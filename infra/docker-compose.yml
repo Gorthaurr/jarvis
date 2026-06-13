@@ -1,0 +1,81 @@
+# =============================================================================
+# Jarvis — локальная инфраструктура (§1 §13)
+# Запуск: docker compose up -d
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL с расширением pgvector (§4 §13)
+  # Образ pgvector/pgvector:pg16 уже содержит расширение vector —
+  # не требует отдельной установки через apt/compile.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: jarvis_postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: jarvis
+      POSTGRES_PASSWORD: jarvis
+      POSTGRES_DB: jarvis
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis -d jarvis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Redis — опциональный (§1: "кэш и pub/sub при необходимости")
+  # Раскомментировать когда потребуется:
+  #   • pub/sub для WebSocket fan-out на нескольких серверах (§3)
+  #   • кэш результатов LLM / TTS (§4)
+  #   • очередь outbound_messages (§11)
+  # ---------------------------------------------------------------------------
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: jarvis_redis
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+
+  # ---------------------------------------------------------------------------
+  # OSRM — роутинг для геоконтекста (§10)
+  # Раскомментировать когда нужен расчёт маршрутов/времени в пути.
+  # Требует предварительной загрузки карты:
+  #   docker run -v ./osrm-data:/data osrm/osrm-backend \
+  #     osrm-extract -p /opt/car.lua /data/moscow.osm.pbf
+  #   docker run -v ./osrm-data:/data osrm/osrm-backend osrm-partition /data/moscow.osrm
+  #   docker run -v ./osrm-data:/data osrm/osrm-backend osrm-customize /data/moscow.osrm
+  # После подготовки данных раскомментировать сервис:
+  # ---------------------------------------------------------------------------
+  # osrm:
+  #   image: osrm/osrm-backend:latest
+  #   container_name: jarvis_osrm
+  #   restart: unless-stopped
+  #   ports:
+  #     - "5000:5000"
+  #   volumes:
+  #     - ./osrm-data:/data
+  #   command: osrm-routed --algorithm mld /data/moscow.osrm
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "curl -sf http://localhost:5000/health || exit 1"]
+  #     interval: 30s
+  #     timeout: 5s
+  #     retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  # redis_data:
+  #   driver: local

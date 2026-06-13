@@ -1,0 +1,39 @@
+# deps
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+out/
+build/
+*.tsbuildinfo
+
+# electron-builder artifacts
+apps/client/release/
+apps/client/dist/
+
+# C# sidecar build
+apps/sidecar-win/bin/
+apps/sidecar-win/obj/
+
+# env / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# logs / runtime
+*.log
+logs/
+.DS_Store
+Thumbs.db
+
+# runtime data
+data/
+tmp/
+*.pid
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json

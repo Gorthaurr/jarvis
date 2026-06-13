@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>SidecarWin</AssemblyName>
+    <RootNamespace>SidecarWin</RootNamespace>
+    <Version>0.1.0</Version>
+
+    <!--
+      Per-Monitor DPI Awareness V2 (§6, §18):
+      требуется для корректного маппинга координат на дисплеях с масштабированием 125/150%.
+      Манифест встраивается автоматически через свойство ниже.
+    -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
+    <!--
+      PublishSingleFile профиль (запустить из корня monorepo):
+        dotnet publish apps/sidecar-win -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -o dist/sidecar-win
+      Итоговый бинарь: dist/sidecar-win/SidecarWin.exe — ~70–120 МБ.
+    -->
+    <PublishSingleFile Condition="'$(PublishSingleFile)' == ''">false</PublishSingleFile>
+    <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      UIAutomation поставляется в составе Windows SDK.
+      Для доступа к System.Windows.Automation достаточно ссылки на PresentationCore/UIAutomation*
+      через NuGet-пакет (работает без WPF/WinForms в консольном приложении net8.0-windows).
+    -->
+    <PackageReference Include="System.Windows.Extensions" Version="8.0.0" />
+  </ItemGroup>
+
+  <!--
+    UIAutomationClient и UIAutomationTypes входят в состав .NET Windows Desktop Runtime.
+    На net8.0-windows они доступны напрямую как framework-ссылки (не нужен отдельный NuGet).
+    Если сборка происходит на машине без Desktop Runtime — добавить:
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+
+</Project>

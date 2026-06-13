@@ -1,0 +1,17 @@
+{
+  // §3 Electron-клиент. Один tsconfig на весь юнит (main/preload/renderer).
+  // Сборка идёт через esbuild (scripts/build.mjs); tsc используется только для typecheck.
+  // main/preload бандлятся в CommonJS (надёжнее для Electron-рантайма),
+  // renderer — в IIFE для <script> в index.html.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Electron main процесс видит node + electron API; renderer — DOM.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    // rootDir НЕ задаём: cross-package импорты (@jarvis/protocol|shared) резолвятся в их src/
+    // через paths из tsconfig.base — явный rootDir конфликтует с этим (TS6059).
+    // Сборка всё равно идёт через esbuild; tsc только проверяет типы (noEmit).
+    "noEmit": true
+  },
+  "include": ["main/**/*", "preload/**/*", "renderer/**/*", "scripts/**/*"]
+}

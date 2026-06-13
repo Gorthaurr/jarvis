@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AndroidManifest.xml — компаньон Jarvis (§12)
+    Геофенсинг через Google Play Services + FCM push.
+    ACCESS_BACKGROUND_LOCATION: для sideload ок; для Play Store нужно обоснование (§18).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.jarvis.companion">
+
+    <!-- ─── Разрешения ─────────────────────────────────────────── -->
+
+    <!-- §12: геофенсинг требует точной геолокации -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!--
+        §9, §12: фоновый геофенсинг без поллинга GPS.
+        На Android 10+ требуется отдельный запрос у пользователя
+        через ACCESS_BACKGROUND_LOCATION dialog.
+        Для Play Store потребуется форма обоснования (§18).
+    -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+
+    <!-- HTTPS-запросы к серверу Jarvis -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- §9: показ push-нотификаций (обязательно на Android 13 / API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Восстановление геофенсов после перезагрузки устройства -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Foreground-сервис нужен для надёжного BroadcastReceiver на Android 12+ -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <application
+        android:name=".JarvisApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.JarvisCompanion"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <!-- ─── Главный экран ─────────────────────────────────── -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ─── Геофенсинг (§12) ──────────────────────────────── -->
+        <!--
+            BroadcastReceiver получает события GEOFENCE_TRANSITION_ENTER /
+            GEOFENCE_TRANSITION_EXIT от Geofencing API (Google Play Services).
+            exported=true обязательно для GMS broadcast delivery.
+        -->
+        <receiver
+            android:name=".GeofenceBroadcastReceiver"
+            android:exported="false"
+            android:permission="com.google.android.gms.permission.ACTIVITY_RECOGNITION">
+            <intent-filter>
+                <action android:name="com.jarvis.companion.ACTION_GEOFENCE_EVENT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Восстановление геофенсов при перезагрузке -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ─── FCM Push (§9) ─────────────────────────────────── -->
+        <!--
+            PushService обрабатывает data-сообщения от сервера Jarvis.
+            Notification-сообщения не используются — вся логика в data-payload,
+            чтобы валидировать expiresAt до показа (§9).
+        -->
+        <service
+            android:name=".PushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+    </application>
+
+</manifest>

@@ -1,0 +1,28 @@
+{
+  "name": "@jarvis/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Тонкий клиент Jarvis — Electron на Windows (§3). Окно, transport, tier0, актуаторы.",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs && electron .",
+    "start": "electron .",
+    "dist": "node scripts/build.mjs && electron-builder",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/protocol": "workspace:*",
+    "@jarvis/shared": "workspace:*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/ws": "^8.5.13",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3"
+  }
+}

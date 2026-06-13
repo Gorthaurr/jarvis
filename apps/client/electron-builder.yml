@@ -1,0 +1,28 @@
+# Сборка инсталлятора Windows (§3). Запуск: pnpm --filter @jarvis/client dist
+# Перед упаковкой должен быть выполнен scripts/build.mjs (см. npm-скрипт "dist").
+appId: com.jarvis.client
+productName: Jarvis
+directories:
+  output: release
+  buildResources: build
+# Что кладём внутрь asar: собранный dist + рантайм-зависимости (ws).
+files:
+  - dist/**/*
+  - package.json
+  - node_modules/ws/**/*
+# Сайдкар Windows (UIA/SendInput, §3) — собирается в apps/sidecar-win (C#, .NET).
+# Кладём готовый exe рядом с ресурсами приложения. На M0 это стаб-плейсхолдер:
+# актуаторы input/ground обращаются к нему по IPC (// TODO(M3)).
+extraResources:
+  - from: ../sidecar-win/bin/Release/sidecar-win.exe
+    to: sidecar-win.exe
+    # NOTE(M3): пока apps/sidecar-win не собран, эта запись закомментирована при первой сборке.
+    # Раскомментируйте, когда сайдкар появится. electron-builder упадёт на отсутствии from.
+win:
+  target:
+    - nsis
+  artifactName: ${productName}-Setup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

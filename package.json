@@ -1,0 +1,26 @@
+{
+  "name": "jarvis",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jarvis — персональный голосовой ассистент (тонкий клиент / толстый сервер). См. JARVIS_SPEC.md",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "dev:server": "pnpm --filter @jarvis/server dev",
+    "dev:client": "pnpm --filter @jarvis/client dev",
+    "db:migrate": "node infra/migrate.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.2",
+    "@types/node": "^22.9.0",
+    "vitest": "^2.1.5"
+  }
+}

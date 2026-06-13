@@ -1,0 +1,21 @@
+{
+  "name": "@jarvis/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Контракт WS клиент↔сервер (§5) + типы ActionCommand/Target/SkillStep (§6). Центральный шов.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

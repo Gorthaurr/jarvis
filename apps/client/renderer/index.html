@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <!-- §3: renderer изолирован. CSP запрещает inline-скрипты; вся логика в renderer.js. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jarvis</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <!-- Индикатор связи с сервером -->
+      <header class="topbar">
+        <span class="brand">Jarvis</span>
+        <span id="link" class="link link--off" title="связь с сервером">offline</span>
+      </header>
+
+      <!-- Орб состояния (idle/listening/thinking/speaking), §3/§21 -->
+      <section class="orb-wrap">
+        <div id="orb" class="orb orb--idle" aria-live="polite"></div>
+        <div id="stateLabel" class="state-label">idle</div>
+        <!-- Транскрипт/последняя реплика -->
+        <div id="transcript" class="transcript"></div>
+      </section>
+
+      <!-- Область карточек ui.display (§21) -->
+      <section id="cards" class="cards" aria-label="карточки"></section>
+
+      <!-- M0: dev-поле текстового ввода (до голоса) -->
+      <form id="inputForm" class="input-row" autocomplete="off">
+        <input
+          id="textInput"
+          class="text-input"
+          type="text"
+          placeholder="Напишите команду… (напр. «открой блокнот»)"
+          aria-label="ввод команды"
+        />
+        <button id="sendBtn" class="send-btn" type="submit">→</button>
+      </form>
+
+      <!-- Модалка подтверждения send/order (§14) с полем revision -->
+      <div id="confirmOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">
+        <div class="modal">
+          <div id="confirmKind" class="modal__kind"></div>
+          <div id="confirmSummary" class="modal__summary"></div>
+          <label class="modal__label" for="revisionInput">Правка (необязательно):</label>
+          <input
+            id="revisionInput"
+            class="text-input"
+            type="text"
+            placeholder="напр. «короче и без эмодзи»"
+          />
+          <div class="modal__actions">
+            <button id="approveBtn" class="btn btn--ok" type="button">Подтвердить</button>
+            <button id="reviseBtn" class="btn" type="button">Переписать</button>
+            <button id="denyBtn" class="btn btn--deny" type="button">Отклонить</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

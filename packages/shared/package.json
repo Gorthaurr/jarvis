@@ -1,0 +1,21 @@
+{
+  "name": "@jarvis/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Общие типы и утилиты (тиры, Result, логгер, env).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

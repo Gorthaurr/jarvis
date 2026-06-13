@@ -1,0 +1,253 @@
+/* Renderer UI Jarvis (§3, §21). Тёмная тема, орб состояния, поле ввода, карточки, модалка confirm. */
+
+:root {
+  --bg: #0b0d12;
+  --panel: #141822;
+  --panel-2: #1b212e;
+  --text: #e6e9ef;
+  --muted: #8b93a7;
+  --accent: #5b8cff;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --deny: #f87171;
+  --speaking: #a78bfa;
+  --listening: #34d399;
+  --thinking: #fbbf24;
+  --idle: #5b8cff;
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  user-select: none;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 12px;
+  gap: 12px;
+}
+
+/* ── topbar ── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.link {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.link--on {
+  color: var(--ok);
+  background: rgba(52, 211, 153, 0.12);
+}
+.link--off {
+  color: var(--deny);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+/* ── орб состояния ── */
+.orb-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px 0;
+}
+.orb {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #ffffff22, transparent 60%), var(--idle);
+  box-shadow: 0 0 0 0 currentColor;
+  transition: background 0.3s ease, transform 0.3s ease;
+}
+.orb--idle {
+  background: radial-gradient(circle at 35% 30%, #ffffff22, transparent 60%), var(--idle);
+}
+.orb--listening {
+  background: radial-gradient(circle at 35% 30%, #ffffff33, transparent 60%), var(--listening);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.orb--thinking {
+  background: radial-gradient(circle at 35% 30%, #ffffff33, transparent 60%), var(--thinking);
+  animation: spin 1.6s linear infinite;
+}
+.orb--speaking {
+  background: radial-gradient(circle at 35% 30%, #ffffff33, transparent 60%), var(--speaking);
+  animation: pulse 0.8s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+  50% {
+    transform: scale(1.08);
+    filter: brightness(1.25);
+  }
+}
+@keyframes spin {
+  0% {
+    transform: rotate(0deg) scale(1.02);
+  }
+  100% {
+    transform: rotate(360deg) scale(1.02);
+  }
+}
+.state-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.transcript {
+  min-height: 18px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: center;
+  max-width: 320px;
+}
+
+/* ── карточки ui.display (§21) ── */
+.cards {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid #ffffff10;
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.card__title {
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 4px;
+  color: var(--accent);
+}
+.card__body {
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+/* ── поле ввода (M0) ── */
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+.text-input {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid #ffffff14;
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 14px;
+  outline: none;
+  user-select: text;
+}
+.text-input:focus {
+  border-color: var(--accent);
+}
+.send-btn,
+.btn {
+  background: var(--accent);
+  border: none;
+  color: white;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.send-btn {
+  width: 44px;
+}
+.btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid #ffffff14;
+}
+.btn--ok {
+  background: var(--ok);
+  color: #062b1f;
+  border: none;
+}
+.btn--deny {
+  background: var(--deny);
+  color: #2b0606;
+  border: none;
+}
+
+/* ── модалка подтверждения (§14) ── */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.overlay--hidden {
+  display: none;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid #ffffff14;
+  border-radius: var(--radius);
+  padding: 16px;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.modal__kind {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--warn);
+}
+.modal__summary {
+  font-size: 14px;
+  user-select: text;
+}
+.modal__label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.modal__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.modal__actions .btn {
+  flex: 1;
+}

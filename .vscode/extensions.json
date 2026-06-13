@@ -1,0 +1,38 @@
+{
+  "recommendations": [
+    // TypeScript и JavaScript
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "ms-vscode.vscode-typescript-next",
+
+    // C# (sidecar-win)
+    "ms-dotnettools.csharp",
+    "ms-dotnettools.csdevkit",
+
+    // Форматирование и стиль
+    "EditorConfig.EditorConfig",
+
+    // pnpm / Node
+    "christian-kohler.npm-intellisense",
+
+    // PostgreSQL
+    "ckolkman.vscode-postgres",
+
+    // Дополнительно
+    "streetsidesoftware.code-spell-checker",
+    "streetsidesoftware.code-spell-checker-russian",
+
+    // Тесты
+    "vitest.explorer",
+
+    // Git
+    "eamodio.gitlens",
+
+    // Docker (для infra/)
+    "ms-azuretools.vscode-docker",
+
+    // Markdown (для SKILL.md и docs/)
+    "yzhang.markdown-all-in-one",
+    "DavidAnson.vscode-markdownlint"
+  ]
+}
