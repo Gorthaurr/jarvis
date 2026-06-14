@@ -33,6 +33,7 @@ import type {
   ProactiveNudge,
   ConfirmRequest,
   TaskStatus,
+  TaskControl,
   DisplayCard,
   ProtocolError,
   Hello,
@@ -171,6 +172,11 @@ export class Transport extends EventEmitter {
   /** Отправить результат подтверждения пользователя (§14). */
   sendConfirmResult(requestId: string, approved: boolean, revision?: string): void {
     this.send(makeEnvelope("user.confirm.result", { requestId, approved, revision }));
+  }
+
+  /** Управление задачей из UI (§20): кнопка «стоп»/«пауза»/«продолжить» в renderer. */
+  sendTaskControl(action: TaskControl["action"], taskId?: string): void {
+    this.send(makeEnvelope<TaskControl>("task.control", { action, taskId }));
   }
 
   // ── соединение ────────────────────────────────────────────────

@@ -27,6 +27,22 @@
         <div id="transcript" class="transcript"></div>
       </section>
 
+      <!-- Панель прогресса задачи (§20): состояние, прогресс, управление -->
+      <section id="taskPanel" class="task task--hidden" aria-live="polite">
+        <div class="task__head">
+          <span id="taskState" class="task__state">—</span>
+          <span id="taskSummary" class="task__summary"></span>
+        </div>
+        <div class="task__bar" role="progressbar">
+          <div id="taskBarFill" class="task__bar-fill"></div>
+        </div>
+        <div class="task__actions">
+          <button id="taskCancelBtn" class="btn btn--deny" type="button">Стоп</button>
+          <button id="taskPauseBtn" class="btn" type="button">Пауза</button>
+          <button id="taskResumeBtn" class="btn btn--ok task--hidden" type="button">Продолжить</button>
+        </div>
+      </section>
+
       <!-- Область карточек ui.display (§21) -->
       <section id="cards" class="cards" aria-label="карточки"></section>
 

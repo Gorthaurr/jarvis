@@ -23,6 +23,7 @@ import {
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ServerConfig } from "../config.js";
 import { SpendGuard } from "../billing/index.js";
+import { TaskManager } from "../brain/tasks/manager.js";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
 import { HashEmbeddingProvider, OpenAiEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { createSttProvider, createTtsProvider } from "../integrations/providers.js";
@@ -80,6 +81,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     web: new WebProvider(config.braveApiKey),
     spend: new SpendGuard({ spendCap: config.defaultSpendCap }),
     models: config.models,
+    tasks: new TaskManager(), // общий реестр долгих задач на gateway (§20)
   };
 
   // Регистрация плагина WebSocket до объявления маршрутов.

@@ -13,7 +13,7 @@
  * если сложность всплыла в петле — это место для филлера «секунду» и продолжения на
  * старшем тире (// TODO: динамическая эскалация).
  */
-import type { ActionCommand } from "@jarvis/protocol";
+import type { ActionCommand, TaskStatus } from "@jarvis/protocol";
 import { DEFAULT_ACTION_TIMEOUT_MS, newId } from "@jarvis/protocol";
 import { type Logger, type Tier, createLogger } from "@jarvis/shared";
 import { TOOL_SCHEMAS } from "@jarvis/tools";
@@ -28,6 +28,8 @@ import { type UserContextSlot, buildSystemPrompt } from "../persona/index.js";
 import { type LocalIntent, classifyTier } from "../router/index.js";
 import { dispatchTool } from "../tools/dispatch.js";
 import { verbalize } from "../verbalize/index.js";
+import { TaskManager } from "../tasks/manager.js";
+import type { Task } from "../tasks/task.js";
 
 const log: Logger = createLogger("agent");
 
@@ -48,6 +50,12 @@ export interface AgentDeps {
   spend: SpendGuard;
   userId: string;
   userContext?: UserContextSlot;
+  /**
+   * Реестр долгих задач (§20). ОБЩИЙ с router-ws: команды «отмени»/«пауза» из UI
+   * мутируют cancel-флаг той же задачи, которую держит петля. Опционален — если не
+   * передан, петля заводит локальный реестр (для изолированных тестов).
+   */
+  tasks?: TaskManager;
 }
 
 /** Инструменты, не предлагаемые модели в диалоге (инициируются иначе). */
@@ -83,8 +91,19 @@ async function runAgentLoop(
   tier: Exclude<Tier, "tier0">,
   deps: AgentDeps,
 ): Promise<AgentReply> {
-  const taskId = `t-${session.sessionId}-${Date.now().toString(36)}`;
   const model = deps.models[tier];
+
+  // Долгая задача (§20): общий с router реестр (или локальный для изолированных тестов).
+  const tasks = deps.tasks ?? new TaskManager();
+  const task = tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal: text });
+  const taskId = task.taskId;
+  // Прогресс показываем (панель + кнопка «стоп» в renderer) только когда задача реально
+  // многошаговая (пошёл tool-use) — чтобы не мигать панелью на простых ответах (§20).
+  let shown = false;
+  const showStatus = (): void => {
+    shown = true;
+    emitTaskStatus(session, task);
+  };
 
   // Retrieval-augmentation: релевантные факты из эпизодической памяти (§8).
   let facts: string[] = [];
@@ -118,11 +137,21 @@ async function runAgentLoop(
 
   // Жёсткий кап шагов + предохранитель SpendGuard (max шагов/токенов/трат §14).
   const HARD_STEP_CAP = 50;
+  let cancelled = false;
+  let limited = false;
+  let round = 0; // число завершённых tool-use раундов (= прогресс задачи)
   for (let step = 0; step < HARD_STEP_CAP; step += 1) {
+    // Отмена ≤1 шага (§20): cancel-флаг проверяется ПЕРЕД каждым шагом. Команда
+    // «отмени» из router мутирует ТОТ ЖЕ флаг между await'ами петли.
+    if (task.cancel.cancelled) {
+      cancelled = true;
+      break;
+    }
+
     const guard = deps.spend.check(taskId, 0.01, 2000);
     if (!guard.allowed) {
       log.warn("предохранитель остановил петлю", { reason: guard.reason });
-      finalText = "Остановился — достигнут лимит на задачу.";
+      limited = true;
       break;
     }
 
@@ -141,6 +170,9 @@ async function runAgentLoop(
       finalText = resp.text || "Готово.";
       break;
     }
+
+    // Пошёл tool-use → это настоящая многошаговая задача: показываем прогресс (§20).
+    if (!shown) showStatus();
 
     // Реплеим ход ассистента (текст + tool_use) и результаты инструментов.
     const assistantBlocks: LlmContentBlock[] = [];
@@ -162,11 +194,41 @@ async function runAgentLoop(
       });
     }
     convo.push({ role: "user", content: resultBlocks });
+
+    round += 1;
+    tasks.progress(taskId, round);
+    if (shown) emitTaskStatus(session, task);
   }
 
   deps.spend.finishTask(taskId);
+
+  // Терминал задачи (§20): отмена / лимит / успех — со стримом task.status.
+  if (cancelled) {
+    // state уже "cancelled" (выставил router через tasks.cancel) — досылаем финальный статус.
+    if (shown) emitTaskStatus(session, task);
+    return { voice: verbalize("Хорошо, остановил.") };
+  }
+  if (limited) {
+    tasks.fail(taskId, "достигнут лимит на задачу (spend cap §14)");
+    if (shown) emitTaskStatus(session, task);
+    return { voice: verbalize("Остановился — достигнут лимит на задачу.") };
+  }
   if (!finalText) finalText = "Готово.";
+  tasks.finish(taskId, finalText);
+  if (shown) emitTaskStatus(session, task);
   return { voice: verbalize(finalText) };
+}
+
+/** Стрим прогресса/состояния задачи на клиент (§20, task.status → renderer-панель). */
+function emitTaskStatus(session: Session, task: Task): void {
+  const payload: TaskStatus = {
+    taskId: task.taskId,
+    state: task.state,
+    summary: task.goal,
+    stepsDone: task.stepsDone,
+    stepsTotal: task.stepsTotal,
+  };
+  session.send("task.status", payload);
 }
 
 /** tier0: локальный интент как одно действие round-trip (§5). */

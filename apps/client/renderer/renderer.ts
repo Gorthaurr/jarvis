@@ -40,6 +40,18 @@ const transcriptEl = $("transcript");
 const linkEl = $("link");
 const cards = $("cards");
 
+// панель задачи (§20)
+const taskPanel = $("taskPanel");
+const taskStateEl = $("taskState");
+const taskSummaryEl = $("taskSummary");
+const taskBarFill = $("taskBarFill");
+const taskCancelBtn = $<HTMLButtonElement>("taskCancelBtn");
+const taskPauseBtn = $<HTMLButtonElement>("taskPauseBtn");
+const taskResumeBtn = $<HTMLButtonElement>("taskResumeBtn");
+
+/** taskId активной задачи — для адресной отправки task.control (§20). */
+let activeTaskId: string | null = null;
+
 const inputForm = $<HTMLFormElement>("inputForm");
 const textInput = $<HTMLInputElement>("textInput");
 
@@ -83,6 +95,68 @@ function addCard(card: DisplayCard): void {
   cards.appendChild(el);
   cards.scrollTop = cards.scrollHeight;
 }
+
+// ── панель задачи (§20) ────────────────────────────────────────
+const TASK_STATE_RU: Record<TaskStatus["state"], string> = {
+  queued: "в очереди",
+  running: "выполняю",
+  paused: "на паузе",
+  waiting_confirm: "жду подтверждения",
+  done: "готово",
+  failed: "ошибка",
+  cancelled: "отменено",
+};
+
+const TERMINAL_STATES: ReadonlySet<TaskStatus["state"]> = new Set(["done", "failed", "cancelled"]);
+let taskHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Отрисовать прогресс/состояние задачи и доступные кнопки управления (§20). */
+function renderTaskStatus(s: TaskStatus): void {
+  activeTaskId = s.taskId;
+  if (taskHideTimer) {
+    clearTimeout(taskHideTimer);
+    taskHideTimer = null;
+  }
+
+  taskPanel.classList.remove("task--hidden");
+  taskPanel.className = `task task--${s.state}`;
+  taskStateEl.textContent = TASK_STATE_RU[s.state] ?? s.state;
+  taskSummaryEl.textContent = s.summary ?? "";
+
+  // Прогресс-бар: доля при известном total, иначе «неопределённый» (бегунок).
+  if (s.stepsTotal && s.stepsTotal > 0) {
+    const pct = Math.min(100, Math.round(((s.stepsDone ?? 0) / s.stepsTotal) * 100));
+    taskBarFill.style.width = `${pct}%`;
+    taskBarFill.classList.remove("task__bar-fill--indeterminate");
+  } else {
+    taskBarFill.style.width = "100%";
+    taskBarFill.classList.add("task__bar-fill--indeterminate");
+  }
+
+  const terminal = TERMINAL_STATES.has(s.state);
+  const paused = s.state === "paused";
+  // На паузе предлагаем «Продолжить» вместо «Пауза»; в терминале прячем управление.
+  taskCancelBtn.classList.toggle("task--hidden", terminal);
+  taskPauseBtn.classList.toggle("task--hidden", terminal || paused);
+  taskResumeBtn.classList.toggle("task--hidden", terminal || !paused);
+
+  if (terminal) {
+    activeTaskId = null;
+    taskBarFill.classList.remove("task__bar-fill--indeterminate");
+    // Показать итог несколько секунд, затем убрать панель.
+    taskHideTimer = setTimeout(() => taskPanel.classList.add("task--hidden"), 4000);
+  }
+}
+
+taskCancelBtn.addEventListener("click", () =>
+  jarvis.sendTaskControl("cancel", activeTaskId ?? undefined),
+);
+taskPauseBtn.addEventListener("click", () =>
+  jarvis.sendTaskControl("pause", activeTaskId ?? undefined),
+);
+taskResumeBtn.addEventListener("click", () =>
+  jarvis.sendTaskControl("resume", activeTaskId ?? undefined),
+);
 
 // ── модалка подтверждения (§14) ────────────────────────────────
 function openConfirm(req: ConfirmRequest): void {
@@ -143,10 +217,7 @@ jarvis.onNudge((n: ProactiveNudge) => {
 });
 jarvis.onConfirmRequest((r: ConfirmRequest) => openConfirm(r));
 jarvis.onDisplay((c: DisplayCard) => addCard(c));
-jarvis.onTaskStatus((s: TaskStatus) => {
-  const steps = s.stepsTotal ? ` (${s.stepsDone ?? 0}/${s.stepsTotal})` : "";
-  transcriptEl.textContent = `[${s.state}]${steps} ${s.summary ?? ""}`.trim();
-});
+jarvis.onTaskStatus((s: TaskStatus) => renderTaskStatus(s));
 
 // ── аудио (§3, §10): захват/воспроизведение в renderer (WebRTC AEC) ────────────
 const playback = new AudioPlayback();

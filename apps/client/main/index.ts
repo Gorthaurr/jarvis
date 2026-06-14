@@ -16,7 +16,7 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
-import type { ClientState } from "@jarvis/protocol";
+import type { ClientState, TaskControl } from "@jarvis/protocol";
 
 import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
@@ -174,6 +174,10 @@ function registerIpc(): void {
   ipcMain.on(IPC.submitText, (_e, text: string) => void handleSubmitText(text));
   ipcMain.on(IPC.confirmResult, (_e, payload: ConfirmResultPayload) => {
     transport?.sendConfirmResult(payload.requestId, payload.approved, payload.revision);
+  });
+  // Управление задачей из UI (§20): «стоп»/«пауза»/«продолжить» -> task.control на сервер.
+  ipcMain.on(IPC.taskControl, (_e, p: TaskControl) => {
+    transport?.sendTaskControl(p.action, p.taskId);
   });
   // Аудио из renderer (§3): кадры захвата + управление микрофоном.
   ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));

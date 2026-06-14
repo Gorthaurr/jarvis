@@ -26,6 +26,7 @@ export type MessageType =
   | "user.confirm.result" // ConfirmResult
   | "client.context" // ClientContext — занятость юзера/активное окно, вход salience (§9)
   | "demo.event" // поток UIA-событий при записи демонстрации (§8)
+  | "task.control" // TaskControl — управление задачей из UI (кнопка «стоп»/«пауза», §20)
   | "pong"
   // server -> client
   | "server.hello" // ServerHello
@@ -109,6 +110,17 @@ export interface DemoEvent {
   name?: string;
   action: string;
   ts: number;
+}
+
+/**
+ * Управление задачей из UI (§20): кнопка «стоп»/«пауза»/«продолжить» в renderer,
+ * либо структурный дубль голосовой команды. Голосовое «отмени»/«продолжи» классифицирует
+ * сервер (Haiku, §20) — этот канал для детерминированных нажатий. taskId опционален:
+ * без него действие применяется к активной задаче сессии.
+ */
+export interface TaskControl {
+  action: "cancel" | "pause" | "resume" | "status";
+  taskId?: string;
 }
 
 // ── server -> client ──────────────────────────────────────────

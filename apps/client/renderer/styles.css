@@ -157,6 +157,93 @@ body {
   user-select: text;
 }
 
+/* ── панель задачи (§20) ── */
+.task {
+  background: var(--panel);
+  border: 1px solid #ffffff10;
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.task--hidden {
+  display: none;
+}
+.task__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.task__state {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+.task--paused .task__state,
+.task--waiting_confirm .task__state {
+  color: var(--warn);
+}
+.task--done .task__state {
+  color: var(--ok);
+}
+.task--failed .task__state,
+.task--cancelled .task__state {
+  color: var(--deny);
+}
+.task__summary {
+  font-size: 13px;
+  color: var(--text);
+  flex: 1;
+  word-break: break-word;
+}
+.task__bar {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.task__bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+.task--done .task__bar-fill {
+  background: var(--ok);
+}
+.task--failed .task__bar-fill,
+.task--cancelled .task__bar-fill {
+  background: var(--deny);
+}
+/* Неопределённый прогресс (нет stepsTotal): бегущая подсветка. */
+.task__bar-fill--indeterminate {
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: task-indeterminate 1.2s infinite linear;
+}
+@keyframes task-indeterminate {
+  0% {
+    background-position: -40% 0;
+  }
+  100% {
+    background-position: 140% 0;
+  }
+}
+.task__actions {
+  display: flex;
+  gap: 8px;
+}
+.task__actions .btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
 /* ── поле ввода (M0) ── */
 .input-row {
   display: flex;

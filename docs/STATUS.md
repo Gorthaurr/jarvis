@@ -143,8 +143,9 @@
 | Confirm-модалка (user.confirm.request) | M0 | ✅ работает | `apps/client/renderer/` |
 | Аудио-захват/воспроизведение (getUserMedia + AudioWorklet + WebAudio) | M1 | ✅ работает | `renderer/audio.ts`, `audio-worklet.js` |
 | Орб (idle/listening/thinking/speaking) | M1 | ✅ работает | + push-to-talk по клику |
-| DisplayCard (ui.display карточки §21) | M8 | 🟡 скелет | TODO(M8) |
-| Task progress (task.status стрим) | M8 | ⬜ не начато | TODO(M8) |
+| DisplayCard (ui.display карточки §21) | M8 | ✅ работает | `renderer.ts` addCard (markdown как текст) |
+| Task progress (task.status стрим §20) | M8 | ✅ работает | панель `#taskPanel` + кнопки стоп/пауза/продолжить |
+| task.control (стоп/пауза/продолжить из UI) | M8 | ✅ работает | preload/main/transport → `task.control` |
 
 ---
 
@@ -200,3 +201,18 @@
 | Оркестрация заказа: confirm + idempotency + place (DI, без сети) | M7 | ✅ работает | `brain/orders/orders.ts` (тест 4/4) |
 | order_place в agent-loop (§14) + клиентская доставка | M7 | ✅ работает | `dispatch.ts`, `client/.../browser.placeOrder` |
 | Browser-автоматизация заказов (CDP-сборка корзины/чекаут) | M7 | 🟡 скелет | `client/.../browser.ts` stub (карту не вводит §0) |
+
+---
+
+## apps/server — задачи и нарративность (M8, §20)
+
+| Компонент | Milestone | Статус | Файлы |
+|---|---|---|---|
+| Модель задачи: Task, TaskState, cancel-флаг, предикаты | M8 | ✅ работает | `brain/tasks/task.ts` |
+| TaskManager: реестр + жизненный цикл (create/cancel/pause/resume/finish/fail/sweep) | M8 | ✅ работает | `brain/tasks/manager.ts` (тест 8/8) |
+| Классификатор управления: «стоп» (TTS) vs «отмени» (задача) §20 | M8 | ✅ работает | `brain/tasks/control.ts` (тест 10/10) |
+| Нарратор: анонс / вехи / статус / финал / ошибка (детерм. RU) | M8 | ✅ работает | `brain/tasks/narrate.ts` (тест 16/16) |
+| agent-loop: задача + стрим task.status + отмена ≤1 шага (§20) | M8 | ✅ работает | `brain/agent/index.ts` (тест 6/6) |
+| router: голос/UI-управление задачей (стоп/пауза/продолжи/статус) | M8 | ✅ работает | `gateway/router-ws.ts` (тест 8/8) |
+| Полная модель `tasks` в Postgres (persist + resume через verify) | M8 | 🟡 скелет | реестр in-process; БД-персист — TODO |
+| Presence-доставка отчёта (ушёл → пуш, §20) | M8 | 🟡 скелет | `proactive/presence.ts` готов; провод в task-финал — TODO |

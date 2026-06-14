@@ -13,6 +13,7 @@ import type {
   ConfirmRequest,
   DisplayCard,
   TaskStatus,
+  TaskControl,
 } from "@jarvis/protocol";
 
 /** Имена IPC-каналов. renderer -> main (invoke/send) и main -> renderer (события). */
@@ -20,6 +21,7 @@ export const IPC = {
   // renderer -> main
   submitText: "jarvis:submitText", // dev-текст из поля ввода (M0)
   confirmResult: "jarvis:confirmResult", // ответ на ConfirmRequest (§14)
+  taskControl: "jarvis:taskControl", // управление задачей из UI (стоп/пауза, §20)
   pushPcm: "jarvis:pushPcm", // кадр PCM16 из renderer (захват, §3)
   activate: "jarvis:activate", // push-to-talk активация (когда нет wake word, §18)
   mute: "jarvis:mute", // честный mute (§0.6)
@@ -65,6 +67,8 @@ export interface JarvisBridge {
   submitText(text: string): void;
   /** Ответить на запрос подтверждения (§14). */
   sendConfirmResult(payload: ConfirmResultPayload): void;
+  /** Управление задачей из UI (§20): «стоп»/«пауза»/«продолжить». */
+  sendTaskControl(action: TaskControl["action"], taskId?: string): void;
   /** Передать кадр PCM16 из захвата renderer в main (§3). */
   pushPcm(pcm: ArrayBuffer): void;
   /** Push-to-talk активация микрофона (§18). */

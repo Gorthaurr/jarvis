@@ -7,6 +7,8 @@ import { MockWebProvider } from "../../integrations/web.js";
 import { InMemoryEpisodicMemory } from "../../memory/episodic.js";
 import { WorkingMemory } from "../../memory/working.js";
 import type { Session } from "../../gateway/session.js";
+import { TaskManager } from "../tasks/manager.js";
+import type { TaskStatus } from "@jarvis/protocol";
 import { type AgentDeps, handleUserText } from "./index.js";
 
 function fakeSession(
@@ -14,8 +16,11 @@ function fakeSession(
     Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }),
   ),
 ) {
-  return { sessionId: "s1", userId: "u1", sendAction } as unknown as Session & {
+  // send — приёмник конвертов (task.status §20 и пр.); в тестах пишем в шпион.
+  const send = vi.fn();
+  return { sessionId: "s1", userId: "u1", sendAction, send } as unknown as Session & {
     sendAction: typeof sendAction;
+    send: typeof send;
   };
 }
 
@@ -93,6 +98,51 @@ describe("agent-loop (§7, §8)", () => {
     const deps = await makeDeps(llm, { spend: new SpendGuard({ maxStepsPerTask: 2 }) });
     const reply = await handleUserText(session, "сделай что-то бесконечное и сложное", deps);
     expect(reply.voice.toLowerCase()).toContain("лимит");
+    expect(llm.requests.length).toBeLessThanOrEqual(3);
+  });
+
+  it("M8 §20: стримит task.status running → done на многошаговой задаче", async () => {
+    const tasks = new TaskManager();
+    const statuses: TaskStatus[] = [];
+    const send = vi.fn((type: string, payload: unknown) => {
+      if (type === "task.status") statuses.push(payload as TaskStatus);
+    });
+    const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+    const session = { sessionId: "s1", userId: "u1", sendAction, send } as unknown as Session;
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "memory_search", input: { query: "зал" } }] },
+      { text: "Посмотрел, готово." },
+    ]);
+    await handleUserText(session, "что у меня в памяти про зал, разверни", await makeDeps(llm, { tasks }));
+
+    expect(statuses.length).toBeGreaterThanOrEqual(2);
+    expect(statuses.some((s) => s.state === "running")).toBe(true);
+    expect(statuses[statuses.length - 1]?.state).toBe("done");
+    expect(tasks.list("u1")[0]?.state).toBe("done");
+  });
+
+  it("M8 §20: отмена в петле останавливает задачу (≤1 шага), state cancelled", async () => {
+    const tasks = new TaskManager();
+    // Имитируем приход task.control(cancel): как только пришёл прогресс — отменяем задачу.
+    const send = vi.fn((type: string, payload: unknown) => {
+      const s = payload as TaskStatus;
+      if (type === "task.status" && s.state === "running" && (s.stepsDone ?? 0) >= 1) {
+        tasks.cancel(s.taskId);
+      }
+    });
+    const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+    const session = { sessionId: "s1", userId: "u1", sendAction, send } as unknown as Session;
+    // Модель всё время просит инструмент — петля бесконечна, остановит только отмена.
+    const llm = new MockLlmProvider(
+      Array.from({ length: 10 }, () => ({
+        toolUses: [{ id: "t", name: "memory_search", input: { query: "x" } }],
+      })),
+    );
+    const reply = await handleUserText(session, "сделай долгую многошаговую работу", await makeDeps(llm, { tasks }));
+
+    expect(reply.voice.toLowerCase()).toContain("останов");
+    expect(tasks.list("u1")[0]?.state).toBe("cancelled");
+    // Отмена ≤1 шага: после прогресса №1 петля не успевает уйти далеко.
     expect(llm.requests.length).toBeLessThanOrEqual(3);
   });
 });

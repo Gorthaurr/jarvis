@@ -21,6 +21,8 @@ import {
   type DevText,
   type Envelope,
   type MessageType,
+  type TaskControl,
+  type TaskStatus,
   type VadEvent,
 } from "@jarvis/protocol";
 import { type Logger, type Tier, createLogger } from "@jarvis/shared";
@@ -32,6 +34,10 @@ import type { IWebProvider } from "../integrations/web.js";
 import type { ISttProvider, ITtsProvider, TtsChunk } from "../integrations/voice-providers.js";
 import { WorkingMemory } from "../memory/working.js";
 import { noteClientContext } from "../proactive/salience.js";
+import { TaskManager } from "../brain/tasks/manager.js";
+import { classifyTaskControl } from "../brain/tasks/control.js";
+import { statusReport } from "../brain/tasks/narrate.js";
+import type { Task } from "../brain/tasks/task.js";
 import { type VoicePipeline, createVoicePipeline } from "../voice/index.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { Session } from "./session.js";
@@ -52,6 +58,8 @@ export interface BrainProviders {
   web: IWebProvider;
   spend: SpendGuard;
   models: Record<Exclude<Tier, "tier0">, string>;
+  /** Реестр долгих задач (§20) — общий на gateway: голос/UI управляют активной задачей. */
+  tasks: TaskManager;
 }
 
 /** Контекст одного соединения, который держит router между сообщениями. */
@@ -83,6 +91,7 @@ export function makeSessionContext(
     models: brain.models,
     spend: brain.spend,
     userId: session.userId,
+    tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
   };
   const voice = createVoicePipeline({
     stt: providers.stt,
@@ -128,6 +137,12 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "client.state":
       log.debug("client.state", (env.payload as ClientStateMsg).state);
       break;
+    case "task.control": {
+      // Управление задачей из UI (кнопка «стоп»/«пауза»/«продолжить», §20).
+      const c = env.payload as TaskControl;
+      handleTaskControl(ctx, c.action, c.taskId);
+      break;
+    }
     case "audio.frame": {
       const f = env.payload as AudioFrame;
       ctx.voice.onAudioFrame(toArrayBuffer(f.pcm));
@@ -155,6 +170,11 @@ async function onDevText(ctx: SessionContext, payload: DevText): Promise<void> {
   const text = payload?.text ?? "";
   if (!text.trim()) return;
 
+  // Голосовое/текстовое управление задачей (§20): «отмени»/«пауза»/«продолжи»/«что
+  // делаешь» перехватываем ДО агента, если есть активная задача. «стоп» (stop_tts)
+  // рубит озвучку. Иначе — обычная реплика идёт в агент.
+  if (handleControlUtterance(ctx, text)) return;
+
   ctx.session.send("client.state", { state: "thinking" });
   let reply: AgentReply;
   try {
@@ -181,6 +201,93 @@ function sendReply(ctx: SessionContext, reply: AgentReply): void {
   // Примечание: голосовой ответ (speak.chunk из TTS) идёт через VoicePipeline
   // на голосовом пути (audio.frame→STT→agent→TTS). Текстовый dev.text-путь
   // отдаёт только transcript/ui.display.
+}
+
+// ── управление задачами (§20) ──────────────────────────────────
+
+/**
+ * Перехватить реплику как команду управления задачей (§20). Возвращает true, если
+ * реплика обработана как управление (агент НЕ вызывается).
+ *
+ *  - «стоп»/«заткнись» (stop_tts) — рубит ТОЛЬКО озвучку (barge-in), задача живёт;
+ *  - «отмени»/«пауза»/«продолжи»/«что делаешь» — действуют на активную задачу сессии;
+ *    без активной задачи такие реплики НЕ перехватываются (уходят в агент как контент).
+ */
+export function handleControlUtterance(ctx: SessionContext, text: string): boolean {
+  if (!ctx.agentDeps.tasks) return false;
+  const decision = classifyTaskControl(text);
+  if (decision.kind === "none") return false;
+
+  // «стоп» — оборвать TTS (§20), задачу не трогаем (различие «заткнись» vs «отмени»).
+  if (decision.kind === "stop_tts") {
+    ctx.voice.onVadEvent("barge_in");
+    ctx.session.send("client.state", { state: "idle" });
+    log.info("stop_tts: оборвана озвучка, задача не тронута (§20)", { reason: decision.reason });
+    return true;
+  }
+
+  // cancel/pause/resume/status осмысленны только при активной задаче.
+  const active = ctx.agentDeps.tasks.active(ctx.session.sessionId);
+  if (!active) return false;
+  if (decision.confidence === "low") {
+    // §20: спорная формулировка — действуем по наиболее вероятному kind (Haiku-доуточнение — TODO).
+    log.info("низкая уверенность классификации управления — действуем по эвристике", {
+      kind: decision.kind,
+      reason: decision.reason,
+    });
+  }
+  handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId);
+  return true;
+}
+
+/** Применить команду управления к задаче и отчитаться клиенту (§20). */
+export function handleTaskControl(ctx: SessionContext, action: TaskControl["action"], taskId?: string): void {
+  const tasks = ctx.agentDeps.tasks;
+  if (!tasks) return;
+  const task = taskId ? tasks.get(taskId) : tasks.active(ctx.session.sessionId);
+  if (!task) {
+    const text = action === "status" ? "Сейчас ничего не выполняю." : "Нет активной задачи.";
+    ctx.session.send("transcript", { text, final: true });
+    return;
+  }
+
+  switch (action) {
+    case "cancel": {
+      const ok = tasks.cancel(task.taskId);
+      emitTaskStatus(ctx.session, task);
+      ctx.session.send("transcript", { text: ok ? "Остановил." : "Уже завершено.", final: true });
+      ctx.session.send("client.state", { state: "idle" });
+      break;
+    }
+    case "pause": {
+      const ok = tasks.pause(task.taskId);
+      emitTaskStatus(ctx.session, task);
+      ctx.session.send("transcript", { text: ok ? "Поставил на паузу." : "Сейчас нельзя поставить на паузу.", final: true });
+      break;
+    }
+    case "resume": {
+      const ok = tasks.resume(task.taskId);
+      emitTaskStatus(ctx.session, task);
+      ctx.session.send("transcript", { text: ok ? "Продолжаю." : "Нечего возобновлять.", final: true });
+      break;
+    }
+    case "status": {
+      ctx.session.send("transcript", { text: statusReport(task), final: true });
+      break;
+    }
+  }
+}
+
+/** Стрим состояния/прогресса задачи на клиент (§20, task.status). */
+function emitTaskStatus(session: Session, task: Task): void {
+  const payload: TaskStatus = {
+    taskId: task.taskId,
+    state: task.state,
+    summary: task.goal,
+    stepsDone: task.stepsDone,
+    stepsTotal: task.stepsTotal,
+  };
+  session.send("task.status", payload);
 }
 
 // ── кодирование аудио для DEV-пути по WS (§5: в проде — WebRTC) ──────────

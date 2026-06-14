@@ -21,6 +21,8 @@ const api: JarvisBridge = {
   submitText: (text) => ipcRenderer.send(IPC.submitText, text),
   sendConfirmResult: (payload: ConfirmResultPayload) =>
     ipcRenderer.send(IPC.confirmResult, payload),
+  sendTaskControl: (action, taskId) =>
+    ipcRenderer.send(IPC.taskControl, { action, taskId }),
   pushPcm: (pcm: ArrayBuffer) => ipcRenderer.send(IPC.pushPcm, pcm),
   activate: () => ipcRenderer.send(IPC.activate),
   mute: () => ipcRenderer.send(IPC.mute),
