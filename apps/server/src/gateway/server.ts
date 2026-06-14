@@ -45,7 +45,7 @@ import {
   dispatch,
   makeSessionContext,
 } from "./router-ws.js";
-import type { SessionSocket } from "./session.js";
+import type { Session, SessionSocket } from "./session.js";
 
 /** Окно на присылку client.hello после коннекта (§5). */
 const HANDSHAKE_TIMEOUT_MS = 5_000;
@@ -272,7 +272,31 @@ function doHandshake(
   });
 
   log.info("handshake завершён", { sessionId: session.sessionId, resumed });
-  return makeSessionContext(session, heartbeat, providers, brain);
+  const ctx = makeSessionContext(session, heartbeat, providers, brain);
+
+  // Онбординг (§11): на свежую (не возобновлённую) сессию Джарвис здоровается
+  // голосом и спрашивает, как обращаться. На resume — молчит (уже знакомы).
+  if (!resumed) startOnboarding(ctx, session, log);
+
+  return ctx;
+}
+
+/** Приветствие Джарвиса при запуске (§11). */
+const GREETING = "Здравствуйте. Я Джарвис, ваш персональный ассистент. Как я могу к вам обращаться?";
+
+function startOnboarding(ctx: SessionContext, session: Session, log: Logger): void {
+  // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.
+  const t = setTimeout(() => {
+    try {
+      session.send("transcript", { text: GREETING, final: true });
+      session.send("ui.display", { title: "Джарвис", markdown: GREETING });
+      ctx.voice.speak(GREETING);
+      log.info("онбординг: приветствие произнесено");
+    } catch (e) {
+      log.warn("онбординг не удался", e instanceof Error ? e.message : String(e));
+    }
+  }, 800);
+  if (typeof t.unref === "function") t.unref();
 }
 
 /** Разобрать входящий кадр в Envelope (с грубой валидацией §5). */
