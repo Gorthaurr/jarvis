@@ -18,11 +18,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
     <!--
-      PublishSingleFile профиль (запустить из корня monorepo):
-        dotnet publish apps/sidecar-win -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-          -o dist/sidecar-win
-      Итоговый бинарь: dist/sidecar-win/SidecarWin.exe — ~70–120 МБ.
+      Публикация (framework-dependent) в путь, который ждёт клиент:
+        dotnet publish -c Release
+      Итог: bin/Release/net8.0-windows/win-x64/publish/SidecarWin.exe
+      Single-file self-contained вариант описан в apps/sidecar-win/README.md.
     -->
     <PublishSingleFile Condition="'$(PublishSingleFile)' == ''">false</PublishSingleFile>
     <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>

@@ -66,6 +66,18 @@ async function run() {
   await cp(resolve(root, "renderer/styles.css"), resolve(outdir, "renderer/styles.css"));
   await cp(resolve(root, "renderer/audio-worklet.js"), resolve(outdir, "renderer/audio-worklet.js"));
 
+  // Шрифт Inter (latin + cyrillic) — woff2 из node_modules в dist/renderer/fonts.
+  const fontsSrc = resolve(root, "node_modules/@fontsource-variable/inter/files");
+  const fontsOut = resolve(outdir, "renderer/fonts");
+  await mkdir(fontsOut, { recursive: true });
+  for (const [src, dst] of [
+    ["inter-latin-wght-normal.woff2", "inter-latin.woff2"],
+    ["inter-latin-ext-wght-normal.woff2", "inter-latin-ext.woff2"],
+    ["inter-cyrillic-wght-normal.woff2", "inter-cyrillic.woff2"],
+  ]) {
+    await cp(resolve(fontsSrc, src), resolve(fontsOut, dst));
+  }
+
   console.log("[build] клиент собран -> dist/");
 }
 

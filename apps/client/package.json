@@ -14,6 +14,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
     "@jarvis/protocol": "workspace:*",
     "@jarvis/shared": "workspace:*",
     "@jarvis/userbots": "workspace:*",

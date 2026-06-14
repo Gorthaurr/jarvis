@@ -265,6 +265,7 @@ settingsSave.addEventListener("click", () => {
   settingsPanel.classList.add("settings--hidden");
 });
 
-// инициализация
-setOrbState("idle");
+// инициализация — ambient (§3): Джарвис слушает СРАЗУ с запуска, без клика по орбу.
 setLink({ online: false });
+setOrbState("listening");
+void ensureCapture().then(() => jarvis.activate());
