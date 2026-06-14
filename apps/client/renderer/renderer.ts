@@ -34,7 +34,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
   return el as T;
 };
 
-const orb = $("orb");
+const statusbar = $("statusbar");
 const stateLabel = $("stateLabel");
 const transcriptEl = $("transcript");
 const linkEl = $("link");
@@ -74,7 +74,7 @@ const STATE_RU: Record<ClientState, string> = {
   speaking: "говорю",
 };
 function setOrbState(state: ClientState): void {
-  orb.className = `orb orb--${state}`;
+  statusbar.className = `statusbar statusbar--${state}`;
   stateLabel.textContent = STATE_RU[state] ?? state;
 }
 
@@ -231,7 +231,7 @@ let capture: AudioCapture | null = null;
 
 jarvis.onSpeakChunk((c: SpeakChunkPayload) => playback.enqueue(c));
 jarvis.onBargeIn(() => playback.stop());
-jarvis.onMicState((open: boolean) => orb.classList.toggle("orb--mic", open));
+jarvis.onMicState((open: boolean) => statusbar.classList.toggle("statusbar--mic", open));
 
 /** Поднять захват (один раз). Кадры PCM уходят в main, где гейтятся (§0.6). */
 async function ensureCapture(): Promise<void> {

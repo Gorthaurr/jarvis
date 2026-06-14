@@ -57,8 +57,40 @@ function whisperLang(code?: string): string {
   return c;
 }
 
-/** Минимум аудио для распознавания (байт). ~0.4с @16кГц 16-bit = 12800 байт. */
-const MIN_BYTES = 12_800;
+/** Минимум аудио для распознавания (байт). ~0.5с @16кГц 16-bit = 16000 байт. */
+const MIN_BYTES = 16_000;
+/** Ниже этого RMS считаем тишиной/шумом — не транскрибируем (Whisper там галлюцинирует). */
+const SILENCE_RMS = 0.015;
+
+/** RMS-громкость сигнала [0..1]. */
+function rms(audio: Float32Array): number {
+  if (audio.length === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < audio.length; i += 1) s += audio[i]! * audio[i]!;
+  return Math.sqrt(s / audio.length);
+}
+
+/**
+ * Частые галлюцинации Whisper на тишине/шуме (обучен на ютуб-субтитрах) — дропаем,
+ * иначе Джарвис «сходит с ума», отвечая на фантомные фразы.
+ */
+const HALLUCINATIONS: RegExp[] = [
+  /субтитр/i,
+  /продолжение следует/i,
+  /спасибо за просмотр/i,
+  /смотрите (на|в|это) видео/i,
+  /подпис(ывайтесь|ка)/i,
+  /редактор/i,
+  /смешка/i,
+  /^[\s.…!?,-]*$/,
+  /^\(.*\)$/,
+];
+function isNoise(text: string): boolean {
+  const s = text.trim();
+  if (s.length < 2) return true;
+  if (s.replace(/[^\p{L}\p{N}]/gu, "").length < 2) return true;
+  return HALLUCINATIONS.some((re) => re.test(s));
+}
 
 class WhisperSttStream implements SttStream {
   readonly live = true;
@@ -104,12 +136,19 @@ class WhisperSttStream implements SttStream {
         off += c.byteLength;
       }
       const audio = pcm16ToFloat32(merged);
+      // Гейт тишины: на тихом/шумовом сегменте Whisper галлюцинирует — не транскрибируем.
+      if (rms(audio) < SILENCE_RMS) {
+        this.closeCb?.();
+        return;
+      }
       const t = await getTranscriber(this.model);
       const out = await t(audio, { language: this.language, task: "transcribe", chunk_length_s: 30 });
       const text = (Array.isArray(out) ? out[0]?.text : out?.text)?.trim() ?? "";
-      if (text) {
+      if (text && !isNoise(text)) {
         log.info("Whisper транскрипт", { text });
         this.partialCb?.({ text, final: true, confidence: 1 });
+      } else if (text) {
+        log.debug("Whisper: дропнул фантом/шум", { text });
       }
     } catch (e) {
       log.warn("Whisper ошибка", e instanceof Error ? e.message : String(e));

@@ -30,15 +30,10 @@
         </div>
       </header>
 
-      <!-- ── Голос-первый экран: орб в центре ── -->
+      <!-- ── Ambient-экран: диалог + тонкий статус снизу (без сферы) ── -->
       <main class="stage">
-        <section class="orb-wrap">
-          <div class="orb-stage">
-            <div id="orb" class="orb orb--idle" aria-live="polite"></div>
-          </div>
-          <div id="stateLabel" class="state-label">слушаю</div>
-          <div id="transcript" class="transcript"></div>
-        </section>
+        <!-- Реплики Джарвиса (ui.display, §21) -->
+        <section id="cards" class="cards" aria-label="диалог"></section>
 
         <!-- Панель прогресса задачи (§20) -->
         <section id="taskPanel" class="task task--hidden" aria-live="polite">
@@ -58,8 +53,12 @@
           </div>
         </section>
 
-        <!-- Карточки ui.display (§21) -->
-        <section id="cards" class="cards" aria-label="карточки"></section>
+        <!-- Тонкий статус снизу: состояние + что услышал -->
+        <div class="statusbar">
+          <span class="statusbar__dot"></span>
+          <span id="stateLabel" class="statusbar__text">слушаю</span>
+          <span id="transcript" class="statusbar__heard"></span>
+        </div>
       </main>
     </div>
 

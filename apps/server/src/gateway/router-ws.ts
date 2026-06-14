@@ -132,6 +132,9 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "pong":
       ctx.heartbeat.notePong();
       break;
+    case "ping":
+      ctx.session.send("pong", {});
+      break;
     case "client.context": {
       const c = env.payload as ClientContext;
       ctx.lastContext = c;

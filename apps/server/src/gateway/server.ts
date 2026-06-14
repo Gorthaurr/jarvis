@@ -258,8 +258,9 @@ function doHandshake(
   }
 
   // M0: аутентификация по token — заглушка (один пользователь, §0).
-  // TODO(M? §13): валидировать token, извлечь userId.
-  const userId = "local-user";
+  // TODO(§13): валидировать token, извлечь userId. Пока — seed dev-юзер (UUID,
+  // иначе запросы к episodic_memory.user_id::uuid падают).
+  const userId = "00000000-0000-0000-0000-000000000001";
 
   const { session, resumed } = registry.createOrResume(userId, sock, hello.resumeSessionId);
 

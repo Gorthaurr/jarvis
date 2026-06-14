@@ -739,3 +739,59 @@ body {
   border-color: hsl(var(--ring));
   box-shadow: 0 0 0 3px hsl(var(--ring) / 0.18);
 }
+
+/* ── статус-бар вместо сферы: состояние + распознанное ── */
+.stage > .cards {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.statusbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 4px 2px;
+  border-top: 1px solid hsl(var(--border));
+  margin-top: 4px;
+}
+.statusbar__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: none;
+  background: hsl(var(--brand));
+  box-shadow: 0 0 10px hsl(var(--brand));
+}
+.statusbar__text {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+}
+.statusbar__heard {
+  flex: 1;
+  font-size: 13px;
+  color: hsl(var(--foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+.statusbar--listening .statusbar__dot {
+  background: hsl(160 70% 48%);
+  box-shadow: 0 0 10px hsl(160 70% 48%);
+  animation: orb-pulse 1.5s ease-in-out infinite;
+}
+.statusbar--thinking .statusbar__dot {
+  background: hsl(38 92% 55%);
+  box-shadow: 0 0 10px hsl(38 92% 55%);
+  animation: orb-pulse 0.9s ease-in-out infinite;
+}
+.statusbar--speaking .statusbar__dot {
+  background: hsl(262 83% 68%);
+  box-shadow: 0 0 10px hsl(262 83% 68%);
+  animation: orb-pulse 0.8s ease-in-out infinite;
+}
