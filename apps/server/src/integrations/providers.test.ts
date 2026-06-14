@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildDeepgramUrl, parseDeepgramMessage } from "./deepgram.js";
-import { buildElevenLabsUrl, parseElevenLabsMessage } from "./elevenlabs.js";
 import { createSttProvider, createTtsProvider } from "./providers.js";
+import type { TtsChunk } from "./voice-providers.js";
 
 describe("parseDeepgramMessage (§10)", () => {
   it("извлекает финальный транскрипт", () => {
@@ -45,35 +45,11 @@ describe("parseDeepgramMessage (§10)", () => {
   });
 });
 
-describe("parseElevenLabsMessage (§21)", () => {
-  it("декодирует base64-аудио", () => {
-    const audioB64 = Buffer.from("RIFF....").toString("base64");
-    const parsed = parseElevenLabsMessage(JSON.stringify({ audio: audioB64, isFinal: false }));
-    expect(parsed?.audio).toBeInstanceOf(ArrayBuffer);
-    expect(parsed?.audio?.byteLength).toBe(8);
-    expect(parsed?.isFinal).toBe(false);
-  });
-
-  it("финал без аудио → {audio:null,isFinal:true}", () => {
-    const parsed = parseElevenLabsMessage({ isFinal: true });
-    expect(parsed).toEqual({ audio: null, isFinal: true });
-  });
-
-  it("сообщение без аудио и без финала → null", () => {
-    expect(parseElevenLabsMessage({ foo: "bar" })).toBeNull();
-    expect(parseElevenLabsMessage("nonjson")).toBeNull();
-  });
-
-  it("URL содержит voiceId и модель", () => {
-    const url = buildElevenLabsUrl("voice123");
-    expect(url).toContain("voice123");
-    expect(url).toContain("eleven_multilingual_v2");
-  });
-});
-
 describe("фабрика провайдеров (§1)", () => {
-  it("без ключей → mock (live=false)", () => {
-    expect(createSttProvider({}).live).toBe(false);
+  it("без ключей: STT → локальный whisper (live), TTS → mock", () => {
+    // STT по умолчанию — локальный Whisper (без ключей, слух работает).
+    expect(createSttProvider({}).live).toBe(true);
+    expect(createSttProvider({ provider: "mock" }).live).toBe(false);
     expect(createTtsProvider({}).live).toBe(false);
   });
 
@@ -102,27 +78,25 @@ describe("фабрика провайдеров (§1)", () => {
     }
   });
 
-  it("TTS с ключом+voiceId открывает стрим через глобальный WebSocket (без сети)", () => {
-    const g = globalThis as { WebSocket?: unknown };
-    const orig = g.WebSocket;
+  it("TTS с ключом+voiceId синтезирует через HTTP (мок fetch)", async () => {
+    const g = globalThis as { fetch?: unknown };
+    const orig = g.fetch;
+    const fakeMp3 = new Uint8Array([1, 2, 3, 4]).buffer;
     const urls: string[] = [];
-    g.WebSocket = class {
-      constructor(url: string) {
-        urls.push(url);
-      }
-      addEventListener(): void {}
-      send(): void {}
-      close(): void {}
-      readyState = 0;
-    } as unknown;
+    g.fetch = async (url: string) => {
+      urls.push(String(url));
+      return { ok: true, arrayBuffer: async () => fakeMp3 } as unknown as Response;
+    };
     try {
       const tts = createTtsProvider({ elevenLabsApiKey: "key", voiceId: "v1" });
       expect(tts.live).toBe(true);
       const stream = tts.synthesize("привет");
-      expect(stream.cancelled).toBe(false);
+      const chunk = await new Promise<TtsChunk>((resolve) => stream.onChunk(resolve));
+      expect(chunk.last).toBe(true);
+      expect(chunk.audio.byteLength).toBe(4);
       expect(urls[0]).toContain("v1");
     } finally {
-      g.WebSocket = orig;
+      g.fetch = orig;
     }
   });
 });

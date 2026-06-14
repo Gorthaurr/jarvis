@@ -101,7 +101,10 @@ function startTransport(): void {
   });
 
   // speak.chunk (TTS) → renderer для воспроизведения; client.state → орб + аудио-гейт.
-  transport.on("speak", (c) => win?.webContents.send(IPC.speakChunk, c));
+  transport.on("speak", (c) => {
+    if (c.last) log.info("speak.chunk → renderer (last)");
+    win?.webContents.send(IPC.speakChunk, c);
+  });
   transport.on("serverState", (s) => {
     win?.webContents.send(IPC.state, s);
     audio?.setServerState(s);
