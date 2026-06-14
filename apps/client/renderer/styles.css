@@ -1,20 +1,30 @@
-/* Renderer UI Jarvis (§3, §21). Тёмная тема, орб состояния, поле ввода, карточки, модалка confirm. */
+/* =============================================================================
+ * Renderer UI Jarvis (§3, §21) — дизайн-система shadcn (тёмная), как в hak-browser.
+ * Токены в HSL, карточки/инпуты/кнопки/орб. Имена классов совпадают с renderer.ts.
+ * ========================================================================== */
 
 :root {
-  --bg: #0b0d12;
-  --panel: #141822;
-  --panel-2: #1b212e;
-  --text: #e6e9ef;
-  --muted: #8b93a7;
-  --accent: #5b8cff;
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --deny: #f87171;
-  --speaking: #a78bfa;
-  --listening: #34d399;
-  --thinking: #fbbf24;
-  --idle: #5b8cff;
-  --radius: 12px;
+  --background: 222 47% 5%;
+  --surface: 222 40% 8.5%; /* карточки/панели — приподнятая поверхность */
+  --surface-2: 222 38% 11.5%; /* инпуты, внутренние блоки */
+  --foreground: 210 40% 98%;
+  --muted-foreground: 215 20% 62%;
+  --border: 217 30% 16%;
+  --border-strong: 217 28% 26%;
+
+  --primary: 210 40% 98%; /* основная кнопка — светлая */
+  --primary-foreground: 222 47% 11%;
+
+  --brand: 217 91% 61%; /* акцент/орб idle */
+  --success: 152 58% 48%;
+  --warning: 38 92% 55%;
+  --destructive: 0 72% 58%;
+
+  --ring: 217 91% 61%;
+
+  --radius: 14px;
+  --radius-md: 10px;
+  --radius-sm: 8px;
 }
 
 * {
@@ -25,10 +35,17 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+body {
+  background:
+    radial-gradient(120% 60% at 50% -10%, hsl(217 60% 12% / 0.6), transparent 60%),
+    hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
   font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 
@@ -36,8 +53,22 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  padding: 12px;
-  gap: 12px;
+  padding: 14px;
+  gap: 14px;
+}
+
+/* ── скроллбары ── */
+.stage::-webkit-scrollbar,
+.cards::-webkit-scrollbar {
+  width: 8px;
+}
+.stage::-webkit-scrollbar-thumb,
+.cards::-webkit-scrollbar-thumb {
+  background: hsl(var(--border-strong));
+  border-radius: 999px;
+}
+.stage::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* ── topbar ── */
@@ -45,23 +76,68 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding: 2px 2px 0;
+  -webkit-app-region: drag; /* перетаскивание окна за топбар */
 }
 .brand {
-  font-weight: 600;
-  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+}
+.brand__mark {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, hsl(var(--brand)), hsl(260 85% 66%));
+  box-shadow: 0 0 14px hsl(var(--brand) / 0.6);
+}
+.brand__name {
+  color: hsl(var(--foreground));
 }
 .link {
-  font-size: 12px;
-  padding: 2px 8px;
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 4px 10px 4px 8px;
   border-radius: 999px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--surface));
+  color: hsl(var(--muted-foreground));
+}
+/* точка статуса — псевдоэлемент (renderer.ts перезаписывает textContent #link) */
+.link::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
 }
 .link--on {
-  color: var(--ok);
-  background: rgba(52, 211, 153, 0.12);
+  color: hsl(var(--success));
+  border-color: hsl(var(--success) / 0.35);
+  background: hsl(var(--success) / 0.1);
 }
 .link--off {
-  color: var(--deny);
-  background: rgba(248, 113, 113, 0.12);
+  color: hsl(var(--destructive));
+  border-color: hsl(var(--destructive) / 0.3);
+  background: hsl(var(--destructive) / 0.08);
+}
+
+/* ── сцена ── */
+.stage {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 /* ── орб состояния ── */
@@ -69,89 +145,126 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 16px 0;
+  gap: 12px;
+  padding: 22px 0 8px;
+}
+.orb-stage {
+  display: grid;
+  place-items: center;
+  width: 150px;
+  height: 150px;
 }
 .orb {
-  width: 96px;
-  height: 96px;
+  --orb: var(--brand);
+  width: 104px;
+  height: 104px;
   border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, #ffffff22, transparent 60%), var(--idle);
-  box-shadow: 0 0 0 0 currentColor;
-  transition: background 0.3s ease, transform 0.3s ease;
+  cursor: pointer;
+  outline: none;
+  position: relative;
+  background:
+    radial-gradient(circle at 34% 28%, hsl(0 0% 100% / 0.55), transparent 42%),
+    radial-gradient(circle at 50% 50%, hsl(var(--orb) / 0.95), hsl(var(--orb) / 0.7) 60%, hsl(var(--orb) / 0.55));
+  box-shadow:
+    0 0 0 1px hsl(0 0% 100% / 0.08) inset,
+    0 10px 40px hsl(var(--orb) / 0.45),
+    0 0 60px hsl(var(--orb) / 0.35);
+  transition: transform 0.35s ease, box-shadow 0.35s ease, background 0.35s ease;
 }
+/* мягкое внешнее кольцо-ореол */
+.orb::after {
+  content: "";
+  position: absolute;
+  inset: -16px;
+  border-radius: 50%;
+  background: radial-gradient(circle, hsl(var(--orb) / 0.22), transparent 70%);
+  opacity: 0.9;
+  z-index: -1;
+}
+.orb:focus-visible {
+  box-shadow:
+    0 0 0 2px hsl(var(--background)),
+    0 0 0 4px hsl(var(--ring)),
+    0 10px 40px hsl(var(--orb) / 0.45);
+}
+
 .orb--idle {
-  background: radial-gradient(circle at 35% 30%, #ffffff22, transparent 60%), var(--idle);
+  --orb: var(--brand);
+  animation: orb-breathe 4.5s ease-in-out infinite;
 }
 .orb--listening {
-  background: radial-gradient(circle at 35% 30%, #ffffff33, transparent 60%), var(--listening);
-  animation: pulse 1.4s ease-in-out infinite;
+  --orb: 160 70% 48%;
+  animation: orb-pulse 1.5s ease-in-out infinite;
 }
 .orb--thinking {
-  background: radial-gradient(circle at 35% 30%, #ffffff33, transparent 60%), var(--thinking);
-  animation: spin 1.6s linear infinite;
+  --orb: 38 92% 55%;
+  animation: orb-spin 2.2s linear infinite;
 }
 .orb--speaking {
-  background: radial-gradient(circle at 35% 30%, #ffffff33, transparent 60%), var(--speaking);
-  animation: pulse 0.8s ease-in-out infinite;
+  --orb: 262 83% 68%;
+  animation: orb-pulse 0.85s ease-in-out infinite;
 }
-@keyframes pulse {
-  0%,
-  100% {
-    transform: scale(1);
-    filter: brightness(1);
-  }
-  50% {
-    transform: scale(1.08);
-    filter: brightness(1.25);
-  }
+/* индикатор открытого микрофона (push-to-talk, §18) */
+.orb--mic::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  border: 2px solid hsl(0 0% 100% / 0.7);
+  animation: orb-pulse 1.2s ease-in-out infinite;
 }
-@keyframes spin {
-  0% {
-    transform: rotate(0deg) scale(1.02);
-  }
-  100% {
-    transform: rotate(360deg) scale(1.02);
-  }
+
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
 }
+@keyframes orb-pulse {
+  0%, 100% { transform: scale(1); filter: brightness(1); }
+  50% { transform: scale(1.07); filter: brightness(1.2); }
+}
+@keyframes orb-spin {
+  0% { transform: rotate(0deg) scale(1.01); }
+  100% { transform: rotate(360deg) scale(1.01); }
+}
+
 .state-label {
-  font-size: 12px;
-  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1.6px;
   text-transform: uppercase;
-  letter-spacing: 1px;
+  color: hsl(var(--muted-foreground));
 }
 .transcript {
   min-height: 18px;
-  font-size: 13px;
-  color: var(--text);
+  font-size: 14px;
+  color: hsl(var(--foreground));
   text-align: center;
-  max-width: 320px;
+  max-width: 340px;
+  user-select: text;
 }
 
-/* ── карточки ui.display (§21) ── */
+/* ── карточка (shadcn Card) ── */
 .cards {
-  flex: 1;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .card {
-  background: var(--panel);
-  border: 1px solid #ffffff10;
+  background: hsl(var(--surface));
+  border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 2px hsl(0 0% 0% / 0.3);
 }
 .card__title {
   font-weight: 600;
   font-size: 13px;
-  margin-bottom: 4px;
-  color: var(--accent);
+  margin-bottom: 6px;
+  color: hsl(var(--foreground));
 }
 .card__body {
   font-size: 13px;
-  color: var(--text);
+  color: hsl(var(--muted-foreground));
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
@@ -159,80 +272,83 @@ body {
 
 /* ── панель задачи (§20) ── */
 .task {
-  background: var(--panel);
-  border: 1px solid #ffffff10;
+  background: hsl(var(--surface));
+  border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  box-shadow: 0 1px 2px hsl(0 0% 0% / 0.3);
 }
 .task--hidden {
   display: none;
 }
 .task__head {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 10px;
 }
 .task__state {
-  font-size: 11px;
+  font-size: 10.5px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--accent);
+  letter-spacing: 0.8px;
+  padding: 3px 9px;
+  border-radius: 999px;
   white-space: nowrap;
+  color: hsl(var(--brand));
+  background: hsl(var(--brand) / 0.12);
 }
 .task--paused .task__state,
 .task--waiting_confirm .task__state {
-  color: var(--warn);
+  color: hsl(var(--warning));
+  background: hsl(var(--warning) / 0.12);
 }
 .task--done .task__state {
-  color: var(--ok);
+  color: hsl(var(--success));
+  background: hsl(var(--success) / 0.12);
 }
 .task--failed .task__state,
 .task--cancelled .task__state {
-  color: var(--deny);
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.12);
 }
 .task__summary {
   font-size: 13px;
-  color: var(--text);
+  color: hsl(var(--foreground));
   flex: 1;
   word-break: break-word;
 }
 .task__bar {
   height: 6px;
-  background: var(--panel-2);
+  background: hsl(var(--surface-2));
   border-radius: 999px;
   overflow: hidden;
 }
 .task__bar-fill {
   height: 100%;
   width: 0;
-  background: var(--accent);
+  background: hsl(var(--brand));
   border-radius: 999px;
-  transition: width 0.25s ease;
+  transition: width 0.3s ease;
 }
 .task--done .task__bar-fill {
-  background: var(--ok);
+  background: hsl(var(--success));
 }
 .task--failed .task__bar-fill,
 .task--cancelled .task__bar-fill {
-  background: var(--deny);
+  background: hsl(var(--destructive));
 }
-/* Неопределённый прогресс (нет stepsTotal): бегущая подсветка. */
 .task__bar-fill--indeterminate {
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background: linear-gradient(90deg, transparent, hsl(var(--brand)), transparent);
   background-size: 40% 100%;
   background-repeat: no-repeat;
   animation: task-indeterminate 1.2s infinite linear;
 }
 @keyframes task-indeterminate {
-  0% {
-    background-position: -40% 0;
-  }
-  100% {
-    background-position: 140% 0;
-  }
+  0% { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
 }
 .task__actions {
   display: flex;
@@ -240,100 +356,173 @@ body {
 }
 .task__actions .btn {
   flex: 1;
-  padding: 6px 10px;
-  font-size: 13px;
 }
 
-/* ── поле ввода (M0) ── */
-.input-row {
+/* ── кнопки (shadcn Button) ── */
+.btn {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+.btn:hover {
+  opacity: 0.9;
+}
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring));
+}
+.btn--sm {
+  height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+.btn--ghost {
+  background: transparent;
+  color: hsl(var(--foreground));
+  border-color: hsl(var(--border-strong));
+}
+.btn--ghost:hover {
+  background: hsl(var(--surface-2));
+  opacity: 1;
+}
+.btn--ok {
+  background: hsl(var(--success));
+  color: hsl(150 60% 8%);
+}
+.btn--deny {
+  background: hsl(var(--destructive));
+  color: hsl(0 0% 100%);
+}
+
+/* ── composer (поле ввода) ── */
+.composer {
   display: flex;
-  gap: 8px;
+  gap: 10px;
+  align-items: center;
 }
 .text-input {
+  -webkit-app-region: no-drag;
   flex: 1;
-  background: var(--panel-2);
-  border: 1px solid #ffffff14;
-  border-radius: 10px;
-  color: var(--text);
-  padding: 10px 12px;
+  width: 100%;
+  height: 44px;
+  background: hsl(var(--surface-2));
+  border: 1px solid hsl(var(--border-strong));
+  border-radius: var(--radius-md);
+  color: hsl(var(--foreground));
+  padding: 0 14px;
   font-size: 14px;
   outline: none;
   user-select: text;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.text-input::placeholder {
+  color: hsl(var(--muted-foreground));
 }
 .text-input:focus {
-  border-color: var(--accent);
-}
-.send-btn,
-.btn {
-  background: var(--accent);
-  border: none;
-  color: white;
-  border-radius: 10px;
-  padding: 10px 14px;
-  font-size: 14px;
-  cursor: pointer;
+  border-color: hsl(var(--ring));
+  box-shadow: 0 0 0 3px hsl(var(--ring) / 0.18);
 }
 .send-btn {
+  -webkit-app-region: no-drag;
+  flex: none;
   width: 44px;
-}
-.btn {
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid #ffffff14;
-}
-.btn--ok {
-  background: var(--ok);
-  color: #062b1f;
+  height: 44px;
+  display: grid;
+  place-items: center;
   border: none;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, hsl(var(--brand)), hsl(225 83% 60%));
+  color: hsl(0 0% 100%);
+  cursor: pointer;
+  box-shadow: 0 6px 18px hsl(var(--brand) / 0.4);
+  transition: transform 0.12s ease, box-shadow 0.15s ease;
 }
-.btn--deny {
-  background: var(--deny);
-  color: #2b0606;
-  border: none;
+.send-btn:hover {
+  transform: translateY(-1px);
+}
+.send-btn:active {
+  transform: translateY(0);
 }
 
 /* ── модалка подтверждения (§14) ── */
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: hsl(222 47% 3% / 0.6);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding: 18px;
+  z-index: 50;
 }
 .overlay--hidden {
   display: none;
 }
 .modal {
-  background: var(--panel);
-  border: 1px solid #ffffff14;
+  background: hsl(var(--surface));
+  border: 1px solid hsl(var(--border-strong));
   border-radius: var(--radius);
-  padding: 16px;
+  padding: 20px;
   width: 100%;
   max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 24px 60px hsl(0 0% 0% / 0.55);
+}
+.modal__head {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 .modal__kind {
-  font-size: 11px;
+  align-self: flex-start;
+  font-size: 10.5px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--warn);
+  letter-spacing: 0.8px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: hsl(var(--warning));
+  background: hsl(var(--warning) / 0.12);
+}
+.modal__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.2px;
 }
 .modal__summary {
   font-size: 14px;
+  color: hsl(var(--foreground));
   user-select: text;
 }
-.modal__label {
-  font-size: 12px;
-  color: var(--muted);
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.field__label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
 }
 .modal__actions {
   display: flex;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: 2px;
 }
 .modal__actions .btn {
   flex: 1;

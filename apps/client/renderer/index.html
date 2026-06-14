@@ -5,79 +5,102 @@
     <!-- §3: renderer изолирован. CSP запрещает inline-скрипты; вся логика в renderer.js. -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; script-src 'self'"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; script-src 'self'"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Jarvis</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="app">
-      <!-- Индикатор связи с сервером -->
+    <div class="app">
+      <!-- ── Топбар: бренд + статус связи ── -->
       <header class="topbar">
-        <span class="brand">Jarvis</span>
+        <div class="brand">
+          <span class="brand__mark" aria-hidden="true"></span>
+          <span class="brand__name">Jarvis</span>
+        </div>
         <span id="link" class="link link--off" title="связь с сервером">offline</span>
       </header>
 
-      <!-- Орб состояния (idle/listening/thinking/speaking), §3/§21 -->
-      <section class="orb-wrap">
-        <div id="orb" class="orb orb--idle" aria-live="polite"></div>
-        <div id="stateLabel" class="state-label">idle</div>
-        <!-- Транскрипт/последняя реплика -->
-        <div id="transcript" class="transcript"></div>
-      </section>
+      <!-- ── Сцена: орб состояния + транскрипт + карточки ── -->
+      <main class="stage">
+        <section class="orb-wrap">
+          <div class="orb-stage">
+            <div id="orb" class="orb orb--idle" aria-live="polite" role="button" tabindex="0"></div>
+          </div>
+          <div id="stateLabel" class="state-label">idle</div>
+          <div id="transcript" class="transcript"></div>
+        </section>
 
-      <!-- Панель прогресса задачи (§20): состояние, прогресс, управление -->
-      <section id="taskPanel" class="task task--hidden" aria-live="polite">
-        <div class="task__head">
-          <span id="taskState" class="task__state">—</span>
-          <span id="taskSummary" class="task__summary"></span>
-        </div>
-        <div class="task__bar" role="progressbar">
-          <div id="taskBarFill" class="task__bar-fill"></div>
-        </div>
-        <div class="task__actions">
-          <button id="taskCancelBtn" class="btn btn--deny" type="button">Стоп</button>
-          <button id="taskPauseBtn" class="btn" type="button">Пауза</button>
-          <button id="taskResumeBtn" class="btn btn--ok task--hidden" type="button">Продолжить</button>
-        </div>
-      </section>
+        <!-- Панель прогресса задачи (§20) -->
+        <section id="taskPanel" class="task task--hidden" aria-live="polite">
+          <div class="task__head">
+            <span id="taskState" class="task__state">—</span>
+            <span id="taskSummary" class="task__summary"></span>
+          </div>
+          <div class="task__bar" role="progressbar">
+            <div id="taskBarFill" class="task__bar-fill"></div>
+          </div>
+          <div class="task__actions">
+            <button id="taskCancelBtn" class="btn btn--deny btn--sm" type="button">Стоп</button>
+            <button id="taskPauseBtn" class="btn btn--ghost btn--sm" type="button">Пауза</button>
+            <button id="taskResumeBtn" class="btn btn--ok btn--sm task--hidden" type="button">
+              Продолжить
+            </button>
+          </div>
+        </section>
 
-      <!-- Область карточек ui.display (§21) -->
-      <section id="cards" class="cards" aria-label="карточки"></section>
+        <!-- Карточки ui.display (§21) -->
+        <section id="cards" class="cards" aria-label="карточки"></section>
+      </main>
 
-      <!-- M0: dev-поле текстового ввода (до голоса) -->
-      <form id="inputForm" class="input-row" autocomplete="off">
+      <!-- ── Composer: текстовый ввод (M0) ── -->
+      <form id="inputForm" class="composer" autocomplete="off">
         <input
           id="textInput"
           class="text-input"
           type="text"
-          placeholder="Напишите команду… (напр. «открой блокнот»)"
+          placeholder="Напишите команду…  «открой блокнот»"
           aria-label="ввод команды"
         />
-        <button id="sendBtn" class="send-btn" type="submit">→</button>
+        <button id="sendBtn" class="send-btn" type="submit" aria-label="отправить">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+            <path
+              d="M5 12h14M13 6l6 6-6 6"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
       </form>
+    </div>
 
-      <!-- Модалка подтверждения send/order (§14) с полем revision -->
-      <div id="confirmOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">
-        <div class="modal">
-          <div id="confirmKind" class="modal__kind"></div>
-          <div id="confirmSummary" class="modal__summary"></div>
-          <label class="modal__label" for="revisionInput">Правка (необязательно):</label>
+    <!-- ── Модалка подтверждения send/order (§14) с полем revision ── -->
+    <div id="confirmOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">
+      <div class="modal">
+        <div class="modal__head">
+          <span id="confirmKind" class="modal__kind"></span>
+          <h3 class="modal__title">Подтверждение</h3>
+        </div>
+        <div id="confirmSummary" class="modal__summary"></div>
+        <div class="field">
+          <label class="field__label" for="revisionInput">Правка (необязательно)</label>
           <input
             id="revisionInput"
             class="text-input"
             type="text"
             placeholder="напр. «короче и без эмодзи»"
           />
-          <div class="modal__actions">
-            <button id="approveBtn" class="btn btn--ok" type="button">Подтвердить</button>
-            <button id="reviseBtn" class="btn" type="button">Переписать</button>
-            <button id="denyBtn" class="btn btn--deny" type="button">Отклонить</button>
-          </div>
+        </div>
+        <div class="modal__actions">
+          <button id="denyBtn" class="btn btn--deny" type="button">Отклонить</button>
+          <button id="reviseBtn" class="btn btn--ghost" type="button">Переписать</button>
+          <button id="approveBtn" class="btn btn--ok" type="button">Подтвердить</button>
         </div>
       </div>
-    </main>
+    </div>
 
     <script src="./renderer.js"></script>
   </body>
