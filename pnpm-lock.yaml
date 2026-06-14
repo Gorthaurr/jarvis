@@ -8,9 +8,15 @@ importers:
 
   .:
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.3.3
+        version: 0.3.16
       '@types/node':
         specifier: ^22.9.0
         version: 22.19.21
+      pg:
+        specifier: ^8.13.1
+        version: 8.21.0
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
@@ -88,6 +94,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.32.1
         version: 0.32.1(encoding@0.1.13)
+      '@electric-sql/pglite':
+        specifier: ^0.3.3
+        version: 0.3.16
       openai:
         specifier: ^4.73.0
         version: 4.104.0(encoding@0.1.13)(ws@8.21.0(bufferutil@4.1.0)(utf-8-validate@5.0.10))
@@ -173,6 +182,9 @@ packages:
   '@develar/schema-utils@2.6.5':
     resolution: {integrity: sha512-0cp4PsWQ/9avqTVMCtZ+GirikIA36ikvjtHweU4/j8yLtgObI0+JUPhYFScgwlteveGB1rt3Cm8UhN04XayDig==}
     engines: {node: '>= 8.9.0'}
+
+  '@electric-sql/pglite@0.3.16':
+    resolution: {integrity: sha512-mZkZfOd9OqTMHsK+1cje8OSzfAQcpD7JmILXTl5ahdempjUDdmg4euf1biDex5/LfQIDJ3gvCu6qDgdnDxfJmA==}
 
   '@electron/asar@3.4.1':
     resolution: {integrity: sha512-i4/rNPRS84t0vSRa2HorerGRXWyF4vThfHesw0dmcWHp+cspK743UanA0suA5Q5y8kzY2y6YKrvbIUn69BCAiA==}
@@ -2778,6 +2790,8 @@ snapshots:
     dependencies:
       ajv: 6.15.0
       ajv-keywords: 3.5.2(ajv@6.15.0)
+
+  '@electric-sql/pglite@0.3.16': {}
 
   '@electron/asar@3.4.1':
     dependencies:

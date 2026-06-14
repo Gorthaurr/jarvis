@@ -24,7 +24,8 @@
   },
   "optionalDependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
-    "openai": "^4.73.0"
+    "openai": "^4.73.0",
+    "@electric-sql/pglite": "^0.3.3"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

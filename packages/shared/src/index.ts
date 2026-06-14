@@ -95,3 +95,91 @@ export function createLogger(scope = "jarvis", minLevel: LogLevel = "info"): Log
 
 /** Стадии латентности голосового пайплайна (§10, quality harness §22). */
 export type LatencyStage = "wake" | "stt_first" | "llm_first_token" | "tts_first_chunk" | "audio";
+
+// ── кеш (§15: экономия на платных вызовах) ───────────────────
+
+/** Метрики кеша — для замера эффективности кеширования (§15). */
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  size: number;
+  /** Доля попаданий 0..1. */
+  hitRate: number;
+}
+
+export interface TtlCacheOptions {
+  /** Время жизни записи, мс. */
+  ttlMs: number;
+  /** Максимум записей (LRU-вытеснение сверх лимита). */
+  maxEntries?: number;
+  /** «Сейчас» — для тестируемости. */
+  now?: () => number;
+}
+
+/**
+ * Один кеш-примитив на все кеши (DRY, §15): in-memory TTL + LRU + метрики hit/miss.
+ * Используется декораторами провайдеров эмбеддингов/web/TTS, чтобы не дублировать
+ * логику кеширования в каждом.
+ */
+export class TtlCache<V> {
+  private readonly map = new Map<string, { value: V; expiresAt: number }>();
+  private readonly ttlMs: number;
+  private readonly maxEntries: number;
+  private readonly now: () => number;
+  private hits = 0;
+  private misses = 0;
+
+  constructor(opts: TtlCacheOptions) {
+    this.ttlMs = opts.ttlMs;
+    this.maxEntries = opts.maxEntries ?? 1000;
+    this.now = opts.now ?? (() => Date.now());
+  }
+
+  get(key: string): V | undefined {
+    const e = this.map.get(key);
+    if (!e) {
+      this.misses += 1;
+      return undefined;
+    }
+    if (e.expiresAt <= this.now()) {
+      this.map.delete(key);
+      this.misses += 1;
+      return undefined;
+    }
+    // LRU: освежаем позицию (перемещаем в конец порядка вставки).
+    this.map.delete(key);
+    this.map.set(key, e);
+    this.hits += 1;
+    return e.value;
+  }
+
+  set(key: string, value: V): void {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, { value, expiresAt: this.now() + this.ttlMs });
+    while (this.map.size > this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
+
+  delete(key: string): void {
+    this.map.delete(key);
+  }
+
+  clear(): void {
+    this.map.clear();
+    this.hits = 0;
+    this.misses = 0;
+  }
+
+  get stats(): CacheStats {
+    const total = this.hits + this.misses;
+    return {
+      hits: this.hits,
+      misses: this.misses,
+      size: this.map.size,
+      hitRate: total === 0 ? 0 : this.hits / total,
+    };
+  }
+}

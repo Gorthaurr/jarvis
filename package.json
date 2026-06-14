@@ -18,6 +18,8 @@
     "db:migrate": "node infra/migrate.mjs"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.3.3",
+    "pg": "^8.13.1",
     "typescript": "^5.6.3",
     "tsx": "^4.19.2",
     "@types/node": "^22.9.0",

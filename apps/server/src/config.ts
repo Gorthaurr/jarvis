@@ -30,6 +30,10 @@ export interface ServerConfig {
   readonly models: Record<Exclude<Tier, "tier0">, string>;
   /** Ключи интеграций — опциональны (без них стаб-режим). */
   readonly anthropicApiKey: string | undefined;
+  /** Base URL Anthropic/шлюза (proxyapi.ru и т.п.); undefined → прямой Anthropic. */
+  readonly anthropicBaseUrl: string | undefined;
+  /** TTL prompt-кеша Anthropic (§15): "5m" дефолт, "1h" extended. */
+  readonly anthropicCacheTtl: "5m" | "1h";
   readonly openaiApiKey: string | undefined;
   readonly embeddingModel: string;
   readonly embeddingDim: number;
@@ -62,6 +66,8 @@ export function loadConfig(): ServerConfig {
       fable: env("TIER3_MODEL", DEFAULT_MODELS.fable),
     },
     anthropicApiKey: envOptional("ANTHROPIC_API_KEY"),
+    anthropicBaseUrl: envOptional("ANTHROPIC_BASE_URL"),
+    anthropicCacheTtl: env("ANTHROPIC_CACHE_TTL", "5m") === "1h" ? "1h" : "5m",
     openaiApiKey: envOptional("OPENAI_API_KEY"),
     embeddingModel: env("EMBEDDING_MODEL", "text-embedding-3-small"),
     embeddingDim: envInt("EMBEDDING_DIM", 1536),

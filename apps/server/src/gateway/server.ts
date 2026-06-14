@@ -23,11 +23,17 @@ import {
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ServerConfig } from "../config.js";
 import { SpendGuard } from "../billing/index.js";
+import { SessionWarmth } from "../brain/agent/warmth.js";
 import { TaskManager } from "../brain/tasks/manager.js";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
-import { HashEmbeddingProvider, OpenAiEmbeddingProvider } from "../integrations/openai-embeddings.js";
+import {
+  CachingEmbeddingProvider,
+  HashEmbeddingProvider,
+  OpenAiEmbeddingProvider,
+} from "../integrations/openai-embeddings.js";
 import { createSttProvider, createTtsProvider } from "../integrations/providers.js";
-import { WebProvider } from "../integrations/web.js";
+import { CachingTtsProvider } from "../integrations/tts-cache.js";
+import { CachingWebProvider, WebProvider } from "../integrations/web.js";
 import { createEpisodicMemory } from "../memory/episodic.js";
 import { forgetClientContext } from "../proactive/salience.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -57,31 +63,42 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const registry = new SessionRegistry();
 
   // Голосовые провайдеры — один раз на gateway (§10). Без ключей — mock-режим.
-  const providers: VoiceProviders = {
-    stt: createSttProvider({ deepgramApiKey: config.deepgramApiKey }),
-    tts: createTtsProvider({
+  // TTS оборачиваем кешем (§15): повторяющиеся фразы не синтезируем заново.
+  const tts = new CachingTtsProvider(
+    createTtsProvider({
       elevenLabsApiKey: config.elevenLabsApiKey,
       voiceId: config.elevenLabsVoiceId,
     }),
+  );
+  const providers: VoiceProviders = {
+    stt: createSttProvider({ deepgramApiKey: config.deepgramApiKey }),
+    tts,
     voiceId: config.elevenLabsVoiceId,
   };
 
   // Мозговые провайдеры — один раз на gateway (§7, §8, §12, §14).
-  // Эмбеддер: OpenAI при наличии ключа, иначе детерминированный hash (dev/retrieval работает).
-  const embedder = config.openaiApiKey
+  // Эмбеддер: OpenAI при наличии ключа, иначе детерминированный hash; поверх — кеш (§15).
+  const baseEmbedder = config.openaiApiKey
     ? new OpenAiEmbeddingProvider({
         apiKey: config.openaiApiKey,
         model: config.embeddingModel,
         dim: config.embeddingDim,
       })
     : new HashEmbeddingProvider();
+  const embedder = new CachingEmbeddingProvider(baseEmbedder);
+  const web = new CachingWebProvider(new WebProvider(config.braveApiKey));
   const brain: BrainProviders = {
-    llm: new AnthropicLlmProvider({ apiKey: config.anthropicApiKey }),
+    llm: new AnthropicLlmProvider({
+      apiKey: config.anthropicApiKey,
+      cacheTtl: config.anthropicCacheTtl,
+      baseUrl: config.anthropicBaseUrl,
+    }),
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
-    web: new WebProvider(config.braveApiKey),
+    web,
     spend: new SpendGuard({ spendCap: config.defaultSpendCap }),
     models: config.models,
     tasks: new TaskManager(), // общий реестр долгих задач на gateway (§20)
+    warmth: new SessionWarmth(), // §15: кешируем префикс только в тёплых сессиях
   };
 
   // Регистрация плагина WebSocket до объявления маршрутов.
@@ -95,8 +112,17 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     });
   });
 
-  // health-чек для оркестратора/клиента.
-  app.get("/healthz", async () => ({ ok: true, sessions: registry.size }));
+  // health-чек + метрики кеша (§15): hit/miss по эмбеддингам/web/TTS — для замера
+  // эффективности кеширования платных вызовов.
+  app.get("/healthz", async () => ({
+    ok: true,
+    sessions: registry.size,
+    cache: {
+      embeddings: embedder.stats,
+      web: web.stats,
+      tts: tts.stats,
+    },
+  }));
 
   return {
     app,
@@ -186,6 +212,7 @@ function onConnection(
       ctx.heartbeat.stop();
       ctx.voice.dispose();
       forgetClientContext(ctx.session.sessionId);
+      brain.warmth.forget(ctx.session.sessionId); // §15: не копим тёплость мёртвых сессий
       // Сессию НЕ удаляем сразу: оставляем для resume (§5). teardown по close
       // оставляем реестру/GC — здесь только heartbeat и in-flight отклоним через teardown
       // при превышении окна resume. Для M0 — снимаем сразу.

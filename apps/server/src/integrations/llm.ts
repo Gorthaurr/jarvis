@@ -10,10 +10,17 @@
 import type { Tier } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 
+/** Маркер кеш-брейкпоинта (§15): помечает конец кешируемого префикса. */
+export interface CacheControl {
+  type: "ephemeral";
+  /** TTL кеша; "5m" (дефолт) или "1h" (extended, требует beta-заголовок). */
+  ttl?: "5m" | "1h";
+}
+
 export type LlmContentBlock =
-  | { type: "text"; text: string }
+  | { type: "text"; text: string; cache_control?: CacheControl }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean; cache_control?: CacheControl };
 
 export interface LlmMessage {
   role: "user" | "assistant";
@@ -39,6 +46,11 @@ export interface LlmRequest {
   tools?: ToolSchema[];
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Кешировать ли статичный префикс (§15). Дефолт true. false — «тощий префикс»
+   * для разовой команды вне активной сессии (не платить 1.25× за перезапись впустую).
+   */
+  cachePrefix?: boolean;
 }
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stub";
@@ -49,7 +61,16 @@ export interface LlmResponse {
   /** Запрошенные моделью вызовы инструментов (если stopReason==="tool_use"). */
   toolUses: ToolUse[];
   stopReason: StopReason;
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * Токены. cacheReadTokens/cacheCreationTokens — метрики prompt-кеша (§15):
+   * read = прочитано из кеша (дёшево), creation = записано в кеш (дороже на 25%).
+   */
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  };
   /** true — ответ синтезирован стабом/моком (без реального вызова). */
   stubbed: boolean;
 }
@@ -87,7 +108,7 @@ export class MockLlmProvider implements ILlmProvider {
       text: turn.text ?? "",
       toolUses,
       stopReason: toolUses.length > 0 ? "tool_use" : "end_turn",
-      usage: { inputTokens: 12, outputTokens: 8 },
+      usage: { inputTokens: 12, outputTokens: 8, cacheReadTokens: 0, cacheCreationTokens: 0 },
       stubbed: true,
     };
   }

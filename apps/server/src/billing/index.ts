@@ -57,9 +57,16 @@ export class SpendGuard {
   private killSwitch = false;
   /** Счётчики по задачам. */
   private readonly tasks = new Map<string, TaskMeter>();
+  /** id юзера для персиста usage_quota (§13, PK user_id+period); без него — только in-memory. */
+  private readonly userId: string | undefined;
+  private readonly now: () => number;
+  /** Последний best-effort персист — для drain() (graceful shutdown / тесты). */
+  private lastPersist: Promise<void> = Promise.resolve();
 
-  constructor(limits: Partial<SpendLimits> = {}) {
+  constructor(limits: Partial<SpendLimits> = {}, opts: { userId?: string; now?: () => number } = {}) {
     this.limits = { ...DEFAULT_LIMITS, ...limits };
+    this.userId = opts.userId;
+    this.now = opts.now ?? (() => Date.now());
   }
 
   /** Активировать аварийный стоп (§14): дальнейшие платные операции запрещены. */
@@ -112,8 +119,14 @@ export class SpendGuard {
     const meter = this.meter(taskId);
     meter.tokens += Math.max(0, tokens);
     this.spent += Math.max(0, cost);
-    // Персистентность usage_quota — best-effort (§14).
-    void this.persistUsage(tokens, cost);
+    // Персистентность usage_quota — best-effort (§14); промис ловим в drain().
+    this.lastPersist = this.persistUsage(tokens, cost);
+    void this.lastPersist;
+  }
+
+  /** Дождаться завершения последнего best-effort персиста (graceful shutdown / тесты). */
+  async drain(): Promise<void> {
+    await this.lastPersist;
   }
 
   /** Сбросить счётчики задачи по её завершении. */
@@ -135,10 +148,25 @@ export class SpendGuard {
     return m;
   }
 
+  /** Текущий период учёта 'YYYY-MM' (§13). */
+  private currentPeriod(): string {
+    return new Date(this.now()).toISOString().slice(0, 7);
+  }
+
+  /**
+   * Best-effort персист в usage_quota (§13, §14): upsert по (user_id, period),
+   * аккумулирует tokens_used/cost_estimate. Без userId или БД — no-op (in-memory учёт).
+   */
   private async persistUsage(tokens: number, cost: number): Promise<void> {
+    if (!this.userId) return; // без юзера — только in-memory зеркало
     const res = await query(
-      `insert into usage_quota (tokens, cost, at) values ($1, $2, now())`,
-      [tokens, cost],
+      `insert into usage_quota (user_id, period, tokens_used, cost_estimate)
+       values ($1, $2, $3, $4)
+       on conflict (user_id, period) do update
+         set tokens_used   = usage_quota.tokens_used + excluded.tokens_used,
+             cost_estimate = usage_quota.cost_estimate + excluded.cost_estimate,
+             updated_at    = now()`,
+      [this.userId, this.currentPeriod(), Math.max(0, tokens), Math.max(0, cost)],
     );
     if (!res) log.debug("usage_quota no-op (нет БД) — учёт только in-memory");
   }

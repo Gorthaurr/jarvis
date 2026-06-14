@@ -27,6 +27,7 @@ import {
 } from "@jarvis/protocol";
 import { type Logger, type Tier, createLogger } from "@jarvis/shared";
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
+import { SessionWarmth } from "../brain/agent/warmth.js";
 import type { SpendGuard } from "../billing/index.js";
 import type { ILlmProvider } from "../integrations/llm.js";
 import type { EpisodicMemory } from "../memory/episodic.js";
@@ -60,6 +61,8 @@ export interface BrainProviders {
   models: Record<Exclude<Tier, "tier0">, string>;
   /** Реестр долгих задач (§20) — общий на gateway: голос/UI управляют активной задачей. */
   tasks: TaskManager;
+  /** Тёплость сессий для §15-кеширования — общая на gateway. */
+  warmth: SessionWarmth;
 }
 
 /** Контекст одного соединения, который держит router между сообщениями. */
@@ -92,6 +95,7 @@ export function makeSessionContext(
     spend: brain.spend,
     userId: session.userId,
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
+    warmth: brain.warmth, // общая тёплость сессий (§15)
   };
   const voice = createVoicePipeline({
     stt: providers.stt,

@@ -30,8 +30,12 @@ import { dispatchTool } from "../tools/dispatch.js";
 import { verbalize } from "../verbalize/index.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { Task } from "../tasks/task.js";
+import { SessionWarmth } from "./warmth.js";
 
 const log: Logger = createLogger("agent");
+
+/** Тёплость сессий по умолчанию (§15), если не инъектирован общий через deps. */
+const sharedWarmth = new SessionWarmth();
 
 /** Ответ агента по схеме §21. */
 export interface AgentReply {
@@ -56,6 +60,8 @@ export interface AgentDeps {
    * передан, петля заводит локальный реестр (для изолированных тестов).
    */
   tasks?: TaskManager;
+  /** Тёплость сессий для §15-кеширования (общая с gateway); по умолчанию — модульная. */
+  warmth?: SessionWarmth;
 }
 
 /** Инструменты, не предлагаемые модели в диалоге (инициируются иначе). */
@@ -140,6 +146,8 @@ async function runAgentLoop(
   let cancelled = false;
   let limited = false;
   let round = 0; // число завершённых tool-use раундов (= прогресс задачи)
+  let cacheReadTokens = 0; // метрики prompt-кеша за задачу (§15)
+  let cacheCreationTokens = 0;
   for (let step = 0; step < HARD_STEP_CAP; step += 1) {
     // Отмена ≤1 шага (§20): cancel-флаг проверяется ПЕРЕД каждым шагом. Команда
     // «отмени» из router мутирует ТОТ ЖЕ флаг между await'ами петли.
@@ -155,6 +163,14 @@ async function runAgentLoop(
       break;
     }
 
+    // §15: кешируем префикс только в «тёплой» сессии. Первый вызов холодной
+    // сессии — тощий префикс без кеша (не платить 1.25× за разовую перезапись);
+    // последующие в петле — уже тёплые. Кеш-брейкпоинт растущего диалога — только
+    // когда кешируем (system+tools кешируются статичным брейкпоинтом в anthropic.ts).
+    const warmth = deps.warmth ?? sharedWarmth;
+    const cachePrefix = step === 0 ? warmth.isWarm(session.sessionId) : true;
+    if (cachePrefix) markCacheBreakpoint(convo);
+
     const resp = await deps.llm.complete({
       tier,
       model,
@@ -162,9 +178,13 @@ async function runAgentLoop(
       systemDynamic: sys.dynamicSuffix || undefined,
       messages: convo,
       tools,
+      cachePrefix,
     });
+    warmth.touch(session.sessionId);
     deps.spend.recordStep(taskId);
     deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, estimateCost(resp.usage));
+    cacheReadTokens += resp.usage.cacheReadTokens;
+    cacheCreationTokens += resp.usage.cacheCreationTokens;
 
     if (resp.toolUses.length === 0) {
       finalText = resp.text || "Готово.";
@@ -201,6 +221,9 @@ async function runAgentLoop(
   }
 
   deps.spend.finishTask(taskId);
+  if (cacheReadTokens + cacheCreationTokens > 0) {
+    log.info("prompt-кеш (§15)", { cacheReadTokens, cacheCreationTokens });
+  }
 
   // Терминал задачи (§20): отмена / лимит / успех — со стримом task.status.
   if (cancelled) {
@@ -282,7 +305,42 @@ function failurePhrase(intent: LocalIntent, code?: string): string {
   }
 }
 
-/** Грубая оценка стоимости вызова (для spend cap §14). Цены — порядок величины. */
-function estimateCost(usage: { inputTokens: number; outputTokens: number }): number {
-  return (usage.inputTokens * 1 + usage.outputTokens * 5) / 1_000_000;
+/**
+ * Грубая оценка стоимости вызова (для spend cap §14). Порядок величины в
+ * нормализованных единицах: вход=1, кеш-чтение=0.1, кеш-запись=1.25, выход=5 —
+ * отражает экономию prompt-кеша (§15).
+ */
+function estimateCost(usage: {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}): number {
+  return (
+    (usage.inputTokens * 1 +
+      usage.cacheReadTokens * 0.1 +
+      usage.cacheCreationTokens * 1.25 +
+      usage.outputTokens * 5) /
+    1_000_000
+  );
+}
+
+/**
+ * Кеш-брейкпоинт растущего диалога (§15): держим РОВНО одну метку — на последнем
+ * блоке последнего сообщения. Прежние снимаем, чтобы не упереться в лимит
+ * брейкпоинтов Anthropic (≤4). Первый ход (content — строка) пропускаем.
+ */
+export function markCacheBreakpoint(convo: LlmMessage[]): void {
+  for (const m of convo) {
+    if (typeof m.content === "string") continue;
+    for (const b of m.content) {
+      if (b.type === "text" || b.type === "tool_result") delete b.cache_control;
+    }
+  }
+  const last = convo.at(-1);
+  if (!last || typeof last.content === "string") return;
+  const lastBlock = last.content.at(-1);
+  if (lastBlock && (lastBlock.type === "text" || lastBlock.type === "tool_result")) {
+    lastBlock.cache_control = { type: "ephemeral" };
+  }
 }

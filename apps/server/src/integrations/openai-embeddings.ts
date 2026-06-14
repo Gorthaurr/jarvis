@@ -4,7 +4,7 @@
  * Используется эпизодической памятью (§8) для семантического поиска. Без
  * OPENAI_API_KEY/SDK возвращает null (память деградирует в пустой retrieval).
  */
-import { type Logger, createLogger } from "@jarvis/shared";
+import { type CacheStats, type Logger, TtlCache, createLogger } from "@jarvis/shared";
 
 const log: Logger = createLogger("embeddings");
 
@@ -108,4 +108,39 @@ function hashString(s: string): number {
     h = Math.imul(h, 16777619);
   }
   return h >>> 0;
+}
+
+/**
+ * Кеширующий декоратор эмбеддингов (§15): одинаковый текст → один платный вызов.
+ * Не кеширует null (транзиентный сбой/стаб — кешировать «нет ответа» нельзя).
+ * Ключ — сам текст (запросы retrieval короткие); объём ограничен LRU.
+ */
+export class CachingEmbeddingProvider implements IEmbeddingProvider {
+  readonly dim: number;
+  readonly live: boolean;
+  private readonly cache: TtlCache<number[]>;
+
+  constructor(
+    private readonly inner: IEmbeddingProvider,
+    opts: { ttlMs?: number; maxEntries?: number } = {},
+  ) {
+    this.dim = inner.dim;
+    this.live = inner.live;
+    this.cache = new TtlCache<number[]>({
+      ttlMs: opts.ttlMs ?? 24 * 3_600_000, // сутки — эмбеддинг текста не меняется
+      maxEntries: opts.maxEntries ?? 5_000,
+    });
+  }
+
+  async embed(text: string): Promise<number[] | null> {
+    const hit = this.cache.get(text);
+    if (hit) return hit;
+    const v = await this.inner.embed(text);
+    if (v !== null) this.cache.set(text, v);
+    return v;
+  }
+
+  get stats(): CacheStats {
+    return this.cache.stats;
+  }
 }

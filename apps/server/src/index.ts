@@ -4,13 +4,40 @@
  * Грузит .env, создаёт логгер, конфигурирует БД (лениво), поднимает gateway,
  * вешает graceful shutdown на SIGINT/SIGTERM.
  */
-import "dotenv/config";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import { createLogger } from "@jarvis/shared";
 import { loadConfig } from "./config.js";
 import { closeDb, configureDb } from "./db/pool.js";
 import { createGateway } from "./gateway/server.js";
 
+/**
+ * Загрузить .env, ища его вверх по дереву от cwd и от модуля — сервер
+ * запускается из apps/server (pnpm), а .env лежит в корне монорепо.
+ */
+function loadEnv(): void {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(process.cwd(), ".env"),
+    resolve(process.cwd(), "../.env"),
+    resolve(here, "../../../.env"), // apps/server/src → корень репо
+    resolve(here, "../../../../.env"),
+  ];
+  // override: .env — источник истины для сервера, важнее унаследованного окружения
+  // (напр. ANTHROPIC_BASE_URL родителя не должен перебивать прокси из .env).
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      dotenv.config({ path: p, override: true });
+      return;
+    }
+  }
+  dotenv.config({ override: true });
+}
+
 async function main(): Promise<void> {
+  loadEnv();
   const config = loadConfig();
   const log = createLogger("server", config.logLevel);
   log.info("старт Jarvis server", {

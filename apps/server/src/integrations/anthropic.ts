@@ -21,6 +21,10 @@ const log: Logger = createLogger("llm:anthropic");
 export interface AnthropicConfig {
   apiKey: string | undefined;
   maxRetries?: number;
+  /** TTL prompt-кеша (§15): "5m" (дефолт) или "1h" (extended, beta-заголовок). */
+  cacheTtl?: "5m" | "1h";
+  /** Base URL — для шлюза/прокси (proxyapi.ru и т.п.); по умолчанию прямой Anthropic. */
+  baseUrl?: string;
 }
 
 /** Сырые типы ответа SDK (минимально). */
@@ -34,20 +38,30 @@ interface RawContentBlock {
 interface RawResponse {
   content: RawContentBlock[];
   stop_reason?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
 }
 
 export class AnthropicLlmProvider implements ILlmProvider {
   readonly live: boolean;
   private readonly apiKey: string | undefined;
   private readonly maxRetries: number;
+  private readonly cacheTtl: "5m" | "1h";
+  private readonly baseUrl: string | undefined;
   private clientPromise: Promise<unknown> | null = null;
 
   constructor(cfg: AnthropicConfig) {
     this.apiKey = cfg.apiKey;
     this.maxRetries = cfg.maxRetries ?? 3;
+    this.cacheTtl = cfg.cacheTtl ?? "5m";
+    this.baseUrl = cfg.baseUrl;
     this.live = Boolean(cfg.apiKey);
     if (!this.live) log.warn("ANTHROPIC_API_KEY не задан — LLM в стаб-режиме");
+    else if (this.baseUrl) log.info("LLM через шлюз", { baseUrl: this.baseUrl });
   }
 
   async complete(req: LlmRequest): Promise<LlmResponse> {
@@ -72,20 +86,31 @@ export class AnthropicLlmProvider implements ILlmProvider {
 
   private async callReal(req: LlmRequest): Promise<LlmResponse> {
     const client = (await this.getClient()) as {
-      messages: { create(args: unknown): Promise<RawResponse> };
+      messages: { create(args: unknown, opts?: unknown): Promise<RawResponse> };
     };
 
-    // §15: первый системный блок — кешируемый.
+    // §15: первый системный блок — кеш-брейкпоинт (кеширует tools+персону, т.к.
+    // в каноническом порядке tools идут перед system). TTL — из конфига.
+    // cachePrefix=false (разовая команда вне сессии) → тощий префикс без кеша,
+    // чтобы не платить 1.25× за перезапись впустую (§15).
+    const cacheControl =
+      this.cacheTtl === "1h" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+    const staticBlock =
+      req.cachePrefix === false
+        ? { type: "text", text: req.systemStatic }
+        : { type: "text", text: req.systemStatic, cache_control: cacheControl };
     const system = [
-      { type: "text", text: req.systemStatic, cache_control: { type: "ephemeral" } },
+      staticBlock,
       ...(req.systemDynamic ? [{ type: "text", text: req.systemDynamic }] : []),
     ];
 
-    const resp = await client.messages.create({
+    const args = {
       model: req.model,
       max_tokens: req.maxTokens ?? 1024,
       temperature: req.temperature ?? 0.4,
       system,
+      // Блоки messages могут нести cache_control (брейкпоинт растущего диалога
+      // в agent-loop, §15) — пробрасываем как есть.
       messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
       ...(req.tools && req.tools.length > 0
         ? {
@@ -96,8 +121,15 @@ export class AnthropicLlmProvider implements ILlmProvider {
             })),
           }
         : {}),
-    });
+    };
 
+    // Extended-cache 1h требует beta-заголовка.
+    const opts =
+      this.cacheTtl === "1h"
+        ? { headers: { "anthropic-beta": "extended-cache-ttl-2025-04-11" } }
+        : undefined;
+
+    const resp = await client.messages.create(args, opts);
     return parseResponse(resp);
   }
 
@@ -107,9 +139,12 @@ export class AnthropicLlmProvider implements ILlmProvider {
       const spec = "@anthropic-ai/sdk";
       const mod = await import(spec);
       const Anthropic = (mod.default ?? (mod as { Anthropic?: unknown }).Anthropic) as new (
-        opts: { apiKey: string },
+        opts: { apiKey: string; baseURL?: string },
       ) => unknown;
-      return new Anthropic({ apiKey: this.apiKey! });
+      return new Anthropic({
+        apiKey: this.apiKey!,
+        ...(this.baseUrl ? { baseURL: this.baseUrl } : {}),
+      });
     })();
     return this.clientPromise;
   }
@@ -138,6 +173,8 @@ export function parseResponse(resp: RawResponse): LlmResponse {
     usage: {
       inputTokens: resp.usage?.input_tokens ?? 0,
       outputTokens: resp.usage?.output_tokens ?? 0,
+      cacheReadTokens: resp.usage?.cache_read_input_tokens ?? 0,
+      cacheCreationTokens: resp.usage?.cache_creation_input_tokens ?? 0,
     },
     stubbed: false,
   };
@@ -151,7 +188,7 @@ function stub(req: LlmRequest): LlmResponse {
     text: `(стаб LLM, тир ${req.tier}) Модель не подключена. Запрос: «${lastText.slice(0, 80)}».`,
     toolUses: [],
     stopReason: "stub",
-    usage: { inputTokens: 0, outputTokens: 0 },
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
     stubbed: true,
   };
 }

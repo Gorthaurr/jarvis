@@ -12,8 +12,9 @@
 | tsconfig.base.json | M0 | ✅ работает | `tsconfig.base.json` |
 | .gitignore / .npmrc / .env.example | M0 | ✅ работает | корень |
 | docker-compose (PostgreSQL + pgvector) | M0 | ✅ работает | `infra/docker-compose.yml` |
-| Миграции PostgreSQL (все таблицы §13) | M0 | ✅ работает | `infra/migrations/0001_init.sql`, `0002_seed_dev.sql` |
+| Миграции PostgreSQL (все таблицы §13) | M0 | ✅ работает | `infra/migrations/0001_init.sql`, `0002_seed_dev.sql` — схема выверена 1:1 с запросами кода (episodic/skills/action_log/usage_quota) |
 | Раннер миграций | M0 | ✅ работает | `infra/migrate.mjs` |
+| Интеграционный тест персистентности (PGlite+pgvector, без Docker) | M2 | ✅ работает | `apps/server/src/db/persistence.integration.test.ts` (тест 5/5: миграции+round-trip) |
 
 ---
 
@@ -74,6 +75,7 @@
 | ToolDispatcher (актуаторы + web/memory; send/order → M6/M7) | M2 | ✅ работает | `brain/tools/dispatch.ts` |
 | code.run lint-гард (реестр/службы/сеть/пути; powershell→confirm §6) | M3 | ✅ работает | `brain/code-guard.ts` (тест 6/6) |
 | web.search / web.fetch (Brave + readability §12) | M2 | ✅ работает | `integrations/web.ts` (тест 5/5, real+mock) |
+| Кеширование платных вызовов (§15): prompt-cache + cache-токены, кеш эмбеддингов/web/TTS, warm-only тощий префикс вне сессии, /healthz-метрики | M2 | ✅ работает | `TtlCache` (@jarvis/shared), декораторы Caching{Embedding,Web,Tts}, `SessionWarmth`, anthropic cacheTtl 5m/1h + breakpoint agent-loop (тест 12/12) |
 
 ---
 

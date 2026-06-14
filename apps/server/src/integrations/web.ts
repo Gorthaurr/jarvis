@@ -5,7 +5,7 @@
  * Сеть через глобальный fetch (Node 22). Без BRAVE_SEARCH_API_KEY поиск отдаёт [];
  * fetch работает без ключа (нужна лишь сеть). Парсеры — чистые, тестируются без сети.
  */
-import { type Logger, createLogger } from "@jarvis/shared";
+import { type CacheStats, type Logger, TtlCache, createLogger } from "@jarvis/shared";
 
 const log: Logger = createLogger("web");
 
@@ -119,6 +119,47 @@ export class WebProvider implements IWebProvider {
       log.warn("web.fetch ошибка", e instanceof Error ? e.message : String(e));
       return null;
     }
+  }
+}
+
+/**
+ * Кеширующий декоратор web (§12, §15): повторный одинаковый search/fetch не дёргает
+ * Brave/сеть в пределах TTL. Пустые результаты не кешируются (стаб/сбой/нет ключа).
+ */
+export class CachingWebProvider implements IWebProvider {
+  readonly live: boolean;
+  private readonly searchCache: TtlCache<SearchHit[]>;
+  private readonly fetchCache: TtlCache<FetchedPage>;
+
+  constructor(
+    private readonly inner: IWebProvider,
+    opts: { searchTtlMs?: number; fetchTtlMs?: number; maxEntries?: number } = {},
+  ) {
+    this.live = inner.live;
+    const maxEntries = opts.maxEntries ?? 500;
+    this.searchCache = new TtlCache<SearchHit[]>({ ttlMs: opts.searchTtlMs ?? 10 * 60_000, maxEntries });
+    this.fetchCache = new TtlCache<FetchedPage>({ ttlMs: opts.fetchTtlMs ?? 30 * 60_000, maxEntries });
+  }
+
+  async search(query: string, limit = 5): Promise<SearchHit[]> {
+    const key = `${limit}:${query}`;
+    const hit = this.searchCache.get(key);
+    if (hit) return hit;
+    const r = await this.inner.search(query, limit);
+    if (r.length > 0) this.searchCache.set(key, r);
+    return r;
+  }
+
+  async fetch(url: string): Promise<FetchedPage | null> {
+    const hit = this.fetchCache.get(url);
+    if (hit) return hit;
+    const r = await this.inner.fetch(url);
+    if (r !== null) this.fetchCache.set(url, r);
+    return r;
+  }
+
+  get stats(): { search: CacheStats; fetch: CacheStats } {
+    return { search: this.searchCache.stats, fetch: this.fetchCache.stats };
   }
 }
 
