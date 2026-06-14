@@ -98,6 +98,9 @@ const STEP_ACTIONS: ReadonlySet<string> = new Set([
   "code.run",
   "screen.capture",
   "context.read",
+  "message.send",
+  "order.place",
+  "confirm",
   "ground",
   "verify",
   "wait",
@@ -114,22 +117,31 @@ function buildStep(action: string, kv: Record<string, string>): SkillStep {
   const target = buildTarget(kv);
   if (target) step.target = target;
 
+  // Служебные ключи, которые не уходят в params (target/expect/мета).
+  const RESERVED = new Set([
+    "role", "name", "handle", "x", "y", "by",
+    "expectrole", "expectname", "expectstate", "needsllm", "timeoutms", "retries",
+  ]);
+
   // params — всё, что не ушло в target/служебные поля.
   const params: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(kv)) {
-    if (["role", "name", "handle", "x", "y", "by"].includes(k)) continue;
+    if (RESERVED.has(k.toLowerCase())) continue;
     if (k === "pattern" || k === "value" || k === "text" || k === "combo" || k === "app" || k === "url") {
       params[k] = v;
-    } else if (k === "timeoutMs" || k === "retries") {
-      const n = Number.parseInt(v, 10);
-      if (!Number.isNaN(n)) {
-        if (k === "timeoutMs") step.timeoutMs = n;
-        else step.retries = n;
-      }
     } else {
       params[k] = v;
     }
   }
+  if (kv.timeoutMs) {
+    const n = Number.parseInt(kv.timeoutMs, 10);
+    if (!Number.isNaN(n)) step.timeoutMs = n;
+  }
+  if (kv.retries) {
+    const n = Number.parseInt(kv.retries, 10);
+    if (!Number.isNaN(n)) step.retries = n;
+  }
+  if (kv.needsLlm === "true") step.needsLlm = true;
   if (kv.pattern) params.pattern = kv.pattern as UiPattern;
   if (Object.keys(params).length > 0) step.params = params;
 
@@ -263,4 +275,70 @@ export async function getSkill(userId: string, id: string): Promise<SkillRecord 
 export async function deleteSkill(userId: string, id: string): Promise<boolean> {
   const res = await query(`delete from skills where user_id = $1 and id = $2`, [userId, id]);
   return res !== null;
+}
+
+// ── guard-шаги и сериализация (§8) ───────────────────────────
+
+/** Действия-гарды, которые автоконсолидация НЕ правит (§8, правило 1). */
+const GUARD_ACTIONS: ReadonlySet<string> = new Set([
+  "message.send",
+  "order.place",
+  "code.run",
+  "confirm",
+]);
+
+/**
+ * Guard-шаг (§8): необратимое/подтверждаемое действие. Консолидация не трогает,
+ * свежевыученный скилл с такими шагами требует ревью перед первым применением (§14).
+ */
+export function isGuardStep(step: SkillStep): boolean {
+  const a = step.action.toLowerCase();
+  if (GUARD_ACTIONS.has(a)) return true;
+  // powershell — всегда guard (§6).
+  if (a === "code.run" && (step.params?.lang as string | undefined)?.toLowerCase() === "powershell") {
+    return true;
+  }
+  return false;
+}
+
+/** Содержит ли скилл guard-шаги (нужно ревью §14). */
+export function hasGuardSteps(steps: readonly SkillStep[]): boolean {
+  return steps.some(isGuardStep);
+}
+
+/** Сериализовать шаг обратно в строку SKILL.md (обратимо к parseSkillMd). */
+export function serializeStep(step: SkillStep, index: number): string {
+  const toks: string[] = [step.action];
+  const t = step.target;
+  if (t) {
+    if (t.by === "role") {
+      toks.push(`role="${t.role}"`);
+      if (t.name) toks.push(`name="${t.name}"`);
+    } else if (t.by === "handle") {
+      toks.push(`handle="${t.handle}"`);
+    } else {
+      toks.push(`x=${t.x}`, `y=${t.y}`);
+    }
+  }
+  for (const [k, v] of Object.entries(step.params ?? {})) {
+    toks.push(`${k}="${String(v)}"`);
+  }
+  if (step.expect?.role) toks.push(`expectRole="${step.expect.role}"`);
+  if (step.expect?.name) toks.push(`expectName="${step.expect.name}"`);
+  if (step.expect?.state) toks.push(`expectState="${step.expect.state}"`);
+  if (step.timeoutMs !== undefined) toks.push(`timeoutMs=${step.timeoutMs}`);
+  if (step.retries !== undefined) toks.push(`retries=${step.retries}`);
+  if (step.needsLlm) toks.push(`needsLlm="true"`);
+  return `${index + 1}. ${toks.join(" ")}`;
+}
+
+/** Собрать SKILL.md из фронтматтера и шагов (канонический content_md, §8). */
+export function serializeSkill(frontmatter: SkillFrontmatter, steps: readonly SkillStep[]): string {
+  const fmLines: string[] = [];
+  for (const [k, v] of Object.entries(frontmatter)) {
+    if (v === undefined || v === null) continue;
+    fmLines.push(`${k}: ${String(v)}`);
+  }
+  const body = steps.map((s, i) => serializeStep(s, i)).join("\n");
+  return `---\n${fmLines.join("\n")}\n---\n\n## Шаги\n${body}\n`;
 }

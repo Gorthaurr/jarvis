@@ -84,8 +84,11 @@
 | Working memory (кольцевой буфер + стек анафоры §10) | M0/M2 | ✅ работает | `memory/working.ts` |
 | Episodic memory (pgvector + in-memory + retrieval §8) | M2 | ✅ работает | `memory/episodic.ts` (тест 4/4) |
 | Эмбеддинги (OpenAI 1536 + Hash детерм. для dev) | M2 | ✅ работает | `integrations/openai-embeddings.ts` |
-| Skills CRUD (SKILL.md per-user) | M4 | 🟡 скелет | TODO(M4) |
-| Ночная консолидация | M4 | ⬜ не начато | TODO(M4) |
+| Skills CRUD + parseSkillMd/serializeSkill (round-trip §8) | M4 | ✅ работает | `memory/skills.ts` (тест 6/6) |
+| Обучение демонстрацией (DemoEvent→SKILL.md черновик §8) | M4 | ✅ работает | `brain/skills/demo.ts` (тест 3/3) |
+| Консолидация: границы автоправки (guard-frozen/promote/rollback §8) | M4 | ✅ работает | `consolidation/index.ts` (тест 4/4) |
+| Ночная суммаризация эпизодов (LLM) | M4 | 🟡 скелет | `nightlyConsolidation` — каркас (нужен LLM) |
+| skill.execute на клиенте (skill-runner + client-actuator) | M4 | ✅ работает | `client/main/skill-runner/` |
 
 ---
 

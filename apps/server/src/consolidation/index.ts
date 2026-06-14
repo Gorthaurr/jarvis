@@ -17,7 +17,9 @@
  * Реализация — TODO(M4). Здесь интерфейс и заглушка, которая безопасно ничего
  * не делает (логирует намерение).
  */
+import type { SkillStep } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { isGuardStep } from "../memory/skills.js";
 
 const log: Logger = createLogger("consolidation");
 
@@ -59,4 +61,29 @@ export function canPromoteSkillVersion(params: {
 /** Нужен ли откат версии по накопленным сбоям (§8, правило 4). */
 export function shouldRollbackSkillVersion(failCount: number): boolean {
   return failCount >= SKILL_ROLLBACK_FAIL_THRESHOLD;
+}
+
+/**
+ * Применить предложенную ревизию шагов с соблюдением границ автоправки (§8, правило 1):
+ * позиции, где ТЕКУЩИЙ шаг — guard (message.send/order.place/code.run/powershell/confirm),
+ * замораживаются и не заменяются. Новые не-guard шаги в конце добавляются.
+ * Возвращает новый набор шагов и индексы заблокированных позиций.
+ */
+export function applySkillRevision(
+  current: readonly SkillStep[],
+  proposed: readonly SkillStep[],
+): { steps: SkillStep[]; blockedIndices: number[] } {
+  const blockedIndices: number[] = [];
+  const steps: SkillStep[] = current.map((cur, i) => {
+    if (isGuardStep(cur)) {
+      blockedIndices.push(i);
+      return cur; // §8: guard-шаг неприкосновенен для автоправки
+    }
+    return proposed[i] ?? cur;
+  });
+  for (let i = current.length; i < proposed.length; i += 1) {
+    const p = proposed[i];
+    if (p) steps.push(p); // добавление шага в конец допускается
+  }
+  return { steps, blockedIndices };
 }

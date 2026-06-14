@@ -14,6 +14,8 @@ import * as input from "./input.js";
 import * as ground from "./ground.js";
 import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
+import { outcomeToActionResult, runSkill } from "../skill-runner/index.js";
+import { createClientActuator } from "../skill-runner/client-actuator.js";
 
 const log = createLogger("actuators");
 
@@ -91,9 +93,20 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         return okResult(commandId, startedAt, r);
       }
 
-      // ── Явно не реализовано в M0: честная ошибка по milestone ──
-      case "skill.execute":
-        return notImplemented(commandId, startedAt, "M4"); // см. skill-runner/index.ts
+      // ── skill-runner (tier-0.5, §8): локальное исполнение шагов без LLM ──
+      case "skill.execute": {
+        const cancel = { cancelled: false }; // TODO(M8): связать с отменой задачи (§20)
+        const outcome = await runSkill({
+          skillId: cmd.skillId,
+          version: cmd.version,
+          steps: cmd.steps,
+          params: cmd.params,
+          cancel,
+          actuator: createClientActuator(),
+          // escalate на needs_llm/exhausted — клиент↔сервер round-trip (TODO M4+): пока no-op.
+        });
+        return outcomeToActionResult(commandId, outcome, Date.now() - startedAt);
+      }
       case "screen.capture":
         return notImplemented(commandId, startedAt, "M3");
       case "context.read": {
