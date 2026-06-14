@@ -67,9 +67,15 @@ const denyBtn = $<HTMLButtonElement>("denyBtn");
 let activeConfirm: ConfirmRequest | null = null;
 
 // ── состояние / орб ────────────────────────────────────────────
+const STATE_RU: Record<ClientState, string> = {
+  idle: "слушаю",
+  listening: "слушаю",
+  thinking: "думаю",
+  speaking: "говорю",
+};
 function setOrbState(state: ClientState): void {
   orb.className = `orb orb--${state}`;
-  stateLabel.textContent = state;
+  stateLabel.textContent = STATE_RU[state] ?? state;
 }
 
 function setLink(link: LinkState): void {
@@ -222,14 +228,10 @@ jarvis.onTaskStatus((s: TaskStatus) => renderTaskStatus(s));
 // ── аудио (§3, §10): захват/воспроизведение в renderer (WebRTC AEC) ────────────
 const playback = new AudioPlayback();
 let capture: AudioCapture | null = null;
-let micOpen = false;
 
 jarvis.onSpeakChunk((c: SpeakChunkPayload) => playback.enqueue(c));
 jarvis.onBargeIn(() => playback.stop());
-jarvis.onMicState((open: boolean) => {
-  micOpen = open;
-  orb.classList.toggle("orb--mic", open);
-});
+jarvis.onMicState((open: boolean) => orb.classList.toggle("orb--mic", open));
 
 /** Поднять захват (один раз). Кадры PCM уходят в main, где гейтятся (§0.6). */
 async function ensureCapture(): Promise<void> {
@@ -242,15 +244,8 @@ async function ensureCapture(): Promise<void> {
   }
 }
 
-// Push-to-talk (§18): wake word «Джарвис» опционален; клик по орбу активирует микрофон.
-orb.title = "Клик — говорить (push-to-talk). Повторный клик — mute.";
-orb.addEventListener("click", () => {
-  if (micOpen) {
-    jarvis.mute();
-    return;
-  }
-  void ensureCapture().then(() => jarvis.activate());
-});
+// Орб — пассивный индикатор состояния. Активация НЕ по клику: Джарвис слушает
+// сам с запуска (ambient, §3). Микрофон поднимается в инициализации ниже.
 
 // ── настройки (ключи / устройства / контекст) ──
 const settingsBtn = $("settingsBtn");
