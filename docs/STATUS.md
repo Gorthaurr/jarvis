@@ -96,11 +96,13 @@
 
 | Компонент | Milestone | Статус | Файлы |
 |---|---|---|---|
-| scheduler.computeTriggerTs (формула §9) | M0 | ✅ работает | `apps/server/src/` |
-| Billing limits / spend cap / kill-switch (§14) | M0 | ✅ работает | `apps/server/src/` |
-| Trigg'еры / salience / proactive пайплайн | M5 | ⬜ не начато | TODO(M5) |
-| ETA (Yandex/OSRM) | M5 | ⬜ не начато | TODO(M5) |
-| Интеграция ICalendarProvider | M5 | ⬜ не начато | TODO(M5) |
+| scheduler: computeTriggerTs + scheduleReminder + learnedPrepMs (§9) | M0/M5 | ✅ работает | `proactive/scheduler.ts` (тест 6/6) |
+| Billing limits / spend cap / kill-switch (§14) | M0 | ✅ работает | `billing/index.ts` |
+| salience: busy/DND/fullscreen/критический + NudgeQueue (§9) | M5 | ✅ работает | `proactive/salience.ts` (тест 8/8) |
+| presence-роутинг (десктоп-голос / mobile-пуш §9, §20) | M5 | ✅ работает | `proactive/presence.ts` (тест 4/4) |
+| Триггеры (time/context/external) — модель + источники | M5 | 🟡 скелет | `proactive/triggers/` (cron/watcher — позже) |
+| ETA (Yandex/OSRM за IEtaProvider) | M5 | 🟡 скелет | `integrations/maps.ts` (стаб 20мин) |
+| ICalendarProvider (read-only §12) | M5 | 🟡 скелет | `integrations/calendar.ts` |
 
 ---
 

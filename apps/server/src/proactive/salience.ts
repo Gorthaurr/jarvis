@@ -30,12 +30,28 @@ export interface SalienceDecision {
   reason: string;
 }
 
+export interface SalienceOptions {
+  /** Пользовательский do-not-disturb (§9). Жёсткие дедлайны идут мобильным пушем. */
+  dnd?: boolean;
+}
+
 /**
  * Решение о прерывании (§9).
  * @param ctx текущий контекст (если неизвестен — считаем фон спокойным).
  * @param trigger сработавший триггер с собственной важностью.
+ * @param opts пользовательские настройки (DND).
  */
-export function shouldInterrupt(ctx: ClientContext | undefined, trigger: Trigger): SalienceDecision {
+export function shouldInterrupt(
+  ctx: ClientContext | undefined,
+  trigger: Trigger,
+  opts: SalienceOptions = {},
+): SalienceDecision {
+  // 0) DND — жёсткий запрет голосового вмешательства (§9). Срочное — мобильным пушем.
+  if (opts.dnd) {
+    log.debug("salience: DND активен — голос подавлен", { trigger: trigger.id });
+    return { interrupt: false, reason: "do-not-disturb (доставка пушем при необходимости)" };
+  }
+
   // 1) Жёсткие блокировки — не беспокоим ни при каких обстоятельствах,
   //    кроме триггеров критической важности (будильник/срочное напоминание).
   if (ctx) {
@@ -67,4 +83,35 @@ export function shouldInterrupt(ctx: ClientContext | undefined, trigger: Trigger
     log.debug("salience: прерывание отклонено", { trigger: t.id, reason });
     return { interrupt: false, reason };
   }
+}
+
+/**
+ * Очередь отложенных nudge (§9): когда пользователь занят, копим и доставляем
+ * при освобождении. Истёкшие (expiresAt) на flush отбрасываются — «выходи в 8:20»,
+ * сказанное в 11:00, хуже молчания (§9).
+ */
+export class NudgeQueue {
+  private readonly byUser = new Map<string, Trigger[]>();
+
+  enqueue(t: Trigger): void {
+    const arr = this.byUser.get(t.userId) ?? [];
+    arr.push(t);
+    this.byUser.set(t.userId, arr);
+  }
+
+  /** Достать доставимые триггеры (не истёкшие) и очистить очередь юзера. */
+  flush(userId: string, now: number): Trigger[] {
+    const arr = this.byUser.get(userId) ?? [];
+    this.byUser.delete(userId);
+    return arr.filter((t) => t.expiresAt > now);
+  }
+
+  size(userId: string): number {
+    return this.byUser.get(userId)?.length ?? 0;
+  }
+}
+
+/** Истёк ли nudge (§9): просроченное не доставляется, молча в лог. */
+export function isExpired(expiresAt: number, now: number): boolean {
+  return expiresAt <= now;
 }

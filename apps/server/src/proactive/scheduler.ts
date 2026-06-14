@@ -67,8 +67,19 @@ export function computeTriggerTs(params: {
 }
 
 /**
+ * Выученное время сборов (§9): prep_minutes из habits (pattern_type='prep_time'),
+ * не захардкоженное. data.minutes → мс; дефолт 10 минут, если привычка не выучена.
+ */
+export function learnedPrepMs(habit?: { data?: { minutes?: number } }): number {
+  const minutes = habit?.data?.minutes;
+  if (typeof minutes === "number" && minutes >= 0) return minutes * 60_000;
+  return 10 * 60_000;
+}
+
+/**
  * Высокоуровневый расчёт: достаёт ETA из провайдера и считает triggerTs.
- * Дефолтные prep/buffer заданы константами; вынесены в параметры для гибкости.
+ * Пересчитывается на каждое гео-событие (смена локации меняет origin → etaMs → triggerTs)
+ * и по кадэнсу к приближению дедлайна (§9).
  */
 export async function scheduleReminder(
   intent: ReminderIntent,
