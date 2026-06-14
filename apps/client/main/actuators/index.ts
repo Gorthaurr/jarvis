@@ -122,9 +122,11 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         const out = await messaging.sendMessage(cmd.channel, cmd.to, cmd.body);
         return okResult(commandId, startedAt, out);
       }
-      case "order.place":
-        // confirm + spend cap + idempotency (§14). НИКОГДА не трогаем платёжные данные (§0).
-        return notImplemented(commandId, startedAt, "M6");
+      case "order.place": {
+        // Гарды §14 пройдены на сервере; здесь — browser-автоматизация без ввода карты (§0).
+        const out = await browser.placeOrder({ vendor: cmd.vendor, items: cmd.items, total: cmd.total });
+        return okResult(commandId, startedAt, out);
+      }
 
       default: {
         // Исчерпывающая проверка union: при добавлении нового kind тут будет ошибка типа.

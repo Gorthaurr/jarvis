@@ -17,6 +17,8 @@ import type { IWebProvider } from "../../integrations/web.js";
 import { lintCode } from "../code-guard.js";
 import { CadenceGuard } from "../messaging/cadence.js";
 import { sendOutbound } from "../messaging/outbound.js";
+import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../orders/order-guard.js";
+import { placeOrder } from "../orders/orders.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
@@ -35,6 +37,8 @@ export interface ToolContext {
 /** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
 const cadence = new CadenceGuard();
 const sentKeys = new Set<string>();
+/** Идемпотентность заказов — на процесс (§14). */
+const placedOrderKeys = new Set<string>();
 
 export interface ToolResult {
   content: string;
@@ -46,8 +50,8 @@ const KIND_BY_TOOL: Record<string, ActionKind> = Object.fromEntries(
   (Object.entries(ACTUATOR_TOOL_BY_KIND) as [ActionKind, string][]).map(([kind, tool]) => [tool, kind]),
 ) as Record<string, ActionKind>;
 
-/** Инструменты, отложенные до M7 (необратимые, требуют гардов §14). */
-const DEFERRED_TOOLS = new Set(["order_place"]);
+/** Инструменты, отложенные на будущее (сейчас пусто: message_send/order_place подключены). */
+const DEFERRED_TOOLS = new Set<string>();
 
 export async function dispatchTool(
   name: string,
@@ -69,11 +73,13 @@ export async function dispatchTool(
   }
 
   if (DEFERRED_TOOLS.has(name)) {
-    return err(`Инструмент ${name} требует подтверждения и гардов (§14) — будет доступен в M6/M7.`);
+    return err(`Инструмент ${name} пока недоступен.`);
   }
 
   // code.run — серверный lint-гард ДО отправки клиенту (§6, §14).
   if (name === "code_run") return runCodeGuarded(ctx, input);
+  // order.place — гарды §14 (spend cap/allowlist/confirm/idempotency) + красная линия карты (§0).
+  if (name === "order_place") return orderPlace(ctx, input);
 
   // Актуаторные инструменты → ActionCommand клиенту.
   const kind = KIND_BY_TOOL[name];
@@ -138,6 +144,34 @@ async function messageSend(ctx: ToolContext, input: Record<string, unknown>): Pr
   );
   if (res.status === "sent") return ok(`Отправлено ${to}.`);
   return err(`Не отправлено (${res.status}): ${res.reason ?? ""}`);
+}
+
+/** order.place под гардами §14 + красная линия карты §0 (UC-5). */
+async function orderPlace(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  if (!ctx.confirm) return err("заказ недоступен: нет канала подтверждения (§14)");
+  const vendor = String(input.vendor ?? "").trim();
+  const items = (Array.isArray(input.items) ? input.items : []) as OrderItem[];
+  const total = Number(input.total ?? 0);
+  if (!vendor || items.length === 0) return err("order_place: нужны vendor и items");
+  try {
+    const res = await placeOrder({ userId: ctx.userId, vendor, items, total }, DEFAULT_ORDER_POLICY, {
+      requestConfirm: async (summary) => ({ approved: (await ctx.confirm!(summary)).approved }),
+      isAlreadyPlaced: (k) => placedOrderKeys.has(k),
+      markPlaced: (k) => placedOrderKeys.add(k),
+      place: async (req) => {
+        const r = await ctx.session.sendAction(
+          { kind: "order.place", vendor: req.vendor, items: req.items as unknown as Record<string, unknown>[], total: req.total },
+          DEFAULT_ACTION_TIMEOUT_MS,
+        );
+        return { ok: r.ok, error: r.error?.message, orderId: (r.data as { orderId?: string })?.orderId };
+      },
+    });
+    if (res.status === "placed") return ok(`Заказ оформлен в «${vendor}» на ${total}.`);
+    return err(`Заказ не оформлен (${res.status}): ${res.reason ?? ""}`);
+  } catch (e) {
+    if (e instanceof CardDataError) return err(e.message); // §0: красная линия карты
+    throw e;
+  }
 }
 
 /** code.run под серверным lint-гардом (§6): запрет реестра/служб/сети/системных путей. */

@@ -59,12 +59,13 @@ describe("agent-loop (§7, §8)", () => {
     expect(reply.voice).toContain("зал");
     const llm = deps.llm as MockLlmProvider;
     expect(llm.requests).toHaveLength(2);
-    // Инструменты предложены модели; message_send доступен (M6, под гардами §14),
-    // order_place отложен до M7.
+    // Инструменты предложены модели; message_send (M6) и order_place (M7) доступны
+    // под гардами §14; skill_execute/demo_record инициируются иначе и не предлагаются.
     const toolNames = (llm.requests[0]?.tools ?? []).map((t) => t.name);
     expect(toolNames).toContain("memory_search");
     expect(toolNames).toContain("message_send");
-    expect(toolNames).not.toContain("order_place");
+    expect(toolNames).toContain("order_place");
+    expect(toolNames).not.toContain("skill_execute");
   });
 
   it("actuator tool из петли → session.sendAction", async () => {

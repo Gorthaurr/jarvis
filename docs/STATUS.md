@@ -196,4 +196,7 @@
 | Outbound: confirm + revise-петля + idempotency (UC-2) | M6 | ✅ работает | `brain/messaging/outbound.ts` (тест 5/5) |
 | message_send в agent-loop (§14) + клиентская доставка | M6 | ✅ работает | `dispatch.ts`, `client/.../messaging.ts` |
 | GramJS/vk-io реальная отправка (нужны сессии/токены) | M6 | 🟡 частично | адаптеры готовы; live — при кредах |
-| Browser-автоматизация заказов | M7 | ⬜ не начато | TODO(M7) |
+| Гарды заказа: spend cap / allowlist / порог + красная линия карты §0 | M7 | ✅ работает | `brain/orders/order-guard.ts` (тест 7/7) |
+| Оркестрация заказа: confirm + idempotency + place (DI, без сети) | M7 | ✅ работает | `brain/orders/orders.ts` (тест 4/4) |
+| order_place в agent-loop (§14) + клиентская доставка | M7 | ✅ работает | `dispatch.ts`, `client/.../browser.placeOrder` |
+| Browser-автоматизация заказов (CDP-сборка корзины/чекаут) | M7 | 🟡 скелет | `client/.../browser.ts` stub (карту не вводит §0) |

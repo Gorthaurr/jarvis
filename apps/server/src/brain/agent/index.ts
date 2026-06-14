@@ -50,8 +50,8 @@ export interface AgentDeps {
   userContext?: UserContextSlot;
 }
 
-/** Инструменты, отложенные до следующих срезов (не предлагаем модели сейчас). */
-const EXCLUDED_TOOLS = new Set(["order_place", "skill_execute", "demo_record"]);
+/** Инструменты, не предлагаемые модели в диалоге (инициируются иначе). */
+const EXCLUDED_TOOLS = new Set(["skill_execute", "demo_record"]);
 
 export async function handleUserText(
   session: Session,
