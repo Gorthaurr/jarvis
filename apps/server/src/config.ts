@@ -40,6 +40,10 @@ export interface ServerConfig {
 
   /** Голос (§10) — без ключей провайдеры работают в mock-режиме. */
   readonly deepgramApiKey: string | undefined;
+  /** STT-провайдер (§10): 'deepgram'|'whisper'|'mock'; undefined → авто (whisper без ключа). */
+  readonly sttProvider: string | undefined;
+  /** Модель локального Whisper (transformers.js), если STT=whisper. */
+  readonly whisperModel: string;
   readonly elevenLabsApiKey: string | undefined;
   readonly elevenLabsVoiceId: string | undefined;
 
@@ -73,6 +77,8 @@ export function loadConfig(): ServerConfig {
     embeddingDim: envInt("EMBEDDING_DIM", 1536),
 
     deepgramApiKey: envOptional("DEEPGRAM_API_KEY"),
+    sttProvider: envOptional("STT_PROVIDER"),
+    whisperModel: env("WHISPER_MODEL", "Xenova/whisper-base"),
     elevenLabsApiKey: envOptional("ELEVENLABS_API_KEY"),
     elevenLabsVoiceId: envOptional("ELEVENLABS_VOICE_ID"),
 

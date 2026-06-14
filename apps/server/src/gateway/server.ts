@@ -71,7 +71,11 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     }),
   );
   const providers: VoiceProviders = {
-    stt: createSttProvider({ deepgramApiKey: config.deepgramApiKey }),
+    stt: createSttProvider({
+      deepgramApiKey: config.deepgramApiKey,
+      provider: config.sttProvider,
+      whisperModel: config.whisperModel,
+    }),
     tts,
     voiceId: config.elevenLabsVoiceId,
   };
