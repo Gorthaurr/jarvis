@@ -10,7 +10,8 @@
     "dev": "node scripts/build.mjs && electron .",
     "start": "electron .",
     "dist": "node scripts/build.mjs && electron-builder",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@jarvis/protocol": "workspace:*",
@@ -23,6 +24,7 @@
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.24.0",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
   }
 }

@@ -8,7 +8,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import { IPC } from "../main/ipc-contract.js";
-import type { JarvisBridge, ConfirmResultPayload } from "../main/ipc-contract.js";
+import type { JarvisBridge, ConfirmResultPayload, SpeakChunkPayload } from "../main/ipc-contract.js";
 
 /** Обёртка подписки: возвращает функцию-отписку, чистит листенер. */
 function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
@@ -21,9 +21,15 @@ const api: JarvisBridge = {
   submitText: (text) => ipcRenderer.send(IPC.submitText, text),
   sendConfirmResult: (payload: ConfirmResultPayload) =>
     ipcRenderer.send(IPC.confirmResult, payload),
+  pushPcm: (pcm: ArrayBuffer) => ipcRenderer.send(IPC.pushPcm, pcm),
+  activate: () => ipcRenderer.send(IPC.activate),
+  mute: () => ipcRenderer.send(IPC.mute),
 
   onState: (cb) => subscribe(IPC.state, cb),
   onTranscript: (cb) => subscribe(IPC.transcript, cb),
+  onSpeakChunk: (cb) => subscribe<SpeakChunkPayload>(IPC.speakChunk, cb),
+  onMicState: (cb) => subscribe<boolean>(IPC.micState, cb),
+  onBargeIn: (cb) => subscribe<void>(IPC.bargeIn, () => cb()),
   onNudge: (cb) => subscribe(IPC.nudge, cb),
   onConfirmRequest: (cb) => subscribe(IPC.confirmRequest, cb),
   onDisplay: (cb) => subscribe(IPC.display, cb),

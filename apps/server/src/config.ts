@@ -34,6 +34,11 @@ export interface ServerConfig {
   readonly embeddingModel: string;
   readonly embeddingDim: number;
 
+  /** Голос (§10) — без ключей провайдеры работают в mock-режиме. */
+  readonly deepgramApiKey: string | undefined;
+  readonly elevenLabsApiKey: string | undefined;
+  readonly elevenLabsVoiceId: string | undefined;
+
   /** Биллинг (§14). */
   readonly defaultSpendCap: number;
 }
@@ -57,6 +62,10 @@ export function loadConfig(): ServerConfig {
     openaiApiKey: envOptional("OPENAI_API_KEY"),
     embeddingModel: env("EMBEDDING_MODEL", "text-embedding-3-small"),
     embeddingDim: envInt("EMBEDDING_DIM", 1536),
+
+    deepgramApiKey: envOptional("DEEPGRAM_API_KEY"),
+    elevenLabsApiKey: envOptional("ELEVENLABS_API_KEY"),
+    elevenLabsVoiceId: envOptional("ELEVENLABS_VOICE_ID"),
 
     defaultSpendCap: Number.parseFloat(env("DEFAULT_SPEND_CAP", "50.00")),
   };

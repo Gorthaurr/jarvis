@@ -22,10 +22,16 @@ import {
 } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ServerConfig } from "../config.js";
+import { createSttProvider, createTtsProvider } from "../integrations/providers.js";
 import { forgetClientContext } from "../proactive/salience.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
-import { type SessionContext, dispatch, makeSessionContext } from "./router-ws.js";
+import {
+  type SessionContext,
+  type VoiceProviders,
+  dispatch,
+  makeSessionContext,
+} from "./router-ws.js";
 import type { SessionSocket } from "./session.js";
 
 /** Окно на присылку client.hello после коннекта (§5). */
@@ -43,6 +49,16 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const app = Fastify({ logger: false });
   const registry = new SessionRegistry();
 
+  // Голосовые провайдеры — один раз на gateway (§10). Без ключей — mock-режим.
+  const providers: VoiceProviders = {
+    stt: createSttProvider({ deepgramApiKey: config.deepgramApiKey }),
+    tts: createTtsProvider({
+      elevenLabsApiKey: config.elevenLabsApiKey,
+      voiceId: config.elevenLabsVoiceId,
+    }),
+    voiceId: config.elevenLabsVoiceId,
+  };
+
   // Регистрация плагина WebSocket до объявления маршрутов.
   void app.register(fastifyWebsocket);
 
@@ -50,7 +66,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     instance.get("/ws", { websocket: true }, (connection) => {
       // @fastify/websocket v11: первый аргумент — это сам WebSocket (ws.WebSocket).
       const socket = connection as unknown as RawWs;
-      onConnection(socket, config, registry, log);
+      onConnection(socket, config, registry, providers, log);
     });
   });
 
@@ -87,6 +103,7 @@ function onConnection(
   ws: RawWs,
   config: ServerConfig,
   registry: SessionRegistry,
+  providers: VoiceProviders,
   log: Logger,
 ): void {
   let ctx: SessionContext | null = null;
@@ -125,7 +142,7 @@ function onConnection(
         return;
       }
       clearTimeout(handshakeTimer);
-      ctx = doHandshake(env as Envelope<Hello>, sock, ws, config, registry, log);
+      ctx = doHandshake(env as Envelope<Hello>, sock, ws, config, registry, providers, log);
       handshakeDone = ctx !== null;
       return;
     }
@@ -141,6 +158,7 @@ function onConnection(
     clearTimeout(handshakeTimer);
     if (ctx) {
       ctx.heartbeat.stop();
+      ctx.voice.dispose();
       forgetClientContext(ctx.session.sessionId);
       // Сессию НЕ удаляем сразу: оставляем для resume (§5). teardown по close
       // оставляем реестру/GC — здесь только heartbeat и in-flight отклоним через teardown
@@ -162,6 +180,7 @@ function doHandshake(
   ws: RawWs,
   config: ServerConfig,
   registry: SessionRegistry,
+  providers: VoiceProviders,
   log: Logger,
 ): SessionContext | null {
   const hello = env.payload;
@@ -199,7 +218,7 @@ function doHandshake(
   });
 
   log.info("handshake завершён", { sessionId: session.sessionId, resumed });
-  return makeSessionContext(session, heartbeat);
+  return makeSessionContext(session, heartbeat, providers);
 }
 
 /** Разобрать входящий кадр в Envelope (с грубой валидацией §5). */

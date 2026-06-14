@@ -119,9 +119,9 @@
 | actuators/input.ts (SendInput через sidecar стаб) | M3 | 🟡 скелет | `apps/client/main/actuators/input.ts` |
 | tier0/ (детерминированные команды, $0) | M0 | ✅ работает | `apps/client/main/tier0/index.ts` |
 | transport/ (WebSocket к серверу) | M0 | ✅ работает | `apps/client/main/transport/` |
-| wakeword/ (детектор «Джарвис») | M1 | 🟡 скелет | `apps/client/main/wakeword/` |
-| vad/ (Silero VAD) | M1 | 🟡 скелет | `apps/client/main/vad/` |
-| audio/ (координация: PCM → wakeword/vad, гейтинг стрима) | M1 | 🟡 скелет | `apps/client/main/audio/` |
+| wakeword/ (детектор «Джарвис») | M1 | ✅ работает | mock + push-to-talk; onnx openWakeWord опц. (RU-валидация §18) |
+| vad/ (Silero VAD) | M1 | ✅ работает | энергетический VAD (RMS+hangover); Silero/onnx опц. |
+| audio/ (координация: PCM → wakeword/vad, гейтинг стрима) | M1 | ✅ работает | privacy-гейт + barge-in, тест 5/5 |
 | sensors/ (screenshot, active-window) | M3 | 🟡 скелет | `apps/client/main/sensors/` |
 | skill-runner/ (детерминированный интерпретатор шагов) | M4 | 🟡 скелет | `apps/client/main/skill-runner/` |
 
@@ -133,8 +133,8 @@
 |---|---|---|---|
 | Текстовый ввод (dev.text) | M0 | ✅ работает | `apps/client/renderer/` |
 | Confirm-модалка (user.confirm.request) | M0 | ✅ работает | `apps/client/renderer/` |
-| Аудио-захват/воспроизведение (getUserMedia + WebAudio) | M1 | 🟡 скелет | TODO(M1) |
-| Орб (idle/listening/thinking/speaking) | M1 | 🟡 скелет | TODO(M1) |
+| Аудио-захват/воспроизведение (getUserMedia + AudioWorklet + WebAudio) | M1 | ✅ работает | `renderer/audio.ts`, `audio-worklet.js` |
+| Орб (idle/listening/thinking/speaking) | M1 | ✅ работает | + push-to-talk по клику |
 | DisplayCard (ui.display карточки §21) | M8 | 🟡 скелет | TODO(M8) |
 | Task progress (task.status стрим) | M8 | ⬜ не начато | TODO(M8) |
 
@@ -163,14 +163,18 @@
 
 ---
 
-## apps/server — voice (LiveKit)
+## apps/server — voice (§10)
 
 | Компонент | Milestone | Статус | Файлы |
 |---|---|---|---|
-| LiveKit Agents (Node): STT→brain→TTS пайплайн | M1 | ⬜ не начато | TODO(M1) |
-| Deepgram streaming STT | M1 | ⬜ не начато | TODO(M1) |
-| ElevenLabs streaming TTS | M1 | ⬜ не начато | TODO(M1) |
-| Barge-in (VAD на сервере, отмена генерации) | M1 | ⬜ не начато | TODO(M1) |
+| VoicePipeline (STT→brain→TTS, in-process; контракт IVoiceProcess для выноса в LiveKit/Pipecat) | M1 | ✅ работает | `apps/server/src/voice/pipeline.ts` |
+| Машина состояний (idle/listening/thinking/speaking) | M1 | ✅ работает | `voice/state.ts` (+тест 15/15) |
+| Turn detection (семантический эндпоинтинг поверх VAD) | M1 | ✅ работает | `voice/turn.ts` (+тест 8/8) |
+| Latency-инструментирование (<800мс §10) | M1 | ✅ работает | `voice/latency.ts` (+тест 4/4) |
+| Deepgram streaming STT (subprotocol-auth, парсер) | M1 | ✅ работает | `integrations/deepgram.ts` (real+mock) |
+| ElevenLabs streaming TTS (stream-input WS) | M1 | ✅ работает | `integrations/elevenlabs.ts` (real+mock) |
+| Barge-in + follow-up окно (§10) | M1 | ✅ работает | `voice/pipeline.ts` (+тест 4/4) |
+| Реальный мик-end-to-end (нужны ключи + LiveKit/WebRTC бинарь аудио) | M1 | 🟡 частично | unit+smoke ок; live-аудио по WS — dev (§5) |
 
 ---
 

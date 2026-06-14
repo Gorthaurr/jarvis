@@ -32,7 +32,8 @@ const log = createLogger("main");
 
 let win: BrowserWindow | null = null;
 let transport: Transport | null = null;
-const audio = new AudioCoordinator();
+let audio: AudioCoordinator | null = null;
+let audioSeq = 0;
 
 /** Конфиг подключения из env (см. .env.example). На M0 — дефолты localhost:8787. */
 function transportConfig() {
@@ -77,6 +78,22 @@ function createWindow(): void {
 /** Поднять транспорт и связать его события с renderer-IPC. */
 function startTransport(): void {
   transport = new Transport(transportConfig(), dispatch);
+
+  // Аудио-координатор (§3): гейтит стрим, прокидывает кадры/VAD на сервер,
+  // воспроизведение и barge-in — в renderer.
+  audio = new AudioCoordinator({
+    sendFrame: (pcm) => transport?.sendAudioFrame(pcm, 16_000, audioSeq++),
+    sendVad: (state) => transport?.sendVad(state),
+    onMicState: (open) => win?.webContents.send(IPC.micState, open),
+    onBargeIn: () => win?.webContents.send(IPC.bargeIn),
+  });
+
+  // speak.chunk (TTS) → renderer для воспроизведения; client.state → орб + аудио-гейт.
+  transport.on("speak", (c) => win?.webContents.send(IPC.speakChunk, c));
+  transport.on("serverState", (s) => {
+    win?.webContents.send(IPC.state, s);
+    audio?.setServerState(s);
+  });
 
   transport.on("connected", (hello) => {
     log.info(`подключено к серверу: session=${hello.sessionId}`);
@@ -156,6 +173,10 @@ function registerIpc(): void {
   ipcMain.on(IPC.confirmResult, (_e, payload: ConfirmResultPayload) => {
     transport?.sendConfirmResult(payload.requestId, payload.approved, payload.revision);
   });
+  // Аудио из renderer (§3): кадры захвата + управление микрофоном.
+  ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));
+  ipcMain.on(IPC.activate, () => audio?.activate());
+  ipcMain.on(IPC.mute, () => audio?.mute());
 }
 
 // ── жизненный цикл приложения ──────────────────────────────────
@@ -164,9 +185,6 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   startTransport();
-
-  // Аудио на M0 — стаб (вход текстом). Координатор поднят для будущей связки (§3, M1).
-  void audio;
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -14,34 +14,65 @@
  */
 import {
   type ActionResult,
+  type AudioFrame,
   type ClientContext,
   type ClientStateMsg,
   type ConfirmResult,
   type DevText,
   type Envelope,
   type MessageType,
+  type VadEvent,
 } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { type AgentReply, handleUserText } from "../brain/agent/index.js";
+import type { ISttProvider, ITtsProvider, TtsChunk } from "../integrations/voice-providers.js";
 import { WorkingMemory } from "../memory/working.js";
 import { noteClientContext } from "../proactive/salience.js";
+import { type VoicePipeline, createVoicePipeline } from "../voice/index.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { Session } from "./session.js";
 
 const log: Logger = createLogger("router-ws");
+
+/** Голосовые провайдеры, общие на gateway (создаются один раз из конфига). */
+export interface VoiceProviders {
+  stt: ISttProvider;
+  tts: ITtsProvider;
+  voiceId?: string;
+}
 
 /** Контекст одного соединения, который держит router между сообщениями. */
 export interface SessionContext {
   session: Session;
   memory: WorkingMemory;
   heartbeat: HeartbeatHandle;
+  /** Голосовой пайплайн сессии (§10). */
+  voice: VoicePipeline;
   /** Последний полученный ClientContext — вход для proactive (§9). */
   lastContext?: ClientContext;
 }
 
 /** Создать контекст для свежей/возобновлённой сессии. */
-export function makeSessionContext(session: Session, heartbeat: HeartbeatHandle): SessionContext {
-  return { session, memory: new WorkingMemory(), heartbeat };
+export function makeSessionContext(
+  session: Session,
+  heartbeat: HeartbeatHandle,
+  providers: VoiceProviders,
+): SessionContext {
+  const memory = new WorkingMemory();
+  const voice = createVoicePipeline({
+    stt: providers.stt,
+    tts: providers.tts,
+    ttsVoiceId: providers.voiceId,
+    // brain на финальном тексте реплики (§21: {voice, display?}).
+    onUserTurn: (text) => handleUserText(session, text, { memory }),
+    // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
+    sendSpeakChunk: (c: TtsChunk) =>
+      session.send("speak.chunk", { audio: bufToBase64(c.audio), seq: c.seq, last: c.last }),
+    sendClientState: (s) => session.send("client.state", { state: s }),
+    sendTranscript: (t) => session.send("transcript", t),
+    sendDisplay: (d) => session.send("ui.display", d),
+  });
+  return { session, memory, heartbeat, voice };
 }
 
 /**
@@ -72,10 +103,13 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "client.state":
       log.debug("client.state", (env.payload as ClientStateMsg).state);
       break;
-    case "audio.frame":
+    case "audio.frame": {
+      const f = env.payload as AudioFrame;
+      ctx.voice.onAudioFrame(toArrayBuffer(f.pcm));
+      break;
+    }
     case "audio.vad":
-      // TODO(M1): голосовой пайплайн вынесен в отдельный процесс (см. voice/).
-      log.debug("аудио-сообщение (M1, пока игнор)", { type });
+      ctx.voice.onVadEvent((env.payload as VadEvent).state);
       break;
     case "screen.capture.result":
       // Результат screen.capture коррелируется как ActionResult в проде;
@@ -119,5 +153,33 @@ function sendReply(ctx: SessionContext, reply: AgentReply): void {
   ctx.session.send("transcript", { text: reply.voice, final: true });
   if (reply.display) ctx.session.send("ui.display", reply.display);
   ctx.session.send("client.state", { state: "idle" });
-  // TODO(M1): здесь же стримить speak.chunk из TTS-провайдера.
+  // Примечание: голосовой ответ (speak.chunk из TTS) идёт через VoicePipeline
+  // на голосовом пути (audio.frame→STT→agent→TTS). Текстовый dev.text-путь
+  // отдаёт только transcript/ui.display.
+}
+
+// ── кодирование аудио для DEV-пути по WS (§5: в проде — WebRTC) ──────────
+
+/** ArrayBuffer → base64 (speak.chunk по JSON-WS). */
+function bufToBase64(buf: ArrayBuffer): string {
+  return Buffer.from(new Uint8Array(buf)).toString("base64");
+}
+
+/** Нормализовать входящий pcm (base64-строка | массив | ArrayBuffer) в ArrayBuffer. */
+function toArrayBuffer(pcm: unknown): ArrayBuffer {
+  if (pcm instanceof ArrayBuffer) return pcm;
+  if (typeof pcm === "string") return copyBytes(Buffer.from(pcm, "base64"));
+  if (Array.isArray(pcm)) return copyBytes(Uint8Array.from(pcm as number[]));
+  if (ArrayBuffer.isView(pcm)) {
+    const v = pcm as ArrayBufferView;
+    return copyBytes(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+  }
+  return new ArrayBuffer(0);
+}
+
+/** Скопировать байты в свежий ArrayBuffer (исключает SharedArrayBuffer из типа). */
+function copyBytes(view: Uint8Array): ArrayBuffer {
+  const out = new ArrayBuffer(view.byteLength);
+  new Uint8Array(out).set(view);
+  return out;
 }

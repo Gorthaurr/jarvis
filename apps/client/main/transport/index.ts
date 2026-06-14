@@ -38,6 +38,7 @@ import type {
   Hello,
   DevText,
   ClientState,
+  VadEvent,
 } from "@jarvis/protocol";
 import { backoffMs, createLogger } from "@jarvis/shared";
 
@@ -65,6 +66,8 @@ export interface TransportEvents {
   disconnected: [{ reason: string }];
   transcript: [Transcript];
   speak: [SpeakChunk];
+  /** Состояние от сервера (client.state): орб + аудио-гейт (§10). */
+  serverState: [ClientState];
   nudge: [ProactiveNudge];
   confirmRequest: [ConfirmRequest];
   taskStatus: [TaskStatus];
@@ -148,6 +151,21 @@ export class Transport extends EventEmitter {
   /** Сообщить серверу состояние клиента (idle/listening/thinking/speaking). */
   sendClientState(state: ClientState): void {
     this.send(makeEnvelope("client.state", { state }));
+  }
+
+  /**
+   * Отправить кадр аудио на сервер (audio.frame — DEV-путь до LiveKit, §5).
+   * PCM кодируется в base64 (JSON-WS не передаёт бинарь); сервер декодирует.
+   */
+  sendAudioFrame(pcm: Int16Array, sampleRate: number, seq: number): void {
+    if (!this.isOpen()) return;
+    const b64 = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64");
+    this.send(makeEnvelope("audio.frame", { pcm: b64, sampleRate, seq }));
+  }
+
+  /** Отправить VAD-событие (audio.vad): speech_start/speech_end/barge_in (§10). */
+  sendVad(state: VadEvent["state"]): void {
+    this.send(makeEnvelope<VadEvent>("audio.vad", { state }));
   }
 
   /** Отправить результат подтверждения пользователя (§14). */
@@ -284,6 +302,9 @@ export class Transport extends EventEmitter {
         break;
       case "speak.chunk":
         this.emit("speak", env.payload as SpeakChunk);
+        break;
+      case "client.state":
+        this.emit("serverState", (env.payload as { state: ClientState }).state);
         break;
       case "proactive.nudge":
         this.emit("nudge", env.payload as ProactiveNudge);

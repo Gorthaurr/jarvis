@@ -59,10 +59,11 @@ async function run() {
     format: "iife",
   });
 
-  // Статика renderer.
+  // Статика renderer (включая AudioWorklet — он грузится как отдельный модуль, не бандлится).
   await mkdir(resolve(outdir, "renderer"), { recursive: true });
   await cp(resolve(root, "renderer/index.html"), resolve(outdir, "renderer/index.html"));
   await cp(resolve(root, "renderer/styles.css"), resolve(outdir, "renderer/styles.css"));
+  await cp(resolve(root, "renderer/audio-worklet.js"), resolve(outdir, "renderer/audio-worklet.js"));
 
   console.log("[build] клиент собран -> dist/");
 }

@@ -1,47 +1,110 @@
 /**
- * Аудио-координация в main-процессе (§3, §5).
+ * Аудио-координация в main-процессе (§3, §10, §0.6).
  *
- * ВАЖНО (§3): захват И воспроизведение аудио ЖИВУТ В RENDERER (WebRTC, getUserMedia с
- * echoCancellation/AEC). main-процесс НЕ трогает аудиоустройства напрямую — он лишь
- * ГЕЙТИТ стрим: решает, когда микрофон «горячий» (после wake word / в follow-up окне §10),
- * и координирует barge-in (прервать TTS при speech_start). Сам PCM в проде идёт по WebRTC
- * (LiveKit), а НЕ через WS audio.frame (тот — только dev-заглушка, §5).
+ * ВАЖНО (§3): захват И воспроизведение аудио ЖИВУТ В RENDERER (getUserMedia +
+ * WebRTC AEC). main НЕ трогает аудиоустройства — он принимает PCM-кадры из renderer
+ * (IPC), прогоняет wake word + VAD и ГЕЙТИТ стрим:
+ *   - до wake word / push-to-talk аудио на сервер НЕ уходит (§0.6 privacy-инвариант);
+ *   - после активации шлёт audio.frame + audio.vad;
+ *   - barge-in (речь во время TTS) → сигнал renderer заглушить плеер (§10);
+ *   - закрытие гейта при возврате сервера в idle (после follow-up окна §10).
  *
- * Здесь — интерфейс координатора и стаб-реализация.
- * // TODO(M1): связать с renderer (IPC), LiveKit-сессией и wake/vad-гейтами.
+ * Сам PCM в проде идёт по WebRTC (LiveKit); audio.frame по WS — dev-заглушка (§5).
  */
-import { EventEmitter } from "node:events";
-import { createLogger } from "@jarvis/shared";
+import type { ClientState, VadEvent } from "@jarvis/protocol";
+import { type Logger, createLogger } from "@jarvis/shared";
+import { type IWakeWord, MockWakeWord } from "../wakeword/index.js";
+import { EnergyVad, type IVad } from "../vad/index.js";
 
-const log = createLogger("audio");
-
-/** Команды гейта стрима, которые main отправляет в renderer (через preload IPC). */
-export type AudioGate = "open" | "close";
-
-export interface AudioCoordinatorEvents {
-  /** main просит renderer открыть/закрыть микрофонный гейт. */
-  gate: [AudioGate];
+export interface AudioCoordinatorDeps {
+  wakeword?: IWakeWord;
+  vad?: IVad;
+  /** Отправить кадр PCM на сервер (audio.frame, dev §5). */
+  sendFrame: (pcm: Int16Array) => void;
+  /** Отправить VAD-событие на сервер (audio.vad). */
+  sendVad: (state: VadEvent["state"]) => void;
+  /** Сообщить renderer состояние микрофона (горячий/закрыт) — индикация орба. */
+  onMicState?: (open: boolean) => void;
+  /** Сигнал renderer мгновенно заглушить плеер TTS (barge-in §10). */
+  onBargeIn?: () => void;
+  log?: Logger;
 }
 
-/**
- * Координатор аудио. На M0 — пустышка: голос ещё не подключён, вход — текстом (dev.text).
- */
-export class AudioCoordinator extends EventEmitter {
-  /** Открыть микрофонный гейт (renderer начнёт слать кадры по WebRTC). */
-  openMic(): void {
-    log.debug("(stub) openMic — гейт микрофона (M1)");
-    this.emit("gate", "open");
+export class AudioCoordinator {
+  private readonly wakeword: IWakeWord;
+  private readonly vad: IVad;
+  private readonly log: Logger;
+  private gateOpen = false;
+  private serverSpeaking = false;
+
+  constructor(private readonly deps: AudioCoordinatorDeps) {
+    this.wakeword = deps.wakeword ?? new MockWakeWord();
+    this.vad = deps.vad ?? new EnergyVad();
+    this.log = deps.log ?? createLogger("audio");
   }
 
-  /** Закрыть гейт (вне wake/follow-up окна — микрофон не слушает, §10). */
-  closeMic(): void {
-    log.debug("(stub) closeMic (M1)");
-    this.emit("gate", "close");
+  get streaming(): boolean {
+    return this.gateOpen;
   }
 
-  /** Barge-in: пользователь заговорил во время TTS -> прервать воспроизведение (§10). */
-  onBargeIn(): void {
-    log.debug("(stub) bargeIn — прервать TTS (M1)");
-    // TODO(M1): сигнал renderer остановить плеер TTS.
+  /** Push-to-talk / явная активация (когда реальный wake word недоступен, §18). */
+  activate(): void {
+    if (!this.gateOpen) this.openGate("manual");
+  }
+
+  /** Принять кадр PCM16 из renderer. */
+  ingest(pcm: Int16Array): void {
+    if (!this.gateOpen) {
+      // Гейт закрыт: аудио на сервер НЕ уходит (§0.6). Только wake word локально.
+      if (this.wakeword.ready && this.wakeword.process(pcm)) {
+        this.openGate("wakeword");
+        this.streamFrame(pcm);
+      }
+      return;
+    }
+    this.streamFrame(pcm);
+  }
+
+  /** Сервер сообщил своё состояние (client.state): отслеживаем speaking и idle. */
+  setServerState(state: ClientState): void {
+    this.serverSpeaking = state === "speaking";
+    // Возврат в idle (после follow-up окна на сервере) → закрываем гейт.
+    if (state === "idle") this.closeGate();
+  }
+
+  /** Принудительно закрыть микрофон (честный mute, §0.6). */
+  mute(): void {
+    this.closeGate();
+  }
+
+  // ── внутреннее ─────────────────────────────────────────────
+
+  private streamFrame(pcm: Int16Array): void {
+    const sig = this.vad.process(pcm);
+    if (sig === "speech_start") {
+      if (this.serverSpeaking) {
+        // Речь поверх TTS — barge-in (§10): рубим воспроизведение и сигналим серверу.
+        this.deps.onBargeIn?.();
+        this.deps.sendVad("barge_in");
+      } else {
+        this.deps.sendVad("speech_start");
+      }
+    } else if (sig === "speech_end") {
+      this.deps.sendVad("speech_end");
+    }
+    this.deps.sendFrame(pcm);
+  }
+
+  private openGate(reason: string): void {
+    this.gateOpen = true;
+    this.log.debug("гейт микрофона ОТКРЫТ", { reason });
+    this.deps.onMicState?.(true);
+  }
+
+  private closeGate(): void {
+    if (!this.gateOpen) return;
+    this.gateOpen = false;
+    this.log.debug("гейт микрофона ЗАКРЫТ");
+    this.deps.onMicState?.(false);
   }
 }

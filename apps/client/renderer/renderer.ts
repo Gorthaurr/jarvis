@@ -15,7 +15,8 @@ import type {
   DisplayCard,
   TaskStatus,
 } from "@jarvis/protocol";
-import type { JarvisBridge, LinkState } from "../main/ipc-contract.js";
+import type { JarvisBridge, LinkState, SpeakChunkPayload } from "../main/ipc-contract.js";
+import { AudioCapture, AudioPlayback } from "./audio.js";
 
 // window.jarvis выставлен preload (contextBridge).
 declare global {
@@ -147,21 +148,39 @@ jarvis.onTaskStatus((s: TaskStatus) => {
   transcriptEl.textContent = `[${s.state}]${steps} ${s.summary ?? ""}`.trim();
 });
 
-// ── аудио-стаб (§3): права на микрофон, AEC включён ────────────
-// TODO(M1): реальный стрим в LiveKit/WebRTC; здесь только проверка getUserMedia + AEC-флаг.
-async function probeMic(): Promise<void> {
+// ── аудио (§3, §10): захват/воспроизведение в renderer (WebRTC AEC) ────────────
+const playback = new AudioPlayback();
+let capture: AudioCapture | null = null;
+let micOpen = false;
+
+jarvis.onSpeakChunk((c: SpeakChunkPayload) => playback.enqueue(c));
+jarvis.onBargeIn(() => playback.stop());
+jarvis.onMicState((open: boolean) => {
+  micOpen = open;
+  orb.classList.toggle("orb--mic", open);
+});
+
+/** Поднять захват (один раз). Кадры PCM уходят в main, где гейтятся (§0.6). */
+async function ensureCapture(): Promise<void> {
+  if (capture) return;
+  capture = new AudioCapture((pcm) => jarvis.pushPcm(pcm));
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
-    // Сразу отпускаем устройство — на M0 поток не используется.
-    stream.getTracks().forEach((t) => t.stop());
+    await capture.start();
   } catch {
-    // Нет прав/устройства — ок для M0 (вход текстом). В M1 это будет обязательным.
+    capture = null; // нет прав/устройства — остаётся текстовый ввод (M0)
   }
 }
+
+// Push-to-talk (§18): wake word «Джарвис» опционален; клик по орбу активирует микрофон.
+orb.title = "Клик — говорить (push-to-talk). Повторный клик — mute.";
+orb.addEventListener("click", () => {
+  if (micOpen) {
+    jarvis.mute();
+    return;
+  }
+  void ensureCapture().then(() => jarvis.activate());
+});
 
 // инициализация
 setOrbState("idle");
 setLink({ online: false });
-void probeMic();
