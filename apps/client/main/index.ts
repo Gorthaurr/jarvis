@@ -29,6 +29,10 @@ import type { ConfirmResultPayload } from "./ipc-contract.js";
 
 const log = createLogger("main");
 
+// §10: Джарвис говорит сам (онбординг/проактивность) без жеста пользователя.
+// Без этого Chromium держит AudioContext в suspended — голос молчит.
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
 // Сборка main идёт в CommonJS (esbuild format=cjs), поэтому __dirname доступен нативно
 // и указывает на dist/main. Пути к preload/renderer строим относительно него.
 
@@ -70,6 +74,7 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: false, // preload использует require('electron') — sandbox=false для contextBridge-моста
       devTools: process.env.JARVIS_DEVTOOLS === "1",
+      autoplayPolicy: "no-user-gesture-required",
     },
   });
 

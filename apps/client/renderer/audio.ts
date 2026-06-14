@@ -24,6 +24,7 @@ export class AudioCapture {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
     this.ctx = new AudioContext();
+    if (this.ctx.state === "suspended") await this.ctx.resume();
     await this.ctx.audioWorklet.addModule("./audio-worklet.js");
     const source = this.ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.ctx, "capture-processor");
@@ -77,6 +78,8 @@ export class AudioPlayback {
     this.parts = [];
     try {
       const ctx = this.ensureCtx();
+      // Chromium может держать контекст suspended — будим явно, иначе тишина.
+      if (ctx.state === "suspended") await ctx.resume();
       const buf = await ctx.decodeAudioData(merged.buffer.slice(0));
       this.stop(); // прервать предыдущий, если играл
       const src = ctx.createBufferSource();
