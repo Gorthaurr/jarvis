@@ -286,7 +286,7 @@ function doHandshake(
 }
 
 /** Приветствие Джарвиса при запуске (§11). */
-const GREETING = "Здравствуйте. Я Джарвис, ваш персональный ассистент. Как я могу к вам обращаться?";
+const GREETING = "Добрый день, сэр. Джарвис к вашим услугам. Как мне к вам обращаться?";
 
 function startOnboarding(ctx: SessionContext, session: Session, log: Logger): void {
   // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.

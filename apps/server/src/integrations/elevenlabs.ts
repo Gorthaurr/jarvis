@@ -94,7 +94,13 @@ class ElevenLabsTtsStream implements TtsStream {
         this.ws.send(
           JSON.stringify({
             text: " ",
-            voice_settings: { stability: 0.5, similarity_boost: 0.8 },
+            // Размеренная, спокойная подача (манера Джарвиса): выше stability.
+            voice_settings: {
+              stability: 0.6,
+              similarity_boost: 0.8,
+              style: 0.0,
+              use_speaker_boost: true,
+            },
             xi_api_key: cfg.apiKey,
           }),
         );
