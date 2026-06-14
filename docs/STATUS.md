@@ -65,14 +65,14 @@
 
 | Компонент | Milestone | Статус | Файлы |
 |---|---|---|---|
-| router / classifyTier (скелет §7) | M0 | 🟡 скелет | `apps/server/src/brain/router/index.ts` |
-| agent M0 (dev.text → app.launch round-trip) | M0 | ✅ работает | `apps/server/src/brain/` |
-| persona (сборка system-промпта) | M0 | ✅ работает | `apps/server/src/brain/persona/index.ts` |
-| persona.md (характер Джарвиса, §11) | M0 | ✅ работает | `apps/server/src/brain/persona/persona.md` |
-| Вербализатор §21 (детерминированный RU-постпроцессор) | M0 | ✅ работает | `apps/server/src/brain/persona/` |
-| Роутинг тиров Haiku/Sonnet/Fable (полный, §7) | M2 | 🟡 скелет | TODO(M2) |
-| Агент Sonnet/Fable (tool-calls, многошаговый) | M2 | 🟡 скелет | TODO(M2) |
-| web.search / web.fetch (server-side §12) | M2 | ⬜ не начато | TODO(M2) |
+| router / classifyTier (§7, Unicode-границы RU) | M0/M2 | ✅ работает | `brain/router/index.ts` (тест 9/9) |
+| agent-loop (tier0 + tool-use + retrieval + предохранитель) | M2 | ✅ работает | `brain/agent/index.ts` (тест 4/4) |
+| persona (сборка system-промпта, кешируемый префикс §15) | M0 | ✅ работает | `brain/persona/index.ts` |
+| persona.md (характер Джарвиса, §11) | M0 | ✅ работает | `brain/persona/persona.md` |
+| Вербализатор §21 (детерминированный RU-постпроцессор) | M0 | ✅ работает | `brain/verbalize/` (тест 13/13) |
+| LLM-провайдер с tool-use (Anthropic real + Mock) | M2 | ✅ работает | `integrations/llm.ts`, `anthropic.ts` |
+| ToolDispatcher (актуаторы + web/memory; send/order → M6/M7) | M2 | ✅ работает | `brain/tools/dispatch.ts` |
+| web.search / web.fetch (Brave + readability §12) | M2 | ✅ работает | `integrations/web.ts` (тест 5/5, real+mock) |
 
 ---
 
@@ -80,8 +80,9 @@
 
 | Компонент | Milestone | Статус | Файлы |
 |---|---|---|---|
-| Working memory (кольцевой буфер сессии) | M0 | ✅ работает | `apps/server/src/` |
-| Episodic memory (pgvector + retrieval) | M2 | 🟡 скелет | TODO(M2) |
+| Working memory (кольцевой буфер + стек анафоры §10) | M0/M2 | ✅ работает | `memory/working.ts` |
+| Episodic memory (pgvector + in-memory + retrieval §8) | M2 | ✅ работает | `memory/episodic.ts` (тест 4/4) |
+| Эмбеддинги (OpenAI 1536 + Hash детерм. для dev) | M2 | ✅ работает | `integrations/openai-embeddings.ts` |
 | Skills CRUD (SKILL.md per-user) | M4 | 🟡 скелет | TODO(M4) |
 | Ночная консолидация | M4 | ⬜ не начато | TODO(M4) |
 

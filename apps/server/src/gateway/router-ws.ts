@@ -23,8 +23,12 @@ import {
   type MessageType,
   type VadEvent,
 } from "@jarvis/protocol";
-import { type Logger, createLogger } from "@jarvis/shared";
-import { type AgentReply, handleUserText } from "../brain/agent/index.js";
+import { type Logger, type Tier, createLogger } from "@jarvis/shared";
+import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
+import type { SpendGuard } from "../billing/index.js";
+import type { ILlmProvider } from "../integrations/llm.js";
+import type { EpisodicMemory } from "../memory/episodic.js";
+import type { IWebProvider } from "../integrations/web.js";
 import type { ISttProvider, ITtsProvider, TtsChunk } from "../integrations/voice-providers.js";
 import { WorkingMemory } from "../memory/working.js";
 import { noteClientContext } from "../proactive/salience.js";
@@ -41,6 +45,15 @@ export interface VoiceProviders {
   voiceId?: string;
 }
 
+/** Мозговые провайдеры, общие на gateway (§7, §8, §12, §14). */
+export interface BrainProviders {
+  llm: ILlmProvider;
+  episodic: EpisodicMemory;
+  web: IWebProvider;
+  spend: SpendGuard;
+  models: Record<Exclude<Tier, "tier0">, string>;
+}
+
 /** Контекст одного соединения, который держит router между сообщениями. */
 export interface SessionContext {
   session: Session;
@@ -48,6 +61,8 @@ export interface SessionContext {
   heartbeat: HeartbeatHandle;
   /** Голосовой пайплайн сессии (§10). */
   voice: VoicePipeline;
+  /** Зависимости agent-loop (§7, §8). */
+  agentDeps: AgentDeps;
   /** Последний полученный ClientContext — вход для proactive (§9). */
   lastContext?: ClientContext;
 }
@@ -57,14 +72,24 @@ export function makeSessionContext(
   session: Session,
   heartbeat: HeartbeatHandle,
   providers: VoiceProviders,
+  brain: BrainProviders,
 ): SessionContext {
   const memory = new WorkingMemory();
+  const agentDeps: AgentDeps = {
+    memory,
+    llm: brain.llm,
+    episodic: brain.episodic,
+    web: brain.web,
+    models: brain.models,
+    spend: brain.spend,
+    userId: session.userId,
+  };
   const voice = createVoicePipeline({
     stt: providers.stt,
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
     // brain на финальном тексте реплики (§21: {voice, display?}).
-    onUserTurn: (text) => handleUserText(session, text, { memory }),
+    onUserTurn: (text) => handleUserText(session, text, agentDeps),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
     sendSpeakChunk: (c: TtsChunk) =>
       session.send("speak.chunk", { audio: bufToBase64(c.audio), seq: c.seq, last: c.last }),
@@ -72,7 +97,7 @@ export function makeSessionContext(
     sendTranscript: (t) => session.send("transcript", t),
     sendDisplay: (d) => session.send("ui.display", d),
   });
-  return { session, memory, heartbeat, voice };
+  return { session, memory, heartbeat, voice, agentDeps };
 }
 
 /**
@@ -133,7 +158,7 @@ async function onDevText(ctx: SessionContext, payload: DevText): Promise<void> {
   ctx.session.send("client.state", { state: "thinking" });
   let reply: AgentReply;
   try {
-    reply = await handleUserText(ctx.session, text, { memory: ctx.memory });
+    reply = await handleUserText(ctx.session, text, ctx.agentDeps);
   } catch (e) {
     log.error("ошибка agent.handleUserText", e instanceof Error ? e.message : String(e));
     ctx.session.send("client.state", { state: "idle" });

@@ -1,8 +1,9 @@
 /**
- * Веб-знания (§12) — интерфейс + стаб.
+ * Веб-знания (§12): web.search (Brave) + web.fetch (readability-извлечение).
  *
- * web.search — поиск (Brave/др.), web.fetch — загрузка и извлечение читаемого
- * текста страницы. Без BRAVE_SEARCH_API_KEY/сети — стаб с пустым результатом.
+ * Server-side инструменты мозга — Q&A никогда не гоняет GUI-браузер юзера (§12).
+ * Сеть через глобальный fetch (Node 22). Без BRAVE_SEARCH_API_KEY поиск отдаёт [];
+ * fetch работает без ключа (нужна лишь сеть). Парсеры — чистые, тестируются без сети.
  */
 import { type Logger, createLogger } from "@jarvis/shared";
 
@@ -17,7 +18,7 @@ export interface SearchHit {
 export interface FetchedPage {
   url: string;
   title: string;
-  /** Очищенный читаемый текст (без навигации/рекламы). */
+  /** Очищенный читаемый текст (без навигации/скриптов/стилей). */
   text: string;
 }
 
@@ -27,24 +28,111 @@ export interface IWebProvider {
   readonly live: boolean;
 }
 
+const BRAVE_URL = "https://api.search.brave.com/res/v1/web/search";
+
+/** Разобрать ответ Brave Search в SearchHit[] (чистая функция). */
+export function parseBraveResults(json: unknown, limit = 5): SearchHit[] {
+  if (typeof json !== "object" || json === null) return [];
+  const results = (json as { web?: { results?: unknown[] } }).web?.results;
+  if (!Array.isArray(results)) return [];
+  const hits: SearchHit[] = [];
+  for (const r of results) {
+    if (typeof r !== "object" || r === null) continue;
+    const o = r as { title?: string; url?: string; description?: string };
+    if (!o.url) continue;
+    hits.push({
+      title: (o.title ?? "").trim(),
+      url: o.url,
+      snippet: stripHtml(o.description ?? "").trim(),
+    });
+    if (hits.length >= limit) break;
+  }
+  return hits;
+}
+
+/** Грубое извлечение читаемого текста из HTML (чистая функция). */
+export function extractReadable(html: string, url = ""): FetchedPage {
+  const title = (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").trim();
+  // Убираем неинформативные блоки целиком.
+  const stripped = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ");
+  const text = stripHtml(stripped);
+  return { url, title: decodeEntities(title), text };
+}
+
+/** Снять теги и схлопнуть пробелы. */
+export function stripHtml(html: string): string {
+  return decodeEntities(
+    html
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " "),
+  ).trim();
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
 export class WebProvider implements IWebProvider {
   readonly live: boolean;
   constructor(private readonly braveApiKey: string | undefined) {
     this.live = Boolean(braveApiKey);
-    if (!this.live) log.warn("BRAVE_SEARCH_API_KEY не задан — web в стаб-режиме");
+    if (!this.live) log.warn("BRAVE_SEARCH_API_KEY не задан — web.search в стаб-режиме ([])");
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async search(_query: string, _limit = 5): Promise<SearchHit[]> {
+  async search(queryText: string, limit = 5): Promise<SearchHit[]> {
     if (!this.live) return [];
-    // TODO(M? §12): реальный вызов Brave Search API.
-    void this.braveApiKey;
-    return [];
+    try {
+      const url = `${BRAVE_URL}?q=${encodeURIComponent(queryText)}&count=${limit}`;
+      const resp = await fetch(url, {
+        headers: { Accept: "application/json", "X-Subscription-Token": this.braveApiKey! },
+      });
+      if (!resp.ok) {
+        log.warn("Brave search не ок", { status: resp.status });
+        return [];
+      }
+      return parseBraveResults(await resp.json(), limit);
+    } catch (e) {
+      log.warn("web.search ошибка", e instanceof Error ? e.message : String(e));
+      return [];
+    }
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async fetch(_url: string): Promise<FetchedPage | null> {
-    // TODO(M? §12): загрузка + readability-извлечение.
-    return null;
+  async fetch(url: string): Promise<FetchedPage | null> {
+    try {
+      const resp = await fetch(url, { headers: { "User-Agent": "JarvisBot/0.1 (+readability)" } });
+      if (!resp.ok) return null;
+      const html = await resp.text();
+      const page = extractReadable(html, url);
+      // Ограничим объём текста (вход в LLM, §15).
+      return { ...page, text: page.text.slice(0, 8000) };
+    } catch (e) {
+      log.warn("web.fetch ошибка", e instanceof Error ? e.message : String(e));
+      return null;
+    }
+  }
+}
+
+/** Mock для тестов/дев: фиксированные результаты. */
+export class MockWebProvider implements IWebProvider {
+  readonly live = false;
+  constructor(
+    private readonly hits: SearchHit[] = [],
+    private readonly page: FetchedPage | null = null,
+  ) {}
+  async search(): Promise<SearchHit[]> {
+    return this.hits;
+  }
+  async fetch(): Promise<FetchedPage | null> {
+    return this.page;
   }
 }

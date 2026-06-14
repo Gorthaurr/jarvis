@@ -39,6 +39,9 @@ export interface ServerConfig {
   readonly elevenLabsApiKey: string | undefined;
   readonly elevenLabsVoiceId: string | undefined;
 
+  /** Веб-знания (§12) — без ключа web.search отдаёт []. */
+  readonly braveApiKey: string | undefined;
+
   /** Биллинг (§14). */
   readonly defaultSpendCap: number;
 }
@@ -66,6 +69,8 @@ export function loadConfig(): ServerConfig {
     deepgramApiKey: envOptional("DEEPGRAM_API_KEY"),
     elevenLabsApiKey: envOptional("ELEVENLABS_API_KEY"),
     elevenLabsVoiceId: envOptional("ELEVENLABS_VOICE_ID"),
+
+    braveApiKey: envOptional("BRAVE_SEARCH_API_KEY"),
 
     defaultSpendCap: Number.parseFloat(env("DEFAULT_SPEND_CAP", "50.00")),
   };

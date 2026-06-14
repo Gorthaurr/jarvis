@@ -1,155 +1,111 @@
 /**
- * LLM-провайдер (Anthropic) — тонкий клиент (§7, §15).
+ * LLM-провайдер Anthropic с поддержкой tool-use (§7, §8, §15).
  *
- * Интерфейс ILlmProvider абстрагирует тир/модель. Реальная реализация вызывает
- * Anthropic SDK, ЕСЛИ задан ANTHROPIC_API_KEY и установлен @anthropic-ai/sdk;
- * иначе — стаб (детерминированный ответ-заглушка), чтобы dev-срез работал без сети.
- *
- * Кеширование системного префикса (§15) закладывается через раздельные блоки
- * system: первый блок (персона) помечается cache_control. SDK импортируется
- * динамически, чтобы отсутствие пакета не ломало импорт модуля (§17 M0).
+ * Реализует ILlmProvider (llm.ts). Реальный вызов через @anthropic-ai/sdk при
+ * наличии ANTHROPIC_API_KEY; иначе — детерминированный стаб (без сети, без tool-use).
+ * Первый системный блок (персона) помечается cache_control (§15). SDK импортируется
+ * динамически — отсутствие пакета не ломает импорт модуля.
  */
-import {
-  type Tier,
-  backoffMs,
-  type Logger,
-  createLogger,
-  sleep,
-} from "@jarvis/shared";
+import { type Logger, backoffMs, createLogger, sleep } from "@jarvis/shared";
+import type {
+  ILlmProvider,
+  LlmContentBlock,
+  LlmRequest,
+  LlmResponse,
+  StopReason,
+  ToolUse,
+} from "./llm.js";
 
-const log: Logger = createLogger("llm");
+const log: Logger = createLogger("llm:anthropic");
 
-/** Сообщение чата. */
-export interface LlmMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-
-/** Запрос к LLM. */
-export interface LlmRequest {
-  tier: Tier;
-  /** Модель (id для тира уже разрешён вызывающим из config.models). */
-  model: string;
-  /** Кешируемый системный префикс (персона, §15). */
-  systemStatic: string;
-  /** Динамический хвост системы (контекст юзера). */
-  systemDynamic?: string;
-  messages: LlmMessage[];
-  maxTokens?: number;
-  temperature?: number;
-}
-
-/** Ответ LLM. */
-export interface LlmResponse {
-  text: string;
-  /** Использование токенов — вход в биллинг (§14). */
-  usage: { inputTokens: number; outputTokens: number };
-  /** true, если ответ синтезирован стабом (без реального вызова). */
-  stubbed: boolean;
-}
-
-export interface ILlmProvider {
-  complete(req: LlmRequest): Promise<LlmResponse>;
-  /** Доступен ли реальный бэкенд (есть ключ и SDK). */
-  readonly live: boolean;
-}
-
-/** Параметры конструктора провайдера. */
 export interface AnthropicConfig {
   apiKey: string | undefined;
-  /** Сколько ретраев при недоступности (§7). */
   maxRetries?: number;
 }
 
-/**
- * Провайдер Anthropic с фоллбэком в стаб.
- * tier0 сюда не приходит — он обрабатывается без LLM (router/agent §7).
- */
+/** Сырые типы ответа SDK (минимально). */
+interface RawContentBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+}
+interface RawResponse {
+  content: RawContentBlock[];
+  stop_reason?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+}
+
 export class AnthropicLlmProvider implements ILlmProvider {
   readonly live: boolean;
   private readonly apiKey: string | undefined;
   private readonly maxRetries: number;
-  // Кешируем динамически импортированный клиент.
   private clientPromise: Promise<unknown> | null = null;
 
   constructor(cfg: AnthropicConfig) {
     this.apiKey = cfg.apiKey;
     this.maxRetries = cfg.maxRetries ?? 3;
     this.live = Boolean(cfg.apiKey);
-    if (!this.live) {
-      log.warn("ANTHROPIC_API_KEY не задан — LLM работает в стаб-режиме");
-    }
+    if (!this.live) log.warn("ANTHROPIC_API_KEY не задан — LLM в стаб-режиме");
   }
 
   async complete(req: LlmRequest): Promise<LlmResponse> {
-    if (!this.live) return this.stub(req);
+    if (!this.live) return stub(req);
 
     let lastErr: unknown;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
         return await this.callReal(req);
       } catch (e) {
         lastErr = e;
         const wait = backoffMs(attempt);
-        log.warn("LLM-вызов не удался, ретрай", {
-          attempt,
-          waitMs: wait,
-          error: e instanceof Error ? e.message : String(e),
-        });
+        log.warn("LLM-вызов не удался, ретрай", { attempt, waitMs: wait });
         await sleep(wait);
       }
     }
-    log.error("LLM недоступен после ретраев — стаб-ответ", {
+    log.error("LLM недоступен после ретраев — стаб", {
       error: lastErr instanceof Error ? lastErr.message : String(lastErr),
     });
-    return this.stub(req);
+    return stub(req);
   }
 
-  /** Реальный вызов через @anthropic-ai/sdk (динамический импорт). */
   private async callReal(req: LlmRequest): Promise<LlmResponse> {
-    const client = await this.getClient();
-    // Типизируем минимально — SDK не обязан присутствовать в типах сборки.
-    const anthropic = client as {
-      messages: {
-        create(args: unknown): Promise<{
-          content: Array<{ type: string; text?: string }>;
-          usage?: { input_tokens?: number; output_tokens?: number };
-        }>;
-      };
+    const client = (await this.getClient()) as {
+      messages: { create(args: unknown): Promise<RawResponse> };
     };
 
-    // §15: первый системный блок кешируется (cache_control).
+    // §15: первый системный блок — кешируемый.
     const system = [
       { type: "text", text: req.systemStatic, cache_control: { type: "ephemeral" } },
       ...(req.systemDynamic ? [{ type: "text", text: req.systemDynamic }] : []),
     ];
 
-    const resp = await anthropic.messages.create({
+    const resp = await client.messages.create({
       model: req.model,
       max_tokens: req.maxTokens ?? 1024,
       temperature: req.temperature ?? 0.4,
       system,
       messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      ...(req.tools && req.tools.length > 0
+        ? {
+            tools: req.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              input_schema: t.input_schema,
+            })),
+          }
+        : {}),
     });
 
-    const text = resp.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text ?? "")
-      .join("");
-    return {
-      text,
-      usage: {
-        inputTokens: resp.usage?.input_tokens ?? 0,
-        outputTokens: resp.usage?.output_tokens ?? 0,
-      },
-      stubbed: false,
-    };
+    return parseResponse(resp);
   }
 
   private getClient(): Promise<unknown> {
     if (this.clientPromise) return this.clientPromise;
     this.clientPromise = (async () => {
-      const mod = await import("@anthropic-ai/sdk");
+      const spec = "@anthropic-ai/sdk";
+      const mod = await import(spec);
       const Anthropic = (mod.default ?? (mod as { Anthropic?: unknown }).Anthropic) as new (
         opts: { apiKey: string },
       ) => unknown;
@@ -157,14 +113,52 @@ export class AnthropicLlmProvider implements ILlmProvider {
     })();
     return this.clientPromise;
   }
+}
 
-  /** Детерминированный стаб-ответ (без сети) для dev-среза (§17). */
-  private stub(req: LlmRequest): LlmResponse {
-    const last = req.messages.at(-1)?.content ?? "";
-    return {
-      text: `(стаб LLM, тир ${req.tier}) Пока не подключена модель. Вы сказали: «${last.slice(0, 80)}».`,
-      usage: { inputTokens: 0, outputTokens: 0 },
-      stubbed: true,
-    };
+/** Разобрать ответ SDK в LlmResponse (чистая функция — тестируется отдельно). */
+export function parseResponse(resp: RawResponse): LlmResponse {
+  const toolUses: ToolUse[] = [];
+  let text = "";
+  for (const b of resp.content ?? []) {
+    if (b.type === "text" && b.text) text += b.text;
+    else if (b.type === "tool_use" && b.id && b.name) {
+      toolUses.push({ id: b.id, name: b.name, input: b.input ?? {} });
+    }
   }
+  const stopReason: StopReason =
+    resp.stop_reason === "tool_use"
+      ? "tool_use"
+      : resp.stop_reason === "max_tokens"
+        ? "max_tokens"
+        : "end_turn";
+  return {
+    text,
+    toolUses,
+    stopReason,
+    usage: {
+      inputTokens: resp.usage?.input_tokens ?? 0,
+      outputTokens: resp.usage?.output_tokens ?? 0,
+    },
+    stubbed: false,
+  };
+}
+
+/** Детерминированный стаб без сети: отвечает текстом, без tool-use. */
+function stub(req: LlmRequest): LlmResponse {
+  const last = req.messages.at(-1)?.content;
+  const lastText = typeof last === "string" ? last : summarizeBlocks(last ?? []);
+  return {
+    text: `(стаб LLM, тир ${req.tier}) Модель не подключена. Запрос: «${lastText.slice(0, 80)}».`,
+    toolUses: [],
+    stopReason: "stub",
+    usage: { inputTokens: 0, outputTokens: 0 },
+    stubbed: true,
+  };
+}
+
+function summarizeBlocks(blocks: LlmContentBlock[]): string {
+  return blocks
+    .map((b) => (b.type === "text" ? b.text : b.type === "tool_result" ? b.content : ""))
+    .join(" ")
+    .trim();
 }

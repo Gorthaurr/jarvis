@@ -22,11 +22,17 @@ import {
 } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ServerConfig } from "../config.js";
+import { SpendGuard } from "../billing/index.js";
+import { AnthropicLlmProvider } from "../integrations/anthropic.js";
+import { HashEmbeddingProvider, OpenAiEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { createSttProvider, createTtsProvider } from "../integrations/providers.js";
+import { WebProvider } from "../integrations/web.js";
+import { createEpisodicMemory } from "../memory/episodic.js";
 import { forgetClientContext } from "../proactive/salience.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
 import {
+  type BrainProviders,
   type SessionContext,
   type VoiceProviders,
   dispatch,
@@ -59,6 +65,23 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     voiceId: config.elevenLabsVoiceId,
   };
 
+  // Мозговые провайдеры — один раз на gateway (§7, §8, §12, §14).
+  // Эмбеддер: OpenAI при наличии ключа, иначе детерминированный hash (dev/retrieval работает).
+  const embedder = config.openaiApiKey
+    ? new OpenAiEmbeddingProvider({
+        apiKey: config.openaiApiKey,
+        model: config.embeddingModel,
+        dim: config.embeddingDim,
+      })
+    : new HashEmbeddingProvider();
+  const brain: BrainProviders = {
+    llm: new AnthropicLlmProvider({ apiKey: config.anthropicApiKey }),
+    episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
+    web: new WebProvider(config.braveApiKey),
+    spend: new SpendGuard({ spendCap: config.defaultSpendCap }),
+    models: config.models,
+  };
+
   // Регистрация плагина WebSocket до объявления маршрутов.
   void app.register(fastifyWebsocket);
 
@@ -66,7 +89,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     instance.get("/ws", { websocket: true }, (connection) => {
       // @fastify/websocket v11: первый аргумент — это сам WebSocket (ws.WebSocket).
       const socket = connection as unknown as RawWs;
-      onConnection(socket, config, registry, providers, log);
+      onConnection(socket, config, registry, providers, brain, log);
     });
   });
 
@@ -104,6 +127,7 @@ function onConnection(
   config: ServerConfig,
   registry: SessionRegistry,
   providers: VoiceProviders,
+  brain: BrainProviders,
   log: Logger,
 ): void {
   let ctx: SessionContext | null = null;
@@ -142,7 +166,7 @@ function onConnection(
         return;
       }
       clearTimeout(handshakeTimer);
-      ctx = doHandshake(env as Envelope<Hello>, sock, ws, config, registry, providers, log);
+      ctx = doHandshake(env as Envelope<Hello>, sock, ws, config, registry, providers, brain, log);
       handshakeDone = ctx !== null;
       return;
     }
@@ -181,6 +205,7 @@ function doHandshake(
   config: ServerConfig,
   registry: SessionRegistry,
   providers: VoiceProviders,
+  brain: BrainProviders,
   log: Logger,
 ): SessionContext | null {
   const hello = env.payload;
@@ -218,7 +243,7 @@ function doHandshake(
   });
 
   log.info("handshake завершён", { sessionId: session.sessionId, resumed });
-  return makeSessionContext(session, heartbeat, providers);
+  return makeSessionContext(session, heartbeat, providers, brain);
 }
 
 /** Разобрать входящий кадр в Envelope (с грубой валидацией §5). */

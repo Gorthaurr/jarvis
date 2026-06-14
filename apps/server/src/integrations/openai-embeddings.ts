@@ -78,3 +78,34 @@ export class StubEmbeddingProvider implements IEmbeddingProvider {
     return null;
   }
 }
+
+/**
+ * Детерминированные псевдо-эмбеддинги (bag-of-words хеширование в bucket'ы),
+ * для dev/тестов без ключа: похожие тексты дают похожие векторы → косинусный
+ * retrieval работает воспроизводимо. НЕ для прода (качество ниже реальной модели).
+ */
+export class HashEmbeddingProvider implements IEmbeddingProvider {
+  readonly live = true; // «живой» в смысле «возвращает вектор», не null
+  constructor(readonly dim = 256) {}
+
+  async embed(text: string): Promise<number[]> {
+    const vec = new Array<number>(this.dim).fill(0);
+    const tokens = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    for (const tok of tokens) {
+      const h = hashString(tok) % this.dim;
+      vec[h] = (vec[h] ?? 0) + 1;
+    }
+    // L2-нормализация (косинус = скалярное произведение).
+    const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
+    return vec.map((v) => v / norm);
+  }
+}
+
+function hashString(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
