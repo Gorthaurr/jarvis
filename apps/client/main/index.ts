@@ -18,10 +18,12 @@ import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
 import type { ClientState } from "@jarvis/protocol";
 
+import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
 import { dispatch } from "./actuators/index.js";
 import * as tier0 from "./tier0/index.js";
 import { AudioCoordinator } from "./audio/index.js";
+import { sidecar } from "./actuators/sidecar-client.js";
 import { IPC } from "./ipc-contract.js";
 import type { ConfirmResultPayload } from "./ipc-contract.js";
 
@@ -181,10 +183,23 @@ function registerIpc(): void {
 
 // ── жизненный цикл приложения ──────────────────────────────────
 
+/** Поднять win-сайдкар (UIA+SendInput, §6), если exe доступен (extraResources). */
+function startSidecar(): void {
+  // В dev C#-сайдкар может быть не собран — тогда ready=false, актуаторы UIA деградируют.
+  const candidates = [
+    join(process.resourcesPath ?? "", "sidecar-win.exe"),
+    join(__dirname, "../../../sidecar-win/bin/Release/net8.0-windows/win-x64/publish/SidecarWin.exe"),
+  ];
+  const exe = candidates.find((p) => p && existsSync(p));
+  if (exe) sidecar().start(exe);
+  else log.warn("win-сайдкар не найден — UIA-актуаторы недоступны (соберите apps/sidecar-win)");
+}
+
 app.whenReady().then(() => {
   registerIpc();
   createWindow();
   startTransport();
+  startSidecar();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -198,4 +213,5 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   transport?.stop();
+  sidecar().stop();
 });

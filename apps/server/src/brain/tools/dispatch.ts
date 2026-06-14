@@ -9,11 +9,12 @@
  * Возвращает текст для tool_result и флаг ошибки. Декуплен от Session минимальным
  * интерфейсом ActuatorSink — тестируется с моком.
  */
-import type { ActionCommand, ActionResult, ActionKind } from "@jarvis/protocol";
+import type { ActionCommand, ActionResult, ActionKind, CodeLang } from "@jarvis/protocol";
 import { DEFAULT_ACTION_TIMEOUT_MS } from "@jarvis/protocol";
 import { ACTUATOR_TOOL_BY_KIND } from "@jarvis/tools";
 import type { EpisodicMemory } from "../../memory/episodic.js";
 import type { IWebProvider } from "../../integrations/web.js";
+import { lintCode } from "../code-guard.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
@@ -61,6 +62,9 @@ export async function dispatchTool(
     return err(`Инструмент ${name} требует подтверждения и гардов (§14) — будет доступен в M6/M7.`);
   }
 
+  // code.run — серверный lint-гард ДО отправки клиенту (§6, §14).
+  if (name === "code_run") return runCodeGuarded(ctx, input);
+
   // Актуаторные инструменты → ActionCommand клиенту.
   const kind = KIND_BY_TOOL[name];
   if (!kind) return err(`Неизвестный инструмент: ${name}`);
@@ -97,6 +101,26 @@ async function memorySearch(ctx: ToolContext, input: Record<string, unknown>): P
   const hits = await ctx.episodic.search(ctx.userId, q, k);
   if (hits.length === 0) return ok("В памяти ничего релевантного не найдено.");
   return ok(hits.map((h) => `- ${h.episode.text} (${h.score.toFixed(2)})`).join("\n"));
+}
+
+/** code.run под серверным lint-гардом (§6): запрет реестра/служб/сети/системных путей. */
+async function runCodeGuarded(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  const lang = input.lang as CodeLang;
+  const code = String(input.code ?? "");
+  if (!["python", "node", "powershell"].includes(lang)) return err("code_run: неизвестный lang");
+  if (!code.trim()) return err("code_run: пустой код");
+
+  const lint = lintCode(lang, code);
+  if (!lint.ok) {
+    return err(`code.run отклонён гардом (§6): ${lint.violations.map((v) => v.message).join("; ")}`);
+  }
+  if (lint.requiresConfirm) {
+    // §6: powershell ВСЕГДА требует confirm + CLM. Подтверждение в автоцикле — §14/M8.
+    return err("powershell требует подтверждения пользователя (§6) — недоступен в автоцикле без confirm.");
+  }
+  const result = await ctx.session.sendAction({ kind: "code.run", lang, code }, DEFAULT_ACTION_TIMEOUT_MS);
+  if (result.ok) return ok(result.data !== undefined ? JSON.stringify(result.data) : "ok (code.run)");
+  return err(`code.run не удалось: ${result.error?.code ?? "runtime"} ${result.error?.message ?? ""}`);
 }
 
 async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {

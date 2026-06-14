@@ -96,8 +96,11 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         return notImplemented(commandId, startedAt, "M4"); // см. skill-runner/index.ts
       case "screen.capture":
         return notImplemented(commandId, startedAt, "M3");
-      case "context.read":
-        return notImplemented(commandId, startedAt, "M3");
+      case "context.read": {
+        // Дейксис (§19): selection/active_window через сайдкар (TextPattern); screen — vision (позже).
+        const text = await ground.readContext(cmd.scope);
+        return okResult(commandId, startedAt, { scope: cmd.scope, text });
+      }
       case "demo.record":
         return notImplemented(commandId, startedAt, "M4");
       case "message.send":

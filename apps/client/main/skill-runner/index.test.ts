@@ -1,0 +1,101 @@
+import { describe, expect, it, vi } from "vitest";
+import type { SkillStep } from "@jarvis/protocol";
+import { type CancelToken, type SkillActuator, runSkill } from "./index.js";
+
+const noSleep = async () => undefined;
+
+function step(action: string, extra: Partial<SkillStep> = {}): SkillStep {
+  return { action, ...extra };
+}
+
+/** Мок-actuator: настраиваемое поведение execute/checkExpect. */
+function mockActuator(over: Partial<SkillActuator> = {}): SkillActuator {
+  return {
+    executeStep: over.executeStep ?? vi.fn(async () => undefined),
+    checkExpect: over.checkExpect ?? vi.fn(async () => true),
+  };
+}
+
+describe("skill-runner (§8, §20)", () => {
+  it("успешный прогон всех шагов", async () => {
+    const actuator = mockActuator();
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("app.focus"), step("input.type", { expect: { role: "textbox" } })],
+      cancel: { cancelled: false },
+      actuator,
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(true);
+    expect(actuator.executeStep).toHaveBeenCalledTimes(2);
+  });
+
+  it("retry: expect не выполняется → повтор → успех", async () => {
+    let calls = 0;
+    const checkExpect = vi.fn(async () => {
+      calls += 1;
+      return calls >= 3; // первые опросы — нет, потом да
+    });
+    const execute = vi.fn(async () => undefined);
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("ui.invoke", { expect: { role: "button" }, timeoutMs: 150, retries: 3 })],
+      cancel: { cancelled: false },
+      actuator: mockActuator({ checkExpect, executeStep: execute }),
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(true);
+    // re-ground: executeStep вызван более одного раза (повтор после неуспешного expect).
+    expect(execute.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("исчерпание retries → эскалация и failed с индексом шага", async () => {
+    const escalate = vi.fn(async () => undefined);
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("ok"), step("ui.invoke", { expect: { role: "x" }, timeoutMs: 100, retries: 1 })],
+      cancel: { cancelled: false },
+      actuator: mockActuator({ checkExpect: async () => false }),
+      escalate,
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.failedStepIndex).toBe(1);
+    expect(escalate).toHaveBeenCalledWith(expect.objectContaining({ action: "ui.invoke" }), "exhausted");
+  });
+
+  it("отмена ПЕРЕД шагом останавливает ≤1 шага (§20)", async () => {
+    const cancel: CancelToken = { cancelled: false };
+    const execute = vi.fn(async () => {
+      cancel.cancelled = true; // отмена приходит во время первого шага
+    });
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("a"), step("b"), step("c")],
+      cancel,
+      actuator: mockActuator({ executeStep: execute }),
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.message).toBe("cancelled");
+    expect(execute).toHaveBeenCalledTimes(1); // второй шаг не стартовал
+  });
+
+  it("needsLlm-шаг вызывает эскалацию needs_llm (§8)", async () => {
+    const escalate = vi.fn(async () => undefined);
+    await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("input.type", { needsLlm: true })],
+      cancel: { cancelled: false },
+      actuator: mockActuator(),
+      escalate,
+      sleep: noSleep,
+    });
+    expect(escalate).toHaveBeenCalledWith(expect.objectContaining({ needsLlm: true }), "needs_llm");
+  });
+});

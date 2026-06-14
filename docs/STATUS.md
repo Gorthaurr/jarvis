@@ -72,6 +72,7 @@
 | Вербализатор §21 (детерминированный RU-постпроцессор) | M0 | ✅ работает | `brain/verbalize/` (тест 13/13) |
 | LLM-провайдер с tool-use (Anthropic real + Mock) | M2 | ✅ работает | `integrations/llm.ts`, `anthropic.ts` |
 | ToolDispatcher (актуаторы + web/memory; send/order → M6/M7) | M2 | ✅ работает | `brain/tools/dispatch.ts` |
+| code.run lint-гард (реестр/службы/сеть/пути; powershell→confirm §6) | M3 | ✅ работает | `brain/code-guard.ts` (тест 6/6) |
 | web.search / web.fetch (Brave + readability §12) | M2 | ✅ работает | `integrations/web.ts` (тест 5/5, real+mock) |
 
 ---
@@ -115,16 +116,17 @@
 |---|---|---|---|
 | actuators/apps.ts (app.launch + app.focus) | M0 | ✅ работает | `apps/client/main/actuators/apps.ts` |
 | actuators/browser.ts (hak-browser стаб) | M3 | 🟡 скелет | `apps/client/main/actuators/browser.ts` |
-| actuators/code-runner.ts (изолированный раннер стаб) | M3 | 🟡 скелет | `apps/client/main/actuators/code-runner.ts` |
-| actuators/ground.ts (IPC к sidecar-win стаб) | M3 | 🟡 скелет | `apps/client/main/actuators/ground.ts` |
-| actuators/input.ts (SendInput через sidecar стаб) | M3 | 🟡 скелет | `apps/client/main/actuators/input.ts` |
+| actuators/code-runner.ts (CWD=temp, таймаут, лимит вывода, urезанный env) | M3 | ✅ работает | `code-runner.ts` (Job Object — TODO) |
+| actuators/sidecar-client.ts (JSON-line RPC к sidecar) | M3 | ✅ работает | тест 5/5 (фрейминг/корреляция/таймаут) |
+| actuators/ground.ts (ui.ground/ui.invoke/context.read через sidecar) | M3 | ✅ работает | реальный IPC; деградация без exe |
+| actuators/input.ts (type/key/click через sidecar SendInput) | M3 | ✅ работает | aligned с C#-протоколом |
 | tier0/ (детерминированные команды, $0) | M0 | ✅ работает | `apps/client/main/tier0/index.ts` |
 | transport/ (WebSocket к серверу) | M0 | ✅ работает | `apps/client/main/transport/` |
 | wakeword/ (детектор «Джарвис») | M1 | ✅ работает | mock + push-to-talk; onnx openWakeWord опц. (RU-валидация §18) |
 | vad/ (Silero VAD) | M1 | ✅ работает | энергетический VAD (RMS+hangover); Silero/onnx опц. |
 | audio/ (координация: PCM → wakeword/vad, гейтинг стрима) | M1 | ✅ работает | privacy-гейт + barge-in, тест 5/5 |
 | sensors/ (screenshot, active-window) | M3 | 🟡 скелет | `apps/client/main/sensors/` |
-| skill-runner/ (детерминированный интерпретатор шагов) | M4 | 🟡 скелет | `apps/client/main/skill-runner/` |
+| skill-runner/ (интерпретатор шагов: expect/auto-wait/retry/cancel/escalate) | M3/M4 | ✅ работает | `skill-runner/index.ts` (тест 5/5) |
 
 ---
 
