@@ -35,7 +35,41 @@ export type LocalIntent =
  * Паттерны запуска приложений: «открой <app>», «запусти <app>», «включи <app>».
  * Группа (?<app>...) — имя приложения/сайта.
  */
-const LAUNCH_RE = /^\s*(?:открой|открыть|запусти|запустить|включи|включить)\s+(?<app>.+?)\s*[.!?]?\s*$/iu;
+// Варианты глагола + допуск на STT-ослышки («открою» вместо «открой» и т.п.).
+const LAUNCH_RE = /^\s*(?:открой|открои|открою|открыть|запусти|запущу|запустить|включи|включить)\s+(?<app>.+?)\s*[.!?]?\s*$/iu;
+
+// Известные веб-сервисы: «открой инстаграм» = открыть сайт в браузере (НЕ приложение).
+// Надёжно и без LLM (детерминированно). Ключи — нормализованные (lowercase) имена.
+const WEB_SERVICES: Record<string, string> = {
+  инстаграм: "https://instagram.com",
+  инстаграмм: "https://instagram.com",
+  инста: "https://instagram.com",
+  instagram: "https://instagram.com",
+  ютуб: "https://youtube.com",
+  ютьюб: "https://youtube.com",
+  ютюб: "https://youtube.com",
+  youtube: "https://youtube.com",
+  вконтакте: "https://vk.com",
+  вк: "https://vk.com",
+  vk: "https://vk.com",
+  телеграм: "https://web.telegram.org",
+  телеграмм: "https://web.telegram.org",
+  telegram: "https://web.telegram.org",
+  фейсбук: "https://facebook.com",
+  facebook: "https://facebook.com",
+  твиттер: "https://twitter.com",
+  twitter: "https://twitter.com",
+  икс: "https://x.com",
+  гугл: "https://google.com",
+  google: "https://google.com",
+  гмейл: "https://mail.google.com",
+  почта: "https://mail.google.com",
+  gmail: "https://mail.google.com",
+  чатгпт: "https://chatgpt.com",
+  chatgpt: "https://chatgpt.com",
+  тикток: "https://tiktok.com",
+  tiktok: "https://tiktok.com",
+};
 /** Паттерны фокуса: «переключись на <app>», «перейди в <app>». */
 const FOCUS_RE = /^\s*(?:переключись на|перейди в|перейди к|фокус на)\s+(?<app>.+?)\s*[.!?]?\s*$/iu;
 
@@ -85,6 +119,9 @@ export function matchLocalIntent(text: string): LocalIntent | undefined {
       return { kind: "browser.open", url: normalizeUrl(arg) };
     }
     arg = normalizeAppName(arg);
+    // Известный веб-сервис («инстаграм», «ютуб»…) → открыть сайт в браузере.
+    const site = WEB_SERVICES[arg];
+    if (site) return { kind: "browser.open", url: site };
     if (arg.length > 0) return { kind: "app.launch", app: arg };
   }
 

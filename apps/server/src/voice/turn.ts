@@ -23,8 +23,11 @@ export interface TurnConfig {
 }
 
 export const DEFAULT_TURN_CONFIG: TurnConfig = {
-  maxSilenceMs: 900,
-  minSilenceMs: 250,
+  // §10: компромисс. 900мс ощущались как тормоз, но 550 резали фразы на полуслове:
+  // Whisper utterance-based (interim-текста нет), эндпоинт держится только на таймере,
+  // поэтому слишком короткая пауза финализирует почти пустой буфер. 800 — баланс.
+  maxSilenceMs: 800,
+  minSilenceMs: 200,
   completeThreshold: 0.6,
 };
 

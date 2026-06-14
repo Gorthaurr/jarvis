@@ -12,6 +12,7 @@ import { createLogger } from "@jarvis/shared";
 import { loadConfig } from "./config.js";
 import { closeDb, configureDb } from "./db/pool.js";
 import { createGateway } from "./gateway/server.js";
+import { warmupWhisper } from "./integrations/whisper-stt.js";
 
 /**
  * Загрузить .env, ища его вверх по дереву от cwd и от модуля — сервер
@@ -57,6 +58,10 @@ async function main(): Promise<void> {
     log.error("не удалось поднять gateway", e instanceof Error ? e.message : String(e));
     process.exit(1);
   }
+
+  // Прогрев Whisper на GPU сразу после старта (§10): первая фраза не ждёт загрузку
+  // модели и upload на видеокарту. Первый запуск с новой моделью качает веса (~один раз).
+  if (config.sttProvider === "whisper") warmupWhisper(config.whisperModel);
 
   // ── graceful shutdown ──────────────────────────────────────
   let shuttingDown = false;

@@ -36,6 +36,7 @@ export class AudioCoordinator {
   private readonly log: Logger;
   private gateOpen = false;
   private serverSpeaking = false;
+  private framesSent = 0; // диагностика потока кадров
 
   constructor(private readonly deps: AudioCoordinatorDeps) {
     this.wakeword = deps.wakeword ?? new MockWakeWord();
@@ -65,11 +66,13 @@ export class AudioCoordinator {
     this.streamFrame(pcm);
   }
 
-  /** Сервер сообщил своё состояние (client.state): отслеживаем speaking и idle. */
+  /** Сервер сообщил своё состояние (client.state): отслеживаем speaking. */
   setServerState(state: ClientState): void {
     this.serverSpeaking = state === "speaking";
-    // Возврат в idle (после follow-up окна на сервере) → закрываем гейт.
-    if (state === "idle") this.closeGate();
+    // §3 ambient: НЕ закрываем гейт на idle. Раньше после первой реплики сервер
+    // уходил в idle → гейт закрывался НАВСЕГДА (wake word — заглушка, открыть
+    // некому) → Джарвис «глох» после первого ответа. Слушаем постоянно с момента
+    // активации; приватность — только через явный mute() (§0.6).
   }
 
   /** Принудительно закрыть микрофон (честный mute, §0.6). */
@@ -86,25 +89,37 @@ export class AudioCoordinator {
         // Речь поверх TTS — barge-in (§10): рубим воспроизведение и сигналим серверу.
         this.deps.onBargeIn?.();
         this.deps.sendVad("barge_in");
+        this.log.info("VAD: barge_in (речь во время TTS)");
       } else {
         this.deps.sendVad("speech_start");
+        this.log.info("VAD: speech_start");
       }
     } else if (sig === "speech_end") {
       this.deps.sendVad("speech_end");
+      this.log.info("VAD: speech_end");
     }
     this.deps.sendFrame(pcm);
+    this.framesSent += 1;
+    // Диагностика: периодически подтверждаем, что кадры реально уходят на сервер.
+    if (this.framesSent % 150 === 1) {
+      this.log.info("аудио-кадры → сервер", {
+        sent: this.framesSent,
+        gateOpen: this.gateOpen,
+        serverSpeaking: this.serverSpeaking,
+      });
+    }
   }
 
   private openGate(reason: string): void {
     this.gateOpen = true;
-    this.log.debug("гейт микрофона ОТКРЫТ", { reason });
+    this.log.info("гейт микрофона ОТКРЫТ", { reason });
     this.deps.onMicState?.(true);
   }
 
   private closeGate(): void {
     if (!this.gateOpen) return;
     this.gateOpen = false;
-    this.log.debug("гейт микрофона ЗАКРЫТ");
+    this.log.info("гейт микрофона ЗАКРЫТ");
     this.deps.onMicState?.(false);
   }
 }

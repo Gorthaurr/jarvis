@@ -2,7 +2,7 @@
  * Сообщения протокола клиент↔сервер (§5).
  * Brain эмитит абстрактные команды, клиент мапит на актуаторы.
  */
-import type { ActionCommand } from "./actions.js";
+import type { ActionCommand, SkillStep } from "./actions.js";
 
 /** Общий конверт каждого сообщения. */
 export interface Envelope<T = unknown> {
@@ -26,6 +26,7 @@ export type MessageType =
   | "user.confirm.result" // ConfirmResult
   | "client.context" // ClientContext — занятость юзера/активное окно, вход salience (§9)
   | "demo.event" // поток UIA-событий при записи демонстрации (§8)
+  | "demo.save" // DemoSave — завершить запись демонстрации и сохранить навык (§8)
   | "task.control" // TaskControl — управление задачей из UI (кнопка «стоп»/«пауза», §20)
   | "pong"
   // server -> client
@@ -38,6 +39,7 @@ export type MessageType =
   | "proactive.nudge" // ProactiveNudge — клиент проговаривает сам, ЕСЛИ не истёк
   | "task.status" // TaskStatus — прогресс/смена статуса задачи (§20)
   | "ui.display" // DisplayCard — карточка с подробностями в renderer (§21)
+  | "skill.saved" // SkillSaved — навык записан/сохранён, доступен для повтора (§8)
   | "error" // ProtocolError — напр. несовпадение версии
   | "ping";
 
@@ -113,6 +115,17 @@ export interface DemoEvent {
 }
 
 /**
+ * Завершить запись демонстрации и сохранить навык (§8). Клиент накопил UIA-события
+ * (sidecar WinEvent-хук), здесь шлёт весь батч с именем — сервер строит черновик
+ * SKILL.md (buildSkillDraft) и сохраняет. commentary — голосовой комментарий, если был.
+ */
+export interface DemoSave {
+  name: string;
+  events: DemoEvent[];
+  commentary?: string;
+}
+
+/**
  * Управление задачей из UI (§20): кнопка «стоп»/«пауза»/«продолжить» в renderer,
  * либо структурный дубль голосовой команды. Голосовое «отмени»/«продолжи» классифицирует
  * сервер (Haiku, §20) — этот канал для детерминированных нажатий. taskId опционален:
@@ -178,6 +191,20 @@ export interface TaskStatus {
 export interface DisplayCard {
   title?: string;
   markdown: string;
+}
+
+/**
+ * Навык записан/сохранён и доступен для повтора (§8). Сервер шлёт после demo.save
+ * (или на старте сессии — список ранее записанных навыков). steps идут вместе,
+ * чтобы клиент мог повторить навык локально (skill-runner) без обращения к серверу.
+ */
+export interface SkillSaved {
+  id: string;
+  name: string;
+  version: number;
+  steps: SkillStep[];
+  /** есть guard-шаги → перед первым применением нужно ревью (§14). */
+  needsReview: boolean;
 }
 
 export interface ScreenCaptureRequest {

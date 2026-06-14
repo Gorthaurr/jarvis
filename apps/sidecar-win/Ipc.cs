@@ -111,3 +111,30 @@ public sealed record ReadSelectionArgs(
 public sealed record RawInputSubscribeArgs(
     [property: JsonPropertyName("enable")]  bool Enable
 );
+
+/// <summary>Аргументы demo.record — старт/стоп записи демонстрации навыка (§8).</summary>
+public sealed record DemoRecordArgs(
+    [property: JsonPropertyName("op")]      string Op       // "start" | "stop"
+);
+
+/// <summary>UIA-событие записи демонстрации — роль/имя элемента + действие, НЕ координаты (§8).</summary>
+public sealed record DemoEventDto(
+    [property: JsonPropertyName("role")]    string Role,
+    [property: JsonPropertyName("name")]    string? Name,
+    [property: JsonPropertyName("action")]  string Action,
+    [property: JsonPropertyName("ts")]      long Ts
+);
+
+/// <summary>Push-сообщение демо-события в stdout (без id — отдельный канал от RPC-ответов).</summary>
+public sealed record DemoEventPush(
+    [property: JsonPropertyName("event")]   string Event,   // всегда "demo"
+    [property: JsonPropertyName("role")]    string Role,
+    [property: JsonPropertyName("name")]    string? Name,
+    [property: JsonPropertyName("action")]  string Action,
+    [property: JsonPropertyName("ts")]      long Ts
+);
+
+/// <summary>Результат demo.record stop — батч пойманных событий.</summary>
+public sealed record DemoStopResult(
+    [property: JsonPropertyName("events")]  IReadOnlyList<DemoEventDto> Events
+);

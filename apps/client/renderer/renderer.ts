@@ -40,6 +40,11 @@ const transcriptEl = $("transcript");
 const linkEl = $("link");
 const cards = $("cards");
 
+// Центральный пассивный индикатор состояния (Amnezia-стиль). Зеркалит то же
+// состояние, что и statusbar (idle/listening/thinking/speaking).
+const hero = $("hero");
+const heroLabel = $("heroLabel");
+
 // панель задачи (§20)
 const taskPanel = $("taskPanel");
 const taskStateEl = $("taskState");
@@ -51,9 +56,6 @@ const taskResumeBtn = $<HTMLButtonElement>("taskResumeBtn");
 
 /** taskId активной задачи — для адресной отправки task.control (§20). */
 let activeTaskId: string | null = null;
-
-const inputForm = $<HTMLFormElement>("inputForm");
-const textInput = $<HTMLInputElement>("textInput");
 
 // модалка confirm
 const confirmOverlay = $("confirmOverlay");
@@ -73,9 +75,14 @@ const STATE_RU: Record<ClientState, string> = {
   thinking: "думаю",
   speaking: "говорю",
 };
+let currentState: ClientState = "listening"; // для цвета шкалы голоса
 function setOrbState(state: ClientState): void {
+  currentState = state;
   statusbar.className = `statusbar statusbar--${state}`;
   stateLabel.textContent = STATE_RU[state] ?? state;
+  // Центральный индикатор — та же машина состояний (§3, пассивный, без клика).
+  hero.className = `hero hero--${state}`;
+  heroLabel.textContent = STATE_RU[state] ?? state;
 }
 
 function setLink(link: LinkState): void {
@@ -84,7 +91,18 @@ function setLink(link: LinkState): void {
 }
 
 // ── карточки ui.display (§21) ──────────────────────────────────
+// Ambient-ассистент, НЕ чат-лог: НЕ копим карточки (раньше приветствие плодило
+// дубли на каждом переподключении). Показываем только последнюю и убираем её.
+let cardTimer: ReturnType<typeof setTimeout> | null = null;
+function clearCards(): void {
+  cards.innerHTML = "";
+  if (cardTimer) {
+    clearTimeout(cardTimer);
+    cardTimer = null;
+  }
+}
 function addCard(card: DisplayCard): void {
+  clearCards();
   const el = document.createElement("div");
   el.className = "card";
   if (card.title) {
@@ -99,7 +117,7 @@ function addCard(card: DisplayCard): void {
   body.textContent = card.markdown;
   el.appendChild(body);
   cards.appendChild(el);
-  cards.scrollTop = cards.scrollHeight;
+  cardTimer = setTimeout(clearCards, 12_000); // эфемерно
 }
 
 // ── панель задачи (§20) ────────────────────────────────────────
@@ -202,18 +220,12 @@ denyBtn.addEventListener("click", () => {
   closeConfirm();
 });
 
-// ── поле ввода (M0) ────────────────────────────────────────────
-inputForm.addEventListener("submit", (e) => {
-  e.preventDefault();
-  const text = textInput.value.trim();
-  if (!text) return;
-  jarvis.submitText(text); // main: tier0 локально, иначе dev.text на сервер (§3, §17)
-  textInput.value = "";
-});
-
 // ── подписки на события main ──────────────────────────────────
 jarvis.onState((s: ClientState) => setOrbState(s));
-jarvis.onLink((l: LinkState) => setLink(l));
+jarvis.onLink((l: LinkState) => {
+  setLink(l);
+  if (l.online) clearCards(); // на (пере)подключении убрать накопившиеся карточки
+});
 jarvis.onTranscript((t: Transcript) => {
   transcriptEl.textContent = t.text;
 });
@@ -239,8 +251,12 @@ async function ensureCapture(): Promise<void> {
   capture = new AudioCapture((pcm) => jarvis.pushPcm(pcm));
   try {
     await capture.start();
-  } catch {
-    capture = null; // нет прав/устройства — остаётся текстовый ввод (M0)
+  } catch (e) {
+    // НЕ глотаем: раньше тихий catch скрывал отказ микрофона → Джарвис «не слышал»
+    // без единого следа. Логируем и показываем явный статус пользователю.
+    capture = null;
+    console.error("микрофон недоступен:", e);
+    transcriptEl.textContent = "Нет доступа к микрофону — проверьте разрешение в Windows.";
   }
 }
 
@@ -260,7 +276,154 @@ settingsSave.addEventListener("click", () => {
   settingsPanel.classList.add("settings--hidden");
 });
 
+// ── запись навыка демонстрацией (§8) ───────────────────────────
+const makeSkillBtn = $<HTMLButtonElement>("makeSkillBtn");
+const skillOverlay = $("skillOverlay");
+const skillSetup = $("skillSetup");
+const skillRecording = $("skillRecording");
+const skillName = $<HTMLInputElement>("skillName");
+const skillCountEl = $("skillCount");
+const skillLastEl = $("skillLast");
+const skillStartBtn = $<HTMLButtonElement>("skillStartBtn");
+const skillDoneBtn = $<HTMLButtonElement>("skillDoneBtn");
+const skillCancelBtn = $<HTMLButtonElement>("skillCancelBtn");
+const skillList = $("skillList");
+
+let recording = false;
+
+/** Сбросить модалку записи в исходный (до старта) вид. */
+function resetSkillModal(): void {
+  recording = false;
+  skillSetup.classList.remove("overlay--hidden");
+  skillRecording.classList.add("overlay--hidden");
+  skillStartBtn.classList.remove("overlay--hidden");
+  skillDoneBtn.classList.add("overlay--hidden");
+  skillCountEl.textContent = "0";
+  skillLastEl.textContent = "";
+}
+
+function openSkillModal(): void {
+  resetSkillModal();
+  skillName.value = "";
+  settingsPanel.classList.add("settings--hidden"); // не перекрывать модалкой
+  skillOverlay.classList.remove("overlay--hidden");
+}
+
+function closeSkillModal(): void {
+  skillOverlay.classList.add("overlay--hidden");
+  resetSkillModal();
+}
+
+makeSkillBtn.addEventListener("click", openSkillModal);
+
+skillStartBtn.addEventListener("click", () => {
+  // Сворачиваем окно Джарвиса, чтобы пользователь показывал задачу в своих приложениях.
+  jarvis.startSkill(skillName.value);
+});
+
+skillDoneBtn.addEventListener("click", () => {
+  jarvis.stopSkill();
+  closeSkillModal();
+});
+
+skillCancelBtn.addEventListener("click", () => {
+  if (recording) jarvis.cancelSkill();
+  closeSkillModal();
+});
+
+// Состояние записи из main: переключаем вид и обновляем счётчик.
+jarvis.onSkillState((s) => {
+  if (s.unavailable) {
+    skillLastEl.textContent = "Запись недоступна — не запущен системный модуль (sidecar).";
+    return;
+  }
+  recording = s.recording;
+  if (s.recording) {
+    skillSetup.classList.add("overlay--hidden");
+    skillRecording.classList.remove("overlay--hidden");
+    skillStartBtn.classList.add("overlay--hidden");
+    skillDoneBtn.classList.remove("overlay--hidden");
+  }
+  skillCountEl.textContent = String(s.count);
+  if (s.last) skillLastEl.textContent = s.last;
+});
+
+// Навык записан/прислан сервером — добавляем строку с кнопкой повтора.
+jarvis.onSkillSaved((s) => {
+  const empty = skillList.querySelector(".skill-list__empty");
+  if (empty) empty.remove();
+  // не дублируем при повторной записи того же id
+  const existing = skillList.querySelector(`[data-skill-id="${s.id}"]`);
+  existing?.remove();
+
+  const li = document.createElement("li");
+  li.className = "skill";
+  li.dataset.skillId = s.id;
+
+  const meta = document.createElement("div");
+  meta.className = "skill__meta";
+  const nameEl = document.createElement("span");
+  nameEl.className = "skill__name";
+  nameEl.textContent = s.name;
+  const sub = document.createElement("span");
+  sub.className = "skill__sub";
+  sub.textContent = `${s.steps.length} шагов${s.needsReview ? " · нужно ревью" : ""}`;
+  meta.appendChild(nameEl);
+  meta.appendChild(sub);
+
+  const play = document.createElement("button");
+  play.className = "btn btn--ok btn--sm";
+  play.type = "button";
+  play.textContent = "▶ Повторить";
+  play.addEventListener("click", () => jarvis.runSkill(s.id));
+
+  li.appendChild(meta);
+  li.appendChild(play);
+  skillList.appendChild(li);
+});
+
+// ── живая шкала голоса (колебания речи) ─────────────────────────
+const waveCanvas = document.getElementById("wave") as HTMLCanvasElement | null;
+function startWaveform(analyser: AnalyserNode): void {
+  if (!waveCanvas) return;
+  const cctx = waveCanvas.getContext("2d");
+  if (!cctx) return;
+  const buf = new Uint8Array(analyser.fftSize);
+  const dpr = window.devicePixelRatio || 1;
+  const fit = (): void => {
+    waveCanvas.width = Math.max(1, Math.round(waveCanvas.clientWidth * dpr));
+    waveCanvas.height = Math.max(1, Math.round(waveCanvas.clientHeight * dpr));
+  };
+  fit();
+  window.addEventListener("resize", fit);
+  const draw = (): void => {
+    requestAnimationFrame(draw);
+    analyser.getByteTimeDomainData(buf);
+    const w = waveCanvas.width;
+    const h = waveCanvas.height;
+    cctx.clearRect(0, 0, w, h);
+    // цвет под состояние: говорю — фиолетовый, иначе янтарный
+    cctx.lineWidth = Math.max(1.5, 2 * dpr);
+    cctx.strokeStyle = currentState === "speaking" ? "#a78bfa" : "#f4ac5e";
+    cctx.lineJoin = "round";
+    cctx.beginPath();
+    const step = w / buf.length;
+    for (let i = 0; i < buf.length; i += 1) {
+      const v = (buf[i]! - 128) / 128; // -1..1
+      const x = i * step;
+      const y = h / 2 + v * (h / 2) * 0.92;
+      if (i === 0) cctx.moveTo(x, y);
+      else cctx.lineTo(x, y);
+    }
+    cctx.stroke();
+  };
+  draw();
+}
+
 // инициализация — ambient (§3): Джарвис слушает СРАЗУ с запуска, без клика по орбу.
 setLink({ online: false });
 setOrbState("listening");
-void ensureCapture().then(() => jarvis.activate());
+void ensureCapture().then(() => {
+  jarvis.activate();
+  if (capture?.analyser) startWaveform(capture.analyser);
+});

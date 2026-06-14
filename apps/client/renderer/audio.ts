@@ -15,6 +15,8 @@ export class AudioCapture {
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private node: AudioWorkletNode | null = null;
+  /** Анализатор для визуализации уровня/колебаний голоса (шкала в UI). */
+  analyser: AnalyserNode | null = null;
 
   constructor(private readonly onFrame: (pcm: ArrayBuffer) => void) {}
 
@@ -27,6 +29,11 @@ export class AudioCapture {
     if (this.ctx.state === "suspended") await this.ctx.resume();
     await this.ctx.audioWorklet.addModule("./audio-worklet.js");
     const source = this.ctx.createMediaStreamSource(this.stream);
+    // Шкала голоса: анализатор на сыром источнике (до ресемпла), для отрисовки волны.
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 2048;
+    this.analyser.smoothingTimeConstant = 0.5;
+    source.connect(this.analyser);
     this.node = new AudioWorkletNode(this.ctx, "capture-processor");
     this.node.port.onmessage = (ev: MessageEvent) => {
       this.onFrame(ev.data as ArrayBuffer);

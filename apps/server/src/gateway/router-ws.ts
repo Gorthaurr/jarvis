@@ -18,9 +18,11 @@ import {
   type ClientContext,
   type ClientStateMsg,
   type ConfirmResult,
+  type DemoSave,
   type DevText,
   type Envelope,
   type MessageType,
+  type SkillSaved,
   type TaskControl,
   type TaskStatus,
   type VadEvent,
@@ -28,6 +30,7 @@ import {
 import { type Logger, type Tier, createLogger } from "@jarvis/shared";
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
+import { getProfile } from "../brain/profile.js";
 import type { SpendGuard } from "../billing/index.js";
 import type { ILlmProvider } from "../integrations/llm.js";
 import type { EpisodicMemory } from "../memory/episodic.js";
@@ -38,6 +41,8 @@ import { noteClientContext } from "../proactive/salience.js";
 import { TaskManager } from "../brain/tasks/manager.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
 import { statusReport } from "../brain/tasks/narrate.js";
+import { saveDemonstratedSkill } from "../brain/skills/record.js";
+import { listSkills } from "../memory/skills.js";
 import type { Task } from "../brain/tasks/task.js";
 import { type VoicePipeline, createVoicePipeline } from "../voice/index.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
@@ -94,6 +99,9 @@ export function makeSessionContext(
     models: brain.models,
     spend: brain.spend,
     userId: session.userId,
+    // Персистентный профиль (§8/§11): имя/факты из data/profile.json → в персону,
+    // чтобы Джарвис ПОМНИЛ пользователя и не спрашивал имя каждый раз.
+    userContext: { displayName: getProfile().displayName, facts: getProfile().facts },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
     warmth: brain.warmth, // общая тёплость сессий (§15)
   };
@@ -101,6 +109,8 @@ export function makeSessionContext(
     stt: providers.stt,
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
+    // §3 wake word: реагировать только на обращение «Джарвис» (вне окна разговора).
+    requireWakeWord: true,
     // brain на финальном тексте реплики (§21: {voice, display?}).
     onUserTurn: (text) => handleUserText(session, text, agentDeps),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
@@ -164,8 +174,11 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       log.debug("screen.capture.result получен");
       break;
     case "demo.event":
-      // TODO(M? §8): запись демонстрации навыка.
-      log.debug("demo.event (обучение демонстрацией — позже)");
+      // Поток событий идёт в main для счётчика UI; авторитетный батч приходит в demo.save.
+      log.debug("demo.event (стрим записи демонстрации)");
+      break;
+    case "demo.save":
+      await onDemoSave(ctx, env.payload as DemoSave);
       break;
     default:
       log.warn("необработанный тип входящего сообщения", { type });
@@ -194,6 +207,77 @@ async function onDevText(ctx: SessionContext, payload: DevText): Promise<void> {
   }
 
   sendReply(ctx, reply);
+}
+
+/**
+ * demo.save → построить навык из демонстрации, сохранить и подтвердить (§8).
+ * Голосом докладываем итог; карточкой показываем шаги; skill.saved кладёт навык
+ * в клиентский реестр (повтор без сервера). Guard-шаги → предупреждаем про ревью (§14).
+ */
+async function onDemoSave(ctx: SessionContext, payload: DemoSave): Promise<void> {
+  const name = (payload?.name ?? "").trim();
+  const events = payload?.events ?? [];
+  if (!name || events.length === 0) {
+    ctx.voice.speak("Не удалось записать навык — я не увидел действий.");
+    return;
+  }
+
+  let saved;
+  try {
+    saved = await saveDemonstratedSkill(ctx.session.userId, {
+      name,
+      events,
+      ...(payload.commentary ? { commentary: payload.commentary } : {}),
+    });
+  } catch (e) {
+    log.error("ошибка saveDemonstratedSkill", e instanceof Error ? e.message : String(e));
+    ctx.voice.speak("Не получилось сохранить навык. Попробуйте ещё раз.");
+    return;
+  }
+
+  if (!saved) {
+    ctx.voice.speak(`Навык «${name}» не записан — я не разобрал значимых действий.`);
+    return;
+  }
+
+  const msg: SkillSaved = {
+    id: saved.id,
+    name: saved.name,
+    version: saved.version,
+    steps: saved.steps,
+    needsReview: saved.needsReview,
+  };
+  ctx.session.send("skill.saved", msg);
+  ctx.session.send("ui.display", {
+    title: `Навык записан: ${saved.name}`,
+    markdown:
+      `Запомнил ${saved.stepCount} шаг(ов).` +
+      (saved.needsReview ? "\n\n⚠️ Есть необратимые шаги — перед первым повтором покажу на подтверждение." : ""),
+  });
+  ctx.voice.speak(
+    saved.needsReview
+      ? `Готово, сэр. Навык «${saved.name}» записан. В нём есть необратимые шаги — перед первым повтором я уточню.`
+      : `Готово, сэр. Навык «${saved.name}» записан, ${saved.stepCount} шагов. Скажите повторить — и я выполню.`,
+  );
+}
+
+/** Прислать клиенту ранее записанные навыки на старте сессии (§8). */
+export function pushSavedSkills(ctx: SessionContext): void {
+  void listSkills(ctx.session.userId)
+    .then((skills) => {
+      for (const s of skills) {
+        const msg: SkillSaved = {
+          id: s.id,
+          name: String((s.steps.length && s.contentMd.match(/^name:\s*(.+)$/m)?.[1]) || s.id),
+          version: s.version,
+          steps: s.steps,
+          needsReview: false,
+        };
+        ctx.session.send("skill.saved", msg);
+      }
+      if (skills.length) log.info(`проброшено навыков клиенту: ${skills.length}`);
+    })
+    .catch((e) => log.warn(`listSkills недоступен: ${e instanceof Error ? e.message : String(e)}`));
 }
 
 /**

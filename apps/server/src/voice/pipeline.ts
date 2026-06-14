@@ -30,6 +30,7 @@ import {
   reduce,
 } from "./state.js";
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
+import { isWakeAddressed, stripWake } from "./wake.js";
 
 /** Ответ brain в формате §21 (голос обязателен, карточка опциональна). */
 export interface AgentReplyLike {
@@ -54,6 +55,10 @@ export interface VoicePipelineDeps {
   followupMs?: number;
   sttSampleRate?: number;
   ttsVoiceId?: string;
+  /** Требовать обращение «Джарвис» вне активного разговора (§3 wake word). */
+  requireWakeWord?: boolean;
+  /** Окно активного разговора после реплики Джарвиса — продолжение без wake word (мс). */
+  conversationWindowMs?: number;
   now?: () => number;
   log?: Logger;
 }
@@ -73,13 +78,54 @@ export class VoicePipeline {
   private interim = "";
   /** Поколение оборота: поздние колбэки от устаревшего STT/TTS отбрасываются. */
   private gen = 0;
+  /** Wake word (§3): активен ли разговор + когда Джарвис последний раз говорил. */
+  private readonly requireWake: boolean;
+  private readonly convWindowMs: number;
+  private awake = false;
+  private lastSpokeAt = 0;
+  private lastCmd = ""; // анти-дубль: последняя обработанная команда + время
+  private lastCmdAt = 0;
 
   constructor(private readonly deps: VoicePipelineDeps) {
     this.now = deps.now ?? (() => Date.now());
     this.turn = deps.turnDetector ?? new TurnDetector(undefined, DEFAULT_TURN_CONFIG, this.now);
     this.latency = new LatencyTracker(this.now);
     this.followupMs = deps.followupMs ?? FOLLOWUP_WINDOW_MS;
+    this.requireWake = deps.requireWakeWord ?? false;
+    this.convWindowMs = deps.conversationWindowMs ?? 12_000;
     this.log = deps.log ?? createLogger("voice:pipeline");
+  }
+
+  /**
+   * Wake word (§3): вне активного разговора реагируем ТОЛЬКО на обращение «Джарвис».
+   * Возвращает текст команды (без слова «Джарвис»), либо "" если реплика не к нам —
+   * пустую строку редьюсер трактует как «игнор» (агент не будится).
+   */
+  private gateWake(raw: string): string {
+    const t = raw.trim();
+    if (!this.requireWake || t.length === 0) return t;
+    let cmd: string | null = null;
+    if (isWakeAddressed(t)) {
+      this.awake = true;
+      this.lastSpokeAt = this.now();
+      const c = stripWake(t);
+      cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
+    } else if (this.awake && this.now() - this.lastSpokeAt < this.convWindowMs) {
+      // Без обращения — принимаем лишь в окне активного разговора.
+      cmd = t;
+    }
+    if (cmd === null) {
+      this.log.info("реплика без обращения «Джарвис» — игнор", { text: t.slice(0, 50) });
+      return "";
+    }
+    // Анти-дубль: ту же фразу не обрабатываем повторно в коротком окне (спам повторов).
+    if (cmd === this.lastCmd && this.now() - this.lastCmdAt < 6_000) {
+      this.log.info("дубль реплики — игнор", { text: cmd.slice(0, 50) });
+      return "";
+    }
+    this.lastCmd = cmd;
+    this.lastCmdAt = this.now();
+    return cmd;
   }
 
   get state(): VoiceState {
@@ -107,7 +153,10 @@ export class VoicePipeline {
    */
   onAudioFrame(pcm: ArrayBuffer): void {
     if (this.ctx.state === "idle") this.onWake();
-    if (this.sttStream && (this.ctx.state === "listening" || this.ctx.state === "speaking")) {
+    // Кормим STT ТОЛЬКО в listening. Раньше кормили и в speaking → Джарвис
+    // транскрибировал собственный TTS (эхо) → спам повторов/ответов. Barge-in
+    // во время speaking всё равно работает по VAD-событию (speech_start → reducer).
+    if (this.sttStream && this.ctx.state === "listening") {
       this.sttStream.pushAudio(pcm);
     }
   }
@@ -207,7 +256,7 @@ export class VoicePipeline {
       this.turn.onInterim(p.text);
       this.latency.mark("stt_first");
       this.deps.sendTranscript?.({ text: p.text, final: p.final });
-      if (p.final) this.dispatch({ type: "transcript_final", text: p.text });
+      if (p.final) this.dispatch({ type: "transcript_final", text: this.gateWake(p.text) });
     });
     stream.onError((e) => this.log.warn("ошибка STT-стрима", e.message));
     this.sttStream = stream;
@@ -245,6 +294,9 @@ export class VoicePipeline {
   }
 
   private startTts(voiceText: string, myGen: number): void {
+    // Джарвис заговорил → открываем окно активного разговора (продолжение без wake word).
+    this.awake = true;
+    this.lastSpokeAt = this.now();
     const stream = this.deps.tts.synthesize(voiceText, { voiceId: this.deps.ttsVoiceId });
     this.ttsStream = stream;
     let first = true;
@@ -255,7 +307,7 @@ export class VoicePipeline {
         this.latency.mark("tts_first_chunk");
         this.latency.mark("audio"); // первый звук пошёл к клиенту
         this.dispatch({ type: "speak_start" });
-        this.log.debug("latency", this.latency.report());
+        this.log.info("latency (мс от конца фразы)", this.latency.report());
       }
       this.deps.sendSpeakChunk(c);
     });

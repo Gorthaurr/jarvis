@@ -31,13 +31,20 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** Несолиситед-сообщение от сайдкара (без id) — напр. событие записи демонстрации (§8). */
+export type PushHandler = (msg: Record<string, unknown>) => void;
+
 /** Транспорт-независимое ядро RPC: фрейминг + корреляция по id. */
 export class JsonLineRpc {
   private buf = "";
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
 
-  constructor(private readonly send: (line: string) => void) {}
+  constructor(
+    private readonly send: (line: string) => void,
+    /** Обработчик push-строк без id (демо-события, user-takeover). */
+    private readonly onPush?: PushHandler,
+  ) {}
 
   /** Отправить запрос и дождаться ответа (или таймаута). */
   request(op: string, args: Record<string, unknown> = {}, timeoutMs = 5000): Promise<unknown> {
@@ -81,6 +88,11 @@ export class JsonLineRpc {
       log.warn("sidecar: не-JSON строка проигнорирована");
       return;
     }
+    // Push-строка без id (демо-событие, user-takeover) — отдельный канал, не RPC-ответ.
+    if (resp.id === undefined || resp.id === null) {
+      this.onPush?.(resp as unknown as Record<string, unknown>);
+      return;
+    }
     const p = this.pending.get(resp.id);
     if (!p) return;
     clearTimeout(p.timer);
@@ -104,9 +116,15 @@ export class SidecarClient {
   private child: ChildProcess | null = null;
   private rpc: JsonLineRpc | null = null;
   private _ready = false;
+  private pushHandler: PushHandler | null = null;
 
   get ready(): boolean {
     return this._ready;
+  }
+
+  /** Подписаться на push-сообщения сайдкара (демо-события записи навыка, §8). */
+  onPush(cb: PushHandler): void {
+    this.pushHandler = cb;
   }
 
   /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false. */
@@ -114,7 +132,10 @@ export class SidecarClient {
     try {
       const child = spawn(exePath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       this.child = child;
-      this.rpc = new JsonLineRpc((line) => child.stdin?.write(line));
+      this.rpc = new JsonLineRpc(
+        (line) => child.stdin?.write(line),
+        (msg) => this.pushHandler?.(msg),
+      );
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (d: string) => this.rpc?.feed(d));
       child.stderr?.setEncoding("utf8");
@@ -141,6 +162,21 @@ export class SidecarClient {
   request(op: string, args: Record<string, unknown> = {}, timeoutMs = 5000): Promise<unknown> {
     if (!this._ready || !this.rpc) throw new Error("sidecar не готов");
     return this.rpc.request(op, args, timeoutMs);
+  }
+
+  /** Начать запись демонстрации навыка — UIA-хук в сайдкаре (§8). */
+  startDemo(): Promise<unknown> {
+    return this.request("demo.record", { op: "start" }, 5000);
+  }
+
+  /**
+   * Остановить запись — вернуть авторитетный батч пойманных событий (§8).
+   * data: { events: Array<{role,name?,action,ts}> }.
+   */
+  stopDemo(): Promise<{ events?: Array<Record<string, unknown>> }> {
+    return this.request("demo.record", { op: "stop" }, 5000) as Promise<{
+      events?: Array<Record<string, unknown>>;
+    }>;
   }
 
   stop(): void {

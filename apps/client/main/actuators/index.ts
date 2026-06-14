@@ -4,8 +4,13 @@
  * Контракт (§5): на КАЖДЫЙ ActionCommand клиент обязан вернуть ровно один ActionResult,
  * корреляция по commandId (= envelope.id). durationMs обязателен.
  *
- * M0-срез (§17): реально работают app.launch / app.focus / browser.open (через apps.ts).
- * Остальные kind возвращают честный {ok:false, error:{code:"runtime", message:"not implemented (Mx)"}}.
+ * Реализованы: app.launch/focus, browser.open/act/read (apps.ts/browser.ts);
+ * input.type/key/click, ui.ground/invoke, context.read — через нативный win-сайдкар
+ * (sidecar-client, UIAutomation+SendInput); code.run (code-runner); skill.execute
+ * (skill-runner); message.send (userbot); order.place (browser). Ввод/UIA требуют
+ * запущенного сайдкара — если он не поднят, актуатор честно вернёт runtime-ошибку.
+ * НЕ реализованы: screen.capture (M3), demo.record как ActionCommand (M4 — запись
+ * навыка инициируется отдельным путём, не через dispatch).
  */
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";

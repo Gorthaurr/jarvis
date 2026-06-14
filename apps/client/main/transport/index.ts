@@ -40,6 +40,9 @@ import type {
   DevText,
   ClientState,
   VadEvent,
+  DemoEvent,
+  DemoSave,
+  SkillSaved,
 } from "@jarvis/protocol";
 import { backoffMs, createLogger } from "@jarvis/shared";
 
@@ -74,6 +77,8 @@ export interface TransportEvents {
   taskStatus: [TaskStatus];
   display: [DisplayCard];
   protocolError: [ProtocolError];
+  /** навык записан/доступен для повтора (§8). */
+  skillSaved: [SkillSaved];
   /** изменение «связности» для индикатора в UI. */
   link: [{ online: boolean }];
 }
@@ -177,6 +182,11 @@ export class Transport extends EventEmitter {
   /** Управление задачей из UI (§20): кнопка «стоп»/«пауза»/«продолжить» в renderer. */
   sendTaskControl(action: TaskControl["action"], taskId?: string): void {
     this.send(makeEnvelope<TaskControl>("task.control", { action, taskId }));
+  }
+
+  /** Завершить запись демонстрации: отправить батч событий на сервер для сохранения (§8). */
+  sendDemoSave(name: string, events: DemoEvent[], commentary?: string): void {
+    this.send(makeEnvelope<DemoSave>("demo.save", { name, events, commentary }));
   }
 
   // ── соединение ────────────────────────────────────────────────
@@ -323,6 +333,9 @@ export class Transport extends EventEmitter {
         break;
       case "ui.display":
         this.emit("display", env.payload as DisplayCard);
+        break;
+      case "skill.saved":
+        this.emit("skillSaved", env.payload as SkillSaved);
         break;
       case "error": {
         const pe = env.payload as ProtocolError;

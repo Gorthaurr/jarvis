@@ -14,6 +14,7 @@ import type {
   DisplayCard,
   TaskStatus,
   TaskControl,
+  SkillSaved,
 } from "@jarvis/protocol";
 
 /** Имена IPC-каналов. renderer -> main (invoke/send) и main -> renderer (события). */
@@ -25,6 +26,10 @@ export const IPC = {
   pushPcm: "jarvis:pushPcm", // кадр PCM16 из renderer (захват, §3)
   activate: "jarvis:activate", // push-to-talk активация (когда нет wake word, §18)
   mute: "jarvis:mute", // честный mute (§0.6)
+  skillStart: "jarvis:skillStart", // начать запись навыка демонстрацией (§8)
+  skillStop: "jarvis:skillStop", // завершить запись и сохранить навык (§8)
+  skillCancel: "jarvis:skillCancel", // отменить запись без сохранения (§8)
+  skillRun: "jarvis:skillRun", // повторить ранее записанный навык (§8)
   // main -> renderer (push-события)
   state: "jarvis:state", // смена ClientState (орб)
   transcript: "jarvis:transcript",
@@ -36,7 +41,20 @@ export const IPC = {
   display: "jarvis:display", // карточка ui.display (§21)
   taskStatus: "jarvis:taskStatus", // прогресс задачи (§20)
   link: "jarvis:link", // online/offline индикатор связи
+  skillState: "jarvis:skillState", // состояние записи навыка (запись/счётчик, §8)
+  skillSaved: "jarvis:skillSaved", // навык записан/доступен для повтора (§8)
 } as const;
+
+/** Состояние записи навыка демонстрацией — для индикатора в UI (§8). */
+export interface SkillRecState {
+  recording: boolean;
+  /** число пойманных значимых действий. */
+  count: number;
+  /** последнее действие (роль/имя) — для живого фидбэка. */
+  last?: string;
+  /** sidecar недоступен → запись невозможна (UIA-хук не поднять). */
+  unavailable?: boolean;
+}
 
 /** Аудио-чанк TTS для renderer (audio — base64; в проде WebRTC, §5). */
 export interface SpeakChunkPayload {
@@ -75,6 +93,14 @@ export interface JarvisBridge {
   activate(): void;
   /** Честный mute (§0.6). */
   mute(): void;
+  /** Начать запись навыка демонстрацией (§8). */
+  startSkill(name: string): void;
+  /** Завершить запись и сохранить навык (§8). */
+  stopSkill(): void;
+  /** Отменить запись без сохранения (§8). */
+  cancelSkill(): void;
+  /** Повторить ранее записанный навык по id (§8). */
+  runSkill(id: string): void;
   // подписки на события main -> renderer
   onState(cb: (state: ClientState) => void): () => void;
   onTranscript(cb: (t: Transcript) => void): () => void;
@@ -86,4 +112,8 @@ export interface JarvisBridge {
   onDisplay(cb: (c: DisplayCard) => void): () => void;
   onTaskStatus(cb: (s: TaskStatus) => void): () => void;
   onLink(cb: (l: LinkState) => void): () => void;
+  /** Состояние записи навыка (§8). */
+  onSkillState(cb: (s: SkillRecState) => void): () => void;
+  /** Навык записан/доступен для повтора (§8). */
+  onSkillSaved(cb: (s: SkillSaved) => void): () => void;
 }

@@ -22,16 +22,31 @@
         <div class="topbar__right">
           <span id="link" class="link link--off" title="связь с сервером">offline</span>
           <button id="settingsBtn" class="icon-btn" type="button" aria-label="настройки" title="Настройки">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="1.8"/>
-              <path d="M19.4 13a7.8 7.8 0 000-2l1.7-1.3-1.7-3-2 .8a7.7 7.7 0 00-1.7-1l-.3-2.1H10l-.3 2.1a7.7 7.7 0 00-1.7 1l-2-.8-1.7 3L6 11a7.8 7.8 0 000 2l-1.7 1.3 1.7 3 2-.8a7.7 7.7 0 001.7 1l.3 2.1h3.4l.3-2.1a7.7 7.7 0 001.7-1l2 .8 1.7-3L19.4 13z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+              <line x1="4" y1="7" x2="6" y2="7"/><line x1="11" y1="7" x2="20" y2="7"/><circle cx="8.5" cy="7" r="2"/>
+              <line x1="4" y1="12" x2="13" y2="12"/><line x1="18" y1="12" x2="20" y2="12"/><circle cx="15.5" cy="12" r="2"/>
+              <line x1="4" y1="17" x2="6" y2="17"/><line x1="11" y1="17" x2="20" y2="17"/><circle cx="8.5" cy="17" r="2"/>
             </svg>
           </button>
         </div>
       </header>
 
-      <!-- ── Ambient-экран: диалог + тонкий статус снизу (без сферы) ── -->
+      <!-- ── Ambient-экран: центральный индикатор + диалог + статус снизу ── -->
       <main class="stage">
+        <!-- Центральный ПАССИВНЫЙ индикатор состояния (геометрия Amnezia ConnectButton).
+             Это визуализация слушаю/думаю/говорю, НЕ кнопка: pointer-events:none, без клика. -->
+        <div id="hero" class="hero hero--listening" aria-hidden="true">
+          <div class="hero__viz">
+            <svg class="hero__rings" viewBox="0 0 190 190" aria-hidden="true">
+              <circle class="hero__ring" cx="95" cy="95" r="93" />
+              <circle class="hero__arc" cx="95" cy="95" r="93" />
+            </svg>
+            <span id="heroLabel" class="hero__label">Слушаю</span>
+          </div>
+          <!-- Живая шкала голоса: колебания того, что говорит пользователь -->
+          <canvas id="wave" class="hero__wave" aria-hidden="true"></canvas>
+        </div>
+
         <!-- Реплики Джарвиса (ui.display, §21) -->
         <section id="cards" class="cards" aria-label="диалог"></section>
 
@@ -53,8 +68,8 @@
           </div>
         </section>
 
-        <!-- Тонкий статус снизу: состояние + что услышал -->
-        <div class="statusbar">
+        <!-- Тонкий статус снизу: состояние + что услышал (id обязателен — renderer.ts $("statusbar")) -->
+        <div id="statusbar" class="statusbar statusbar--listening">
           <span class="statusbar__dot"></span>
           <span id="stateLabel" class="statusbar__text">слушаю</span>
           <span id="transcript" class="statusbar__heard"></span>
@@ -74,6 +89,55 @@
       </header>
 
       <div class="settings__body">
+        <!-- Навыки: обучение демонстрацией (§8) -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Навыки</h3>
+          <p class="setgroup__hint">Покажите Джарвису задачу один раз — он запомнит и повторит сам.</p>
+          <button id="makeSkillBtn" class="btn btn--accent btn--wide" type="button">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.8"/>
+              <circle cx="12" cy="12" r="3" fill="currentColor"/>
+            </svg>
+            Сделать скилл
+          </button>
+          <ul id="skillList" class="skill-list" aria-label="записанные навыки">
+            <li class="skill-list__empty">Пока нет записанных навыков.</li>
+          </ul>
+        </section>
+
+        <!-- Оплата / подписка -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Оплата</h3>
+          <div class="plan">
+            <div class="plan__row">
+              <span class="plan__label">Тариф</span>
+              <span id="planName" class="plan__value">Pro</span>
+            </div>
+            <div class="plan__row">
+              <span class="plan__label">Баланс</span>
+              <span id="planBalance" class="plan__value">—</span>
+            </div>
+          </div>
+          <button id="manageBillingBtn" class="btn btn--ghost btn--wide" type="button">Управление подпиской</button>
+        </section>
+
+        <!-- Выбор языка -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Язык</h3>
+          <p class="setgroup__hint">Язык распознавания речи и ответов Джарвиса.</p>
+          <select id="langSelect" class="select-input" aria-label="язык">
+            <option value="ru">Русский</option>
+            <option value="en">English</option>
+          </select>
+        </section>
+
+        <!-- Контекст о пользователе -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Контекст</h3>
+          <p class="setgroup__hint">Что Джарвису знать о вас — стиль, привычки, как обращаться.</p>
+          <textarea id="contextInput" class="text-area" rows="4" placeholder="напр. «Зовут Антон. Обращаться на ты. Зал пн/ср/пт.»"></textarea>
+        </section>
+
         <!-- API-ключи -->
         <section class="setgroup">
           <h3 class="setgroup__title">API-ключи</h3>
@@ -88,7 +152,7 @@
           </div>
           <div class="field">
             <label class="field__label" for="keyDeepgram">Deepgram — распознавание речи</label>
-            <input id="keyDeepgram" class="text-input" type="password" placeholder="нужен, чтобы говорить" />
+            <input id="keyDeepgram" class="text-input" type="password" placeholder="резерв STT" />
           </div>
         </section>
 
@@ -102,33 +166,6 @@
               <span class="device__tag">desktop</span>
             </li>
           </ul>
-        </section>
-
-        <!-- Контекст о пользователе -->
-        <section class="setgroup">
-          <h3 class="setgroup__title">Контекст</h3>
-          <p class="setgroup__hint">Что Джарвису знать о вас — стиль, привычки, как обращаться.</p>
-          <textarea id="contextInput" class="text-area" rows="4" placeholder="напр. «Зовут Антон. Обращаться на ты. Зал пн/ср/пт.»"></textarea>
-        </section>
-
-        <!-- Dev: текстовая команда (пока нет STT) -->
-        <section class="setgroup">
-          <h3 class="setgroup__title">Тест командой <span class="setgroup__dev">dev</span></h3>
-          <p class="setgroup__hint">Пока не подключён STT — можно проверить мозг текстом.</p>
-          <form id="inputForm" class="composer" autocomplete="off">
-            <input
-              id="textInput"
-              class="text-input"
-              type="text"
-              placeholder="напр. «открой блокнот»"
-              aria-label="ввод команды"
-            />
-            <button id="sendBtn" class="send-btn" type="submit" aria-label="отправить">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-                <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </button>
-          </form>
         </section>
       </div>
 
@@ -158,6 +195,39 @@
           <button id="denyBtn" class="btn btn--deny" type="button">Отклонить</button>
           <button id="reviseBtn" class="btn btn--ghost" type="button">Переписать</button>
           <button id="approveBtn" class="btn btn--ok" type="button">Подтвердить</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Запись навыка демонстрацией (§8) ── -->
+    <div id="skillOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">
+      <div class="modal">
+        <div class="modal__head">
+          <span class="modal__kind">навык</span>
+          <h3 class="modal__title">Сделать скилл</h3>
+        </div>
+
+        <!-- Шаг 1: имя + старт -->
+        <div id="skillSetup">
+          <p class="modal__summary">Назовите навык и нажмите «Начать». Затем покажите задачу — кликайте по кнопкам и полям как обычно. Джарвис запомнит действия.</p>
+          <div class="field">
+            <label class="field__label" for="skillName">Название навыка</label>
+            <input id="skillName" class="text-input" type="text" placeholder="напр. «Открыть отчёт за месяц»" aria-label="название навыка" />
+          </div>
+        </div>
+
+        <!-- Шаг 2: идёт запись -->
+        <div id="skillRecording" class="skill-rec overlay--hidden">
+          <div class="skill-rec__pulse"><span class="skill-rec__dot"></span> Идёт запись</div>
+          <div class="skill-rec__count">Поймано действий: <strong id="skillCount">0</strong></div>
+          <div id="skillLast" class="skill-rec__last"></div>
+          <p class="modal__summary skill-rec__hint">Покажите всё по шагам. Когда закончите — нажмите «Готово».</p>
+        </div>
+
+        <div class="modal__actions">
+          <button id="skillCancelBtn" class="btn btn--deny" type="button">Отмена</button>
+          <button id="skillStartBtn" class="btn btn--ok" type="button">Начать</button>
+          <button id="skillDoneBtn" class="btn btn--accent overlay--hidden" type="button">Готово</button>
         </div>
       </div>
     </div>

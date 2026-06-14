@@ -8,7 +8,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 import { IPC } from "../main/ipc-contract.js";
-import type { JarvisBridge, ConfirmResultPayload, SpeakChunkPayload } from "../main/ipc-contract.js";
+import type {
+  JarvisBridge,
+  ConfirmResultPayload,
+  SpeakChunkPayload,
+  SkillRecState,
+} from "../main/ipc-contract.js";
+import type { SkillSaved } from "@jarvis/protocol";
 
 /** Обёртка подписки: возвращает функцию-отписку, чистит листенер. */
 function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
@@ -26,6 +32,10 @@ const api: JarvisBridge = {
   pushPcm: (pcm: ArrayBuffer) => ipcRenderer.send(IPC.pushPcm, pcm),
   activate: () => ipcRenderer.send(IPC.activate),
   mute: () => ipcRenderer.send(IPC.mute),
+  startSkill: (name: string) => ipcRenderer.send(IPC.skillStart, name),
+  stopSkill: () => ipcRenderer.send(IPC.skillStop),
+  cancelSkill: () => ipcRenderer.send(IPC.skillCancel),
+  runSkill: (id: string) => ipcRenderer.send(IPC.skillRun, id),
 
   onState: (cb) => subscribe(IPC.state, cb),
   onTranscript: (cb) => subscribe(IPC.transcript, cb),
@@ -37,6 +47,8 @@ const api: JarvisBridge = {
   onDisplay: (cb) => subscribe(IPC.display, cb),
   onTaskStatus: (cb) => subscribe(IPC.taskStatus, cb),
   onLink: (cb) => subscribe(IPC.link, cb),
+  onSkillState: (cb) => subscribe<SkillRecState>(IPC.skillState, cb),
+  onSkillSaved: (cb) => subscribe<SkillSaved>(IPC.skillSaved, cb),
 };
 
 contextBridge.exposeInMainWorld("jarvis", api);

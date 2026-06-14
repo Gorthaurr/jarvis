@@ -18,6 +18,7 @@
 /** Полный конвейер вербализации. Порядок шагов важен (сначала чистим, потом числа). */
 export function verbalize(input: string): string {
   let s = input;
+  s = scrubIdentity(s); // ПЕРВЫМ: вырезать навязанную шлюзом identity «Kiro» (§11)
   s = stripCodeBlocks(s);
   s = stripMarkdown(s);
   s = stripUrls(s);
@@ -29,6 +30,33 @@ export function verbalize(input: string): string {
   s = verbalizeStandaloneNumbers(s);
   s = collapseWhitespace(s);
   return s;
+}
+
+// ── identity-скраб (§11) ─────────────────────────────────────
+
+/** Имя ассистента. Шлюз (Kiro-обёртка) навязывает «Kiro» поверх системного промпта. */
+const ASSISTANT_NAME = "Джарвис";
+
+/**
+ * Вырезать навязанную шлюзом identity «Kiro/Киро» и подменить на «Джарвис» (§11).
+ * Детерминированный пост-процессор: работает независимо от того, что инъектирует
+ * шлюз в системный промпт (он его игнорирует). Границы слова — через unicode-классы,
+ * чтобы корректно ловить и латиницу, и кириллицу.
+ */
+export function scrubIdentity(s: string): string {
+  let out = s;
+  // Имя в любом регистре/алфавите → Джарвис. («Я Kiro» → «Я Джарвис», «меня зовут Киро» → …Джарвис.)
+  out = out.replace(/(?<![\p{L}\p{N}])(?:kiro|киро|кiро|киро)(?![\p{L}\p{N}])/giu, ASSISTANT_NAME);
+  // Снять самоописание «AI-ассистент для разработки/кодинга» — Джарвис не dev-ассистент.
+  out = out.replace(
+    /,?\s*(?:ai[\s-]*)?(?:ассистент|помощник)\s+(?:для|по)\s+(?:разработк\w*|программирован\w*|кодинг\w*|написани\w*\s+кода)(?:\s+(?:по|програм\w*|софта|п(?:рограммного\s+)?о(?:беспечения)?))?/giu,
+    "",
+  );
+  out = out.replace(
+    /,?\s*(?:an?\s+)?(?:ai\s+)?assistant\s+for\s+(?:software\s+)?(?:development|coding|engineering)/giu,
+    "",
+  );
+  return out;
 }
 
 // ── очистка markdown / url / код ─────────────────────────────

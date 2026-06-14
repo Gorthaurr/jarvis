@@ -25,6 +25,7 @@ import type { EpisodicMemory } from "../../memory/episodic.js";
 import type { WorkingMemory } from "../../memory/working.js";
 import type { SpendGuard } from "../../billing/index.js";
 import { type UserContextSlot, buildSystemPrompt } from "../persona/index.js";
+import { setDisplayName } from "../profile.js";
 import { type LocalIntent, classifyTier } from "../router/index.js";
 import { dispatchTool } from "../tools/dispatch.js";
 import { verbalize } from "../verbalize/index.js";
@@ -67,6 +68,16 @@ export interface AgentDeps {
 /** Инструменты, не предлагаемые модели в диалоге (инициируются иначе). */
 const EXCLUDED_TOOLS = new Set(["skill_execute", "demo_record"]);
 
+/** «Зови меня X / меня зовут X / обращайся ко мне X» → имя (детерминированно, без LLM). */
+const NAME_RE =
+  /(?:обращайся ко мне|зови меня|называй меня|меня зовут|мо[её] имя)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё-]{1,19})/iu;
+function extractName(text: string): string | null {
+  const m = NAME_RE.exec(text);
+  if (!m?.[1]) return null;
+  const raw = m[1].replace(/[.!?,]+$/u, "");
+  return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+}
+
 export async function handleUserText(
   session: Session,
   text: string,
@@ -74,6 +85,25 @@ export async function handleUserText(
 ): Promise<AgentReply> {
   const clean = text.trim();
   deps.memory.pushTurn("user", clean);
+
+  // Память (§8/§11): пользователь представился → запоминаем имя НАВСЕГДА (профиль на диске),
+  // подставляем в персону текущей сессии. Больше не спрашиваем при каждом запуске.
+  const name = extractName(clean);
+  if (name) {
+    void setDisplayName(name);
+    if (deps.userContext) deps.userContext.displayName = name;
+    else deps.userContext = { displayName: name };
+    const reply: AgentReply = { voice: verbalize(`Запомнил, ${name}. Рад знакомству.`) };
+    deps.memory.pushTurn("assistant", reply.voice);
+    return reply;
+  }
+
+  // Фоновая запись реплики в эпизодическую память (контекст будущих сессий, §8).
+  if (clean.length > 3) {
+    void deps.episodic
+      .write({ userId: deps.userId, kind: "event", text: clean, ts: Date.now() })
+      .catch(() => undefined);
+  }
 
   const decision = classifyTier(clean);
   log.info("маршрутизация", { tier: decision.tier, reason: decision.reason });

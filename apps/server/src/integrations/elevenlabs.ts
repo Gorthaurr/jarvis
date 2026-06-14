@@ -23,7 +23,9 @@ export interface ElevenLabsConfig {
   modelId?: string;
 }
 
-const DEFAULT_MODEL = "eleven_multilingual_v2";
+// turbo_v2_5 — заметно быстрее multilingual_v2 при близком качестве, поддерживает русский
+// (меньше задержка синтеза). Переопределяется ELEVENLABS_MODEL (напр. вернуть multilingual_v2).
+const DEFAULT_MODEL = process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5";
 
 /** Поток TTS поверх HTTP: один запрос → полный mp3 → один чанк (last=true). */
 class ElevenLabsHttpStream implements TtsStream {
@@ -58,8 +60,9 @@ class ElevenLabsHttpStream implements TtsStream {
         body: JSON.stringify({
           text,
           model_id: model,
-          // Размеренная подача (манера Джарвиса), §21.
-          voice_settings: { stability: 0.6, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true },
+          // Размеренная, но ЖИВАЯ подача (манера Джарвиса): чуть ниже stability +
+          // немного style — меньше «робота», больше человеческой интонации (§21).
+          voice_settings: { stability: 0.5, similarity_boost: 0.85, style: 0.2, use_speaker_boost: true },
         }),
       });
       if (!resp.ok) {

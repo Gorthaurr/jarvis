@@ -271,6 +271,26 @@ export async function getSkill(userId: string, id: string): Promise<SkillRecord 
   };
 }
 
+/** Список всех навыков пользователя (для проброса в UI на старте сессии, §8). */
+export async function listSkills(userId: string): Promise<SkillRecord[]> {
+  const res = await query(
+    `select id, user_id, version, content_md, steps, fail_count,
+            extract(epoch from updated_at) * 1000 as updated_at
+       from skills where user_id = $1 order by updated_at desc`,
+    [userId],
+  );
+  if (!res) return [];
+  return res.rows.map((row) => ({
+    id: String(row.id),
+    userId: String(row.user_id),
+    version: Number(row.version),
+    contentMd: String(row.content_md),
+    steps: (row.steps as SkillStep[]) ?? [],
+    failCount: Number(row.fail_count),
+    updatedAt: Number(row.updated_at),
+  }));
+}
+
 /** Удалить навык. Возвращает true, если запрос ушёл в БД. */
 export async function deleteSkill(userId: string, id: string): Promise<boolean> {
   const res = await query(`delete from skills where user_id = $1 and id = $2`, [userId, id]);

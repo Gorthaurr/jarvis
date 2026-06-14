@@ -26,6 +26,9 @@ import { SpendGuard } from "../billing/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { TaskManager } from "../brain/tasks/manager.js";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
+import { HybridLlmProvider } from "../integrations/hybrid.js";
+import { OllamaLlmProvider } from "../integrations/ollama.js";
+import { getProfile, loadProfile } from "../brain/profile.js";
 import {
   CachingEmbeddingProvider,
   HashEmbeddingProvider,
@@ -44,6 +47,7 @@ import {
   type VoiceProviders,
   dispatch,
   makeSessionContext,
+  pushSavedSkills,
 } from "./router-ws.js";
 import type { Session, SessionSocket } from "./session.js";
 
@@ -91,12 +95,20 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     : new HashEmbeddingProvider();
   const embedder = new CachingEmbeddingProvider(baseEmbedder);
   const web = new CachingWebProvider(new WebProvider(config.braveApiKey));
+  // §7 гибрид: основной Opus (Anthropic/шлюз) + резерв локальная Ollama (qwen2.5).
+  // Circuit breaker авто-переключает на Ollama, когда шлюз/ключ недоступен, и обратно
+  // на Opus при восстановлении. Так Джарвис отвечает даже при лежащем шлюзе.
+  const anthropicLlm = new AnthropicLlmProvider({
+    apiKey: config.anthropicApiKey,
+    cacheTtl: config.anthropicCacheTtl,
+    baseUrl: config.anthropicBaseUrl,
+  });
+  const ollamaLlm = new OllamaLlmProvider({});
+  const hybridLlm = new HybridLlmProvider(anthropicLlm, ollamaLlm);
+  // Стартовая проба: если основной лёг — заранее открыть брейкер (первая реплика сразу в Ollama).
+  void hybridLlm.probePrimary(config.models.haiku);
   const brain: BrainProviders = {
-    llm: new AnthropicLlmProvider({
-      apiKey: config.anthropicApiKey,
-      cacheTtl: config.anthropicCacheTtl,
-      baseUrl: config.anthropicBaseUrl,
-    }),
+    llm: hybridLlm,
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
     web,
     spend: new SpendGuard({ spendCap: config.defaultSpendCap }),
@@ -132,6 +144,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     app,
     registry,
     async listen() {
+      await loadProfile(); // §8/§11: помним имя/факты пользователя между запусками
       await app.listen({ port: config.port, host: config.host });
       log.info("gateway слушает", { host: config.host, port: config.port });
     },
@@ -279,6 +292,9 @@ function doHandshake(
   log.info("handshake завершён", { sessionId: session.sessionId, resumed });
   const ctx = makeSessionContext(session, heartbeat, providers, brain);
 
+  // §8: пробрасываем ранее записанные навыки в UI (список «Навыки» + возможность повтора).
+  pushSavedSkills(ctx);
+
   // Онбординг (§11): на свежую (не возобновлённую) сессию Джарвис здоровается
   // голосом и спрашивает, как обращаться. На resume — молчит (уже знакомы).
   if (!resumed) startOnboarding(ctx, session, log);
@@ -286,16 +302,21 @@ function doHandshake(
   return ctx;
 }
 
-/** Приветствие Джарвиса при запуске (§11). */
-const GREETING = "Добрый день, сэр. Джарвис к вашим услугам. Как мне к вам обращаться?";
+/** Приветствие (§11): по имени, если знаем (профиль), иначе спрашиваем как обращаться. */
+function greeting(): string {
+  const name = getProfile().displayName;
+  return name
+    ? `Добрый день, ${name}. Джарвис к вашим услугам.`
+    : "Добрый день, сэр. Джарвис к вашим услугам. Как мне к вам обращаться?";
+}
 
 function startOnboarding(ctx: SessionContext, session: Session, log: Logger): void {
   // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.
   const t = setTimeout(() => {
     try {
-      session.send("transcript", { text: GREETING, final: true });
-      session.send("ui.display", { title: "Джарвис", markdown: GREETING });
-      ctx.voice.speak(GREETING);
+      // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript —
+      // иначе на каждое переподключение копится карточка-спам (НЕ чат-бот, §концепт).
+      ctx.voice.speak(greeting());
       log.info("онбординг: приветствие произнесено");
     } catch (e) {
       log.warn("онбординг не удался", e instanceof Error ? e.message : String(e));

@@ -98,13 +98,30 @@ class DeepgramSttStream implements SttStream {
       this.ws = new WS(buildDeepgramUrl(opts), ["token", apiKey]);
       this.ws.addEventListener("open", () => {
         this.open = true;
+        log.info("deepgram WS открыт — STT в облаке (расход баланса идёт отсюда)");
         for (const f of this.queue) this.ws?.send(f);
         this.queue = [];
       });
       this.ws.addEventListener("message", (ev) => {
         const data = typeof ev.data === "string" ? ev.data : ev.message;
+        // ДИАГНОСТИКА: что реально шлёт deepgram (тип, текст, финал/ошибка).
+        try {
+          const j = JSON.parse(typeof data === "string" ? data : String(data)) as Record<string, unknown>;
+          const ch = j.channel as { alternatives?: Array<{ transcript?: string }> } | undefined;
+          log.info("deepgram msg", {
+            type: j.type,
+            transcript: ch?.alternatives?.[0]?.transcript ?? "",
+            is_final: j.is_final,
+            err: (j.error ?? j.reason ?? j.description) as unknown,
+          });
+        } catch {
+          /* не-JSON кадр */
+        }
         const p = parseDeepgramMessage(data);
-        if (p) this.partialCb?.(p);
+        if (p) {
+          if (p.final) log.info("deepgram транскрипт (финал)", { text: p.text });
+          this.partialCb?.(p);
+        }
       });
       this.ws.addEventListener("error", () => this.errorCb?.(new Error("deepgram ws error")));
       this.ws.addEventListener("close", () => {

@@ -13,10 +13,10 @@
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
  */
-import { app, BrowserWindow, Menu, ipcMain } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, session } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
-import type { ClientState, TaskControl } from "@jarvis/protocol";
+import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep } from "@jarvis/protocol";
 
 import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
@@ -24,8 +24,10 @@ import { dispatch } from "./actuators/index.js";
 import * as tier0 from "./tier0/index.js";
 import { AudioCoordinator } from "./audio/index.js";
 import { sidecar } from "./actuators/sidecar-client.js";
+import { runSkill } from "./skill-runner/index.js";
+import { createClientActuator } from "./skill-runner/client-actuator.js";
 import { IPC } from "./ipc-contract.js";
-import type { ConfirmResultPayload } from "./ipc-contract.js";
+import type { ConfirmResultPayload, SkillRecState } from "./ipc-contract.js";
 
 const log = createLogger("main");
 
@@ -40,6 +42,19 @@ let win: BrowserWindow | null = null;
 let transport: Transport | null = null;
 let audio: AudioCoordinator | null = null;
 let audioSeq = 0;
+/** Текущее состояние связи — чтобы переслать его, когда renderer догрузится (race-fix). */
+let linkOnline = false;
+
+// ── запись/повтор навыков демонстрацией (§8) ───────────────────
+/** Активная сессия записи навыка: имя + накопленные UIA-события из sidecar-хука. */
+let skillRec: { name: string; events: DemoEvent[] } | null = null;
+/** Реестр доступных навыков (id → шаги/версия/имя) — для повтора без сервера. */
+const skillRegistry = new Map<string, { name: string; version: number; steps: SkillStep[] }>();
+
+/** Прокинуть состояние записи навыка в renderer (§8). */
+function sendSkillState(s: SkillRecState): void {
+  win?.webContents.send(IPC.skillState, s);
+}
 
 /** Конфиг подключения из env (см. .env.example). На M0 — дефолты localhost:8787. */
 function transportConfig() {
@@ -61,6 +76,15 @@ function createWindow(): void {
   // Убрать дефолтное меню Electron (File/Edit/View/…) — обычное десктоп-приложение.
   Menu.setApplicationMenu(null);
 
+  // §3 КРИТИЧНО для слуха: Electron по умолчанию ОТКЛОНЯЕТ запрос media от renderer,
+  // из-за чего getUserMedia падал (ошибка глоталась) и Джарвис «не слышал». Явно
+  // разрешаем аудио-захват. (OS-уровень Windows: Параметры → Конфиденциальность →
+  // Микрофон → разрешить классическим приложениям — должно быть включено.)
+  const allowMic = (p: string): boolean =>
+    p === "media" || p === "audioCapture" || p === "microphone";
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(allowMic(permission)));
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => allowMic(permission));
+
   win = new BrowserWindow({
     width: 420,
     height: 640,
@@ -81,6 +105,20 @@ function createWindow(): void {
   win.loadFile(join(__dirname, "../renderer/index.html"));
   win.on("closed", () => {
     win = null;
+  });
+
+  // Диагностика: проброс консоли рендерера в лог main (иначе ошибки/логи renderer
+  // не видны нигде). Сигнатура console-message менялась между версиями Electron —
+  // вытаскиваем message устойчиво. Уровни warn/error помечаем.
+  win.webContents.on("console-message", (...a: unknown[]) => {
+    const msg = a.find((x): x is string => typeof x === "string") ?? (a[0] as { message?: string })?.message;
+    if (msg) log.info(`[renderer] ${String(msg).slice(0, 400)}`);
+  });
+
+  // Race-fix: renderer подписывается на события только после загрузки. Состояние связи
+  // могло прийти раньше (потеряно) — пересылаем актуальное, когда DOM/скрипт готовы.
+  win.webContents.on("did-finish-load", () => {
+    win?.webContents.send(IPC.link, { online: linkOnline });
   });
 
   // DevTools НЕ открываем автоматически. Только по явному флагу JARVIS_DEVTOOLS=1.
@@ -112,17 +150,29 @@ function startTransport(): void {
 
   transport.on("connected", (hello) => {
     log.info(`подключено к серверу: session=${hello.sessionId}`);
+    linkOnline = true;
     win?.webContents.send(IPC.link, { online: true });
     setState("idle");
   });
-  transport.on("link", (l) => win?.webContents.send(IPC.link, l));
-  transport.on("disconnected", () => win?.webContents.send(IPC.link, { online: false }));
+  transport.on("link", (l) => {
+    linkOnline = l.online;
+    win?.webContents.send(IPC.link, l);
+  });
+  transport.on("disconnected", () => {
+    linkOnline = false;
+    win?.webContents.send(IPC.link, { online: false });
+  });
 
   transport.on("transcript", (t) => win?.webContents.send(IPC.transcript, t));
   transport.on("nudge", (n) => win?.webContents.send(IPC.nudge, n));
   transport.on("confirmRequest", (r) => win?.webContents.send(IPC.confirmRequest, r));
   transport.on("display", (c) => win?.webContents.send(IPC.display, c));
   transport.on("taskStatus", (s) => win?.webContents.send(IPC.taskStatus, s));
+  // Навык записан/прислан сервером (§8): кладём в реестр для повтора + показываем в UI.
+  transport.on("skillSaved", (s: SkillSaved) => {
+    skillRegistry.set(s.id, { name: s.name, version: s.version, steps: s.steps });
+    win?.webContents.send(IPC.skillSaved, s);
+  });
   transport.on("protocolError", (e) => {
     // version_mismatch -> «требуется обновление»: показываем карточкой в renderer (§5).
     win?.webContents.send(IPC.display, {
@@ -182,6 +232,100 @@ async function handleSubmitText(text: string): Promise<void> {
   }
 }
 
+// ── запись навыка демонстрацией (§8) ───────────────────────────
+
+/** Начать запись: поднять UIA-хук в sidecar; копить события до «Готово». */
+async function startSkillRecording(name: string): Promise<void> {
+  const sc = sidecar();
+  if (!sc.ready) {
+    log.warn("запись навыка невозможна — sidecar не готов");
+    sendSkillState({ recording: false, count: 0, unavailable: true });
+    return;
+  }
+  try {
+    await sc.startDemo();
+    skillRec = { name: name.trim() || "Навык", events: [] };
+    log.info(`запись навыка начата: «${skillRec.name}»`);
+    sendSkillState({ recording: true, count: 0 });
+  } catch (e) {
+    log.warn(`не удалось начать запись навыка: ${e instanceof Error ? e.message : String(e)}`);
+    sendSkillState({ recording: false, count: 0, unavailable: true });
+  }
+}
+
+/** Завершить запись: забрать авторитетный батч из sidecar и отправить на сервер (§8). */
+async function stopSkillRecording(): Promise<void> {
+  const rec = skillRec;
+  skillRec = null;
+  if (!rec) return;
+  let events = rec.events;
+  try {
+    const res = await sidecar().stopDemo();
+    if (Array.isArray(res?.events) && res.events.length > 0) {
+      events = res.events.map((e) => ({
+        role: String(e.role ?? ""),
+        name: e.name ? String(e.name) : undefined,
+        action: String(e.action ?? "invoke"),
+        ts: Number(e.ts ?? 0),
+      }));
+    }
+  } catch (e) {
+    log.warn(`stopDemo вернул ошибку, используем накопленный поток: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  sendSkillState({ recording: false, count: events.length });
+  if (events.length === 0) {
+    win?.webContents.send(IPC.display, {
+      title: "Навык не записан",
+      markdown: "Я не уловил действий. Попробуйте показать ещё раз — кликайте по элементам, а не по пустому месту.",
+    });
+    return;
+  }
+  log.info(`запись навыка «${rec.name}» завершена: ${events.length} событий → на сервер`);
+  transport?.sendDemoSave(rec.name, events);
+}
+
+/** Отменить запись без сохранения (§8). */
+async function cancelSkillRecording(): Promise<void> {
+  skillRec = null;
+  try {
+    await sidecar().stopDemo();
+  } catch {
+    /* sidecar мог не записывать — игнор */
+  }
+  sendSkillState({ recording: false, count: 0 });
+  log.info("запись навыка отменена");
+}
+
+/** Повторить ранее записанный навык по id — локальный skill-runner поверх sidecar (§8). */
+async function runSavedSkill(id: string): Promise<void> {
+  const skill = skillRegistry.get(id);
+  if (!skill) {
+    log.warn(`повтор навыка ${id}: нет в реестре`);
+    win?.webContents.send(IPC.display, { title: "Навык не найден", markdown: `Навык «${id}» не записан в этой сессии.` });
+    return;
+  }
+  log.info(`повтор навыка «${skill.name}» (${id}): ${skill.steps.length} шагов`);
+  win?.webContents.send(IPC.display, { title: `Повторяю: ${skill.name}`, markdown: `${skill.steps.length} шагов…` });
+  setState("thinking");
+  try {
+    const outcome = await runSkill({
+      skillId: id,
+      version: skill.version,
+      steps: skill.steps,
+      cancel: { cancelled: false },
+      actuator: createClientActuator(),
+    });
+    win?.webContents.send(IPC.display, {
+      title: outcome.ok ? `Готово: ${skill.name}` : `Сбой: ${skill.name}`,
+      markdown: outcome.ok ? "Навык выполнен." : `Не получилось: ${outcome.message ?? "ошибка"}.`,
+    });
+  } catch (e) {
+    log.error(`повтор навыка упал: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    setState("idle");
+  }
+}
+
 /** Регистрация IPC-обработчиков renderer -> main. */
 function registerIpc(): void {
   ipcMain.on(IPC.submitText, (_e, text: string) => void handleSubmitText(text));
@@ -196,6 +340,11 @@ function registerIpc(): void {
   ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));
   ipcMain.on(IPC.activate, () => audio?.activate());
   ipcMain.on(IPC.mute, () => audio?.mute());
+  // Запись/повтор навыков демонстрацией (§8).
+  ipcMain.on(IPC.skillStart, (_e, name: string) => void startSkillRecording(name));
+  ipcMain.on(IPC.skillStop, () => void stopSkillRecording());
+  ipcMain.on(IPC.skillCancel, () => void cancelSkillRecording());
+  ipcMain.on(IPC.skillRun, (_e, id: string) => void runSavedSkill(id));
 }
 
 // ── жизненный цикл приложения ──────────────────────────────────
@@ -208,8 +357,28 @@ function startSidecar(): void {
     join(__dirname, "../../../sidecar-win/bin/Release/net8.0-windows/win-x64/publish/SidecarWin.exe"),
   ];
   const exe = candidates.find((p) => p && existsSync(p));
-  if (exe) sidecar().start(exe);
-  else log.warn("win-сайдкар не найден — UIA-актуаторы недоступны (соберите apps/sidecar-win)");
+  if (exe) {
+    const sc = sidecar();
+    // Push из sidecar: живые UIA-события записи навыка (§8) — копим и обновляем счётчик в UI.
+    sc.onPush((msg) => {
+      if (msg.event !== "demo" || !skillRec) return;
+      const ev: DemoEvent = {
+        role: String(msg.role ?? ""),
+        name: msg.name ? String(msg.name) : undefined,
+        action: String(msg.action ?? "invoke"),
+        ts: Number(msg.ts ?? 0),
+      };
+      skillRec.events.push(ev);
+      sendSkillState({
+        recording: true,
+        count: skillRec.events.length,
+        last: ev.name ? `${ev.role}: ${ev.name}` : ev.role,
+      });
+    });
+    sc.start(exe);
+  } else {
+    log.warn("win-сайдкар не найден — UIA-актуаторы и запись навыков недоступны (соберите apps/sidecar-win)");
+  }
 }
 
 app.whenReady().then(() => {

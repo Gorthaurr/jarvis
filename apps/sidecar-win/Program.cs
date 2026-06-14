@@ -20,6 +20,13 @@ Log("Запуск. Ожидание запросов на stdin...");
 using UiaGrounder grounder = new();
 JsonSerializerOptions jsonOpts = ArgsHelper.Options;
 
+// stdout — единственный канал и для RPC-ответов, и для push демо-событий (с другого
+// потока, §8). Любая запись в Console.Out идёт под этим локом, иначе строки слипнутся.
+object stdoutLock = new();
+
+// Рекордер обучения демонстрацией (§8) — создаётся лениво по demo.record start.
+DemoRecorder? recorder = null;
+
 // -----------------------------------------------------------------------
 // Главный цикл: каждая строка stdin — один IpcRequest
 // -----------------------------------------------------------------------
@@ -79,6 +86,9 @@ async Task HandleRequestAsync(IpcRequest req)
 
             // §6 — арбитраж ввода / user-takeover
             "raw-input.subscribe" => HandleRawInputSubscribe(req),
+
+            // §8 — обучение демонстрацией: запись/останов глобального UIA-хука
+            "demo.record" => HandleDemoRecord(req),
 
             _ => throw new InvalidOperationException($"Неизвестная операция: {req.Op}"),
         };
@@ -177,6 +187,37 @@ object? HandleReadWindow(IpcRequest req)
     return result;
 }
 
+// "demo.record" — старт/стоп записи демонстрации навыка (§8)
+object? HandleDemoRecord(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<DemoRecordArgs>(req.Args);
+    string op = (args.Op ?? "").ToLowerInvariant();
+
+    if (op == "start")
+    {
+        recorder ??= new DemoRecorder(PushDemoEvent, Log);
+        recorder.Start();
+        return new { success = true, recording = true };
+    }
+
+    if (op == "stop")
+    {
+        if (recorder is null) return new DemoStopResult(Array.Empty<DemoEventDto>());
+        IReadOnlyList<DemoEventDto> events = recorder.Stop();
+        return new DemoStopResult(events);
+    }
+
+    throw new InvalidOperationException($"demo.record: неизвестный op '{args.Op}'");
+}
+
+// Push демо-события в stdout (без id — отдельный канал, читается клиентом как onPush).
+void PushDemoEvent(DemoEventDto e)
+{
+    var push = new DemoEventPush("demo", e.Role, e.Name, e.Action, e.Ts);
+    string json = JsonSerializer.Serialize(push, jsonOpts);
+    lock (stdoutLock) { Console.WriteLine(json); }
+}
+
 // "raw-input.subscribe" — арбитраж ввода / user-takeover (§6) — скелет
 object? HandleRawInputSubscribe(IpcRequest req)
 {
@@ -204,11 +245,11 @@ object? HandleRawInputSubscribe(IpcRequest req)
 void WriteOk(string id, object? data)
 {
     string json = JsonSerializer.Serialize(new IpcOkResponse(id, true, data), jsonOpts);
-    Console.WriteLine(json);
+    lock (stdoutLock) { Console.WriteLine(json); }
 }
 
 void WriteError(string id, string error)
 {
     string json = JsonSerializer.Serialize(new IpcErrResponse(id, false, error), jsonOpts);
-    Console.WriteLine(json);
+    lock (stdoutLock) { Console.WriteLine(json); }
 }

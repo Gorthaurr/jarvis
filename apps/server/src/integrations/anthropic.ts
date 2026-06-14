@@ -56,7 +56,9 @@ export class AnthropicLlmProvider implements ILlmProvider {
 
   constructor(cfg: AnthropicConfig) {
     this.apiKey = cfg.apiKey;
-    this.maxRetries = cfg.maxRetries ?? 3;
+    // Голос: быстро падать, а не висеть. 1 ретрай (транзиентный блип), не 3 —
+    // мёртвый шлюз не должен тормозить ответ на 6.5с (см. грабли oneprovider).
+    this.maxRetries = cfg.maxRetries ?? 1;
     this.cacheTtl = cfg.cacheTtl ?? "5m";
     this.baseUrl = cfg.baseUrl;
     this.live = Boolean(cfg.apiKey);
@@ -107,7 +109,10 @@ export class AnthropicLlmProvider implements ILlmProvider {
     const args = {
       model: req.model,
       max_tokens: req.maxTokens ?? 1024,
-      temperature: req.temperature ?? 0.4,
+      // ВНИМАНИЕ: НЕ слать temperature/top_p/top_k. На Opus 4.8 / 4.7 / Fable 5 эти
+      // sampling-параметры УДАЛЕНЫ — любой из них → HTTP 400 (invalid_request_error)
+      // → стаб «Модель не подключена». (Гейт oneprovider их глотал, реальный Anthropic — нет.)
+      // Поведение модели рулим персоной (§11), не temperature.
       system,
       // Блоки messages могут нести cache_control (брейкпоинт растущего диалога
       // в agent-loop, §15) — пробрасываем как есть.
@@ -139,10 +144,14 @@ export class AnthropicLlmProvider implements ILlmProvider {
       const spec = "@anthropic-ai/sdk";
       const mod = await import(spec);
       const Anthropic = (mod.default ?? (mod as { Anthropic?: unknown }).Anthropic) as new (
-        opts: { apiKey: string; baseURL?: string },
+        opts: { apiKey: string; baseURL?: string; maxRetries?: number; timeout?: number },
       ) => unknown;
       return new Anthropic({
         apiKey: this.apiKey!,
+        // Ретраи делаем сами (короткие). Внутренние ретраи SDK (дефолт 2) умножали
+        // задержку на дохлом шлюзе → отключаем. timeout — не висеть бесконечно (голос).
+        maxRetries: 0,
+        timeout: 10_000,
         ...(this.baseUrl ? { baseURL: this.baseUrl } : {}),
       });
     })();
@@ -180,22 +189,14 @@ export function parseResponse(resp: RawResponse): LlmResponse {
   };
 }
 
-/** Детерминированный стаб без сети: отвечает текстом, без tool-use. */
-function stub(req: LlmRequest): LlmResponse {
-  const last = req.messages.at(-1)?.content;
-  const lastText = typeof last === "string" ? last : summarizeBlocks(last ?? []);
+/** Стаб без сети (нет ключа / шлюз недоступен): короткое произносимое сообщение, без tool-use. */
+function stub(_req: LlmRequest): LlmResponse {
   return {
-    text: `(стаб LLM, тир ${req.tier}) Модель не подключена. Запрос: «${lastText.slice(0, 80)}».`,
+    // Уходит в TTS → чисто и в характере, без debug-префикса и эха запроса.
+    text: "Связь с сервером прервалась, сэр. Повторите, пожалуйста.",
     toolUses: [],
     stopReason: "stub",
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
     stubbed: true,
   };
-}
-
-function summarizeBlocks(blocks: LlmContentBlock[]): string {
-  return blocks
-    .map((b) => (b.type === "text" ? b.text : b.type === "tool_result" ? b.content : ""))
-    .join(" ")
-    .trim();
 }
