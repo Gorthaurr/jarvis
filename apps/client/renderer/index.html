@@ -13,22 +13,31 @@
   </head>
   <body>
     <div class="app">
-      <!-- ── Топбар: бренд + статус связи ── -->
+      <!-- ── Топбар: бренд + статус связи + настройки ── -->
       <header class="topbar">
         <div class="brand">
           <span class="brand__mark" aria-hidden="true"></span>
           <span class="brand__name">Jarvis</span>
         </div>
-        <span id="link" class="link link--off" title="связь с сервером">offline</span>
+        <div class="topbar__right">
+          <span id="link" class="link link--off" title="связь с сервером">offline</span>
+          <button id="settingsBtn" class="icon-btn" type="button" aria-label="настройки" title="Настройки">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M19.4 13a7.8 7.8 0 000-2l1.7-1.3-1.7-3-2 .8a7.7 7.7 0 00-1.7-1l-.3-2.1H10l-.3 2.1a7.7 7.7 0 00-1.7 1l-2-.8-1.7 3L6 11a7.8 7.8 0 000 2l-1.7 1.3 1.7 3 2-.8a7.7 7.7 0 001.7 1l.3 2.1h3.4l.3-2.1a7.7 7.7 0 001.7-1l2 .8 1.7-3L19.4 13z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
       </header>
 
-      <!-- ── Сцена: орб состояния + транскрипт + карточки ── -->
+      <!-- ── Голос-первый экран: орб в центре ── -->
       <main class="stage">
         <section class="orb-wrap">
           <div class="orb-stage">
             <div id="orb" class="orb orb--idle" aria-live="polite" role="button" tabindex="0"></div>
           </div>
           <div id="stateLabel" class="state-label">idle</div>
+          <p class="hint">Скажите «Джарвис» или нажмите на сферу, чтобы говорить</p>
           <div id="transcript" class="transcript"></div>
         </section>
 
@@ -53,29 +62,82 @@
         <!-- Карточки ui.display (§21) -->
         <section id="cards" class="cards" aria-label="карточки"></section>
       </main>
+    </div>
 
-      <!-- ── Composer: текстовый ввод (M0) ── -->
-      <form id="inputForm" class="composer" autocomplete="off">
-        <input
-          id="textInput"
-          class="text-input"
-          type="text"
-          placeholder="Напишите команду…  «открой блокнот»"
-          aria-label="ввод команды"
-        />
-        <button id="sendBtn" class="send-btn" type="submit" aria-label="отправить">
+    <!-- ── Настройки (ключи / устройства / контекст) ── -->
+    <aside id="settingsPanel" class="settings settings--hidden" aria-label="настройки">
+      <header class="settings__head">
+        <h2 class="settings__title">Настройки</h2>
+        <button id="settingsClose" class="icon-btn" type="button" aria-label="закрыть">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
-            <path
-              d="M5 12h14M13 6l6 6-6 6"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
+            <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </button>
-      </form>
-    </div>
+      </header>
+
+      <div class="settings__body">
+        <!-- API-ключи -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">API-ключи</h3>
+          <p class="setgroup__hint">Хранятся локально (Electron safeStorage). Без них части работают в стаб-режиме.</p>
+          <div class="field">
+            <label class="field__label" for="keyAnthropic">Anthropic / шлюз (мозг)</label>
+            <input id="keyAnthropic" class="text-input" type="password" placeholder="sk-…" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="keyEleven">ElevenLabs — голос (voiceId)</label>
+            <input id="keyEleven" class="text-input" type="text" placeholder="voiceId Джарвиса" />
+          </div>
+          <div class="field">
+            <label class="field__label" for="keyDeepgram">Deepgram — распознавание речи</label>
+            <input id="keyDeepgram" class="text-input" type="password" placeholder="нужен, чтобы говорить" />
+          </div>
+        </section>
+
+        <!-- Подключённые устройства -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Устройства</h3>
+          <ul id="deviceList" class="device-list">
+            <li class="device">
+              <span class="device__dot"></span>
+              <span class="device__name">Этот компьютер</span>
+              <span class="device__tag">desktop</span>
+            </li>
+          </ul>
+        </section>
+
+        <!-- Контекст о пользователе -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Контекст</h3>
+          <p class="setgroup__hint">Что Джарвису знать о вас — стиль, привычки, как обращаться.</p>
+          <textarea id="contextInput" class="text-area" rows="4" placeholder="напр. «Зовут Антон. Обращаться на ты. Зал пн/ср/пт.»"></textarea>
+        </section>
+
+        <!-- Dev: текстовая команда (пока нет STT) -->
+        <section class="setgroup">
+          <h3 class="setgroup__title">Тест командой <span class="setgroup__dev">dev</span></h3>
+          <p class="setgroup__hint">Пока не подключён STT — можно проверить мозг текстом.</p>
+          <form id="inputForm" class="composer" autocomplete="off">
+            <input
+              id="textInput"
+              class="text-input"
+              type="text"
+              placeholder="напр. «открой блокнот»"
+              aria-label="ввод команды"
+            />
+            <button id="sendBtn" class="send-btn" type="submit" aria-label="отправить">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </form>
+        </section>
+      </div>
+
+      <footer class="settings__foot">
+        <button id="settingsSave" class="btn" type="button">Сохранить</button>
+      </footer>
+    </aside>
 
     <!-- ── Модалка подтверждения send/order (§14) с полем revision ── -->
     <div id="confirmOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">

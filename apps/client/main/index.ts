@@ -13,7 +13,7 @@
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
  */
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, Menu, ipcMain } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
 import type { ClientState, TaskControl } from "@jarvis/protocol";
@@ -54,17 +54,22 @@ function setState(state: ClientState): void {
 }
 
 function createWindow(): void {
+  // Убрать дефолтное меню Electron (File/Edit/View/…) — обычное десктоп-приложение.
+  Menu.setApplicationMenu(null);
+
   win = new BrowserWindow({
     width: 420,
     height: 640,
     title: "Jarvis",
     backgroundColor: "#0b0d12",
+    autoHideMenuBar: true,
     webPreferences: {
       // §3: renderer изолирован; node-доступа нет, только мост preload.
       preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // preload использует require('electron') — sandbox=false для contextBridge-моста
+      devTools: process.env.JARVIS_DEVTOOLS === "1",
     },
   });
 
@@ -73,8 +78,8 @@ function createWindow(): void {
     win = null;
   });
 
-  // Открыть DevTools в dev-режиме (не в упакованном приложении).
-  if (!app.isPackaged) win.webContents.openDevTools({ mode: "detach" });
+  // DevTools НЕ открываем автоматически. Только по явному флагу JARVIS_DEVTOOLS=1.
+  if (process.env.JARVIS_DEVTOOLS === "1") win.webContents.openDevTools({ mode: "detach" });
 }
 
 /** Поднять транспорт и связать его события с renderer-IPC. */

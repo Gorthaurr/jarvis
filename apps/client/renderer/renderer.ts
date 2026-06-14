@@ -252,6 +252,19 @@ orb.addEventListener("click", () => {
   void ensureCapture().then(() => jarvis.activate());
 });
 
+// ── настройки (ключи / устройства / контекст) ──
+const settingsBtn = $("settingsBtn");
+const settingsPanel = $("settingsPanel");
+const settingsClose = $("settingsClose");
+const settingsSave = $<HTMLButtonElement>("settingsSave");
+
+settingsBtn.addEventListener("click", () => settingsPanel.classList.remove("settings--hidden"));
+settingsClose.addEventListener("click", () => settingsPanel.classList.add("settings--hidden"));
+settingsSave.addEventListener("click", () => {
+  // TODO: персист ключей/контекста через preload → Electron safeStorage (§12/§13).
+  settingsPanel.classList.add("settings--hidden");
+});
+
 // инициализация
 setOrbState("idle");
 setLink({ online: false });
