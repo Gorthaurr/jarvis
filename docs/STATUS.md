@@ -190,7 +190,10 @@
 
 | Компонент | Milestone | Статус | Файлы |
 |---|---|---|---|
-| GramJS (Telegram userbot) | M6 | ⬜ не начато | TODO(M6) |
-| vk-io (VK userbot) | M6 | ⬜ не начато | TODO(M6) |
-| Cadence guard / idempotency | M6 | ⬜ не начато | TODO(M6) |
+| userbots: ISender + MockSender + Telegram/VK адаптеры (§12) | M6 | ✅ работает | `packages/userbots` (сессия на клиенте) |
+| Cadence guard (rate-limit/веер/burst/новый контакт §14) | M6 | ✅ работает | `brain/messaging/cadence.ts` (тест 5/5) |
+| Контакты + голосовая дизамбигуация (§13) | M6 | ✅ работает | `brain/messaging/contacts.ts` (тест 6/6) |
+| Outbound: confirm + revise-петля + idempotency (UC-2) | M6 | ✅ работает | `brain/messaging/outbound.ts` (тест 5/5) |
+| message_send в agent-loop (§14) + клиентская доставка | M6 | ✅ работает | `dispatch.ts`, `client/.../messaging.ts` |
+| GramJS/vk-io реальная отправка (нужны сессии/токены) | M6 | 🟡 частично | адаптеры готовы; live — при кредах |
 | Browser-автоматизация заказов | M7 | ⬜ не начато | TODO(M7) |

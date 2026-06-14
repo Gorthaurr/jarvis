@@ -16,6 +16,7 @@ import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
 import { outcomeToActionResult, runSkill } from "../skill-runner/index.js";
 import { createClientActuator } from "../skill-runner/client-actuator.js";
+import * as messaging from "./messaging.js";
 
 const log = createLogger("actuators");
 
@@ -116,9 +117,11 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
       case "demo.record":
         return notImplemented(commandId, startedAt, "M4");
-      case "message.send":
-        // ТРЕБУЕТ confirm + cadence guard (§14) — гейтится на сервере; клиент исполняет userbot (M5).
-        return notImplemented(commandId, startedAt, "M5");
+      case "message.send": {
+        // Гарды §14 (confirm/cadence/idempotency) уже пройдены на сервере; здесь — доставка userbot'ом (§12).
+        const out = await messaging.sendMessage(cmd.channel, cmd.to, cmd.body);
+        return okResult(commandId, startedAt, out);
+      }
       case "order.place":
         // confirm + spend cap + idempotency (§14). НИКОГДА не трогаем платёжные данные (§0).
         return notImplemented(commandId, startedAt, "M6");

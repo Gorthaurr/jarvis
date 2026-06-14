@@ -16,6 +16,7 @@
   "dependencies": {
     "@jarvis/protocol": "workspace:*",
     "@jarvis/shared": "workspace:*",
+    "@jarvis/userbots": "workspace:*",
     "ws": "^8.18.0"
   },
   "devDependencies": {

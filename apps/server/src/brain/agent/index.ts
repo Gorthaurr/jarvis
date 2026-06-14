@@ -14,7 +14,7 @@
  * старшем тире (// TODO: динамическая эскалация).
  */
 import type { ActionCommand } from "@jarvis/protocol";
-import { DEFAULT_ACTION_TIMEOUT_MS } from "@jarvis/protocol";
+import { DEFAULT_ACTION_TIMEOUT_MS, newId } from "@jarvis/protocol";
 import { type Logger, type Tier, createLogger } from "@jarvis/shared";
 import { TOOL_SCHEMAS } from "@jarvis/tools";
 import { buildActionLogEntry, insertActionLog } from "../../db/action-log.js";
@@ -50,8 +50,8 @@ export interface AgentDeps {
   userContext?: UserContextSlot;
 }
 
-/** Инструменты, отложенные до следующих срезов (не предлагаем модели в M2). */
-const M2_EXCLUDED_TOOLS = new Set(["message_send", "order_place", "skill_execute", "demo_record"]);
+/** Инструменты, отложенные до следующих срезов (не предлагаем модели сейчас). */
+const EXCLUDED_TOOLS = new Set(["order_place", "skill_execute", "demo_record"]);
 
 export async function handleUserText(
   session: Session,
@@ -96,14 +96,24 @@ async function runAgentLoop(
   }
 
   const sys = buildSystemPrompt({ ...deps.userContext, facts });
-  const tools = TOOL_SCHEMAS.filter((t) => !M2_EXCLUDED_TOOLS.has(t.name));
+  const tools = TOOL_SCHEMAS.filter((t) => !EXCLUDED_TOOLS.has(t.name));
 
   // Контекст диалога из рабочей памяти (§8).
   const convo: LlmMessage[] = deps.memory
     .recentTurns()
     .map((t) => ({ role: t.role, content: t.text }) as LlmMessage);
 
-  const toolCtx = { session, web: deps.web, episodic: deps.episodic, userId: deps.userId };
+  const toolCtx = {
+    session,
+    web: deps.web,
+    episodic: deps.episodic,
+    userId: deps.userId,
+    // Подтверждение необратимого (§14) — для message_send (UC-2).
+    confirm: (summary: string) =>
+      session
+        .requestConfirm({ requestId: newId(), summary, kind: "send", expiresAt: Date.now() + 60_000 })
+        .then((r) => ({ approved: r.approved, revision: r.revision })),
+  };
   let finalText = "";
 
   // Жёсткий кап шагов + предохранитель SpendGuard (max шагов/токенов/трат §14).

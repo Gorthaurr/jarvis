@@ -9,12 +9,14 @@
  * Возвращает текст для tool_result и флаг ошибки. Декуплен от Session минимальным
  * интерфейсом ActuatorSink — тестируется с моком.
  */
-import type { ActionCommand, ActionResult, ActionKind, CodeLang } from "@jarvis/protocol";
+import type { ActionCommand, ActionResult, ActionKind, CodeLang, MessageChannel } from "@jarvis/protocol";
 import { DEFAULT_ACTION_TIMEOUT_MS } from "@jarvis/protocol";
 import { ACTUATOR_TOOL_BY_KIND } from "@jarvis/tools";
 import type { EpisodicMemory } from "../../memory/episodic.js";
 import type { IWebProvider } from "../../integrations/web.js";
 import { lintCode } from "../code-guard.js";
+import { CadenceGuard } from "../messaging/cadence.js";
+import { sendOutbound } from "../messaging/outbound.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
@@ -26,7 +28,13 @@ export interface ToolContext {
   web: IWebProvider;
   episodic: EpisodicMemory;
   userId: string;
+  /** Подтверждение необратимого (§14). Нужен для message_send. */
+  confirm?: (summary: string) => Promise<{ approved: boolean; revision?: string }>;
 }
+
+/** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
+const cadence = new CadenceGuard();
+const sentKeys = new Set<string>();
 
 export interface ToolResult {
   content: string;
@@ -38,8 +46,8 @@ const KIND_BY_TOOL: Record<string, ActionKind> = Object.fromEntries(
   (Object.entries(ACTUATOR_TOOL_BY_KIND) as [ActionKind, string][]).map(([kind, tool]) => [tool, kind]),
 ) as Record<string, ActionKind>;
 
-/** Инструменты, отложенные до M6/M7 (необратимые, требуют гардов §14). */
-const DEFERRED_TOOLS = new Set(["message_send", "order_place"]);
+/** Инструменты, отложенные до M7 (необратимые, требуют гардов §14). */
+const DEFERRED_TOOLS = new Set(["order_place"]);
 
 export async function dispatchTool(
   name: string,
@@ -56,6 +64,8 @@ export async function dispatchTool(
       return memorySearch(ctx, input);
     case "memory_write":
       return memoryWrite(ctx, input);
+    case "message_send":
+      return messageSend(ctx, input);
   }
 
   if (DEFERRED_TOOLS.has(name)) {
@@ -101,6 +111,33 @@ async function memorySearch(ctx: ToolContext, input: Record<string, unknown>): P
   const hits = await ctx.episodic.search(ctx.userId, q, k);
   if (hits.length === 0) return ok("В памяти ничего релевантного не найдено.");
   return ok(hits.map((h) => `- ${h.episode.text} (${h.score.toFixed(2)})`).join("\n"));
+}
+
+/** message.send под гардами §14: confirm (revise-петля) + cadence + idempotency (UC-2). */
+async function messageSend(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  if (!ctx.confirm) return err("отправка недоступна: нет канала подтверждения (§14)");
+  const channel = input.channel as MessageChannel;
+  const to = String(input.to ?? "").trim();
+  const body = String(input.body ?? "").trim();
+  if (channel !== "vk" && channel !== "telegram") return err("message_send: неизвестный channel");
+  if (!to || !body) return err("message_send: нужны to и body");
+
+  const res = await sendOutbound(
+    { userId: ctx.userId, channel, recipient: to, body, neverMessagedBefore: true },
+    {
+      requestConfirm: (summary) => ctx.confirm!(summary),
+      regenerate: async (_rev, prev) => prev, // полная перегенерация — через новый ход агента
+      cadence,
+      isAlreadySent: (k) => sentKeys.has(k),
+      markSent: (k) => sentKeys.add(k),
+      send: async (ch, rcpt, b) => {
+        const r = await ctx.session.sendAction({ kind: "message.send", channel: ch, to: rcpt, body: b }, DEFAULT_ACTION_TIMEOUT_MS);
+        return { ok: r.ok, error: r.error?.message };
+      },
+    },
+  );
+  if (res.status === "sent") return ok(`Отправлено ${to}.`);
+  return err(`Не отправлено (${res.status}): ${res.reason ?? ""}`);
 }
 
 /** code.run под серверным lint-гардом (§6): запрет реестра/служб/сети/системных путей. */

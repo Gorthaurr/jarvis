@@ -59,10 +59,11 @@ describe("agent-loop (§7, §8)", () => {
     expect(reply.voice).toContain("зал");
     const llm = deps.llm as MockLlmProvider;
     expect(llm.requests).toHaveLength(2);
-    // Инструменты предложены модели, но необратимые (M6/M7) исключены.
+    // Инструменты предложены модели; message_send доступен (M6, под гардами §14),
+    // order_place отложен до M7.
     const toolNames = (llm.requests[0]?.tools ?? []).map((t) => t.name);
     expect(toolNames).toContain("memory_search");
-    expect(toolNames).not.toContain("message_send");
+    expect(toolNames).toContain("message_send");
     expect(toolNames).not.toContain("order_place");
   });
 
