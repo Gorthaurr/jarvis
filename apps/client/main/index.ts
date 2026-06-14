@@ -61,7 +61,7 @@ function createWindow(): void {
     backgroundColor: "#0b0d12",
     webPreferences: {
       // §3: renderer изолирован; node-доступа нет, только мост preload.
-      preload: join(__dirname, "../preload/index.js"),
+      preload: join(__dirname, "../preload/index.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // preload использует require('electron') — sandbox=false для contextBridge-моста

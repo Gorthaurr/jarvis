@@ -30,21 +30,22 @@ const common = {
 };
 
 async function run() {
-  // main-процесс: Node + Electron API. electron и ws — external (рантайм-зависимости).
+  // main-процесс: Node + Electron API. CJS-бандл с расширением .cjs — пакет помечен
+  // "type":"module", поэтому .js трактовался бы как ESM и require() падал бы.
   await build({
     ...common,
     entryPoints: [resolve(root, "main/index.ts")],
-    outfile: resolve(outdir, "main/index.js"),
+    outfile: resolve(outdir, "main/index.cjs"),
     platform: "node",
     format: "cjs",
     external: ["electron", "ws"],
   });
 
-  // preload: запускается в привилегированном контексте до renderer.
+  // preload: запускается в привилегированном контексте до renderer. Тоже .cjs (CJS).
   await build({
     ...common,
     entryPoints: [resolve(root, "preload/index.ts")],
-    outfile: resolve(outdir, "preload/index.js"),
+    outfile: resolve(outdir, "preload/index.cjs"),
     platform: "node",
     format: "cjs",
     external: ["electron"],
