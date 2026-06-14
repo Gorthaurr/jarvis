@@ -49,24 +49,23 @@ export class AudioCapture {
   }
 }
 
-/** Воспроизведение TTS: аккумулирует чанки и проигрывает; barge-in глушит мгновенно. */
+/**
+ * Воспроизведение TTS через нативный HTML5 <audio> + blob (надёжно для целого mp3;
+ * WebAudio decodeAudioData рвал стрим-чанки). Аккумулирует чанки, на последнем
+ * собирает blob и проигрывает целиком. Barge-in глушит мгновенно.
+ */
 export class AudioPlayback {
-  private ctx: AudioContext | null = null;
   private parts: Uint8Array[] = [];
-  private source: AudioBufferSourceNode | null = null;
+  private audio: HTMLAudioElement | null = null;
+  private url: string | null = null;
 
-  private ensureCtx(): AudioContext {
-    if (!this.ctx) this.ctx = new AudioContext();
-    return this.ctx;
-  }
-
-  /** Принять чанк (audio — base64). На последнем — декодировать и проиграть. */
+  /** Принять чанк (audio — base64). На последнем — собрать и проиграть целиком. */
   enqueue(chunk: { audio: string; seq: number; last: boolean }): void {
     if (chunk.audio) this.parts.push(base64ToBytes(chunk.audio));
-    if (chunk.last) void this.flush();
+    if (chunk.last) this.flush();
   }
 
-  private async flush(): Promise<void> {
+  private flush(): void {
     if (this.parts.length === 0) return;
     const total = this.parts.reduce((n, p) => n + p.byteLength, 0);
     const merged = new Uint8Array(total);
@@ -76,31 +75,39 @@ export class AudioPlayback {
       off += p.byteLength;
     }
     this.parts = [];
+    this.stop(); // прервать предыдущий, если играл
     try {
-      const ctx = this.ensureCtx();
-      // Chromium может держать контекст suspended — будим явно, иначе тишина.
-      if (ctx.state === "suspended") await ctx.resume();
-      const buf = await ctx.decodeAudioData(merged.buffer.slice(0));
-      this.stop(); // прервать предыдущий, если играл
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      src.start();
-      this.source = src;
+      const blob = new Blob([merged], { type: "audio/mpeg" });
+      this.url = URL.createObjectURL(blob);
+      const el = new Audio(this.url);
+      el.onended = () => this.cleanup();
+      el.onerror = () => this.cleanup();
+      this.audio = el;
+      void el.play().catch(() => this.cleanup());
     } catch {
-      // dev: формат может не декодироваться (частичный поток) — игнор.
+      this.cleanup();
     }
   }
 
   /** Barge-in (§10): мгновенно заглушить воспроизведение. */
   stop(): void {
     this.parts = [];
-    try {
-      this.source?.stop();
-    } catch {
-      /* уже остановлен */
+    if (this.audio) {
+      try {
+        this.audio.pause();
+      } catch {
+        /* уже остановлен */
+      }
     }
-    this.source = null;
+    this.cleanup();
+  }
+
+  private cleanup(): void {
+    if (this.url) {
+      URL.revokeObjectURL(this.url);
+      this.url = null;
+    }
+    this.audio = null;
   }
 }
 
