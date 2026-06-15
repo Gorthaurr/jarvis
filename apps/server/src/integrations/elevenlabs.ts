@@ -23,9 +23,39 @@ export interface ElevenLabsConfig {
   modelId?: string;
 }
 
-// turbo_v2_5 — заметно быстрее multilingual_v2 при близком качестве, поддерживает русский
-// (меньше задержка синтеза). Переопределяется ELEVENLABS_MODEL (напр. вернуть multilingual_v2).
-const DEFAULT_MODEL = process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5";
+// КАЧЕСТВО vs ЛАТЕНТНОСТЬ (подтверждено офиц. доками ElevenLabs, 2026):
+//   flash_v2_5 / turbo_v2_5 — latency-модели (~75мс), но «плоский»/роботизированный звук,
+//     особенно на русском (хуже просодия, слабее нормализация чисел). turbo — deprecated.
+//   multilingual_v2 — самая натуральная/эмоциональная (рек. для нарратива/аудиокниг),
+//     отличный русский, латентность ~1-2с. Для размеренного дворецкого это правильный
+//     выбор: лёгкая задержка окупается живым голосом. v3 ещё выразительнее, но не для
+//     real-time (высокая задержка, иная система стабильности) — держим как опцию.
+// Переопределяется ELEVENLABS_MODEL.
+const DEFAULT_MODEL = process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
+
+/** Прочитать float из env в [min,max] с фоллбэком (для тюнинга голоса без правок кода). */
+function envFloat(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number.parseFloat(raw);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+/**
+ * voice_settings под размеренного дворецкого (подтверждено доками ElevenLabs):
+ *   stability 0.6 — ровный предсказуемый тон (0.5 на flash «гулял» → ощущение брака);
+ *   similarity_boost 0.8 — узнаваемо, но без артефактов исходного сэмпла (0.85 — у предела);
+ *   style 0.0 — КЛЮЧ для дворецкого: style добавляет «игру»/нестабильность + латентность;
+ *   use_speaker_boost true — чёткость; speed 0.95 — лёгкая размеренность без искажений.
+ * Все четыре крутятся через ELEVENLABS_* env без перекомпиляции.
+ */
+const VOICE_SETTINGS = {
+  stability: envFloat("ELEVENLABS_STABILITY", 0.6, 0, 1),
+  similarity_boost: envFloat("ELEVENLABS_SIMILARITY", 0.8, 0, 1),
+  style: envFloat("ELEVENLABS_STYLE", 0.0, 0, 1),
+  use_speaker_boost: (process.env.ELEVENLABS_SPEAKER_BOOST ?? "true") !== "false",
+  speed: envFloat("ELEVENLABS_SPEED", 0.95, 0.7, 1.2),
+};
 
 /** Поток TTS поверх HTTP: один запрос → полный mp3 → один чанк (last=true). */
 class ElevenLabsHttpStream implements TtsStream {
@@ -35,6 +65,9 @@ class ElevenLabsHttpStream implements TtsStream {
   private _cancelled = false;
   private done = false;
   private readonly controller = new AbortController();
+  /** Жёсткий таймаут синтеза: без него зависший fetch держит пайплайн в thinking навсегда. */
+  private readonly timeoutMs = 8_000;
+  private timer?: ReturnType<typeof setTimeout>;
 
   constructor(text: string, cfg: Required<Pick<ElevenLabsConfig, "apiKey" | "voiceId">> & ElevenLabsConfig) {
     void this.run(text, cfg);
@@ -44,6 +77,18 @@ class ElevenLabsHttpStream implements TtsStream {
     text: string,
     cfg: Required<Pick<ElevenLabsConfig, "apiKey" | "voiceId">> & ElevenLabsConfig,
   ): Promise<void> {
+    // Армируем таймаут: при зависании сети abort'им fetch и отдаём ошибку наверх,
+    // чтобы reducer вывел пайплайн из thinking (а не молчал бесконечно).
+    this.timer = setTimeout(() => {
+      if (!this.done && !this._cancelled) {
+        try {
+          this.controller.abort();
+        } catch {
+          /* уже завершён */
+        }
+      }
+    }, this.timeoutMs);
+    if (typeof this.timer === "object" && "unref" in this.timer) this.timer.unref?.();
     try {
       const model = cfg.modelId ?? DEFAULT_MODEL;
       const url =
@@ -60,9 +105,12 @@ class ElevenLabsHttpStream implements TtsStream {
         body: JSON.stringify({
           text,
           model_id: model,
-          // Размеренная, но ЖИВАЯ подача (манера Джарвиса): чуть ниже stability +
-          // немного style — меньше «робота», больше человеческой интонации (§21).
-          voice_settings: { stability: 0.5, similarity_boost: 0.85, style: 0.2, use_speaker_boost: true },
+          voice_settings: VOICE_SETTINGS,
+          // Текст УЖЕ нормализован детерминированно по-русски (числа→слова, чистка markdown).
+          // off отключает нормализацию ElevenLabs: на русском её встроенная логика читает
+          // числа по английским правилам, плюс на flash/turbo вне Enterprise она и так не
+          // работает. Явный off = детерминированно + чуть ниже латентность (§21).
+          apply_text_normalization: "off",
         }),
       });
       if (!resp.ok) {
@@ -83,6 +131,7 @@ class ElevenLabsHttpStream implements TtsStream {
   }
 
   private finish(): void {
+    if (this.timer) clearTimeout(this.timer);
     if (this.done || this._cancelled) return;
     this.done = true;
     this.doneCb?.();
@@ -99,6 +148,7 @@ class ElevenLabsHttpStream implements TtsStream {
   }
   cancel(): void {
     this._cancelled = true;
+    if (this.timer) clearTimeout(this.timer);
     try {
       this.controller.abort();
     } catch {

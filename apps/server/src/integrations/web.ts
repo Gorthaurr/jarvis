@@ -30,6 +30,69 @@ export interface IWebProvider {
 
 const BRAVE_URL = "https://api.search.brave.com/res/v1/web/search";
 
+/** Таймаут сетевых вызовов мозга (§12): не вешать голосовой ответ на медленном сайте. */
+const WEB_TIMEOUT_MS = 8_000;
+/** Жёсткий лимит вычитываемого HTML (защита от гигантских страниц до slice). */
+const MAX_HTML_BYTES = 2_000_000;
+
+/**
+ * SSRF-защита (§14): URL для web.fetch приходит от LLM (tool-use). Не пускаем модель
+ * читать внутреннюю сеть/метаданные облака/localhost и не-http(s) схемы.
+ */
+export function isFetchUrlAllowed(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const host = u.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal")) return false;
+  // IPv6-литерал URL.hostname приходит В СКОБКАХ ("[::1]") — снимаем перед проверкой.
+  const v6 = host.startsWith("[") && host.endsWith("]");
+  const h = v6 ? host.slice(1, -1) : host;
+  if (v6) {
+    if (h === "::1" || h === "::") return false; // loopback / unspecified
+    if (/^(?:fc|fd|fe80)/.test(h)) return false; // ULA / link-local
+    // IPv4-mapped: ::ffff:127.0.0.1 (dotted) и ::ffff:7f00:1 (hex).
+    const mapped = /::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
+    if (mapped && isPrivateIpv4(mapped[1]!)) return false;
+    if (/::ffff:(?:7f|0a|a9fe|c0a8)/.test(h)) return false; // hex 127/10/169.254/192.168
+    return true;
+  }
+  if (isPrivateIpv4(h) || /^0\./.test(h)) return false;
+  return true;
+}
+
+/** Приватные/служебные IPv4-диапазоны (RFC1918 + loopback + link-local). */
+function isPrivateIpv4(host: string): boolean {
+  if (/^(?:127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return true;
+  if (/^172\.(?:1[6-9]|2\d|3[01])\./.test(host)) return true;
+  return false;
+}
+
+/** Прочитать тело с жёстким лимитом байт ПОТОКОВО (не буферизуя весь ответ в память). */
+async function readCappedText(resp: Response, maxBytes: number): Promise<string> {
+  const reader = resp.body?.getReader();
+  if (!reader) return (await resp.text()).slice(0, maxBytes);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      total += value.length;
+      if (total >= maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 /** Разобрать ответ Brave Search в SearchHit[] (чистая функция). */
 export function parseBraveResults(json: unknown, limit = 5): SearchHit[] {
   if (typeof json !== "object" || json === null) return [];
@@ -95,9 +158,12 @@ export class WebProvider implements IWebProvider {
       const url = `${BRAVE_URL}?q=${encodeURIComponent(queryText)}&count=${limit}`;
       const resp = await fetch(url, {
         headers: { Accept: "application/json", "X-Subscription-Token": this.braveApiKey! },
+        signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
       });
       if (!resp.ok) {
-        log.warn("Brave search не ок", { status: resp.status });
+        // 401/403 — ключ протух (провайдер сломан), 429 — лимит, 5xx — сбой.
+        // Логируем класс ошибки явно, чтобы пустой результат не путали с «ничего не найдено».
+        log.warn("Brave search не ок", { status: resp.status, kind: resp.status === 429 ? "rate_limit" : resp.status >= 500 ? "server" : "auth_or_client" });
         return [];
       }
       return parseBraveResults(await resp.json(), limit);
@@ -108,10 +174,26 @@ export class WebProvider implements IWebProvider {
   }
 
   async fetch(url: string): Promise<FetchedPage | null> {
+    // SSRF-гард (§14): не читаем внутреннюю сеть/не-http(s) по запросу модели.
+    if (!isFetchUrlAllowed(url)) {
+      log.warn("web.fetch отклонён (SSRF-гард)", { url });
+      return null;
+    }
     try {
-      const resp = await fetch(url, { headers: { "User-Agent": "JarvisBot/0.1 (+readability)" } });
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "JarvisBot/0.1 (+readability)" },
+        signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+        redirect: "follow",
+      });
       if (!resp.ok) return null;
-      const html = await resp.text();
+      // Redirect-SSRF: конечный URL после редиректов мог увести во внутреннюю сеть —
+      // ревалидируем (302 → 169.254.169.254/localhost не должен пройти).
+      if (resp.url && resp.url !== url && !isFetchUrlAllowed(resp.url)) {
+        log.warn("web.fetch: редирект в запрещённый адрес — отказ", { url, final: resp.url });
+        return null;
+      }
+      // Потоковое чтение с жёстким лимитом байт (не доверяем content-length, не буферизуем всё).
+      const html = await readCappedText(resp, MAX_HTML_BYTES);
       const page = extractReadable(html, url);
       // Ограничим объём текста (вход в LLM, §15).
       return { ...page, text: page.text.slice(0, 8000) };

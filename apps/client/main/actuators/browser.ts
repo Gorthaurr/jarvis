@@ -1,35 +1,33 @@
 /**
- * Актуатор драйва hak-браузера через puppeteer-core (§6).
+ * Актуатор драйва браузера через Chrome DevTools Protocol (§6).
  *
- * browser.act/browser.read работают с уже запущенным «honest» браузером (реальный профиль
- * пользователя, не headless), подключаясь по CDP. Интенты (play/next/scroll/pause) и
- * selectorIntent резолвятся в a11y-роли/тексты, а НЕ в хрупкие CSS-селекторы (§6).
- *
- * browser.open реализован НЕ здесь, а в actuators/apps.ts (launchApp с URL/браузером) —
- * это просто запуск процесса; для M0 этого достаточно.
- *
- * // TODO(M3): подключить puppeteer-core по CDP к hak-браузеру, реализовать act()/read().
+ * browser.open/act/read работают через выделенный Chrome-инстанс по CDP (browser-cdp.ts).
+ * Интенты (play/next/scroll/click/type/back/...) и текст резолвятся в DOM-элементы по
+ * видимому тексту/aria, а НЕ в хрупкие пиксели. За BrowserController позже встанет
+ * hak-browser (anti-detect, профиль пользователя) — вызовы не изменятся.
  */
 import { createLogger } from "@jarvis/shared";
-import { NotImplementedError } from "./input.js";
+import { type PageContent, browserController } from "./browser-cdp.js";
 
 const log = createLogger("actuator:browser");
 
-export type BrowserIntent = "play" | "next" | "scroll" | "pause";
+export type { PageContent };
 
-/** Выполнить интент в браузере (hak-browser). */
-export async function act(
-  _intent: BrowserIntent,
-  _params?: Record<string, unknown>,
-): Promise<void> {
-  log.warn("browser.act — puppeteer-core драйв не реализован (M3)");
-  throw new NotImplementedError("browser.act");
+/** Открыть URL в управляемом браузере (CDP). */
+export async function open(url: string): Promise<void> {
+  await browserController().open(url);
 }
 
-/** Извлечь контент по интенту селектора (возвращается в ActionResult.data). */
-export async function read(_selectorIntent: string): Promise<unknown> {
-  log.warn("browser.read — puppeteer-core драйв не реализован (M3)");
-  throw new NotImplementedError("browser.read");
+/** Выполнить интент в браузере (CDP): play/pause/next/prev/scroll/click/type/back/forward. */
+export async function act(intent: string, params?: Record<string, unknown>): Promise<void> {
+  log.debug("browser.act", { intent });
+  await browserController().act(intent, params);
+}
+
+/** Извлечь читаемый контент страницы (возвращается в ActionResult.data). */
+export async function read(selectorIntent: string): Promise<PageContent> {
+  log.debug("browser.read", { selectorIntent });
+  return browserController().read(selectorIntent);
 }
 
 /**

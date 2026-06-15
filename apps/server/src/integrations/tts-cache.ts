@@ -9,6 +9,18 @@
 import { type CacheStats, TtlCache } from "@jarvis/shared";
 import type { ITtsProvider, TtsChunk, TtsOpts, TtsStream } from "./voice-providers.js";
 
+/** id модели TTS включаем в ключ: смена ELEVENLABS_MODEL не должна отдавать старый голос. */
+const TTS_MODEL_TAG = process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
+
+/**
+ * Ключ кеша TTS. Длина-префиксы у voiceId/model исключают коллизию через двоеточие
+ * (напр. пустой voiceId + текст «X:…» против voiceId «X» + текст «…»).
+ */
+function cacheKey(voiceId: string | undefined, text: string): string {
+  const v = voiceId ?? "";
+  return `${v.length}:${v}|${TTS_MODEL_TAG.length}:${TTS_MODEL_TAG}|${text}`;
+}
+
 /** Проигрыватель заранее закешированных чанков — без вызова API. */
 class ReplayTtsStream implements TtsStream {
   private chunkCb?: (c: TtsChunk) => void;
@@ -103,7 +115,7 @@ export class CachingTtsProvider implements ITtsProvider {
   }
 
   synthesize(text: string, opts?: TtsOpts): TtsStream {
-    const key = `${opts?.voiceId ?? ""}:${text}`;
+    const key = cacheKey(opts?.voiceId, text);
     const cached = this.cache.get(key);
     if (cached) return new ReplayTtsStream(cached);
     return new CollectingTtsStream(this.inner.synthesize(text, opts), (chunks) =>

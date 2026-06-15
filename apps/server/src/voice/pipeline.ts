@@ -78,6 +78,10 @@ export class VoicePipeline {
   private interim = "";
   /** Поколение оборота: поздние колбэки от устаревшего STT/TTS отбрасываются. */
   private gen = 0;
+  /** Говорит ли сейчас пользователь (между speech_start и финалом) — не перебиваем его фоном. */
+  private userSpeaking = false;
+  /** Очередь озвучки фоновых результатов (§20 async): произносим, когда канал свободен. */
+  private pendingSpeech: string[] = [];
   /** Wake word (§3): активен ли разговор + когда Джарвис последний раз говорил. */
   private readonly requireWake: boolean;
   private readonly convWindowMs: number;
@@ -148,6 +152,25 @@ export class VoicePipeline {
   }
 
   /**
+   * Озвучить РЕЗУЛЬТАТ фоновой задачи (§20 async): кладём в очередь и произносим, когда
+   * канал свободен (не во время раздумья/речи Джарвиса и не поверх говорящего пользователя).
+   * Так разговор не блокируется задачей, а её итог всё равно проговаривается по готовности.
+   */
+  speakQueued(text: string): void {
+    if (!text.trim()) return;
+    this.pendingSpeech.push(text);
+    this.maybeDrainSpeech();
+  }
+
+  private maybeDrainSpeech(): void {
+    if (this.pendingSpeech.length === 0) return;
+    if (this.ctx.state === "speaking" || this.ctx.state === "thinking") return;
+    if (this.ttsStream || this.userSpeaking) return;
+    const next = this.pendingSpeech.shift();
+    if (next !== undefined) this.startTts(next, this.gen);
+  }
+
+  /**
    * Кадр PCM от клиента. Аудио доходит до сервера ТОЛЬКО после wake word
    * (§0.6/§3: клиент гейтит стрим), поэтому приход кадра в idle = активация цикла.
    */
@@ -164,11 +187,13 @@ export class VoicePipeline {
   /** VAD-событие от клиента. */
   onVadEvent(state: "speech_start" | "speech_end" | "barge_in"): void {
     if (state === "speech_start") {
+      this.userSpeaking = true; // пользователь заговорил — не лезем фоном
       this.turn.onSpeechStart();
       this.dispatch({ type: "speech_start" });
       return;
     }
     if (state === "barge_in") {
+      this.userSpeaking = true;
       this.dispatch({ type: "barge_in" });
       return;
     }
@@ -193,11 +218,17 @@ export class VoicePipeline {
     this.dispatch({ type: "mute" });
   }
 
+  /** Сбросить очередь отложенных фоновых озвучек — на явный «стоп»/«отмени»: слушать стейл не нужно. */
+  clearPendingSpeech(): void {
+    this.pendingSpeech = [];
+  }
+
   /** Освободить ресурсы (закрытие сессии). */
   dispose(): void {
     this.clearFollowup();
     this.clearSilenceTimer();
     this.cancelTts();
+    this.pendingSpeech = []; // не держим отложенные фоновые реплики мёртвой сессии
     void this.sttStream?.close();
     this.sttStream = null;
   }
@@ -208,6 +239,10 @@ export class VoicePipeline {
     const { context, actions } = reduce(this.ctx, ev);
     this.ctx = context;
     for (const a of actions) this.apply(a);
+    // Страховка очереди озвучки (§20): на ЛЮБОМ переходе пробуем пролить отложенный фоновый
+    // итог. Гарды maybeDrainSpeech делают это no-op при занятом канале → дешёво и идемпотентно.
+    // Без этого итог застревал после barge-in/возврата в idle (нет speak_done → нет дренажа).
+    this.maybeDrainSpeech();
   }
 
   private apply(a: VoiceAction): void {
@@ -231,6 +266,9 @@ export class VoicePipeline {
         this.clearFollowup();
         break;
       case "set_client_state":
+        // idle = ничего не происходит → пользователь точно не в середине фразы. Сбрасываем
+        // userSpeaking (иначе после ложного barge-in он застревал true и блокировал дренаж).
+        if (a.state === "idle") this.userSpeaking = false;
         this.deps.sendClientState(a.state);
         break;
     }
@@ -259,10 +297,20 @@ export class VoicePipeline {
       if (p.final) this.dispatch({ type: "transcript_final", text: this.gateWake(p.text) });
     });
     stream.onError((e) => this.log.warn("ошибка STT-стрима", e.message));
+    // Облачный STT (Deepgram) сам закрывает WS по простою (~10с без аудио). БЕЗ этого
+    // сброса мёртвый стрим висит, ensureStt его не переоткрывает → Джарвис «глохнет»
+    // после паузы. Локальный Whisper не самозакрывался, потому бага не было.
+    stream.onClose(() => {
+      if (this.sttStream === stream) {
+        this.sttStream = null;
+        this.log.info("STT-стрим закрылся — переоткроется на следующей речи");
+      }
+    });
     this.sttStream = stream;
   }
 
   private async finalizeStt(): Promise<void> {
+    this.userSpeaking = false; // фраза пользователя завершена — канал может освободиться
     const stream = this.sttStream;
     if (!stream) return;
     this.sttStream = null;
@@ -286,7 +334,12 @@ export class VoicePipeline {
       this.log.error("ошибка brain", e instanceof Error ? e.message : String(e));
       reply = { voice: "Что-то пошло не так. Повторишь?" };
     }
-    if (myGen !== this.gen) return; // юзер перебил, пока думали (barge-in на thinking)
+    if (myGen !== this.gen) {
+      // Юзер перебил, пока думали (barge-in на thinking) — этот ответ выбрасываем, но канал
+      // мог освободиться: пробуем пролить отложенный фоновый итог (иначе застрял бы в очереди).
+      this.maybeDrainSpeech();
+      return;
+    }
     this.latency.mark("llm_first_token");
     this.deps.sendTranscript?.({ text: reply.voice, final: true });
     if (reply.display) this.deps.sendDisplay?.(reply.display);
@@ -316,6 +369,7 @@ export class VoicePipeline {
       if (myGen !== this.gen) return;
       this.ttsStream = null;
       this.dispatch({ type: "speak_done" });
+      this.maybeDrainSpeech(); // канал освободился — озвучим следующий фоновый результат, если есть
     });
   }
 
@@ -334,6 +388,7 @@ export class VoicePipeline {
     this.followupTimer = setTimeout(() => {
       this.followupTimer = null;
       this.dispatch({ type: "followup_timeout" });
+      this.maybeDrainSpeech(); // вернулись в idle — можно озвучить отложенный фоновый итог
     }, this.followupMs);
     if (typeof this.followupTimer.unref === "function") this.followupTimer.unref();
   }

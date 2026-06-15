@@ -68,7 +68,10 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
   // stop/mute обрабатываются из любого состояния (приоритетно).
   if (ev.type === "stop" || ev.type === "mute") {
     const actions: VoiceAction[] = [];
-    if (ctx.state === "speaking") actions.push({ type: "cancel_tts" });
+    // cancel_tts и в thinking: отменяет ещё не озвученный, но УЖЕ ЗАПУЩЕННЫЙ ход агента
+    // (инкремент gen в pipeline инвалидирует его поздний TTS), иначе Джарвис заговорит
+    // поверх пользователя после стопа.
+    if (ctx.state === "speaking" || ctx.state === "thinking") actions.push({ type: "cancel_tts" });
     if (ctx.state === "listening") actions.push({ type: "close_stt" });
     if (ctx.followupActive) actions.push({ type: "disarm_followup" });
     return go("idle", false, actions);
@@ -119,8 +122,9 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
           return go("speaking", false, []);
         case "barge_in":
         case "speech_start":
-          // Юзер перебил на этапе обдумывания — отменяем и слушаем заново (§10).
-          return go("listening", false, [{ type: "open_stt" }]);
+          // Юзер перебил на этапе обдумывания — ОТМЕНЯЕМ запущенный ход агента
+          // (cancel_tts инкрементит gen → поздний ответ не озвучится) и слушаем заново (§10).
+          return go("listening", false, [{ type: "cancel_tts" }, { type: "open_stt" }]);
         case "transcript_final":
           // Поздний финал от закрытого стрима — игнор (агент уже вызван).
           return noop(ctx);

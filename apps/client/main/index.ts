@@ -24,6 +24,8 @@ import { dispatch } from "./actuators/index.js";
 import * as tier0 from "./tier0/index.js";
 import { AudioCoordinator } from "./audio/index.js";
 import { sidecar } from "./actuators/sidecar-client.js";
+import { browserController } from "./actuators/browser-cdp.js";
+import { buildSystemProfile, formatProfileSummary } from "./sensors/system-profiler.js";
 import { runSkill } from "./skill-runner/index.js";
 import { createClientActuator } from "./skill-runner/client-actuator.js";
 import { IPC } from "./ipc-contract.js";
@@ -153,6 +155,7 @@ function startTransport(): void {
     linkOnline = true;
     win?.webContents.send(IPC.link, { online: true });
     setState("idle");
+    void sendEnvProfile(); // §9: отдать агенту авто-профиль окружения (браузер/приложения)
   });
   transport.on("link", (l) => {
     linkOnline = l.online;
@@ -350,6 +353,39 @@ function registerIpc(): void {
 // ── жизненный цикл приложения ──────────────────────────────────
 
 /** Поднять win-сайдкар (UIA+SendInput, §6), если exe доступен (extraResources). */
+// §9: авто-профиль окружения (браузер/приложения) — собираем один раз, шлём агенту при
+// каждом подключении (после reconnect тоже — resumed-сессия должна знать окружение).
+let envSummary: string | undefined;
+async function sendEnvProfile(): Promise<void> {
+  try {
+    if (envSummary === undefined) {
+      const profile = await buildSystemProfile();
+      envSummary = formatProfileSummary(profile);
+      log.info("окружение определено (авто)", { summary: envSummary });
+    }
+    if (envSummary) transport?.sendEnv(envSummary);
+  } catch (e) {
+    log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// §6 user-takeover: дебаунс физического ввода → пауза/возобновление агента на сервере.
+// Взял мышь/клаву → сразу takeover(true); по простою TAKEOVER_IDLE_MS — takeover(false).
+const TAKEOVER_IDLE_MS = 1500;
+let userActive = false;
+let userIdleTimer: ReturnType<typeof setTimeout> | undefined;
+function noteUserInput(): void {
+  if (!userActive) {
+    userActive = true;
+    transport?.sendTakeover(true); // пользователь взял управление → агент уступает
+  }
+  if (userIdleTimer) clearTimeout(userIdleTimer);
+  userIdleTimer = setTimeout(() => {
+    userActive = false;
+    transport?.sendTakeover(false); // ввод свободен → агент продолжает
+  }, TAKEOVER_IDLE_MS);
+}
+
 function startSidecar(): void {
   // В dev C#-сайдкар может быть не собран — тогда ready=false, актуаторы UIA деградируют.
   const candidates = [
@@ -359,8 +395,13 @@ function startSidecar(): void {
   const exe = candidates.find((p) => p && existsSync(p));
   if (exe) {
     const sc = sidecar();
-    // Push из sidecar: живые UIA-события записи навыка (§8) — копим и обновляем счётчик в UI.
+    // Push из sidecar: живые UIA-события записи навыка (§8) + user-takeover (§6).
     sc.onPush((msg) => {
+      // §6 user-takeover: пользователь физически взялся за мышь/клаву → агент уступает.
+      if (msg.event === "user-input") {
+        noteUserInput();
+        return;
+      }
       if (msg.event !== "demo" || !skillRec) return;
       const ev: DemoEvent = {
         role: String(msg.role ?? ""),
@@ -376,6 +417,13 @@ function startSidecar(): void {
       });
     });
     sc.start(exe);
+    // §6: включить арбитраж ввода (LL-хуки), чтобы ловить «пользователь взял управление».
+    // Сайдкару нужен момент на подъём — подписываемся чуть погодя, best-effort.
+    setTimeout(() => {
+      sc.request("raw-input.subscribe", { enable: true }).catch(() => {
+        log.warn("raw-input.subscribe не удался — user-takeover недоступен");
+      });
+    }, 2500);
   } else {
     log.warn("win-сайдкар не найден — UIA-актуаторы и запись навыков недоступны (соберите apps/sidecar-win)");
   }
@@ -400,4 +448,5 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   transport?.stop();
   sidecar().stop();
+  void browserController().close(); // §6: гасим управляемый браузер (не оставляем висеть)
 });

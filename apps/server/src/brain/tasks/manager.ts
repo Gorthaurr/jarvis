@@ -118,6 +118,24 @@ export class TaskManager {
     return true;
   }
 
+  /**
+   * §20: снять ВСЕ незавершённые задачи сессии. Нужно для параллельного режима:
+   * голосовое «отмени» означает «останови всё, что делаешь», а активных задач может
+   * быть несколько (Semaphore>1). Мутирует cancel.cancelled у каждой (петли увидят) и
+   * переводит в "cancelled". Возвращает снятые задачи (для стрима task.status в UI).
+   */
+  cancelSession(sessionId: string): Task[] {
+    const cancelled: Task[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.sessionId !== sessionId || isTerminalState(task.state)) continue;
+      task.cancel.cancelled = true;
+      task.state = "cancelled";
+      task.finishedAt = this.now();
+      cancelled.push(task);
+    }
+    return cancelled;
+  }
+
   /** §20: «пауза» — running/queued → paused. false для прочих состояний. */
   pause(taskId: string): boolean {
     const task = this.tasks.get(taskId);

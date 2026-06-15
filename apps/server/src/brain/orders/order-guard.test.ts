@@ -35,4 +35,13 @@ describe("assertNoCardData — красная линия карты (§0)", () =
     expect(() => assertNoCardData({ cardNumber: "x" })).toThrow(CardDataError);
     expect(() => assertNoCardData({ payment: { cvv: "123" } })).toThrow(CardDataError);
   });
+  it("13–19-значное НЕ-карточное число (штрихкод/ID) не блокирует заказ (Luhn)", () => {
+    // EAN-13 штрихкод товара и длинный артикул — не проходят Luhn → не карта.
+    expect(() => assertNoCardData({ note: "штрихкод 4006381333931" })).not.toThrow();
+    expect(() => assertNoCardData({ sku: "1234567890123456" })).not.toThrow();
+  });
+  it("карта с точками/слэшами как разделителями тоже ловится (§0)", () => {
+    expect(() => assertNoCardData({ note: "оплата 4111.1111.1111.1111" })).toThrow(CardDataError);
+    expect(() => assertNoCardData({ note: "4111/1111/1111/1111" })).toThrow(CardDataError);
+  });
 });

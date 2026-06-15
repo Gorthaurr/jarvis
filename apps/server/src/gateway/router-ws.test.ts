@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { TaskManager } from "../brain/tasks/manager.js";
-import { handleControlUtterance, handleTaskControl, type SessionContext } from "./router-ws.js";
+import { handleControlUtterance, handleTakeover, handleTaskControl, type SessionContext } from "./router-ws.js";
 
 interface SentEnvelope {
   type: string;
@@ -21,7 +21,7 @@ function fakeCtx(tasks: TaskManager) {
   const onVadEvent = vi.fn();
   const ctx = {
     session: { sessionId: "s1", userId: "u1", send },
-    voice: { onVadEvent },
+    voice: { onVadEvent, clearPendingSpeech: vi.fn() },
     agentDeps: { tasks },
   } as unknown as SessionContext;
   return { ctx, sent, onVadEvent };
@@ -46,6 +46,20 @@ describe("router task control (§20)", () => {
     expect(handleControlUtterance(ctx, "отмени")).toBe(true);
     expect(tasks.get(t.taskId)?.state).toBe("cancelled");
     expect(sent.some((e) => e.type === "task.status" && e.payload.state === "cancelled")).toBe(true);
+  });
+
+  it("«отмени» снимает ВСЕ параллельные задачи сессии (§20), не только свежую", () => {
+    const tasks = new TaskManager();
+    const a = tasks.create({ userId: "u1", sessionId: "s1", goal: "первая" });
+    const b = tasks.create({ userId: "u1", sessionId: "s1", goal: "вторая" });
+    const { ctx, sent } = fakeCtx(tasks);
+
+    expect(handleControlUtterance(ctx, "отмени")).toBe(true);
+    expect(tasks.get(a.taskId)?.state).toBe("cancelled"); // старая тоже снята
+    expect(tasks.get(b.taskId)?.state).toBe("cancelled");
+    // Статус по каждой снятой задаче ушёл в UI.
+    const cancelledStatuses = sent.filter((e) => e.type === "task.status" && e.payload.state === "cancelled");
+    expect(cancelledStatuses).toHaveLength(2);
   });
 
   it("«что делаешь» при активной задаче → отчёт статуса (перехвачено)", () => {
@@ -95,5 +109,21 @@ describe("router task control (§20)", () => {
     const { ctx, sent } = fakeCtx(new TaskManager());
     handleTaskControl(ctx, "cancel");
     expect(sent.some((e) => e.type === "transcript")).toBe(true);
+  });
+
+  it("user-takeover НЕ паузит задачу (автономный Джарвис; остановка — только явная, голосом)", () => {
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });
+    const { ctx } = fakeCtx(tasks);
+
+    handleTakeover(ctx, true); // пользователь шевельнул мышью / печатает рядом
+    expect(tasks.get(t.taskId)?.state).toBe("running"); // работа НЕ тормозится (no-op)
+    handleTakeover(ctx, false);
+    expect(tasks.get(t.taskId)?.state).toBe("running");
+  });
+
+  it("user-takeover без активной задачи — без падения", () => {
+    const { ctx } = fakeCtx(new TaskManager());
+    expect(() => handleTakeover(ctx, true)).not.toThrow();
   });
 });

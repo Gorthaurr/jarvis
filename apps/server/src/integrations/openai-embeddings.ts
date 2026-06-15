@@ -133,10 +133,13 @@ export class CachingEmbeddingProvider implements IEmbeddingProvider {
   }
 
   async embed(text: string): Promise<number[] | null> {
-    const hit = this.cache.get(text);
+    // Ключ включает размерность: при смене провайдера/модели (hash 256 ↔ OpenAI 1536)
+    // нельзя отдать вектор несовместимой размерности из кеша. Нормализуем пробелы.
+    const key = `${this.dim}:${text.trim().replace(/\s+/g, " ")}`;
+    const hit = this.cache.get(key);
     if (hit) return hit;
     const v = await this.inner.embed(text);
-    if (v !== null) this.cache.set(text, v);
+    if (v !== null) this.cache.set(key, v);
     return v;
   }
 

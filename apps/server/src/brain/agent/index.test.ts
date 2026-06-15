@@ -9,7 +9,8 @@ import { WorkingMemory } from "../../memory/working.js";
 import type { Session } from "../../gateway/session.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { TaskStatus } from "@jarvis/protocol";
-import { type AgentDeps, handleUserText } from "./index.js";
+import { type AgentDeps, handleUserText, waitWhilePaused } from "./index.js";
+import type { Task } from "../tasks/task.js";
 
 function fakeSession(
   sendAction = vi.fn((_cmd: ActionCommand, _t?: number) =>
@@ -64,13 +65,17 @@ describe("agent-loop (§7, §8)", () => {
     expect(reply.voice).toContain("зал");
     const llm = deps.llm as MockLlmProvider;
     expect(llm.requests).toHaveLength(2);
-    // Инструменты предложены модели; message_send (M6) и order_place (M7) доступны
-    // под гардами §14; skill_execute/demo_record инициируются иначе и не предлагаются.
+    // Инструменты предложены модели; skill_execute (§8) предлагается; demo_record из UI.
+    // message_send/order_place УБРАНЫ из набора (userbot/mock, не в концепции): мессенджеры/
+    // заказы Джарвис делает через интерфейс как человек (browser_*/ui_*/input_*).
     const toolNames = (llm.requests[0]?.tools ?? []).map((t) => t.name);
     expect(toolNames).toContain("memory_search");
-    expect(toolNames).toContain("message_send");
-    expect(toolNames).toContain("order_place");
-    expect(toolNames).not.toContain("skill_execute");
+    expect(toolNames).toContain("skill_execute");
+    expect(toolNames).toContain("skill_list");
+    expect(toolNames).toContain("browser_open");
+    expect(toolNames).not.toContain("demo_record");
+    expect(toolNames).not.toContain("message_send");
+    expect(toolNames).not.toContain("order_place");
   });
 
   it("actuator tool из петли → session.sendAction", async () => {
@@ -119,6 +124,60 @@ describe("agent-loop (§7, §8)", () => {
     expect(statuses.some((s) => s.state === "running")).toBe(true);
     expect(statuses[statuses.length - 1]?.state).toBe("done");
     expect(tasks.list("u1")[0]?.state).toBe("done");
+  });
+
+  it("§7: модель застряла (инструменты падают подряд) → авто-эскалация тира haiku→sonnet", async () => {
+    // sendAction всегда падает → actuator-инструменты возвращают ошибку.
+    const failingSend = vi.fn(() =>
+      Promise.resolve({ commandId: "c", ok: false, error: { code: "runtime" as const, message: "fail" }, durationMs: 1 }),
+    );
+    const session = fakeSession(failingSend);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] }, // раунд 1 — ошибка
+      { toolUses: [{ id: "t2", name: "app_launch", input: { app: "x" } }] }, // раунд 2 — ошибка → эскалация
+      { toolUses: [{ id: "t3", name: "app_launch", input: { app: "x" } }] }, // уже на sonnet
+      { text: "Зашёл с другой стороны, готово." },
+    ]);
+    await handleUserText(session, "разберись с одной штукой", await makeDeps(llm));
+    const models = llm.requests.map((r) => r.model);
+    expect(models[0]).toBe("h"); // начали на haiku
+    expect(models).toContain("s"); // после 2 провалов подряд — эскалация на sonnet
+  });
+
+  it("§20 async: задача-действие → дворецкий-ответ СРАЗУ + результат в фоне (не блокирует)", async () => {
+    const session = fakeSession();
+    const spoken: { voice: string }[] = [];
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+      { text: "Готово, калькулятор открыт, сэр." },
+    ]);
+    const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+    // «создай …» → sonnet → фон
+    const reply = await handleUserText(session, "создай файл и посчитай что-нибудь сложное", deps);
+    expect(reply.voice).toMatch(/сэр/i); // мгновенное дворецкое подтверждение
+    expect(spoken).toHaveLength(0); // результат ещё не готов — разговор не блокирован
+    await vi.waitFor(() => expect(spoken.length).toBeGreaterThan(0), { timeout: 3000 });
+    expect(spoken[0]?.voice).toContain("калькулятор"); // итог проговорён в фоне
+  });
+
+  it("§6/§20: waitWhilePaused ждёт пока paused и продолжает после resume", async () => {
+    const task = { state: "paused", cancel: { cancelled: false } } as Task;
+    const p = waitWhilePaused(task);
+    let done = false;
+    void p.then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(done).toBe(false); // на паузе — петля стоит, не продолжает
+    task.state = "running"; // resume (router/takeover)
+    await p;
+    expect(done).toBe(true);
+  });
+
+  it("§6/§20: waitWhilePaused выходит сразу при отмене на паузе", async () => {
+    const task = { state: "paused", cancel: { cancelled: false } } as Task;
+    const p = waitWhilePaused(task);
+    task.cancel.cancelled = true; // отмена во время паузы
+    await p; // не должно зависнуть
+    expect(true).toBe(true);
   });
 
   it("M8 §20: отмена в петле останавливает задачу (≤1 шага), state cancelled", async () => {

@@ -42,10 +42,21 @@ describe("AudioCoordinator (§3, §0.6)", () => {
     expect(sendVad).not.toHaveBeenCalledWith("speech_start");
   });
 
-  it("возврат сервера в idle закрывает гейт", () => {
-    const { ac, sendFrame, onMicState } = setup();
+  it("ambient: возврат сервера в idle НЕ закрывает гейт (§3, слушаем дальше)", () => {
+    // После активации Джарвис слушает постоянно (wake word — заглушка, переоткрыть
+    // гейт некому). Закрытие на idle делало его «глухим» после первой реплики.
+    const { ac, sendFrame } = setup();
     ac.activate();
     ac.setServerState("idle");
+    expect(ac.streaming).toBe(true);
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("mute() — честный privacy-стоп: гейт закрыт, аудио на сервер не уходит (§0.6)", () => {
+    const { ac, sendFrame, onMicState } = setup();
+    ac.activate();
+    ac.mute();
     expect(onMicState).toHaveBeenLastCalledWith(false);
     expect(ac.streaming).toBe(false);
     ac.ingest(loud());

@@ -174,6 +174,11 @@ function canonicalAction(action: string): string {
   return a;
 }
 
+/** Снять экранирование serializeStep (обратное escapeAttr). Порядок обратный. */
+function unescapeAttr(v: string): string {
+  return v.replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+}
+
 /** Разобрать key="value" key2='v2' key3=v3 → словарь. */
 function parseKeyValues(s: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -181,7 +186,7 @@ function parseKeyValues(s: string): Record<string, string> {
   let m: RegExpExecArray | null;
   while ((m = re.exec(s)) !== null) {
     const key = m[1]!;
-    out[key] = m[2] ?? m[3] ?? m[4] ?? "";
+    out[key] = unescapeAttr(m[2] ?? m[3] ?? m[4] ?? "");
   }
   return out;
 }
@@ -297,6 +302,50 @@ export async function deleteSkill(userId: string, id: string): Promise<boolean> 
   return res !== null;
 }
 
+// ── Провайдер навыков для agent-loop (§8): каталог + резолв для skill_execute ──
+
+/** Краткая карточка навыка для каталога модели (skill_list). */
+export interface SkillInfo {
+  id: string;
+  name: string;
+  version: number;
+  /** Есть guard-шаги (message.send/order.place/code.run/confirm) → нужно подтверждение (§14). */
+  needsReview: boolean;
+}
+
+/** Резолвнутый навык для исполнения (skill_execute → ActionCommand skill.execute). */
+export interface ResolvedSkill {
+  id: string;
+  version: number;
+  steps: SkillStep[];
+  needsReview: boolean;
+}
+
+export interface SkillProvider {
+  list(userId: string): Promise<SkillInfo[]>;
+  get(userId: string, id: string): Promise<ResolvedSkill | null>;
+}
+
+/** Человекочитаемое имя навыка из фронтматтера (иначе — id). */
+function skillName(rec: SkillRecord): string {
+  return String(parseSkillMd(rec.contentMd).frontmatter.name ?? rec.id);
+}
+
+/** Адаптер над listSkills/getSkill: каталог и резолв навыков для мозга (§8). */
+export function createSkillProvider(): SkillProvider {
+  return {
+    async list(userId) {
+      const recs = await listSkills(userId);
+      return recs.map((r) => ({ id: r.id, name: skillName(r), version: r.version, needsReview: hasGuardSteps(r.steps) }));
+    },
+    async get(userId, id) {
+      const r = await getSkill(userId, id);
+      if (!r) return null;
+      return { id: r.id, version: r.version, steps: r.steps, needsReview: hasGuardSteps(r.steps) };
+    },
+  };
+}
+
 // ── guard-шаги и сериализация (§8) ───────────────────────────
 
 /** Действия-гарды, которые автоконсолидация НЕ правит (§8, правило 1). */
@@ -326,26 +375,37 @@ export function hasGuardSteps(steps: readonly SkillStep[]): boolean {
   return steps.some(isGuardStep);
 }
 
+/**
+ * Экранирование значения внутри key="value" (§8): кавычка в значении (частый случай —
+ * имя кнопки/текст с «"») иначе вырвалась бы из литерала и поломала парсинг остатка
+ * строки в новые «ключи». Обратимо unescapeAttr в parseKeyValues.
+ */
+function escapeAttr(v: string): string {
+  return v.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
 /** Сериализовать шаг обратно в строку SKILL.md (обратимо к parseSkillMd). */
 export function serializeStep(step: SkillStep, index: number): string {
   const toks: string[] = [step.action];
   const t = step.target;
   if (t) {
     if (t.by === "role") {
-      toks.push(`role="${t.role}"`);
-      if (t.name) toks.push(`name="${t.name}"`);
+      toks.push(`role="${escapeAttr(t.role)}"`);
+      if (t.name) toks.push(`name="${escapeAttr(t.name)}"`);
     } else if (t.by === "handle") {
-      toks.push(`handle="${t.handle}"`);
+      toks.push(`handle="${escapeAttr(t.handle)}"`);
     } else {
       toks.push(`x=${t.x}`, `y=${t.y}`);
     }
   }
   for (const [k, v] of Object.entries(step.params ?? {})) {
-    toks.push(`${k}="${String(v)}"`);
+    // Не-строки (числа/булевы/объекты) кодируем JSON, чтобы не терять их в «[object Object]».
+    const raw = typeof v === "string" ? v : JSON.stringify(v);
+    toks.push(`${k}="${escapeAttr(raw)}"`);
   }
-  if (step.expect?.role) toks.push(`expectRole="${step.expect.role}"`);
-  if (step.expect?.name) toks.push(`expectName="${step.expect.name}"`);
-  if (step.expect?.state) toks.push(`expectState="${step.expect.state}"`);
+  if (step.expect?.role) toks.push(`expectRole="${escapeAttr(step.expect.role)}"`);
+  if (step.expect?.name) toks.push(`expectName="${escapeAttr(step.expect.name)}"`);
+  if (step.expect?.state) toks.push(`expectState="${escapeAttr(step.expect.state)}"`);
   if (step.timeoutMs !== undefined) toks.push(`timeoutMs=${step.timeoutMs}`);
   if (step.retries !== undefined) toks.push(`retries=${step.retries}`);
   if (step.needsLlm) toks.push(`needsLlm="true"`);

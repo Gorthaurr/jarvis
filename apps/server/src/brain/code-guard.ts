@@ -30,6 +30,8 @@ interface Rule {
   message: string;
   /** Языки, к которым правило применяется (пусто = все). */
   langs?: CodeLang[];
+  /** true — не блокировать, а ПОТРЕБОВАТЬ confirm (как powershell): необратимое через код. */
+  confirm?: boolean;
 }
 
 /** Запрещённые конструкции (§6: реестр, службы, сеть, системные пути, шелл/eval). */
@@ -47,21 +49,33 @@ const RULES: Rule[] = [
   { rule: "shell-exec", re: /\b(?:os\.system|subprocess\.\w+\([^)]*shell\s*=\s*True|eval\(|exec\()/i, message: "запуск шелла/eval запрещён", langs: ["python"] },
   { rule: "shell-exec", re: /(?:child_process|execSync|spawnSync|exec\s*\(|eval\s*\(|new\s+Function)/i, message: "запуск шелла/eval запрещён", langs: ["node"] },
   { rule: "shell-exec", re: /\b(?:Invoke-Expression|iex\b|Start-Process|&\s*['"])/i, message: "запуск процессов/IEX запрещён", langs: ["powershell"] },
+  // Обфускация/динамический доступ (закрывает обход через аргументы самописных инструментов §8+):
+  // __import__('os').system(...), os.popen, importlib, ctypes, pty, compile(...).
+  { rule: "dyn-exec", re: /\b(?:__import__|importlib|ctypes|os\.popen|os\.exec\w*|pty\.spawn|subprocess|multiprocessing|compile\s*\()/i, message: "динамический импорт/исполнение запрещён (обфускация §6)", langs: ["python"] },
+  { rule: "dyn-exec", re: /(?:process\.binding|globalThis\s*\[|\bimport\s*\(|Function\s*\(|require\s*\(\s*[^'"`)\s])/i, message: "динамический импорт/исполнение запрещён (обфускация §6)", langs: ["node"] },
   // Абсолютные системные пути вне CWD
   { rule: "system-path", re: /(?:C:\\\\?Windows|C:\\\\?Program Files|%SystemRoot%|\/etc\/|\/usr\/|\/bin\/|\\\\[A-Za-z0-9._-]+\\)/i, message: "абсолютные системные пути вне CWD запрещены" },
+  // Деструктивные ФС-операции из code.run — НЕ блок, но через confirm (как fs_delete §4):
+  // иначе python shutil.rmtree / node fs.rm стирали бы данные в обход выделенного гейта.
+  { rule: "fs-destroy", re: /\b(?:os\.remove|os\.unlink|os\.rmdir|shutil\.rmtree)\b|\.unlink\s*\(/i, message: "удаление файлов из code.run — требует подтверждения (§4)", langs: ["python"], confirm: true },
+  { rule: "fs-destroy", re: /\bfs(?:\.promises)?\.(?:unlink|rm|rmdir)(?:Sync)?\s*\(/i, message: "удаление файлов из code.run — требует подтверждения (§4)", langs: ["node"], confirm: true },
 ];
 
 /** Прогнать статический гард над кодом (чистая функция). */
 export function lintCode(lang: CodeLang, code: string): LintResult {
   const violations: LintViolation[] = [];
+  let needsConfirm = false;
   for (const r of RULES) {
     if (r.langs && !r.langs.includes(lang)) continue;
     const m = r.re.exec(code);
-    if (m) violations.push({ rule: r.rule, match: m[0], message: r.message });
+    if (!m) continue;
+    if (r.confirm) needsConfirm = true; // не блок — требует подтверждения (§4)
+    else violations.push({ rule: r.rule, match: m[0], message: r.message });
   }
   return {
     ok: violations.length === 0,
     violations,
-    requiresConfirm: lang === "powershell", // §6: powershell — всегда confirm + CLM
+    // §6: powershell всегда confirm + CLM; деструктивные ФС-операции — тоже confirm (§4).
+    requiresConfirm: lang === "powershell" || needsConfirm,
   };
 }

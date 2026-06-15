@@ -76,6 +76,27 @@ describe("TaskManager — жизненный цикл задач (§20)", () => 
     expect(m.cancel("нет")).toBe(false);
   });
 
+  it("cancelSession: снимает ВСЕ незавершённые задачи сессии (параллельный режим §20)", () => {
+    const c = clock(2_000);
+    const m = new TaskManager(c.now);
+    const a = m.create({ userId: "u1", sessionId: "s1", goal: "a" });
+    const b = m.create({ userId: "u1", sessionId: "s1", goal: "b" });
+    const other = m.create({ userId: "u1", sessionId: "s2", goal: "c" }); // чужая сессия
+    m.finish(b.taskId); // уже терминальна — cancelSession её не трогает
+
+    c.advance(50);
+    const cancelled = m.cancelSession("s1");
+    expect(cancelled.map((t) => t.taskId)).toEqual([a.taskId]); // только живая «a» из s1
+    expect(a.state).toBe("cancelled");
+    expect(a.cancel.cancelled).toBe(true); // тот же флаг, что держит петля
+    expect(a.finishedAt).toBe(2_050);
+    expect(b.state).toBe("done"); // терминальная не перезаписана
+    expect(other.state).toBe("running"); // чужая сессия не тронута
+
+    // Идемпотентность: повторно нечего снимать.
+    expect(m.cancelSession("s1")).toEqual([]);
+  });
+
   it("pause/resume: разрешённые переходы и запреты", () => {
     const c = clock();
     const m = new TaskManager(c.now);

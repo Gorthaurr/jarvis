@@ -106,10 +106,20 @@ async function createEmbeddedPglite(dataDir: string): Promise<QueryClient> {
 async function createPgPool(connectionString: string): Promise<QueryClient> {
   const pg = await import("pg");
   const Pool = pg.default?.Pool ?? pg.Pool;
-  const pool = new Pool({ connectionString });
+  // КРИТИЧНО для голоса (§10): БЕЗ таймаутов зависший запрос/коннект вешает ВЕСЬ ход
+  // навсегда (retrieval await'ится перед LLM) → «Джарвис не отвечает». Жёсткие лимиты:
+  // запрос не дольше 4с, коннект не дольше 4с — иначе query() ловит ошибку и отдаёт null,
+  // ход продолжается без БД-фактов, а не висит.
+  const pool = new Pool({
+    connectionString,
+    connectionTimeoutMillis: 4000,
+    idleTimeoutMillis: 30_000,
+    statement_timeout: 4000,
+    query_timeout: 4000,
+  });
   pool.on("error", (e: Error) => log.error("pg pool error", e.message));
   closeBackend = () => pool.end();
-  log.info("БД: node-pg pool инициализирован");
+  log.info("БД: node-pg pool инициализирован (таймауты 4с)");
   return pool as unknown as QueryClient;
 }
 

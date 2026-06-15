@@ -26,10 +26,18 @@ export async function typeText(text: string): Promise<void> {
   await sidecar().request("type", { text });
 }
 
-/** combo в нотации протокола: "Ctrl+S", "ArrowRight", "Space". */
-export async function pressKey(combo: string): Promise<void> {
+/**
+ * combo в нотации протокола: "Ctrl+S", "ArrowRight", "Space", "W".
+ * mode: press (нажать+отпустить) | down (удержать — движение в играх) | up (отпустить).
+ * scancode: true → слать сканкодами (игры на DirectInput/RawInput).
+ */
+export async function pressKey(
+  combo: string,
+  mode?: "press" | "down" | "up",
+  scancode?: boolean,
+): Promise<void> {
   ensure();
-  await sidecar().request("key", { combo });
+  await sidecar().request("key", { combo, mode, scancode });
 }
 
 /** Клик по цели. coords — vision-fallback; role грундится в handle перед кликом (§6). */

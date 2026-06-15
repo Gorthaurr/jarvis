@@ -19,9 +19,14 @@ import * as input from "./input.js";
 import * as ground from "./ground.js";
 import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
+import * as fs from "./fs.js";
+import * as system from "./system.js";
+import * as office from "./office.js";
 import { outcomeToActionResult, runSkill } from "../skill-runner/index.js";
 import { createClientActuator } from "../skill-runner/client-actuator.js";
 import * as messaging from "./messaging.js";
+import { jarvisBrowser } from "./jarvis-browser.js";
+import { monitors } from "../monitors.js";
 
 const log = createLogger("actuators");
 
@@ -65,9 +70,16 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         return okResult(commandId, startedAt, out);
       }
       case "browser.open": {
-        // Открытие URL = запуск дефолтного браузера на этот URL (apps.launchApp умеет URI).
-        const out = await apps.launchApp(cmd.url);
-        return okResult(commandId, startedAt, out);
+        // Управляемый браузер (CDP) — чтобы дальше работали browser.act/read на этой же
+        // странице. Нет Chrome / сбой CDP → мягкий откат на запуск дефолтного браузера.
+        try {
+          await browser.open(cmd.url);
+          return okResult(commandId, startedAt, { url: cmd.url, controlled: true });
+        } catch (e) {
+          log.warn(`browser.open CDP не удался (${e instanceof Error ? e.message : String(e)}) — откат на launchApp`);
+          const out = await apps.launchApp(cmd.url);
+          return okResult(commandId, startedAt, { ...out, controlled: false });
+        }
       }
 
       // ── СТАБЫ (бросают NotImplementedError) ──────────────────
@@ -75,7 +87,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         await input.typeText(cmd.text);
         return okResult(commandId, startedAt);
       case "input.key":
-        await input.pressKey(cmd.combo);
+        await input.pressKey(cmd.combo, cmd.mode, cmd.scancode);
         return okResult(commandId, startedAt);
       case "input.click":
         await input.click(cmd.target);
@@ -127,10 +139,72 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         const out = await messaging.sendMessage(cmd.channel, cmd.to, cmd.body);
         return okResult(commandId, startedAt, out);
       }
+      case "telegram.send": {
+        // НЕВИДИМАЯ отправка в Telegram через браузер Джарвиса (off-screen Chrome + CDP, §6).
+        // НЕ MTProto/userbot (см. message.send) — реальный webK в скрытом окне.
+        const out = await jarvisBrowser().telegramSend(cmd.to, cmd.text);
+        return okResult(commandId, startedAt, out);
+      }
+      case "telegram.read": {
+        const out = await jarvisBrowser().telegramRead(cmd.to, cmd.count);
+        return okResult(commandId, startedAt, out);
+      }
+      // «Браузер Джарвиса» (§6): общие невидимые примитивы над его залогиненным профилем.
+      case "jbrowser.open": {
+        const out = await jarvisBrowser().open(cmd.url);
+        return okResult(commandId, startedAt, out);
+      }
+      case "jbrowser.read": {
+        const out = await jarvisBrowser().read();
+        return okResult(commandId, startedAt, out);
+      }
+      case "jbrowser.act": {
+        const out = await jarvisBrowser().act(cmd.intent, cmd.params);
+        return okResult(commandId, startedAt, out);
+      }
       case "order.place": {
         // Гарды §14 пройдены на сервере; здесь — browser-автоматизация без ввода карты (§0).
         const out = await browser.placeOrder({ vendor: cmd.vendor, items: cmd.items, total: cmd.total });
         return okResult(commandId, startedAt, out);
+      }
+
+      // ── Файловая система (§6): прямое управление файлами ──────
+      case "fs.read":
+        return okResult(commandId, startedAt, await fs.readFile(cmd.path, cmd.maxBytes));
+      case "fs.write":
+        return okResult(commandId, startedAt, await fs.writeFile(cmd.path, cmd.content, cmd.createDirs));
+      case "fs.append":
+        return okResult(commandId, startedAt, await fs.appendFile(cmd.path, cmd.content));
+      case "fs.list":
+        return okResult(commandId, startedAt, await fs.listDir(cmd.path, cmd.recursive));
+      case "fs.delete":
+        // Необратимо: confirm уже взят на сервере (§4); здесь — исполнение.
+        return okResult(commandId, startedAt, await fs.deleteEntry(cmd.path, cmd.recursive));
+      case "fs.move":
+        return okResult(commandId, startedAt, await fs.moveEntry(cmd.from, cmd.to));
+      case "fs.mkdir":
+        return okResult(commandId, startedAt, await fs.makeDir(cmd.path));
+      case "fs.search":
+        return okResult(commandId, startedAt, await fs.search(cmd.root, cmd.query, cmd.inContent, cmd.maxResults));
+
+      // ── Системное управление (§6): питание/блокировка/медиа/громкость/буфер ──
+      case "system.lock":
+      case "system.power":
+      case "system.media":
+      case "system.volume":
+      case "system.clipboard":
+        return okResult(commandId, startedAt, await system.runSystem(cmd));
+
+      // ── Office как живые приложения (§6): Word/Excel через COM ──
+      case "office.excel":
+        return okResult(commandId, startedAt, await office.runExcel(cmd));
+      case "office.word":
+        return okResult(commandId, startedAt, await office.runWord(cmd));
+
+      // ── Мультимонитор (§6): куда уводить видимую активность Джарвиса ──
+      case "monitor.set": {
+        monitors.setTarget(cmd.target);
+        return okResult(commandId, startedAt, { target: cmd.target, summary: monitors.summary() });
       }
 
       default: {

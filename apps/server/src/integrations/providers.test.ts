@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { buildDeepgramUrl, parseDeepgramMessage } from "./deepgram.js";
+import { StreamAgc, buildDeepgramUrl, parseDeepgramMessage } from "./deepgram.js";
 import { createSttProvider, createTtsProvider } from "./providers.js";
 import type { TtsChunk } from "./voice-providers.js";
+
+/** Пик амплитуды Int16-буфера в [0,1] (для проверки усиления). */
+function peakOf(buf: ArrayBuffer): number {
+  const v = new DataView(buf);
+  let peak = 0;
+  for (let i = 0; i < buf.byteLength / 2; i += 1) peak = Math.max(peak, Math.abs(v.getInt16(i * 2, true)) / 32768);
+  return peak;
+}
+
+/** Синтетический тихий синус Int16 с заданным пиком. */
+function quietPcm(peak: number, n = 320): ArrayBuffer {
+  const buf = new ArrayBuffer(n * 2);
+  const v = new DataView(buf);
+  for (let i = 0; i < n; i += 1) v.setInt16(i * 2, Math.round(Math.sin(i / 4) * peak * 32767), true);
+  return buf;
+}
 
 describe("parseDeepgramMessage (§10)", () => {
   it("извлекает финальный транскрипт", () => {
@@ -42,6 +58,35 @@ describe("parseDeepgramMessage (§10)", () => {
     expect(url).toContain("language=ru");
     expect(url).toContain("sample_rate=16000");
     expect(url).toContain("interim_results=true");
+  });
+
+  it("URL: nova-3 + keyterm-подсказки (имя/сервисы) для русской речи", () => {
+    const url = buildDeepgramUrl({ sampleRate: 16000, language: "ru" });
+    expect(url).toContain("model=nova-3");
+    expect(decodeURIComponent(url)).toContain("keyterm=Джарвис");
+    expect(url).toContain("smart_format=true");
+  });
+});
+
+describe("StreamAgc — усиление тихого STT-потока (§10)", () => {
+  it("тянет тихий поток к целевому пику (Deepgram молчал на тихом raw-PCM)", () => {
+    const agc = new StreamAgc(0.25, 6);
+    const quiet = quietPcm(0.07); // браузерный autoGainControl даёт ~0.07
+    expect(peakOf(quiet)).toBeLessThan(0.1);
+    const boosted = agc.boost(quiet);
+    expect(peakOf(boosted)).toBeGreaterThan(0.2); // поднят к целевому ~0.25
+  });
+
+  it("тишину НЕ раздувает (иначе фантомные транскрипты)", () => {
+    const agc = new StreamAgc();
+    const silence = new ArrayBuffer(640); // нули
+    expect(peakOf(agc.boost(silence))).toBe(0);
+  });
+
+  it("не клиппует — остаётся в диапазоне Int16", () => {
+    const agc = new StreamAgc(0.25, 6);
+    const boosted = agc.boost(quietPcm(0.07));
+    expect(peakOf(boosted)).toBeLessThanOrEqual(1);
   });
 });
 

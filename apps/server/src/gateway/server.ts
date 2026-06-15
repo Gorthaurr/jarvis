@@ -25,9 +25,11 @@ import type { ServerConfig } from "../config.js";
 import { SpendGuard } from "../billing/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { TaskManager } from "../brain/tasks/manager.js";
+import { DynamicToolStore } from "../brain/tools/dynamic.js";
+import { ButlerAcks } from "../brain/persona/acks.js";
+import { buildSystemPrompt } from "../brain/persona/index.js";
+import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
-import { HybridLlmProvider } from "../integrations/hybrid.js";
-import { OllamaLlmProvider } from "../integrations/ollama.js";
 import { getProfile, loadProfile } from "../brain/profile.js";
 import {
   CachingEmbeddingProvider,
@@ -38,7 +40,9 @@ import { createSttProvider, createTtsProvider } from "../integrations/providers.
 import { CachingTtsProvider } from "../integrations/tts-cache.js";
 import { CachingWebProvider, WebProvider } from "../integrations/web.js";
 import { createEpisodicMemory } from "../memory/episodic.js";
+import { createSkillProvider } from "../memory/skills.js";
 import { forgetClientContext } from "../proactive/salience.js";
+import { ExtensionBridge, type ExtSocket } from "./extension-bridge.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
 import {
@@ -86,36 +90,58 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
 
   // Мозговые провайдеры — один раз на gateway (§7, §8, §12, §14).
   // Эмбеддер: OpenAI при наличии ключа, иначе детерминированный hash; поверх — кеш (§15).
+  // ВАЖНО: размерность hash-фоллбэка должна совпадать с колонкой episodic_memory.embedding
+  // (VECTOR(1536), §13). Иначе при DATABASE_URL без OPENAI_API_KEY все INSERT'ы вектора
+  // молча отклоняются Postgres (dim mismatch) → эпизодическая память «немая».
   const baseEmbedder = config.openaiApiKey
     ? new OpenAiEmbeddingProvider({
         apiKey: config.openaiApiKey,
         model: config.embeddingModel,
         dim: config.embeddingDim,
       })
-    : new HashEmbeddingProvider();
+    : new HashEmbeddingProvider(config.embeddingDim);
   const embedder = new CachingEmbeddingProvider(baseEmbedder);
   const web = new CachingWebProvider(new WebProvider(config.braveApiKey));
-  // §7 гибрид: основной Opus (Anthropic/шлюз) + резерв локальная Ollama (qwen2.5).
-  // Circuit breaker авто-переключает на Ollama, когда шлюз/ключ недоступен, и обратно
-  // на Opus при восстановлении. Так Джарвис отвечает даже при лежащем шлюзе.
+  // §7: мозг — ТОЛЬКО облачный Opus (Anthropic). Концепция: ничего локального (тонкий
+  // клиент, должен идти и на телефоне). Никаких резервных/локальных моделей. Сбой Opus →
+  // честный стаб «Связь прервалась, сэр».
   const anthropicLlm = new AnthropicLlmProvider({
     apiKey: config.anthropicApiKey,
     cacheTtl: config.anthropicCacheTtl,
     baseUrl: config.anthropicBaseUrl,
   });
-  const ollamaLlm = new OllamaLlmProvider({});
-  const hybridLlm = new HybridLlmProvider(anthropicLlm, ollamaLlm);
-  // Стартовая проба: если основной лёг — заранее открыть брейкер (первая реплика сразу в Ollama).
-  void hybridLlm.probePrimary(config.models.haiku);
+  // Реестр самописных инструментов (§8+): имена встроенных — зарезервированы.
+  // Рехидратация с диска — в listen() ДО приёма соединений (чтобы ранние сессии видели
+  // выученные инструменты), не fire-and-forget.
+  const dynamicTools = new DynamicToolStore(new Set(Object.keys(TOOLS_BY_NAME)));
+  // §11/§20: дворецкие подтверждения голосом персоны. Пул генерится один раз (warm в
+  // listen), ack отдаётся мгновенно из готового пула — задержки на модель в момент задачи нет.
+  const acks = new ButlerAcks({
+    llm: anthropicLlm,
+    model: config.models.haiku,
+    persona: buildSystemPrompt().staticPrefix,
+  });
+  // Мост к браузерному расширению «Jarvis Web Hands» (§6): невидимые действия в браузере
+  // пользователя на его логинах (фоновые вкладки). Один на gateway.
+  const extBridge = new ExtensionBridge(log.child("ext"));
   const brain: BrainProviders = {
-    llm: hybridLlm,
+    llm: anthropicLlm,
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
     web,
     spend: new SpendGuard({ spendCap: config.defaultSpendCap }),
     models: config.models,
     tasks: new TaskManager(), // общий реестр долгих задач на gateway (§20)
     warmth: new SessionWarmth(), // §15: кешируем префикс только в тёплых сессиях
+    dynamicTools, // §8+ самописные инструменты
+    skills: createSkillProvider(), // §8 выученные показом навыки
+    acks, // §11 дворецкие подтверждения (прегенерация голосом персоны)
+    extBridge, // §6 руки в браузере (невидимая отправка в Telegram)
   };
+
+  // Продакшен-sweep реестра задач (§20): без периодической чистки терминальные задачи
+  // копятся в памяти gateway бесконечно. Снимается в close().
+  const taskSweep = setInterval(() => brain.tasks.sweep(Date.now()), 5 * 60_000);
+  taskSweep.unref?.();
 
   // Регистрация плагина WebSocket до объявления маршрутов.
   void app.register(fastifyWebsocket);
@@ -126,6 +152,39 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       const socket = connection as unknown as RawWs;
       onConnection(socket, config, registry, providers, brain, log);
     });
+    // Канал расширения (Chrome). Своя WS, отдельно от клиентского /ws (другой протокол).
+    instance.get("/ext", { websocket: true }, (connection) => {
+      const ws = connection as unknown as RawWs;
+      const sock: ExtSocket = { send: (d) => ws.send(d), close: () => ws.close() };
+      extBridge.attach(sock);
+      ws.on("message", (raw: unknown) => extBridge.handleMessage(rawToText(raw)));
+      ws.on("close", () => extBridge.detach(sock));
+      ws.on("error", () => extBridge.detach(sock));
+    });
+  });
+
+  // DEV-триггер для проверки руки в браузере: POST /ext/telegram {to,text}.
+  app.post("/ext/telegram", async (req) => {
+    const body = (req.body ?? {}) as { to?: string; text?: string };
+    if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
+    try {
+      const data = await extBridge.telegramSend(String(body.to ?? ""), String(body.text ?? ""));
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // DEV-триггер: перечитать распакованное расширение с диска (chrome.runtime.reload),
+  // чтобы подхватить правки background.js без ручного ↻ в chrome://extensions.
+  app.post("/ext/reload", async () => {
+    if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
+    try {
+      const data = await extBridge.request({ type: "reload" }, 5_000);
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
   });
 
   // health-чек + метрики кеша (§15): hit/miss по эмбеддингам/web/TTS — для замера
@@ -145,10 +204,13 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     registry,
     async listen() {
       await loadProfile(); // §8/§11: помним имя/факты пользователя между запусками
+      await dynamicTools.load(); // §8+: выученные инструменты доступны с первой сессии
+      void acks.warm(); // §11: прегенерим пул дворецких фраз в фоне (сбой — остаёмся на seed)
       await app.listen({ port: config.port, host: config.host });
       log.info("gateway слушает", { host: config.host, port: config.port });
     },
     async close() {
+      clearInterval(taskSweep);
       registry.teardownAll();
       await app.close();
       log.info("gateway остановлен");
@@ -228,6 +290,7 @@ function onConnection(
     if (ctx) {
       ctx.heartbeat.stop();
       ctx.voice.dispose();
+      ctx.disposeAgent(); // §20: пометить сессию закрытой + снять незавершённые фоновые задачи
       forgetClientContext(ctx.session.sessionId);
       brain.warmth.forget(ctx.session.sessionId); // §15: не копим тёплость мёртвых сессий
       // Сессию НЕ удаляем сразу: оставляем для resume (§5). teardown по close
@@ -323,6 +386,15 @@ function startOnboarding(ctx: SessionContext, session: Session, log: Logger): vo
     }
   }, 800);
   if (typeof t.unref === "function") t.unref();
+}
+
+/** Нормализовать сырой WS-кадр (string | Buffer | {data}) в текст. */
+function rawToText(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (raw instanceof Buffer) return raw.toString("utf8");
+  const data = (raw as { data?: unknown })?.data;
+  if (Buffer.isBuffer(data)) return data.toString("utf8");
+  return String(raw);
 }
 
 /** Разобрать входящий кадр в Envelope (с грубой валидацией §5). */

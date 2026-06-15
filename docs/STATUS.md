@@ -155,11 +155,13 @@
 
 | Компонент | Milestone | Статус | Файлы |
 |---|---|---|---|
-| Скелет: Program.cs, IPC stdio | M0 | 🟡 скелет | `apps/sidecar-win/Program.cs`, `Ipc.cs` |
-| UIAutomation-грундинг (UiaGrounder.cs) | M3 | 🟡 скелет | `apps/sidecar-win/UiaGrounder.cs` |
-| SendInput-синтез (InputSynthesizer.cs) | M3 | 🟡 скелет | `apps/sidecar-win/InputSynthesizer.cs` |
-| UIA-паттерны (InvokePattern, ValuePattern, ...) | M3 | ⬜ не начато | TODO(M3) |
-| Арбитраж ввода (user takeover) | M3 | ⬜ не начато | TODO(M3) |
+| Program.cs, IPC stdio (JSON-line RPC + push-канал) | M0 | ✅ работает | `apps/sidecar-win/Program.cs`, `Ipc.cs` |
+| UIAutomation-грундинг (роль/имя → handle+bbox, реестр с LRU) | M3 | ✅ работает | `UiaGrounder.cs` (smoke 4/4: ground живого окна) |
+| SendInput-синтез (type/key/click, DPI V2, лог↔физ координаты) | M3 | ✅ работает | `InputSynthesizer.cs` (click по handle + ClickPhysical) |
+| UIA-паттерны (Invoke/SetValue/Select/Toggle/Expand/Scroll) | M3 | ✅ работает | `UiaGrounder.Invoke` (TryGetCurrentPattern, не бросает) |
+| Чтение a11y (read.window/read.selection, TextPattern §19) | M3 | ✅ работает | `UiaGrounder` (устойчиво к stale-узлам) |
+| Арбитраж ввода (user takeover, LL-хуки + фильтр синтетики) | M3 | ✅ работает | `InputArbiter.cs` (push «user-input»; TS-провод — TODO) |
+| Сборка/дымовой тест | M3 | ✅ работает | `dotnet build` 0 ошибок; `smoke-test.mjs` 4/4 |
 
 ---
 
@@ -214,7 +216,11 @@
 | TaskManager: реестр + жизненный цикл (create/cancel/pause/resume/finish/fail/sweep) | M8 | ✅ работает | `brain/tasks/manager.ts` (тест 8/8) |
 | Классификатор управления: «стоп» (TTS) vs «отмени» (задача) §20 | M8 | ✅ работает | `brain/tasks/control.ts` (тест 10/10) |
 | Нарратор: анонс / вехи / статус / финал / ошибка (детерм. RU) | M8 | ✅ работает | `brain/tasks/narrate.ts` (тест 16/16) |
-| agent-loop: задача + стрим task.status + отмена ≤1 шага (§20) | M8 | ✅ работает | `brain/agent/index.ts` (тест 6/6) |
-| router: голос/UI-управление задачей (стоп/пауза/продолжи/статус) | M8 | ✅ работает | `gateway/router-ws.ts` (тест 8/8) |
+| agent-loop: задача + стрим task.status + отмена ≤1 шага (§20) | M8 | ✅ работает | `brain/agent/index.ts` (тест 10/10) |
+| router: голос/UI-управление задачей (стоп/пауза/продолжи/статус) | M8 | ✅ работает | `gateway/router-ws.ts` (тест 10/10) |
+| Дворецкое подтверждение СРАЗУ + фоновый итог по готовности (async §20) | M8 | ✅ работает | `brain/agent/index.ts`, `voice/pipeline.ts` (speakQueued) |
+| Параллельные независимые задачи + аренда ввода (мышь/клава/фокус) | M8 | ✅ работает | `Semaphore`/`AsyncMutex` (@jarvis/shared, тест 6/6), `brain/tools/input-kinds.ts` (тест 3/3), `brain/agent/async.test.ts` (тест 5/5) — GUI-команды сериализуются, прочее параллельно; tier0 при занятом вводе → фон, фокус не крадётся |
+| LLM-голос дворецких подтверждений (прегенерация пула персоной) | M8/§11 | ✅ работает | `brain/persona/acks.ts` (тест 5/5) — warm один раз, ack мгновенный из пула; seed-фоллбэк при сбое |
+| Lifecycle: per-session async-состояние, чистка на ws-close (нет утечки bgChains) | M8 | ✅ работает | `makeSessionContext`/`disposeAgent` (router-ws), вызов в `gateway/server.ts` |
 | Полная модель `tasks` в Postgres (persist + resume через verify) | M8 | 🟡 скелет | реестр in-process; БД-персист — TODO |
 | Presence-доставка отчёта (ушёл → пуш, §20) | M8 | 🟡 скелет | `proactive/presence.ts` готов; провод в task-финал — TODO |

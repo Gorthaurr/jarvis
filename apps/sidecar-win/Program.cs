@@ -17,6 +17,11 @@ static void Log(string msg)
 
 Log("Запуск. Ожидание запросов на stdin...");
 
+// Страховка от залипания зажатых клавиш (§6): отпустить всё при ЛЮБОМ завершении процесса
+// (нормальный выход, Ctrl+C, kill родителя), иначе игровая клавиша останется зажатой в ОС.
+AppDomain.CurrentDomain.ProcessExit += (_, _) => InputSynthesizer.ReleaseAllHeld();
+Console.CancelKeyPress += (_, _) => InputSynthesizer.ReleaseAllHeld();
+
 using UiaGrounder grounder = new();
 JsonSerializerOptions jsonOpts = ArgsHelper.Options;
 
@@ -26,6 +31,9 @@ object stdoutLock = new();
 
 // Рекордер обучения демонстрацией (§8) — создаётся лениво по demo.record start.
 DemoRecorder? recorder = null;
+
+// Арбитр ввода (§6, user-takeover) — создаётся лениво по raw-input.subscribe enable.
+InputArbiter? arbiter = null;
 
 // -----------------------------------------------------------------------
 // Главный цикл: каждая строка stdin — один IpcRequest
@@ -50,6 +58,11 @@ while ((line = Console.ReadLine()) is not null)
 
     await HandleRequestAsync(req);
 }
+
+// Снимаем глобальные хуки и отпускаем зажатые клавиши перед выходом.
+InputSynthesizer.ReleaseAllHeld(); // §6: не оставляем «зажатый WASD» при закрытии stdin
+arbiter?.Stop();
+if (recorder is { IsRecording: true }) recorder.Stop();
 
 Log("stdin закрыт. Завершение.");
 return 0;
@@ -135,17 +148,15 @@ object? HandleClick(IpcRequest req)
 
     if (args.X.HasValue && args.Y.HasValue)
     {
-        // Прямые координаты от vision-движка — масштабируем через DPI (§18)
+        // Прямые координаты от vision-движка — ЛОГИЧЕСКИЕ (96dpi), масштабируем через DPI (§18).
         InputSynthesizer.Click(args.X.Value, args.Y.Value, button);
     }
     else if (args.Handle.HasValue)
     {
-        // Fallback: получить центр элемента из GroundResult (§6)
-        // Перегрундим по handle, чтобы получить актуальный bbox
-        GroundResult? r = grounder.Ground("button", null, null);
-        // TODO(M1): добавить метод GetBbox(handle) в UiaGrounder для точного fallback
-        throw new InvalidOperationException(
-            "Fallback-клик по handle не реализован — используй ground + coords (TODO M1)");
+        // Fallback-клик по a11y-элементу (§6): точка клика из UIA — уже ФИЗИЧЕСКАЯ,
+        // поэтому ClickPhysical (без повторного DPI-масштаба).
+        (double cx, double cy) = grounder.GetClickPoint(args.Handle.Value);
+        InputSynthesizer.ClickPhysical(cx, cy, button);
     }
     else
     {
@@ -163,12 +174,15 @@ object? HandleType(IpcRequest req)
     return new { success = true, length = args.Text.Length };
 }
 
-// "key" — комбинация клавиш (§6)
+// "key" — комбинация клавиш (§6). mode: press|down|up, scancode: VK vs скан-код (игры).
 object? HandleKey(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<KeyArgs>(req.Args);
-    InputSynthesizer.SendKeyCombo(args.Combo);
-    return new { success = true, combo = args.Combo };
+    string mode = string.IsNullOrWhiteSpace(args.Mode) ? "press" : args.Mode;
+    bool scancode = args.Scancode ?? false;
+
+    InputSynthesizer.SendKeyCombo(args.Combo, mode, scancode);
+    return new { success = true, combo = args.Combo, mode };
 }
 
 // "read.selection" — выделенный текст через TextPattern (§19)
@@ -218,25 +232,28 @@ void PushDemoEvent(DemoEventDto e)
     lock (stdoutLock) { Console.WriteLine(json); }
 }
 
-// "raw-input.subscribe" — арбитраж ввода / user-takeover (§6) — скелет
+// "raw-input.subscribe" — арбитраж ввода / user-takeover (§6)
 object? HandleRawInputSubscribe(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<RawInputSubscribeArgs>(req.Args);
 
-    // TODO(M2): Установить low-level keyboard/mouse hook (SetWindowsHookEx WH_KEYBOARD_LL / WH_MOUSE_LL).
-    //   Хук фильтрует события по dwExtraInfo:
-    //   - если dwExtraInfo == InputSynthesizer.SyntheticMarker → синтетика, пропускаем (§6)
-    //   - иначе → физический ввод пользователя → user-takeover: уведомить Electron по stdout
-    //     и временно заблокировать выдачу команд от агента.
-    //   Хук требует message loop (Application.Run / PeekMessage) в отдельном потоке.
-    Log($"raw-input.subscribe enable={args.Enable} — TODO(M2): low-level hook не установлен");
-
-    return new
+    if (args.Enable)
     {
-        success = true,
-        subscribed = false,
-        note = "raw-input арбитраж не реализован (TODO M2)"
-    };
+        arbiter ??= new InputArbiter(PushUserInput, Log);
+        arbiter.Start();
+        return new { success = true, subscribed = true };
+    }
+
+    arbiter?.Stop();
+    return new { success = true, subscribed = false };
+}
+
+// Push «пользователь взялся за ввод» в stdout (отдельный канал, читается клиентом как onPush).
+void PushUserInput(string kind)
+{
+    var push = new UserInputPush("user-input", kind, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    string json = JsonSerializer.Serialize(push, jsonOpts);
+    lock (stdoutLock) { Console.WriteLine(json); }
 }
 
 // -----------------------------------------------------------------------

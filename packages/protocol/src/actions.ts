@@ -32,21 +32,46 @@ export type CodeLang = "python" | "node" | "powershell";
 /** Канал переписки от лица пользователя (§12). */
 export type MessageChannel = "vk" | "telegram";
 
+/** Операции питания ОС. shutdown/restart/logoff необратимы → confirm (§4). */
+export type PowerOp = "sleep" | "shutdown" | "restart" | "logoff";
+
+/** Управление медиа (глобальные media-клавиши). */
+export type MediaOp = "play" | "pause" | "next" | "prev" | "stop";
+
+/** Управление громкостью. set требует level (0..100). */
+export type VolumeOp = "set" | "mute" | "up" | "down";
+
+/** Операции Excel (через COM). */
+export type ExcelOp = "read" | "write_cell" | "append_row";
+
+/** Операции Word (через COM). */
+export type WordOp = "read" | "write" | "append";
+
 /**
  * Абстрактная команда действия (server -> client).
  * Конверт: envelope.id = commandId; payload несёт timeoutMs (§5).
  */
 export type ActionCommand =
   | { kind: "input.type"; text: string }
-  | { kind: "input.key"; combo: string } // "Ctrl+S", "ArrowRight", "Space"
+  | {
+      kind: "input.key";
+      combo: string; // "Ctrl+S", "ArrowRight", "Space", "W"
+      mode?: "press" | "down" | "up"; // press (по умолч.), down (удержать), up (отпустить) — для игр
+      scancode?: boolean; // true → слать сканкодами (DirectInput/RawInput игр)
+    }
   | { kind: "input.click"; target: Target } // синтетический ввод — FALLBACK (§6)
   | { kind: "ui.invoke"; target: Target; pattern: UiPattern; value?: string } // UIA-паттерны — ОСНОВНОЙ путь
   | { kind: "ui.ground"; query: { role: string; name?: string } } // -> возвращает handle/bbox в ActionResult.data
   | { kind: "app.launch"; app: string }
   | { kind: "app.focus"; app: string }
   | { kind: "browser.open"; url: string }
-  | { kind: "browser.act"; intent: "play" | "next" | "scroll" | "pause"; params?: Record<string, unknown> } // hak-browser
-  | { kind: "browser.read"; selectorIntent: string } // извлечь контент
+  | {
+      kind: "browser.act";
+      // CDP-драйв: медиа/прокрутка/навигация/клик/ввод по видимому тексту или селектору.
+      intent: "play" | "pause" | "next" | "prev" | "scroll" | "click" | "type" | "back" | "forward";
+      params?: Record<string, unknown>; // text/selector/dy в зависимости от intent
+    }
+  | { kind: "browser.read"; selectorIntent: string } // извлечь читаемый контент страницы
   | { kind: "code.run"; lang: CodeLang; code: string } // ограничения §6 обязательны
   | {
       kind: "skill.execute";
@@ -59,7 +84,47 @@ export type ActionCommand =
   | { kind: "context.read"; scope: "selection" | "active_window" | "screen" } // дейксис, §19
   | { kind: "demo.record"; op: "start" | "stop" } // обучение демонстрацией, §8
   | { kind: "message.send"; channel: MessageChannel; to: string; body: string } // ТРЕБУЕТ confirm + cadence guard
-  | { kind: "order.place"; vendor: string; items: Record<string, unknown>[]; total: number }; // confirm + spend cap + idempotency
+  | { kind: "telegram.send"; to: string; text: string } // НЕВИДИМО через выделенный Chrome+CDP (НЕ MTProto/userbot — см. message.send)
+  | { kind: "telegram.read"; to: string; count?: number } // прочитать последние сообщения чата
+  // ── «Браузер Джарвиса» (§6): его СОБСТВЕННЫЙ невидимый залогиненный Chrome, общие примитивы ──
+  | { kind: "jbrowser.open"; url: string } // открыть URL в браузере Джарвиса (невидимо) → читаемый контент
+  | { kind: "jbrowser.read" } // прочитать текущую страницу браузера Джарвиса
+  | { kind: "jbrowser.act"; intent: "click" | "type" | "scroll" | "key"; params?: Record<string, unknown> }
+  | { kind: "order.place"; vendor: string; items: Record<string, unknown>[]; total: number } // confirm + spend cap + idempotency
+  // ── Файловая система (§6): прямое управление файлами на машине пользователя ──
+  | { kind: "fs.read"; path: string; maxBytes?: number } // прочитать текстовый файл
+  | { kind: "fs.write"; path: string; content: string; createDirs?: boolean } // создать/перезаписать (правка файла)
+  | { kind: "fs.append"; path: string; content: string } // дописать в конец
+  | { kind: "fs.list"; path: string; recursive?: boolean } // содержимое каталога
+  | { kind: "fs.delete"; path: string; recursive?: boolean } // удалить файл/каталог — ТРЕБУЕТ confirm (§4)
+  | { kind: "fs.move"; from: string; to: string } // переместить/переименовать
+  | { kind: "fs.mkdir"; path: string } // создать каталог (рекурсивно)
+  | { kind: "fs.search"; root: string; query: string; inContent?: boolean; maxResults?: number } // поиск по имени/содержимому
+  // ── Системное управление (§6): питание, блокировка, медиа, громкость, буфер ──
+  | { kind: "system.lock" } // заблокировать рабочую станцию (безопасно/обратимо)
+  | { kind: "system.power"; op: PowerOp } // sleep/shutdown/restart/logoff — необратимые → confirm (§4)
+  | { kind: "system.media"; op: MediaOp } // глобальные media-клавиши
+  | { kind: "system.volume"; op: VolumeOp; level?: number } // громкость (set требует level 0..100)
+  | { kind: "system.clipboard"; op: "read" | "write"; text?: string } // буфер обмена
+  // ── Мультимонитор (§6): на какой монитор уводить видимую активность Джарвиса ──
+  | { kind: "monitor.set"; target: "jarvis" | "primary" } // jarvis=рабочий (вторичный), primary=основной пользователя
+  // ── Office как ЖИВЫЕ приложения (§6): Word/Excel через COM ──
+  | {
+      kind: "office.excel";
+      op: ExcelOp;
+      path: string;
+      sheet?: string; // имя листа (по умолчанию активный/первый)
+      range?: string; // для read: "A1:C10" (пусто = used range)
+      cell?: string; // для write_cell: "B2"
+      value?: string; // для write_cell
+      row?: string[]; // для append_row: значения новой строки
+    }
+  | {
+      kind: "office.word";
+      op: WordOp;
+      path: string;
+      text?: string; // для write (заменить) / append (дописать абзац)
+    };
 
 export type ActionKind = ActionCommand["kind"];
 

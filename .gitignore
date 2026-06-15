@@ -24,9 +24,13 @@ apps/sidecar-win/obj/
 
 # logs / runtime
 *.log
+*.err
 logs/
 .DS_Store
 Thumbs.db
+
+# dev artifacts (TTS A/B сэмплы, прочее)
+*.mp3
 
 # runtime data
 data/

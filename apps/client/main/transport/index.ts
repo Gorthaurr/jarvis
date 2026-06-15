@@ -34,6 +34,8 @@ import type {
   ConfirmRequest,
   TaskStatus,
   TaskControl,
+  Takeover,
+  ClientEnv,
   DisplayCard,
   ProtocolError,
   Hello,
@@ -182,6 +184,16 @@ export class Transport extends EventEmitter {
   /** Управление задачей из UI (§20): кнопка «стоп»/«пауза»/«продолжить» в renderer. */
   sendTaskControl(action: TaskControl["action"], taskId?: string): void {
     this.send(makeEnvelope<TaskControl>("task.control", { action, taskId }));
+  }
+
+  /** User-takeover (§6): пользователь взялся за ввод (active:true) / освободил (false). */
+  sendTakeover(active: boolean): void {
+    this.send(makeEnvelope<Takeover>("client.takeover", { active }));
+  }
+
+  /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту. */
+  sendEnv(summary: string): void {
+    this.send(makeEnvelope<ClientEnv>("client.env", { summary }));
   }
 
   /** Завершить запись демонстрации: отправить батч событий на сервер для сохранения (§8). */

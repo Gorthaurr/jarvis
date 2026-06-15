@@ -156,6 +156,14 @@ export class TtlCache<V> {
   set(key: string, value: V): void {
     if (this.map.has(key)) this.map.delete(key);
     this.map.set(key, { value, expiresAt: this.now() + this.ttlMs });
+    if (this.map.size <= this.maxEntries) return;
+    // Сперва выметаем просроченные (иначе FIFO вытеснит живую запись раньше мёртвой).
+    const t = this.now();
+    for (const [k, e] of this.map) {
+      if (this.map.size <= this.maxEntries) break;
+      if (e.expiresAt <= t) this.map.delete(k);
+    }
+    // Если всё ещё над лимитом — вытесняем самые старые по порядку вставки.
     while (this.map.size > this.maxEntries) {
       const oldest = this.map.keys().next().value;
       if (oldest === undefined) break;
@@ -181,5 +189,80 @@ export class TtlCache<V> {
       size: this.map.size,
       hitRate: total === 0 ? 0 : this.hits / total,
     };
+  }
+}
+
+// ── параллелизм (§20: фоновые задачи + аренда ввода) ─────────
+
+/**
+ * Честный счётный семафор (FIFO). Ограничивает число одновременно
+ * исполняющихся операций — напр., параллельных фоновых задач (§20), чтобы не
+ * спамить LLM/CPU. Разрешения передаются ожидающим строго в порядке очереди
+ * (без «голодания»). Node однопоточный — гонок за счётчиком нет.
+ */
+export class Semaphore {
+  private permits: number;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(permits: number) {
+    this.permits = Math.max(0, Math.floor(permits));
+  }
+
+  /** Забрать разрешение синхронно, если есть. true — забрано (обязателен release). */
+  tryAcquire(): boolean {
+    if (this.permits > 0) {
+      this.permits -= 1;
+      return true;
+    }
+    return false;
+  }
+
+  /** Дождаться разрешения. Резолвится, когда вызывающий им владеет. */
+  acquire(): Promise<void> {
+    if (this.tryAcquire()) return Promise.resolve();
+    return new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  /** Вернуть разрешение. Есть ожидающие — передаём первому (FIFO), счётчик не растёт. */
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) next();
+    else this.permits += 1;
+  }
+
+  /** Выполнить fn под одним разрешением (acquire → finally release). */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  /** Свободных разрешений сейчас. */
+  get available(): number {
+    return this.permits;
+  }
+
+  /** Сколько вызывающих стоят в очереди за разрешением. */
+  get pending(): number {
+    return this.waiters.length;
+  }
+}
+
+/**
+ * Взаимное исключение = семафор на одно разрешение. В Джарвисе — аренда
+ * физического ввода (мышь/клавиатура/фокус, §20): команды, трогающие ввод,
+ * сериализуются через неё, а независимые задачи бегут параллельно.
+ */
+export class AsyncMutex extends Semaphore {
+  constructor() {
+    super(1);
+  }
+
+  /** Удерживается ли аренда сейчас (нет свободного разрешения). */
+  get locked(): boolean {
+    return this.available === 0;
   }
 }

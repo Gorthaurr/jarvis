@@ -23,6 +23,9 @@ public sealed class UiaGrounder : IDisposable
     private const int MaxSearchDepth = 8;
     // Лимит символов при выгрузке текста окна (§19).
     private const int DefaultMaxChars = 8_000;
+    // Граница реестра дескрипторов: AutomationElement держит нативные/COM-ресурсы,
+    // без вытеснения долгая сессия копит тысячи ссылок (утечка). Храним последние N.
+    private const int MaxRegistry = 512;
 
     // -----------------------------------------------------------------------
     // Грундинг
@@ -60,6 +63,7 @@ public sealed class UiaGrounder : IDisposable
     {
         int handle = System.Threading.Interlocked.Increment(ref _nextHandle);
         _registry[handle] = el;
+        TrimRegistry();
 
         System.Windows.Rect bbox = el.Current.BoundingRectangle;
         return new GroundResult(
@@ -71,6 +75,34 @@ public sealed class UiaGrounder : IDisposable
             Name: el.Current.Name ?? "",
             Role: el.Current.ControlType.ProgrammaticName
         );
+    }
+
+    /// <summary>Вытеснить самые старые дескрипторы (handle монотонно растёт) сверх лимита.</summary>
+    private void TrimRegistry()
+    {
+        while (_registry.Count > MaxRegistry)
+        {
+            int oldest = int.MaxValue;
+            foreach (int k in _registry.Keys) if (k < oldest) oldest = k;
+            if (oldest == int.MaxValue) break;
+            _registry.TryRemove(oldest, out _);
+        }
+    }
+
+    /// <summary>
+    /// Точка клика по дескриптору (§6, fallback синтетического клика по элементу, который
+    /// НЕ поддерживает UIA-паттерн — напр. canvas/кастомный контрол). Координаты ФИЗИЧЕСКИЕ.
+    /// Предпочитаем ClickablePoint UIA; иначе — центр BoundingRectangle.
+    /// </summary>
+    public (double x, double y) GetClickPoint(int handle)
+    {
+        AutomationElement el = GetElement(handle);
+        if (el.TryGetClickablePoint(out System.Windows.Point pt) && (pt.X != 0 || pt.Y != 0))
+            return (pt.X, pt.Y);
+        System.Windows.Rect r = el.Current.BoundingRectangle;
+        if (double.IsInfinity(r.Width) || r.IsEmpty)
+            throw new InvalidOperationException("Элемент не имеет видимой области для клика");
+        return (r.X + r.Width / 2.0, r.Y + r.Height / 2.0);
     }
 
     // -----------------------------------------------------------------------
@@ -85,53 +117,46 @@ public sealed class UiaGrounder : IDisposable
     {
         AutomationElement el = GetElement(handle);
 
+        // ВАЖНО: AutomationElement.GetCurrentPattern БРОСАЕТ при неподдержке паттерна,
+        // а не возвращает null. Поэтому везде TryGetCurrentPattern (graceful).
         switch (pattern.ToLowerInvariant())
         {
             case "invoke":
-                if (el.GetCurrentPattern(InvokePattern.Pattern) is InvokePattern inv)
-                    inv.Invoke();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает InvokePattern");
+                Require<InvokePattern>(el, InvokePattern.Pattern, "InvokePattern").Invoke();
                 break;
 
             case "setvalue":
-                if (el.GetCurrentPattern(ValuePattern.Pattern) is ValuePattern vp)
-                    vp.SetValue(value ?? "");
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает ValuePattern");
+                Require<ValuePattern>(el, ValuePattern.Pattern, "ValuePattern").SetValue(value ?? "");
                 break;
 
             case "select":
-                if (el.GetCurrentPattern(SelectionItemPattern.Pattern) is SelectionItemPattern sip)
-                    sip.Select();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает SelectionItemPattern");
+                Require<SelectionItemPattern>(el, SelectionItemPattern.Pattern, "SelectionItemPattern").Select();
                 break;
 
             case "toggle":
-                if (el.GetCurrentPattern(TogglePattern.Pattern) is TogglePattern tp)
-                    tp.Toggle();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает TogglePattern");
+                Require<TogglePattern>(el, TogglePattern.Pattern, "TogglePattern").Toggle();
                 break;
 
             case "expand":
-                if (el.GetCurrentPattern(ExpandCollapsePattern.Pattern) is ExpandCollapsePattern ecp)
-                    ecp.Expand();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает ExpandCollapsePattern");
+                Require<ExpandCollapsePattern>(el, ExpandCollapsePattern.Pattern, "ExpandCollapsePattern").Expand();
                 break;
 
             case "scroll":
-                if (el.GetCurrentPattern(ScrollPattern.Pattern) is ScrollPattern sp)
-                    sp.Scroll(ScrollAmount.SmallIncrement, ScrollAmount.SmallIncrement);
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает ScrollPattern");
+                Require<ScrollPattern>(el, ScrollPattern.Pattern, "ScrollPattern")
+                    .Scroll(ScrollAmount.SmallIncrement, ScrollAmount.SmallIncrement);
                 break;
 
             default:
                 throw new ArgumentException($"Неизвестный паттерн: {pattern}");
         }
+    }
+
+    /// <summary>Получить паттерн или бросить понятную ошибку (без падения на «Unsupported pattern»).</summary>
+    private static T Require<T>(AutomationElement el, AutomationPattern pattern, string label) where T : class
+    {
+        if (el.TryGetCurrentPattern(pattern, out object? obj) && obj is T typed)
+            return typed;
+        throw new InvalidOperationException($"Элемент не поддерживает {label}");
     }
 
     // -----------------------------------------------------------------------
@@ -149,7 +174,7 @@ public sealed class UiaGrounder : IDisposable
             : AutomationElement.FocusedElement
               ?? throw new InvalidOperationException("Нет фокусированного элемента");
 
-        if (el.GetCurrentPattern(TextPattern.Pattern) is not TextPattern textPattern)
+        if (!el.TryGetCurrentPattern(TextPattern.Pattern, out object? tpObj) || tpObj is not TextPattern textPattern)
             return new SelectionResult("");
 
         TextPatternRange[] ranges = textPattern.GetSelection();
@@ -194,23 +219,32 @@ public sealed class UiaGrounder : IDisposable
         if (sb.Length >= maxChars) { truncated = true; return; }
         if (depth > MaxSearchDepth) return;
 
-        string name = el.Current.Name ?? "";
-        string value = "";
-
-        if (el.GetCurrentPattern(ValuePattern.Pattern) is ValuePattern vp)
-            value = vp.Current.Value ?? "";
-
-        if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(value))
+        // Доступ к одному узлу может бросить (элемент исчез, COM-таймаут, защищённое окно) —
+        // изолируем, чтобы один проблемный узел не рушил всю выжимку (§19).
+        try
         {
-            string role = el.Current.ControlType.ProgrammaticName;
-            sb.Append(role).Append(": ").Append(name);
-            if (!string.IsNullOrWhiteSpace(value))
-                sb.Append(" [").Append(value).Append(']');
-            sb.AppendLine();
+            string name = el.Current.Name ?? "";
+            string value = "";
+
+            // TryGetCurrentPattern — НЕ GetCurrentPattern (тот бросает на неподдержке).
+            if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
+                value = vp.Current.Value ?? "";
+
+            if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(value))
+            {
+                string role = el.Current.ControlType.ProgrammaticName;
+                sb.Append(role).Append(": ").Append(name);
+                if (!string.IsNullOrWhiteSpace(value))
+                    sb.Append(" [").Append(value).Append(']');
+                sb.AppendLine();
+            }
         }
+        catch { /* пропускаем проблемный узел */ }
 
         // Рекурсивный обход потомков
-        AutomationElementCollection children = el.FindAll(TreeScope.Children, Condition.TrueCondition);
+        AutomationElementCollection children;
+        try { children = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
+        catch { return; }
         foreach (AutomationElement child in children)
         {
             if (sb.Length >= maxChars) { truncated = true; return; }

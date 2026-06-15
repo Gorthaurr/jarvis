@@ -40,6 +40,8 @@ export interface UserContextSlot {
   timezone?: string;
   /** Произвольные факты долговременной памяти (§8), уже отобранные retrieval'ом. */
   facts?: readonly string[];
+  /** Авто-профиль окружения (§9): браузер/приложения пользователя — чтобы агент адаптировался. */
+  environment?: string;
 }
 
 /**
@@ -65,6 +67,11 @@ function renderDynamic(slot: UserContextSlot): string {
   const lines: string[] = [];
   if (slot.displayName) lines.push(`Пользователя зовут: ${slot.displayName}.`);
   if (slot.timezone) lines.push(`Часовой пояс пользователя: ${slot.timezone}.`);
+  if (slot.environment) {
+    // §9: окружение определено АВТОМАТИЧЕСКИ. Действуй под него: для веба используй
+    // браузер пользователя, для задач — установленные у него приложения; не предполагай.
+    lines.push(`Окружение (определено автоматически): ${slot.environment}`);
+  }
   if (slot.facts && slot.facts.length > 0) {
     lines.push("Известные факты о пользователе:");
     for (const f of slot.facts) lines.push(`- ${f}`);

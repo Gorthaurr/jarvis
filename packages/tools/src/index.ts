@@ -124,7 +124,32 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "context.read": "context_read",
   "demo.record": "demo_record",
   "message.send": "message_send",
+  "telegram.send": "telegram_send", // невидимо через браузер Джарвиса (НЕ userbot/MTProto)
+  "telegram.read": "telegram_read", // чтение чата через браузер Джарвиса
+  "jbrowser.open": "web_open", // общие невидимые веб-примитивы браузера Джарвиса
+  "jbrowser.read": "web_read",
+  "jbrowser.act": "web_act",
   "order.place": "order_place",
+  // Файловая система (§6).
+  "fs.read": "fs_read",
+  "fs.write": "fs_write",
+  "fs.append": "fs_append",
+  "fs.list": "fs_list",
+  "fs.delete": "fs_delete",
+  "fs.move": "fs_move",
+  "fs.mkdir": "fs_mkdir",
+  "fs.search": "fs_search",
+  // Системное управление (§6).
+  "system.lock": "system_lock",
+  "system.power": "system_power",
+  "system.media": "system_media",
+  "system.volume": "system_volume",
+  "system.clipboard": "system_clipboard",
+  // Office как живые приложения (§6).
+  "office.excel": "office_excel",
+  "office.word": "office_word",
+  // Мультимонитор (§6).
+  "monitor.set": "monitor_set",
 };
 
 const ACTUATOR_TOOLS: ToolSchema[] = [
@@ -202,12 +227,22 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "input_key",
     description:
-      "Послать сочетание клавиш или одиночную клавишу (ActionCommand input.key, §6), напр. \"Ctrl+S\", \"ArrowRight\", \"Space\". FALLBACK к UIA-паттернам.",
+      "Послать сочетание клавиш или одиночную клавишу (ActionCommand input.key, §6), напр. \"Ctrl+S\", \"ArrowRight\", \"Space\", \"W\". " +
+      "Для ИГР: mode=\"down\" нажимает и УДЕРЖИВАЕТ клавишу (движение), mode=\"up\" отпускает; scancode=true шлёт сканкодами (нужно играм на DirectInput/RawInput, иначе они не видят ввод). По умолчанию mode=\"press\" (нажать+отпустить), scancode=false.",
     input_schema: obj(
       {
         combo: {
           type: "string",
-          description: "Комбинация/клавиша, напр. \"Ctrl+S\", \"ArrowRight\", \"Space\".",
+          description: "Комбинация/клавиша, напр. \"Ctrl+S\", \"ArrowRight\", \"Space\", \"W\".",
+        },
+        mode: {
+          type: "string",
+          enum: ["press", "down", "up"],
+          description: "press — нажать+отпустить; down — удержать (игры/движение); up — отпустить.",
+        },
+        scancode: {
+          type: "boolean",
+          description: "true — слать сканкодами (для игр DirectInput/RawInput).",
         },
       },
       ["combo"],
@@ -238,18 +273,20 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "browser_act",
     description:
-      "Высокоуровневое действие в hak-browser над текущей вкладкой (ActionCommand browser.act, §6): play/next/scroll/pause. params — необязательные параметры интента.",
+      "Действие в управляемом браузере над текущей страницей (ActionCommand browser.act, §6, CDP). " +
+      "intent: play/pause/next/prev (медиа), scroll (params.dy), back/forward (история), click (params.text — по видимому тексту, или params.selector), type (params.text в фокус/поле, params.selector). " +
+      "Элементы ищутся по ВИДИМОМУ тексту/aria, не по пикселям. Перед действием обычно нужен browser_open (открыть страницу) и/или browser_read (понять, что на ней).",
     input_schema: obj(
       {
         intent: {
           type: "string",
-          enum: ["play", "next", "scroll", "pause"],
+          enum: ["play", "pause", "next", "prev", "scroll", "click", "type", "back", "forward"],
           description: "Интент действия в браузере.",
         },
         params: {
           type: "object",
           additionalProperties: true,
-          description: "Необязательные параметры интента.",
+          description: "Параметры: text (для click/type), selector (CSS, опц.), dy (для scroll).",
         },
       },
       ["intent"],
@@ -283,49 +320,6 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         code: { type: "string", description: "Исходный код для исполнения в песочнице." },
       },
       ["lang", "code"],
-    ),
-  },
-  {
-    name: "skill_execute",
-    description:
-      "Запустить ранее выученный скилл на клиентском skill-runner (ActionCommand skill.execute, §8). steps — шаги в терминах интентов и ролей (НИКОГДА координаты/CSS-селекторы). params — параметры подстановки. Каждый шаг с expect авто-ожидает постусловие; шаг с needsLlm=true — единственный случай легитимного обращения раннера к серверу.",
-    input_schema: obj(
-      {
-        skillId: { type: "string", description: "Идентификатор скилла." },
-        version: { type: "integer", description: "Версия скилла (целое)." },
-        steps: {
-          type: "array",
-          description: "Шаги скилла (SkillStep §8).",
-          items: obj(
-            {
-              action: {
-                type: "string",
-                description: "ActionKind или верхнеуровневый интент шага (\"ground\", \"verify\", ...).",
-              },
-              target: TARGET_SCHEMA,
-              params: { type: "object", additionalProperties: true },
-              needsLlm: {
-                type: "boolean",
-                description: "true — runner вызывает сервер, чтобы сочинить текст по месту.",
-              },
-              expect: obj({
-                role: { type: "string" },
-                name: { type: "string" },
-                state: { type: "string" },
-              }),
-              timeoutMs: { type: "integer" },
-              retries: { type: "integer" },
-            },
-            ["action"],
-          ),
-        },
-        params: {
-          type: "object",
-          additionalProperties: true,
-          description: "Параметры подстановки в скилл (необязательно).",
-        },
-      },
-      ["skillId", "version", "steps"],
     ),
   },
   {
@@ -400,6 +394,195 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   },
 ];
 
+// ───────────────────────────── Файловая система (§6) ─────────────────────────────
+// Прямое управление файлами на машине пользователя. Путь — абсолютный Windows-путь
+// (C:\\Users\\...) или относительный. Поддерживаются переменные окружения вида %USERPROFILE%.
+
+const FS_TOOLS: ToolSchema[] = [
+  {
+    name: "fs_read",
+    description:
+      "Прочитать текстовый файл и вернуть его содержимое (ActionCommand fs.read, §6). Для больших файлов задай maxBytes. Бинарные файлы не для этого инструмента.",
+    input_schema: obj(
+      {
+        path: { type: "string", description: "Путь к файлу (абсолютный или с %USERPROFILE% и т.п.)." },
+        maxBytes: { type: "integer", minimum: 1, description: "Лимит читаемых байт (необязательно)." },
+      },
+      ["path"],
+    ),
+  },
+  {
+    name: "fs_write",
+    description:
+      "Создать новый файл ИЛИ перезаписать существующий заданным содержимым (ActionCommand fs.write, §6). Это основной способ «создать/изменить файл». createDirs=true — создать недостающие родительские каталоги. Перезапись существующего файла теряет прежнее содержимое — будь уверен в пути.",
+    input_schema: obj(
+      {
+        path: { type: "string", description: "Путь к файлу для создания/перезаписи." },
+        content: { type: "string", description: "Новое полное содержимое файла." },
+        createDirs: { type: "boolean", description: "Создать недостающие родительские каталоги." },
+      },
+      ["path", "content"],
+    ),
+  },
+  {
+    name: "fs_append",
+    description:
+      "Дописать текст в конец файла, не затирая прежнее (ActionCommand fs.append, §6). Если файла нет — он создаётся.",
+    input_schema: obj(
+      {
+        path: { type: "string", description: "Путь к файлу." },
+        content: { type: "string", description: "Текст для добавления в конец." },
+      },
+      ["path", "content"],
+    ),
+  },
+  {
+    name: "fs_list",
+    description:
+      "Перечислить содержимое каталога: файлы и подкаталоги с размером и типом (ActionCommand fs.list, §6). recursive=true — обойти вложенные каталоги.",
+    input_schema: obj(
+      {
+        path: { type: "string", description: "Путь к каталогу." },
+        recursive: { type: "boolean", description: "Рекурсивный обход (осторожно на больших деревьях)." },
+      },
+      ["path"],
+    ),
+  },
+  {
+    name: "fs_delete",
+    description:
+      "Удалить файл или каталог (ActionCommand fs.delete, §6). НЕОБРАТИМО → ВСЕГДА требует user.confirm (§4). Для непустого каталога нужен recursive=true. Будь предельно внимателен к пути.",
+    input_schema: obj(
+      {
+        path: { type: "string", description: "Путь к файлу или каталогу для удаления." },
+        recursive: { type: "boolean", description: "Удалить каталог со всем содержимым." },
+      },
+      ["path"],
+    ),
+  },
+  {
+    name: "fs_move",
+    description:
+      "Переместить или переименовать файл/каталог (ActionCommand fs.move, §6). Если to существует — будет перезаписан.",
+    input_schema: obj(
+      {
+        from: { type: "string", description: "Исходный путь." },
+        to: { type: "string", description: "Целевой путь (новое имя/расположение)." },
+      },
+      ["from", "to"],
+    ),
+  },
+  {
+    name: "fs_mkdir",
+    description:
+      "Создать каталог, включая недостающие родительские (ActionCommand fs.mkdir, §6).",
+    input_schema: obj(
+      {
+        path: { type: "string", description: "Путь создаваемого каталога." },
+      },
+      ["path"],
+    ),
+  },
+  {
+    name: "fs_search",
+    description:
+      "Найти файлы по имени или по содержимому внутри каталога (ActionCommand fs.search, §6). inContent=true — искать query внутри текстовых файлов; иначе — по именам файлов. Возвращает список путей с совпадениями.",
+    input_schema: obj(
+      {
+        root: { type: "string", description: "Корневой каталог поиска." },
+        query: { type: "string", description: "Подстрока для поиска (в имени или в содержимом)." },
+        inContent: { type: "boolean", description: "Искать внутри содержимого файлов." },
+        maxResults: { type: "integer", minimum: 1, description: "Максимум результатов (необязательно)." },
+      },
+      ["root", "query"],
+    ),
+  },
+];
+
+// ───────────────────────────── Системное управление (§6) ─────────────────────────────
+
+const SYSTEM_TOOLS: ToolSchema[] = [
+  {
+    name: "monitor_set",
+    description:
+      "Куда уводить ВИДИМУЮ активность Джарвиса на мультимониторе (ActionCommand monitor.set, §6). target='jarvis' — рабочий монитор Джарвиса (по умолчанию вторичный, чтобы не мешать пользователю); target='primary' — основной монитор пользователя. Зови на «выведи на основной монитор» → primary; «верни на свой / на второй монитор» → jarvis. Это меняет, где открываются окна/браузер Джарвиса.",
+    input_schema: obj(
+      {
+        target: {
+          type: "string",
+          enum: ["jarvis", "primary"],
+          description: "jarvis — рабочий монитор Джарвиса; primary — основной монитор пользователя.",
+        },
+      },
+      ["target"],
+    ),
+  },
+  {
+    name: "system_lock",
+    description:
+      "Заблокировать рабочую станцию (экран блокировки Windows) — ActionCommand system.lock, §6. Безопасно и обратимо (разблокировать может только пользователь), confirm НЕ требуется. Используй на просьбы «заблокируй компьютер», «закрой доступ».",
+    input_schema: obj({}, []),
+  },
+  {
+    name: "system_power",
+    description:
+      "Управление питанием ОС (ActionCommand system.power, §6): sleep (сон), shutdown (выключение), restart (перезагрузка), logoff (выход из сеанса). shutdown/restart/logoff НЕОБРАТИМЫ и теряют несохранённую работу → ВСЕГДА требуют user.confirm (§4). sleep/блокировка — без confirm.",
+    input_schema: obj(
+      {
+        op: {
+          type: "string",
+          enum: ["sleep", "shutdown", "restart", "logoff"],
+          description: "Операция питания.",
+        },
+      },
+      ["op"],
+    ),
+  },
+  {
+    name: "system_media",
+    description:
+      "Глобальное управление медиа через media-клавиши (ActionCommand system.media, §6): play, pause, next, prev, stop. Действует на текущий медиаплеер/браузер.",
+    input_schema: obj(
+      {
+        op: {
+          type: "string",
+          enum: ["play", "pause", "next", "prev", "stop"],
+          description: "Медиа-команда.",
+        },
+      },
+      ["op"],
+    ),
+  },
+  {
+    name: "system_volume",
+    description:
+      "Управление громкостью системы (ActionCommand system.volume, §6): set (задать level 0..100), mute (тишина/возврат), up, down.",
+    input_schema: obj(
+      {
+        op: {
+          type: "string",
+          enum: ["set", "mute", "up", "down"],
+          description: "Операция громкости.",
+        },
+        level: { type: "integer", minimum: 0, maximum: 100, description: "Уровень для op=set (0..100)." },
+      },
+      ["op"],
+    ),
+  },
+  {
+    name: "system_clipboard",
+    description:
+      "Чтение/запись системного буфера обмена (ActionCommand system.clipboard, §6): op=read возвращает текст буфера, op=write кладёт text в буфер. Не помещай в буфер платёжные реквизиты (§0).",
+    input_schema: obj(
+      {
+        op: { type: "string", enum: ["read", "write"], description: "read — прочитать, write — записать." },
+        text: { type: "string", description: "Текст для op=write." },
+      },
+      ["op"],
+    ),
+  },
+];
+
 // ───────────────────────────── Server-side инструменты мозга (§12) ─────────────────────────────
 
 const WEB_TOOLS: ToolSchema[] = [
@@ -435,6 +618,70 @@ const WEB_TOOLS: ToolSchema[] = [
         },
       },
       ["url"],
+    ),
+  },
+];
+
+// ─────────────────────── Мессенджеры через браузер Джарвиса (§6) ───────────────────────
+
+const MESSAGING_TOOLS: ToolSchema[] = [
+  {
+    name: "telegram_send",
+    description:
+      "Отправить сообщение в Telegram контакту через НЕВИДИМЫЙ браузер Джарвиса (его залогиненный профиль web.telegram.org, окно за экраном — пользователь не видит, фокус не крадётся). Это правильный способ написать в Telegram. НЕ открывай видимое окно (browser_open/app_launch) и НЕ води интерфейс руками — один вызов сам найдёт контакт и отправит. «Избранное»/Saved Messages поддержано. Если точного чата нет — вернётся СПИСОК видимых чатов: посмотри на него и САМ выбери нужный по смыслу (напр. пользователь сказал «Катя» → в списке «Катя Любимая» — это она), затем повтори с ТОЧНЫМ названием. Если «не залогинен» — Джарвис откроет окно входа, попроси войти.",
+    input_schema: obj(
+      {
+        to: { type: "string", description: "Имя/контакт получателя как в Telegram (напр. «Катя»), либо «Избранное»." },
+        text: { type: "string", description: "Текст сообщения." },
+      },
+      ["to", "text"],
+    ),
+  },
+  {
+    name: "telegram_read",
+    description:
+      "Прочитать последние сообщения чата в Telegram через невидимый браузер Джарвиса (его залогиненная сессия). Используй, когда пользователь спрашивает «что мне написал/ответил X», «прочитай переписку с X», «что нового в Telegram». Возвращает список последних сообщений с направлением (in=входящее, out=исходящее). Если точного чата нет — вернётся СПИСОК видимых чатов: посмотри и САМ выбери нужный по смыслу (напр. «Катя» → «Катя Любимая»), повтори с ТОЧНЫМ названием. Альтернатива — посмотреть Telegram самому через web_open/web_read и решить.",
+    input_schema: obj(
+      {
+        to: { type: "string", description: "Имя/контакт чата как в Telegram (напр. «Катя»), либо «Избранное»." },
+        count: { type: "integer", minimum: 1, maximum: 50, description: "Сколько последних сообщений вернуть (по умолчанию ~12)." },
+      },
+      ["to"],
+    ),
+  },
+];
+
+// ─────────────── «Браузер Джарвиса» — общие невидимые веб-примитивы (§6) ───────────────
+// Его СОБСТВЕННЫЙ залогиненный Chrome (Telegram/Google/…), окно за экраном. Этим Джарвис
+// читает/действует на аккаунтах пользователя САМ, без хардкода под каждый сервис. Отдельно
+// от browser_* (те — ВИДИМО показать сайт пользователю в его обычном браузере).
+
+const JARVIS_BROWSER_TOOLS: ToolSchema[] = [
+  {
+    name: "web_open",
+    description:
+      "Открыть URL в СВОЁМ (Джарвиса) невидимом залогиненном браузере и вернуть читаемый текст страницы. Используй, чтобы самому зайти на сервис пользователя (почта, YouTube, соцсеть и т.п.) и что-то прочитать/сделать — НЕЗАМЕТНО, не показывая пользователю. Для «покажи мне сайт на экране» используй browser_open, а не это.",
+    input_schema: obj({ url: { type: "string", description: "Полный URL (https://…)." } }, ["url"]),
+  },
+  {
+    name: "web_read",
+    description:
+      "Прочитать читаемый текст ТЕКУЩЕЙ страницы в браузере Джарвиса (после web_open/web_act). Возвращает title/url/text.",
+    input_schema: obj({}, []),
+  },
+  {
+    name: "web_act",
+    description:
+      "Действие на текущей странице браузера Джарвиса: click (по тексту или CSS-селектору), type (ввести текст в фокус/селектор), scroll (прокрутить), key (нажать Enter/Tab/Escape). Композируется с web_open/web_read для автономной работы на сайте.",
+    input_schema: obj(
+      {
+        intent: { type: "string", enum: ["click", "type", "scroll", "key"], description: "Тип действия." },
+        params: {
+          type: "object",
+          description: "Параметры: для click — {text} или {selector}; для type — {text, selector?}; для scroll — {dy}; для key — {key:'Enter'|'Tab'|'Escape'}.",
+        },
+      },
+      ["intent"],
     ),
   },
 ];
@@ -487,11 +734,122 @@ const MEMORY_TOOLS: ToolSchema[] = [
   },
 ];
 
+// ───────────────────────────── Office: живые Word/Excel (§6) ─────────────────────────────
+
+const OFFICE_TOOLS: ToolSchema[] = [
+  {
+    name: "office_excel",
+    description:
+      "Работа с Excel-книгой через живое приложение (ActionCommand office.excel, §6, COM). " +
+      "op=read — прочитать значения (range «A1:C10» или весь лист) → вернёт таблицу; op=write_cell — записать value в ячейку cell (напр. «B2») и сохранить; op=append_row — дописать строку row (массив значений) в конец листа и сохранить. " +
+      "Если файла нет — для записи он создаётся. sheet — имя листа (по умолчанию первый). Требуется установленный Excel; если его нет — действие вернёт ошибку (тогда работай с .xlsx как с файлом через code_run + openpyxl).",
+    input_schema: obj(
+      {
+        op: { type: "string", enum: ["read", "write_cell", "append_row"], description: "read | write_cell | append_row." },
+        path: { type: "string", description: "Путь к .xlsx (абсолютный)." },
+        sheet: { type: "string", description: "Имя листа (по умолчанию первый/активный)." },
+        range: { type: "string", description: "Для read: диапазон «A1:C10» (пусто = весь заполненный лист)." },
+        cell: { type: "string", description: "Для write_cell: адрес ячейки, напр. «B2»." },
+        value: { type: "string", description: "Для write_cell: записываемое значение." },
+        row: { type: "array", items: { type: "string" }, description: "Для append_row: значения новой строки." },
+      },
+      ["op", "path"],
+    ),
+  },
+  {
+    name: "office_word",
+    description:
+      "Работа с Word-документом через живое приложение (ActionCommand office.word, §6, COM). " +
+      "op=read — вернуть текст документа; op=write — заменить всё содержимое на text и сохранить; op=append — дописать абзац text в конец и сохранить. " +
+      "Если файла нет — для записи он создаётся. Требуется установленный Word; если его нет — действие вернёт ошибку (тогда работай с .docx через code_run + python-docx).",
+    input_schema: obj(
+      {
+        op: { type: "string", enum: ["read", "write", "append"], description: "read | write | append." },
+        path: { type: "string", description: "Путь к .docx (абсолютный)." },
+        text: { type: "string", description: "Для write/append: текст." },
+      },
+      ["op", "path"],
+    ),
+  },
+];
+
+// ───────────────────────────── Саморасширение (§8+): пишет инструменты сам ─────────────────────────────
+
+const META_TOOLS: ToolSchema[] = [
+  {
+    name: "tool_create",
+    description:
+      "СОЗДАТЬ СЕБЕ НОВЫЙ ИНСТРУМЕНТ, когда штатных не хватает (саморасширение). Сохраняет именованный шаблон кода; после этого инструмент становится вызываемым по имени на следующих ходах (переживает рестарт — это твой навык). " +
+      "Код пишется на python|node|powershell и исполняется в ограниченном раннере (гард §6: без реестра/служб/сети/системных путей; powershell → confirm). Параметры подставляются в шаблон через плейсхолдеры {{имя}}. " +
+      "Используй, когда задача повторяемая и нет готового инструмента: напиши код один раз — дальше вызывай как обычный инструмент.",
+    input_schema: obj(
+      {
+        name: { type: "string", description: "Уникальное имя snake_case (3-41 симв., с буквы). Не повторяй имена встроенных инструментов." },
+        description: { type: "string", description: "Что делает инструмент и когда применять (это увидит модель в наборе)." },
+        lang: { type: "string", enum: [...CODE_LANG_ENUM], description: "Язык кода: python | node | powershell." },
+        code: { type: "string", description: "Шаблон кода. Параметры — через {{имя}}. Выводит результат в stdout." },
+        params: {
+          type: "array",
+          description: "Параметры инструмента (имена для подстановки {{имя}}).",
+          items: obj(
+            {
+              name: { type: "string", description: "Имя параметра (snake_case)." },
+              description: { type: "string", description: "Назначение параметра." },
+            },
+            ["name"],
+          ),
+        },
+      },
+      ["name", "description", "lang", "code"],
+    ),
+  },
+  {
+    name: "tool_list",
+    description: "Список ранее созданных самописных инструментов (имя, описание, язык). Проверь перед созданием нового — возможно, нужный уже есть.",
+    input_schema: obj({}, []),
+  },
+  {
+    name: "tool_remove",
+    description: "Удалить самописный инструмент по имени (если устарел/сломан).",
+    input_schema: obj({ name: { type: "string", description: "Имя инструмента для удаления." } }, ["name"]),
+  },
+];
+
+// ───────────────────────────── Навыки, выученные показом (§8) ─────────────────────────────
+
+const SKILL_TOOLS: ToolSchema[] = [
+  {
+    name: "skill_list",
+    description:
+      "Список выученных навыков (записанных демонстрацией): id, имя, версия. Посмотри перед тем как делать многошаговую задачу руками — возможно, навык уже есть и его можно просто запустить через skill_execute.",
+    input_schema: obj({}, []),
+  },
+  {
+    name: "skill_execute",
+    description:
+      "Запустить ВЫУЧЕННЫЙ навык по id (ActionCommand skill.execute, §8). Шаги навыка резолвит сервер — тебе нужен только skillId (из skill_list) и опц. params для подстановки. Навыки с guard-шагами (отправка/заказ/код) требуют подтверждения перед запуском. Это $0-путь: повтор выученного без LLM-перебора.",
+    input_schema: obj(
+      {
+        skillId: { type: "string", description: "Идентификатор навыка из skill_list." },
+        params: { type: "object", additionalProperties: true, description: "Параметры подстановки (необязательно)." },
+      },
+      ["skillId"],
+    ),
+  },
+];
+
 // ───────────────────────────── Сборка и индекс ─────────────────────────────
 
-/** Полный набор инструментов мозга (§6 актуаторы + §12 web + §8 память). */
+/** Полный набор инструментов мозга (§6 актуаторы + fs/system + самописные + §12 web + §8 память). */
 export const TOOL_SCHEMAS: ToolSchema[] = [
   ...ACTUATOR_TOOLS,
+  ...FS_TOOLS,
+  ...SYSTEM_TOOLS,
+  ...OFFICE_TOOLS,
+  ...SKILL_TOOLS,
+  ...META_TOOLS,
+  ...MESSAGING_TOOLS,
+  ...JARVIS_BROWSER_TOOLS,
   ...WEB_TOOLS,
   ...MEMORY_TOOLS,
 ];
@@ -503,3 +861,12 @@ export const TOOLS_BY_NAME: Record<string, ToolSchema> = Object.fromEntries(
 
 /** Имена всех актуаторных инструментов (эмитят ActionCommand). Полезно для гейтинга на клиенте. */
 export const ACTUATOR_TOOL_NAMES: readonly string[] = Object.values(ACTUATOR_TOOL_BY_KIND);
+
+/**
+ * Реверс {@link ACTUATOR_TOOL_BY_KIND}: имя инструмента → вид команды. Единый
+ * источник правды для всех, кому нужно «по имени инструмента узнать ActionKind»
+ * (диспетчер §6, классификация аренды ввода §20) — не дублировать reverse в каждом.
+ */
+export const ACTUATOR_KIND_BY_TOOL: Record<string, ActionKind> = Object.fromEntries(
+  (Object.entries(ACTUATOR_TOOL_BY_KIND) as [ActionKind, string][]).map(([kind, tool]) => [tool, kind]),
+);

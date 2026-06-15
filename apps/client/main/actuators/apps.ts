@@ -121,7 +121,12 @@ export async function focusApp(app: string): Promise<LaunchOutcome> {
   log.info(`focus (AppActivate fallback): "${app}" -> "${target}"`);
 
   // Имя процесса без расширения и без URI-схемы — то, что AppActivate сможет сопоставить.
-  const probe = target.replace(/\.exe$/i, "").replace(/:$/, "");
+  const rawProbe = target.replace(/\.exe$/i, "").replace(/:$/, "");
+  // БЕЗОПАСНОСТЬ: probe попадает в PowerShell-строковый литерал. Имя приходит из tier0
+  // (текст пользователя) или с сервера — без экранирования одиночная кавычка вырывается
+  // из литерала и исполняет произвольный PS (RCE). Удваиваем кавычки (PS-escape для '…')
+  // и отсекаем заведомо не-имена (управляющие символы, перевод строки).
+  const probe = rawProbe.replace(/[\r\n]/g, " ").replace(/'/g, "''");
 
   const ps = [
     "$ErrorActionPreference='SilentlyContinue';",

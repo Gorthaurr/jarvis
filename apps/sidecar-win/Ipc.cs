@@ -96,7 +96,9 @@ public sealed record TypeArgs(
 );
 
 public sealed record KeyArgs(
-    [property: JsonPropertyName("combo")]   string Combo    // напр. "ctrl+c", "win+r", "alt+F4"
+    [property: JsonPropertyName("combo")]    string Combo,   // напр. "ctrl+c", "win+r", "alt+F4"
+    [property: JsonPropertyName("mode")]     string? Mode,   // "press" (по умолч.) | "down" (удержать) | "up" (отпустить)
+    [property: JsonPropertyName("scancode")] bool? Scancode  // true → KEYEVENTF_SCANCODE (для игр DirectInput/RawInput)
 );
 
 public sealed record ReadWindowArgs(
@@ -137,4 +139,11 @@ public sealed record DemoEventPush(
 /// <summary>Результат demo.record stop — батч пойманных событий.</summary>
 public sealed record DemoStopResult(
     [property: JsonPropertyName("events")]  IReadOnlyList<DemoEventDto> Events
+);
+
+/// <summary>Push-сигнал «пользователь взялся за ввод» (user-takeover, §6) — отдельный канал.</summary>
+public sealed record UserInputPush(
+    [property: JsonPropertyName("event")]   string Event,   // всегда "user-input"
+    [property: JsonPropertyName("kind")]    string Kind,    // "mouse" | "keyboard"
+    [property: JsonPropertyName("ts")]      long Ts
 );

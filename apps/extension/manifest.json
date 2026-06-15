@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Jarvis Web Hands",
+  "version": "0.1.0",
+  "description": "Невидимые руки Джарвиса в браузере: фоновые вкладки + действия от твоего лица, на твоих логинах.",
+  "permissions": ["tabs", "scripting", "alarms"],
+  "host_permissions": ["https://web.telegram.org/*"],
+  "background": { "service_worker": "background.js" }
+}

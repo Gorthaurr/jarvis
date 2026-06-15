@@ -16,6 +16,7 @@ import {
   type ActionResult,
   type AudioFrame,
   type ClientContext,
+  type ClientEnv,
   type ClientStateMsg,
   type ConfirmResult,
   type DemoSave,
@@ -23,13 +24,16 @@ import {
   type Envelope,
   type MessageType,
   type SkillSaved,
+  type Takeover,
   type TaskControl,
   type TaskStatus,
   type VadEvent,
 } from "@jarvis/protocol";
-import { type Logger, type Tier, createLogger } from "@jarvis/shared";
+import { AsyncMutex, type Logger, Semaphore, type Tier, createLogger } from "@jarvis/shared";
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
+import type { ButlerAcks } from "../brain/persona/acks.js";
+import type { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { getProfile } from "../brain/profile.js";
 import type { SpendGuard } from "../billing/index.js";
 import type { ILlmProvider } from "../integrations/llm.js";
@@ -42,10 +46,11 @@ import { TaskManager } from "../brain/tasks/manager.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
 import { statusReport } from "../brain/tasks/narrate.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
-import { listSkills } from "../memory/skills.js";
+import { type SkillProvider, listSkills } from "../memory/skills.js";
 import type { Task } from "../brain/tasks/task.js";
 import { type VoicePipeline, createVoicePipeline } from "../voice/index.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
+import type { ExtensionBridge } from "./extension-bridge.js";
 import type { Session } from "./session.js";
 
 const log: Logger = createLogger("router-ws");
@@ -68,7 +73,20 @@ export interface BrainProviders {
   tasks: TaskManager;
   /** Тёплость сессий для §15-кеширования — общая на gateway. */
   warmth: SessionWarmth;
+  /** Реестр самописных инструментов (§8+ саморасширение) — общий на gateway. */
+  dynamicTools: DynamicToolStore;
+  /** Провайдер выученных показом навыков (§8) — общий на gateway. */
+  skills: SkillProvider;
+  /** Пул дворецких подтверждений голосом персоны (§11) — общий на gateway (прегенерация одна). */
+  acks: ButlerAcks;
+  /** Мост к браузерному расширению (§6): невидимая отправка в Telegram и т.п. */
+  extBridge: ExtensionBridge;
 }
+
+/** Потолок параллельных фоновых agent-loop'ов на сессию (§20): «много агентов», но не
+ *  бесконечно (LLM/CPU). GUI-задачи всё равно сериализует аренда ввода; research-задачи
+ *  бегут реально параллельно. */
+const MAX_PARALLEL_TASKS = 5;
 
 /** Контекст одного соединения, который держит router между сообщениями. */
 export interface SessionContext {
@@ -81,6 +99,11 @@ export interface SessionContext {
   agentDeps: AgentDeps;
   /** Последний полученный ClientContext — вход для proactive (§9). */
   lastContext?: ClientContext;
+  /**
+   * Закрытие сессии (§20): помечаем закрытой (фоновый итог не озвучиваем в мёртвую
+   * сессию) и снимаем её незавершённые задачи. Вызывается gateway по ws-close.
+   */
+  disposeAgent(): void;
 }
 
 /** Создать контекст для свежей/возобновлённой сессии. */
@@ -91,6 +114,12 @@ export function makeSessionContext(
   brain: BrainProviders,
 ): SessionContext {
   const memory = new WorkingMemory();
+  // Per-session состояние async-контура (§20): живёт с сессией, GC'ится с контекстом —
+  // никаких процесс-глобальных Map по sessionId (прежний bgChains тёк на каждой сессии).
+  const inputArbiter = new AsyncMutex(); // аренда мыши/клавы/фокуса — сериализует GUI-команды
+  const concurrency = new Semaphore(MAX_PARALLEL_TASKS); // потолок параллельных agent-loop'ов
+  const bgTasks = new Set<Promise<void>>(); // живые фоновые задачи (для чистки на закрытии)
+  let closed = false;
   const agentDeps: AgentDeps = {
     memory,
     llm: brain.llm,
@@ -104,6 +133,16 @@ export function makeSessionContext(
     userContext: { displayName: getProfile().displayName, facts: getProfile().facts },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
     warmth: brain.warmth, // общая тёплость сессий (§15)
+    dynamicTools: brain.dynamicTools, // §8+ самописные инструменты в наборе модели
+    skills: brain.skills, // §8 выученные показом навыки (skill_list/skill_execute)
+    inputArbiter, // §20: GUI-команды (вкл. tier0) сериализуются, прочее — параллельно
+    concurrency, // §20: ограничитель параллельных фоновых задач
+    bgTasks, // §20: реестр живых фоновых задач
+    acks: brain.acks, // §11: дворецкие подтверждения голосом персоны (прегенерация)
+    ackRotation: 0, // §11: ротация ack per-session
+    isClosed: () => closed, // §20: не озвучивать итог в закрытую сессию
+    // §6: невидимая отправка в Telegram через браузерное расширение (фоновая вкладка).
+    telegramSend: (to, text) => brain.extBridge.telegramSend(to, text),
   };
   const voice = createVoicePipeline({
     stt: providers.stt,
@@ -120,7 +159,20 @@ export function makeSessionContext(
     sendTranscript: (t) => session.send("transcript", t),
     sendDisplay: (d) => session.send("ui.display", d),
   });
-  return { session, memory, heartbeat, voice, agentDeps };
+  // §20 async: фоновые задачи не блокируют разговор — их ИТОГ озвучивается через
+  // очередь пайплайна (когда канал свободен), плюс карточка в renderer.
+  agentDeps.speakResult = (reply) => {
+    voice.speakQueued(reply.voice);
+    if (reply.display) session.send("ui.display", reply.display);
+  };
+  const disposeAgent = (): void => {
+    closed = true;
+    // Снимаем ВСЕ незавершённые задачи сессии одним проходом: петли увидят cancel-флаг,
+    // выйдут ≤1 шага и освободят аренду ввода; задачи сами удалятся из bgTasks по завершении.
+    // Озвучку фонового итога глушит isClosed() — в мёртвую сессию не говорим (§20).
+    brain.tasks.cancelSession(session.sessionId);
+  };
+  return { session, memory, heartbeat, voice, agentDeps, disposeAgent };
 }
 
 /**
@@ -158,6 +210,19 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       // Управление задачей из UI (кнопка «стоп»/«пауза»/«продолжить», §20).
       const c = env.payload as TaskControl;
       handleTaskControl(ctx, c.action, c.taskId);
+      break;
+    }
+    case "client.takeover": {
+      // Пользователь взялся за ввод (§6) → агент уступает: пауза/возобновление задачи.
+      handleTakeover(ctx, (env.payload as Takeover).active);
+      break;
+    }
+    case "client.env": {
+      // §9: авто-профиль окружения (браузер/приложения) → в системный промпт сессии,
+      // чтобы агент адаптировался под конкретного пользователя (не хардкод).
+      const summary = (env.payload as ClientEnv).summary;
+      ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, environment: summary };
+      log.info("client.env: профиль окружения получен", { len: summary?.length ?? 0 });
       break;
     }
     case "audio.frame": {
@@ -312,6 +377,7 @@ export function handleControlUtterance(ctx: SessionContext, text: string): boole
   // «стоп» — оборвать TTS (§20), задачу не трогаем (различие «заткнись» vs «отмени»).
   if (decision.kind === "stop_tts") {
     ctx.voice.onVadEvent("barge_in");
+    ctx.voice.clearPendingSpeech(); // пользователь хочет тишины — не озвучивать отложенные фоновые итоги
     ctx.session.send("client.state", { state: "idle" });
     log.info("stop_tts: оборвана озвучка, задача не тронута (§20)", { reason: decision.reason });
     return true;
@@ -327,6 +393,13 @@ export function handleControlUtterance(ctx: SessionContext, text: string): boole
       reason: decision.reason,
     });
   }
+  // «отмени» голосом → «останови ВСЁ, что делаешь»: при параллельных задачах (§20)
+  // снимаем все, а не только самую свежую (иначе остальные доедут и озвучат итог).
+  // Пауза/возобновление/статус — по самой свежей активной (taskId).
+  if (decision.kind === "cancel") {
+    handleTaskControl(ctx, "cancel");
+    return true;
+  }
   handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId);
   return true;
 }
@@ -335,7 +408,26 @@ export function handleControlUtterance(ctx: SessionContext, text: string): boole
 export function handleTaskControl(ctx: SessionContext, action: TaskControl["action"], taskId?: string): void {
   const tasks = ctx.agentDeps.tasks;
   if (!tasks) return;
+
+  // «отмени» без явного taskId → снять ВСЕ задачи сессии (параллельный режим §20). С
+  // явным taskId (кнопка в UI на конкретной задаче) — гранулярная отмена ниже.
+  if (action === "cancel" && !taskId) {
+    const cancelled = tasks.cancelSession(ctx.session.sessionId);
+    ctx.voice.clearPendingSpeech(); // отменил всё → отложенные фоновые итоги тоже не нужны
+    for (const t of cancelled) emitTaskStatus(ctx.session, t);
+    const text =
+      cancelled.length === 0 ? "Нет активной задачи." : cancelled.length > 1 ? "Остановил все, сэр." : "Остановил.";
+    ctx.session.send("transcript", { text, final: true });
+    ctx.session.send("client.state", { state: "idle" });
+    return;
+  }
+
   const task = taskId ? tasks.get(taskId) : tasks.active(ctx.session.sessionId);
+  // Защита от кросс-сессионного управления: явный taskId должен принадлежать ЭТОЙ сессии.
+  if (task && task.sessionId !== ctx.session.sessionId) {
+    log.warn("task.control на задачу чужой сессии — игнор", { taskId, session: ctx.session.sessionId });
+    return;
+  }
   if (!task) {
     const text = action === "status" ? "Сейчас ничего не выполняю." : "Нет активной задачи.";
     ctx.session.send("transcript", { text, final: true });
@@ -367,6 +459,19 @@ export function handleTaskControl(ctx: SessionContext, action: TaskControl["acti
       break;
     }
   }
+}
+
+/**
+ * User-takeover (§6): пользователь взялся за мышь/клавиатуру → агент УСТУПАЕТ управление.
+ * active:true ставит активную задачу на паузу (петля перестаёт слать команды), active:false
+ * (простой ввода) — возобновляет. Делается тихо (без голосовых реплик) — это автоматика.
+ */
+export function handleTakeover(_ctx: SessionContext, _active: boolean): void {
+  // §20/концепция: НЕ паузим задачу по физическому вводу. Причина: пока ты просто смотришь
+  // и шевелишь мышью, авто-пауза флапала (пауза↔возобновление на каждое движение) и
+  // «приостанавливала» работу — это против автономного Джарвиса («много агентов, не
+  // тормозить, когда я рядом»). Явная остановка — голосом «стоп»/«отмени» (handleTaskControl).
+  // Сигнал takeover принимаем, но игнорируем (no-op).
 }
 
 /** Стрим состояния/прогресса задачи на клиент (§20, task.status). */
