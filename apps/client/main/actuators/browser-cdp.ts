@@ -15,6 +15,7 @@ import { mkdtemp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import NodeWebSocket from "ws";
 import { createLogger } from "@jarvis/shared";
 import { resolveAutomationBrowser } from "../sensors/system-profiler.js";
 import { monitors } from "../monitors.js";
@@ -279,8 +280,11 @@ export class CdpBrowserController implements BrowserController {
   }
 
   private connectWs(wsUrl: string): Promise<void> {
-    const WS = (globalThis as { WebSocket?: new (u: string) => WsLike }).WebSocket;
-    if (!WS) throw new Error("WebSocket недоступен в этом рантайме");
+    // В main-процессе Electron (Node 20.x) глобального WebSocket нет — берём пакет `ws`
+    // (как транспорт). Иначе CDP молча откатывался на launch-only, и невидимый путь не работал.
+    const WS =
+      (globalThis as { WebSocket?: new (u: string) => WsLike }).WebSocket ??
+      (NodeWebSocket as unknown as new (u: string) => WsLike);
     const ws = new WS(wsUrl);
     this.ws = ws;
     return new Promise<void>((resolve, reject) => {
