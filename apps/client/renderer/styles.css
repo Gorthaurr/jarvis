@@ -364,6 +364,10 @@ body {
   opacity: 1;
   animation: hero-spin 1.05s linear infinite;
 }
+/* «Думаю» — фокус на крутящемся кольце, без живой волны (как в макете). */
+.hero--thinking .hero__wave {
+  opacity: 0;
+}
 .hero--speaking {
   --hero-stroke: var(--accent);
   --hero-glow: var(--violet-glow);

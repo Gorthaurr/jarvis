@@ -388,7 +388,7 @@ function startWaveform(analyser: AnalyserNode): void {
   if (!waveCanvas) return;
   const cctx = waveCanvas.getContext("2d");
   if (!cctx) return;
-  const buf = new Uint8Array(analyser.fftSize);
+  const buf = new Uint8Array(analyser.frequencyBinCount);
   const dpr = window.devicePixelRatio || 1;
   const fit = (): void => {
     waveCanvas.width = Math.max(1, Math.round(waveCanvas.clientWidth * dpr));
@@ -396,26 +396,39 @@ function startWaveform(analyser: AnalyserNode): void {
   };
   fit();
   window.addEventListener("resize", fit);
+  // Эквалайзер-столбики (как в макете «Премиум-минимал»): циан со свечением, симметрично
+  // от центра, мягкое сглаживание во времени. Голос даёт энергию в нижне-средних частотах —
+  // верхние (почти всегда пустые) бины отрезаем, чтобы столбики «жили» по всей ширине.
+  const BARS = 40;
+  const levels = new Float32Array(BARS); // сглаженные высоты (0..1) — чтобы не «дёргалось»
   const draw = (): void => {
     requestAnimationFrame(draw);
-    analyser.getByteTimeDomainData(buf);
+    analyser.getByteFrequencyData(buf);
     const w = waveCanvas.width;
     const h = waveCanvas.height;
     cctx.clearRect(0, 0, w, h);
-    // живая волна голоса — циан под палитру «Премиум-минимал» (монохром, accent #5ed6ff)
-    cctx.lineWidth = Math.max(1.5, 2 * dpr);
-    cctx.strokeStyle = "#5ed6ff";
-    cctx.lineJoin = "round";
-    cctx.beginPath();
-    const step = w / buf.length;
-    for (let i = 0; i < buf.length; i += 1) {
-      const v = (buf[i]! - 128) / 128; // -1..1
-      const x = i * step;
-      const y = h / 2 + v * (h / 2) * 0.92;
-      if (i === 0) cctx.moveTo(x, y);
-      else cctx.lineTo(x, y);
+    const gap = 2 * dpr;
+    const barW = Math.max(1.5 * dpr, (w - gap * (BARS - 1)) / BARS);
+    const mid = h / 2;
+    const usable = Math.max(1, Math.floor(buf.length * 0.6)); // отрезаем пустой верх спектра
+    cctx.fillStyle = "#5ed6ff";
+    cctx.shadowColor = "rgba(94, 214, 255, 0.75)";
+    cctx.shadowBlur = 7 * dpr;
+    for (let i = 0; i < BARS; i += 1) {
+      const a = Math.floor((i / BARS) * usable);
+      const b = Math.max(a + 1, Math.floor(((i + 1) / BARS) * usable));
+      let sum = 0;
+      for (let j = a; j < b; j += 1) sum += buf[j]!;
+      const amp = sum / (b - a) / 255; // 0..1
+      // экспоненциальное сглаживание: вверх быстро, вниз плавно (живой, но не нервный эквалайзер)
+      const prev = levels[i]!;
+      levels[i] = amp > prev ? amp : prev * 0.82 + amp * 0.18;
+      const barH = Math.max(2 * dpr, levels[i]! * h * 0.94);
+      const x = i * (barW + gap);
+      cctx.beginPath();
+      cctx.roundRect(x, mid - barH / 2, barW, barH, Math.min(barW / 2, 2 * dpr));
+      cctx.fill();
     }
-    cctx.stroke();
   };
   draw();
 }
