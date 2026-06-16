@@ -1,119 +1,125 @@
 # Следующая сессия — хендофф
 
-> Состояние на конец сессии 2026-06-15 (поздний вечер). Архитектурные принципы и грабли —
-> в памяти: `project_jarvis_architecture.md` (читать ПЕРВЫМ), `feedback_universal.md`,
-> `project_jarvis_handoff.md`, `project_jarvis_infra.md` — грузятся автоматически.
+> Состояние на конец сессии 2026-06-16. Ветка `feat/native-pg-pgvector-cache-gateway`, всё
+> **закоммичено** (рабочее дерево чистое). 316 серверных тестов зелёные, `pnpm -r typecheck` чист.
+> Архитектура и грабли — в памяти (грузятся автоматически): `project_jarvis_architecture.md`
+> (читать ПЕРВЫМ), `project_jarvis_hermes.md`, `project_jarvis_voice.md`, `feedback_universal.md`,
+> `project_jarvis_handoff.md`, `project_jarvis_infra.md`.
 
-## СДЕЛАНО: петля HERMES (самообучение навыками-процедурами) — РАБОТАЕТ, 296 тестов
+## ГЛАВНАЯ ЗАДАЧА: realtime-голос (как Grok Voice / ChatGPT Advanced Voice)
 
-Корневой принцип пользователя: **НЕ хардкодить под каждый сервис** — ОДИН самообучающийся
-агент, который ошибается вначале, но каждый успешный сложный приём сохраняет НАВЫКОМ и
-переиспользует (эталон — HERMES от Nous Research). НАВЫК = процедура-памятка, которой LLM
-СЛЕДУЕТ гибко, **НЕ реплей кликов**. Все 5 пунктов одобренного плана реализованы:
+Пользователь хочет 3 фишки «общения» как у Grok. **Две сделаны** (см. ниже), осталась
+**realtime-голос** — самая большая и рискованная (трогает рабочий голосовой контур). НЕ делать
+наспех: это связанный рефактор ОБЕИХ сторон, проверяется ТОЛЬКО на слух (пользователь слушает).
 
-1. **`skill_save` (новый server-side инструмент)** — схема `packages/tools/src/index.ts`
-   (`SKILL_TOOLS`: `{name, when, procedure}`); хендлер `brain/tools/dispatch.ts` (`skillSave`).
-   Хранение: `memory/skills.ts` `createSkillProvider().save()` → `content_md` = фронтматтер
-   (`source: learned`, name, version, `description`=when) + тело-процедура; БД-upsert (`saveSkill`)
-   + осязаемый файл `data/skills/<id>.md` (общий `writeSkillFile`). Повторное сохранение того же
-   имени → version++ (улучшение, п.5). `slugify`/`writeSkillFile` вынесены в `skills.ts` (DRY —
-   `brain/skills/record.ts` теперь их переиспользует).
-2. **RECALL в начале задачи** — `runAgentLoop` зовёт `deps.skills.recall(userId, text)` ПОД
-   ТАЙМАУТОМ (как facts), лексический матч с грубым стеммингом (`matchLearnedSkill`, чистая
-   функция, порог ≥2 попаданий и ≥1/3 перекрытие — ложный recall вреднее пропуска). Найденный
-   навык форматируется (`formatRecalledSkill`) и вшивается через новое поле
-   `UserContextSlot.learnedSkill` → `buildSystemPrompt` отдельным блоком «# Подходящий выученный
-   навык» (руководство, не факт; модель вольна игнорировать, если не подходит).
-3. **AUTO-SAVE бэкстоп** — после успешной задачи (`!failed && !limited && !cancelled && finalText
-   && round>=3 && !recalled && !skillSavedInLoop && deps.skills`) `selfLearnSkill` гонит ≤4 узких
-   ходов (набор ТОЛЬКО `skill_save`/`skill_list` — рефлексия не делает реальных действий) с
-   траекторией инструментов (`toolTrajectory`) в нудже. Ошибки глушатся, голосовой ответ не
-   блокируется. `skill_save`, вызванный моделью ПО ХОДУ задачи, выставляет `skillSavedInLoop` →
-   повторно не нуждим.
-4. **Персона** (`persona.md` §8, version 12→13) — добавлен блок «Навыки — твоя процедурная память
-   (`skill_save`)»: сохраняй обобщённо после сложной задачи; в начале похожей следуй показанному
-   навыку; разовое не сохраняй.
-5. **Разделение реплей- и процедура-навыков** — `createSkillProvider().list/get` ФИЛЬТРУЮТ
-   `source: learned` (их нельзя реплеить через `skill_execute`; они только для recall). UI-каталог
-   («Навыки») через `listSkills`/`pushSavedSkills` по-прежнему видит всё.
+**Почему сейчас задержка:** все тиры на **Opus 4.8** (жёсткое требование пользователя, см. .env) —
+даже болтовня медленная. ElevenLabs (HTTP `multilingual_v2`) отдаёт весь mp3 одним ответом. Клиент
+(`apps/client/renderer/audio.ts` `AudioPlayback`) **копит чанки и играет ТОЛЬКО по `last`** — то
+есть без изменений клиента стриминг ничего не ускорит. Реальный «вау» даёт только token-streaming.
 
-**Тесты (302, было 285):** `skills.test.ts` (serializeLearnedSkill/matchLearnedSkill +
-ложные-срабатывания стемминга/порог/тай-брейк, slugify, isLearnedMd, createSkillProvider
-save→recall БЕЗ БД с version++), `skill-tools.test.ts` (skill_save: ok/валидация/нет провайдера),
-`agent/index.test.ts` (recall вшивает процедуру; бэкстоп сохраняет; провал → НЕ сохраняем; recall
-сработал → НЕ навязываем). `pnpm -r typecheck` + `@jarvis/server test` зелёные.
+**ПЛАН (3 части, делать по очереди, на каждой давать пользователю послушать):**
+1. **LLM token-streaming.** Добавить `completeStream(req, onDelta)` в `ILlmProvider`
+   (`apps/server/src/integrations/llm.ts`) + реализации: `anthropic.ts` (SDK `client.messages.stream`),
+   `MockLlmProvider`. Только для КОНВЕРСАЦИОННОГО финального текста (без tool_use). Если в стриме
+   пошёл `tool_use` — откатываемся на штатный мульти-шаг `runAgentLoop` (стримленный префикс обычно
+   пустой на tool-ходах).
+2. **Пофразный синтез + чанкер.** Утилита-аккумулятор: из дельт собирает ПРЕДЛОЖЕНИЯ (по `.!?…`/
+   переносам), отдаёт по мере готовности. Каждое предложение → `tts.synthesize` сразу. ElevenLabs
+   на короткой фразе отвечает быстрее → первый звук = синтез ПЕРВОГО предложения, остальное
+   синтезируется во время проигрывания.
+3. **Очередь воспроизведения на клиенте.** `AudioPlayback`: на каждый `last:true` — НЕ останавливать
+   предыдущее (сейчас `flush()` зовёт `stop()`!), а класть utterance в ОЧЕРЕДЬ и играть по
+   `onended` подряд. Barge-in/`stop()` чистит очередь + глушит текущее.
 
-**Пост-ревью хардненг (адверсариальный workflow, 9 подтверждённых → исправлены):**
-- **#1 крит:** `pushSavedSkills` (`gateway/router-ws.ts`) слал learned-процедуры в UI как
-  РЕПЛЕЙ-карточки (их derived-«шаги» из прозы могли исполниться по клику) → теперь фильтрует
-  `isLearnedMd` и ставит `needsReview = hasGuardSteps` (а не хардкод false).
-- **#2 крит:** learned и demonstrated навыки делили id-пространство (`slugify(name)`) → upsert
-  затирал друг друга. Теперь learned-id с префиксом `learned__` (slugify не порождает `_` →
-  коллизия невозможна).
-- **#3:** бэкстоп срабатывал и на ПРОВАЛЕ (`finalText` ставится и когда модель сдалась) → добавлен
-  гейт `anyToolSucceeded`.
-- **#6 (универсальность):** без БД skill_save «учил в пустоту» → in-memory-фолбэк в
-  `saveSkill/getSkill/listSkills` (как у эпизодической памяти); version++ работает и без Postgres.
-- **#7:** бэкстоп ел бюджет `maxStepsPerTask=30` той же задачи → отдельный метр `${taskId}:reflect`
-  (+лог при отказе предохранителя); spendCap/kill-switch по-прежнему действуют.
-- **#8/#9:** 4-симв. стемминг recall давал ложные совпадения (стол*/поч*) → длинозависимый порог
-  общего префикса `max(5, ⌈0.75·min(len)⌉)` + детерминир. тай-брейк по id.
+**Где вшивать (риск):** шов `onUserTurn` в `voice/pipeline.ts` → `runAgent`. Сейчас он ждёт
+ПОЛНЫЙ `AgentReply` и зовёт `startTts(reply.voice)`. Для стрима нужен путь, где `onUserTurn`
+отдаёт предложения по мере генерации. Беречь: `gen`-инвалидацию (barge-in), `drive`-флаг
+(проактивный `speak` НЕ трогает машину состояний — см. фикс этой сессии!), `speak_start/done`,
+`maybeDrainSpeech`. Низкорисковый минимум: для реплик в 1 предложение оставить текущий путь
+(0 регрессий на частом кейсе), пофразный — только для многопредложенных.
 
-**ОТЛОЖЕНО (осознанно, на потом):**
-- **Клиентский confirm на UI-повтор навыка** (§14): `runSavedSkill` в `apps/client/main/index.ts`
-  реплеит guard-навык БЕЗ подтверждения (серверный `skill_execute` — с подтверждением). Это
-  ПРЕД-существующая дыра (не про HERMES; learned-процедуры туда уже не попадают). Заведена задача.
-- **Улучшение навыка на ОШИБКЕ** recall'нутого (сейчас version++ только при явном пере-`skill_save`).
-  Куратор: stale 30д / archive 90д, LLM-доработка.
-- **Семантический recall** (сейчас лексический + стемминг; навыки НЕ эмбеддятся) — если навыков
-  станет много с синонимичными формулировками, эмбеддить when/name и матчить косинусом.
-- **agentskills.io-стандарт** формата — опционально.
-- Учитывать `fail_count`/реальное «применил ли модель навык» вместо «recalled != null» как прокси.
+**Альтернатива поменьше (если ок жить с задержкой Opus):** только п.2+п.3 (пофразный синтез +
+клиентская очередь) — меньше риска, но эффект скромнее (Opus всё равно «думает» перед первым звуком).
 
-## СДЕЛАНО этой сессией: «Браузер Джарвиса» + Telegram send/read (РАБОТАЕТ)
+## СДЕЛАНО этой сессией
 
-- **`apps/client/main/actuators/jarvis-browser.ts`** — ТЁПЛЫЙ невидимый Chrome (свой профиль),
-  общий слой. ОБЩИЕ примитивы `web_open`/`web_read`/`web_act` (Opus сам читает/действует на ЛЮБОМ
-  залогиненном сервисе) + тюнингованные `telegram_send`/`telegram_read`. Это и есть путь к
-  «любой мессенджер/YouTube» — НЕ хардкодить, а общими руками + (скоро) навыками.
-- Протокол: kinds `telegram.send/telegram.read/jbrowser.open/jbrowser.read/jbrowser.act`
-  (`packages/protocol/src/actions.ts`); карта `ACTUATOR_TOOL_BY_KIND` + схемы + тест покрытия
-  (`packages/tools`); client `actuators/index.ts` (кейсы); server `dispatch.ts` (telegram_send →
-  ActionCommand telegram.send; остальные через generic actuator-путь). Старый `stealth-telegram.ts` удалён.
-- **navTo (ВАЖНО, принцип пользователя — не хардкод-матчер):** ищем чат по ПОЛНОЙ строке диалога в
-  ВИДИМОМ списке (не глобальный @username-поиск, не угаданный селектор имени); на неоднозначности
-  возвращаем `candidates` (полные строки чатов) → НЕЙРОНКА сама выбирает (как человек по скрину) и
-  повторяет с точным названием. Saved Messages — через меню по иконке `savedmessages` (язык-независимо).
-- **Verified standalone:** send (delivered по исходящему пузырю), read («Катя»→нашёл «Катя Любимая»,
-  сообщения с in/out, время/edited вычищены клонированием+удалением meta).
-- **Невидимость (универсально):** off-screen позиция = за правым краём ВСЕХ мониторов в ФИЗ.пикселях
-  (`scaleFactor`, floor 40000). Причина прошлого «видел браузер» — DIP≠физ при масштабе≠100%.
-- Надёжность (из ревью): `AsyncMutex` на ВСЕ операции (не два Chrome на профиль), трекинг
-  login-процесса (kill перед тёплым), `proc.on('exit')`, idle-close 5мин, ASCII-профиль (кирилл.
-  имя юзера → фолбэк ProgramData).
-- Память: добавлены `project_jarvis_architecture.md`, `feedback_universal.md`.
-- **Универсальность-ревью (workflow, 31 находка): критичные применены.** ОТЛОЖЕНО: кросс-ОС
-  (mac/linux в `chromeCandidates`/`system-profiler` — приложение пока Windows-only); DPI для
-  ВИДИМОГО окна `browser-cdp.ts`; авто-параметризация навыков.
+### 1. Петля HERMES — самообучение навыками-процедурами (§8) — `a61f134`
+Джарвис сам сохраняет успешный многошаговый приём навыком-процедурой (`skill_save`) и СЛЕДУЕТ ему
+в похожих задачах (recall в системный промпт), НЕ реплей кликов. Детали/что-где/почему/отложено —
+в памяти `project_jarvis_hermes.md`. Узлы: `memory/skills.ts` (save/recall/matchLearnedSkill,
+`learned__`-префикс id, in-memory фолбэк без БД), `brain/agent/index.ts` (recall + бэкстоп
+`selfLearnSkill`), `persona/index.ts` (`learnedSkill`-слот), `dispatch.ts` (`skillSave`),
+`gateway/router-ws.ts` `pushSavedSkills` (фильтр learned). Пост-ревью хардненг (9 находок) внутри
+коммита. ОТЛОЖЕНО (HERMES): улучшение навыка на ОШИБКЕ recall'нутого; куратор stale/archive;
+семантический recall (эмбеддинги when/name); клиентский confirm на UI-повтор guard-навыка
+(`runSavedSkill` в client — ПРЕД-сущ. дыра §14, заведена задача-чип).
 
-## Профиль / логин Telegram
-- Профиль браузера Джарвиса: `%LOCALAPPDATA%\JarvisTG\tg-profile` (Telegram УЖЕ залогинен с 2FA).
-  Кириллица в пути ломает IndexedDB webK → путь ASCII; вход по НОМЕРУ (QR webK капризен), нужен 2FA-пароль.
-- Видимое окно входа: `apps/server/stealth-tg.mjs login` (прототип) или `JarvisBrowser.openLogin()`.
-- ОТЛОЖЕНО (прошлая просьба): раздел «Аккаунты» в настройках Electron (кнопки «Войти в Google/…»
-  открывают браузер Джарвиса видимо → логин → дальше действует невидимо). Один профиль = все сервисы
-  (вошёл в Google → YouTube/почта живые). Делать ПОСЛЕ петли HERMES (она это обобщает).
+### 2. Голос: два фикса «не слышит» / «перестал слушать» — `61ed8c0`, `16c9846`
+- **«спросил и перестал слушать»:** фоновый итог (§20) произносился из idle/listening, машина НЕ
+  входила в speaking → не срабатывал возврат `speak_done → listening + follow-up`. Фикс: `speak_start`
+  переводит в speaking и из idle/listening (`voice/state.ts`).
+- **регрессия «не слышит»:** тот фикс заставлял и онбординг-приветствие гнать в speaking →
+  churn STT на старте. Фикс: проактивный `speak()` — fire-and-forget (`drive=false`), НЕ трогает
+  цикл (`voice/pipeline.ts`). ВАЖНО беречь это при realtime-рефакторе.
+
+### 3. Невидимый браузер ОЖИЛ — WebSocket из пакета `ws` — `194ed5a`
+Корень «не может невидимо как в TG, жалуется на отсутствие инструмента»: оба CDP-клиента
+(`jarvis-browser.ts` невидимый + `browser-cdp.ts` видимый) брали `globalThis.WebSocket`, которого
+**в main-процессе Electron 33 (Node 20.x) НЕТ** → `web_open/web_act/web_read` падали. Фикс: берём
+`WebSocket` из пакета `ws` (как транспорт). Проверено по логу: `web_open/act/read isError:false`.
+Это фундамент универсальности — общие руки на любом залогиненном сервисе.
+
+### 4. `web_login` — вход в сервис видимо, дальше невидимо — `ee98d81`
+Не залогинен → Джарвис открывает страницу входа ВИДИМО (тот же профиль), юзер входит один раз,
+дальше работает невидимо. Tool `web_login(url)` → `jbrowser.login` → `jarvisBrowser().openLogin(url)`.
+Персона §8 учит распознавать стену логина. Любой сервис (ВК и т.д.) становится залогиненным как TG.
+
+### 5. UI — полное соответствие макету «Премиум-минимал» — `8ba2fa5`, `8ceb757`, `b389101`, `df43f7f`
+Исходник — `Дизайн электрона.zip` (`port/Jarvis Redesign - standalone.html` + `.dc.html` + `styles.css`).
+Перенёс 1:1: near-black слои, циан `#5ed6ff`, **живой CSS-эквалайзер** (`@keyframes eq`, 26 столбиков,
+огибающая sin — параметры из макета, всегда «живые», НЕ от микрофона), **кольцо только в «Думаю»**,
+вкладки настроек (Общее/Навыки/Ключи/Оплата), шестерёнка-cog, шрифт Manrope (`@fontsource-variable/manrope`).
+Проверял рендером через preview-сервер (скриншот зависал на анимациях → паузил `animationPlayState`
+перед захватом; превью-сервер отдавал SOURCE renderer, не dist). ОТЛОЖЕНО: «Deep Focus·50:00» —
+это пример-контент макета (нет механизма), не добавлял.
+
+### 6. Личности/голоса — режимы-маски Джарвиса (§11) — `c4890df`
+Переключаемый ТОН одного Джарвиса (не другой персонаж): дворецкий(база)/дерзкий/рассказчик/с юмором.
+Голосом «будь дерзким»/«будь собой» (детерминированно, `matchModeCommand` на подстроках — `\b`/`\w`
+в JS НЕ работают с кириллицей!). Меняет формулировку (оверлей к персоне) + подачу голоса ElevenLabs
+(`voice_settings` style/stability/speed на том же голосе). `profile.mode` персистит. Узлы:
+`persona/modes.ts`, `persona/index.ts` (`personaTone`), `agent/index.ts`, `voice-providers.ts`+`elevenlabs.ts`
+(per-call settings), `pipeline.ts` (`getVoiceOpts`), `router-ws.ts`. ОТЛОЖЕНО: вкладка «Характер» в
+настройках (UI-переключатель режимов); разные voiceId (у юзера один голос — сейчас отличие через voice_settings).
+
+### 7. Проактивность/память — контекстное приветствие (§9/§11) — `91187c8`
+Джарвис открывает сессию КОНТЕКСТНО: время суток + что помнит (имя, факты, недавняя episodic-память)
+→ живой опенер, при уместности с проактивным вопросом. Best-effort (haiku, под таймаутом) с фолбэком.
+`proactive/greeting.ts` (`timeOfDay`+`buildGreeting`, профиль инъектится — без глоб. состояния).
+ОТЛОЖЕНО (бо́льшая проактивность): триггеры (`proactive/triggers/index.ts`) — ВСЁ ещё СТУБЫ (TODO M5):
+сам заводит разговор СРЕДИ сессии по времени/событиям. Инфра готова (salience/presence/NudgeQueue/
+scheduler), нет источников триггеров + хранилища напоминаний.
 
 ## Как запускать (durable) / проверять
-- **Сервер:** убить процесс на 8787 → `Start-Process cmd.exe "/c", 'cd /d "<repo>\apps\server" && node "<repo>\node_modules\tsx\dist\cli.mjs" src/index.ts > "<repo>\server.log" 2>&1' -WindowStyle Hidden`. PowerShell-вызов СРАЗУ выходит.
-- **Клиент:** пересборка `pnpm --filter @jarvis/client build`; запуск `Start-Process electron.exe "." -WorkingDirectory apps\client` (БЕЗ редиректа stdio — иначе GUI не стартует; `-RedirectStandardOutput` для диагностики допустим, но потом stale).
-- **Чистый рестарт:** убить 8787-owner + electron + SidecarWin + chrome с `*JarvisTG*` в cmdline; `Start-Sleep 3`; проверить electron=0; старт сервера → healthz → клиент; проверка `server.log` **в UTF-8** (`Get-Content -Encoding UTF8`! иначе кракозябры и ложные «0 хендшейков»): должно быть 1 handshake / 1 сессия, без реконнект-флаппинга (флаппинг = наложение от частых рестартов).
-- **Проверки кода:** `pnpm --filter @jarvis/client typecheck` + `@jarvis/server typecheck`; `@jarvis/tools test`; `@jarvis/server test` (был 285); синтаксис PAGE-строки в jarvis-browser.ts: `node -e "new Function(<String.raw содержимое>)"`.
-- **ВСЁ НЕЗАКОММИЧЕНО** (вся сессия в рабочем дереве, ветка `feat/native-pg-pgvector-cache-gateway`).
+- **Сервер:** убить владельца 8787 → `Start-Process cmd.exe '/c', 'cd /d "<repo>\apps\server" && node "<repo>\node_modules\tsx\dist\cli.mjs" src/index.ts > "<repo>\server.log" 2>&1' -WindowStyle Hidden`. PowerShell-вызов СРАЗУ выходит. Ждать `healthz` (порт 8787).
+- **Клиент:** пересборка `pnpm --filter @jarvis/client build`; запуск `Start-Process <repo>\node_modules\.pnpm\electron@33.4.11\node_modules\electron\dist\electron.exe "." -WorkingDirectory apps\client`. Для диагностики можно `-RedirectStandardOutput client.out.log -RedirectStandardError client.err.log` (рендерер-логи и ошибки актуаторов видны там).
+- **Проверки:** `pnpm -r typecheck`; `pnpm --filter @jarvis/server test` (316); `@jarvis/tools test`; `@jarvis/client test`.
+- **server.log ТОЛЬКО в UTF-8** (`Get-Content -Encoding UTF8`! иначе кракозябры и ложные «0 хендшейков»). 1 handshake / 1 сессия, без реконнект-флаппинга.
+- **БД:** локально нативный Postgres (`postgres://postgres:...@localhost:5432/jarvis`) — `db: 'configured'`. HERMES-навыки/эпизоды durable.
 
-## Чего НЕ делать
-- НЕ хардкодить под каждый сервис/кнопку — общие руки + навыки + LLM решает (это корневой принцип).
-- НЕ матчить чаты строгими `===` — отдавать кандидатов нейронке.
-- НЕ ставить off-screen `-3000`/`+300` — за правым краём всех мониторов в физ.пикселях.
-- НЕ MTProto (userbot отвергнут), НЕ расширение для невидимости (Chrome паузит rAF в фон-вкладке).
-- НЕ читать server.log без `-Encoding UTF8`. НЕ частить рестартами (флаппинг).
+## Чего НЕ делать (грабли)
+- realtime-голос — НЕ вшивать наспех в `pipeline.ts`/`runAgentLoop` без проверки на слух; беречь
+  `drive=false` для проактивного `speak` (иначе вернётся «не слышит»), `gen`-инвалидацию, barge-in.
+- В JS-регексах с кириллицей НЕ использовать `\b`/`\w` — не работают; матчить подстроками/`[а-яё]`.
+- НЕ хардкодить под сервис — общие руки (`web_open/act/login`) + навыки + LLM решает.
+- НЕ читать `server.log` без `-Encoding UTF8`. НЕ частить рестартами (флаппинг).
+- НЕ менять модель/тиры с Opus (требование) и TTS с `multilingual_v2` (точность > скорости, выбор юзера).
+- preview-скриншот зависает на работающих CSS-анимациях → перед захватом
+  `document.querySelectorAll('*').forEach(e=>e.style.animationPlayState='paused')`.
+
+## Открытые задачи (приоритет сверху)
+1. **realtime-голос** (главная, см. выше).
+2. Бо́льшая проактивность: реальные триггеры (время/события) среди сессии + хранилище напоминаний.
+3. Вкладка «Характер» в настройках (UI-переключатель режимов §11).
+4. Клиентский confirm на UI-повтор guard-навыка (§14, пред-сущ. дыра, есть задача-чип).
+5. HERMES-куратор: улучшение навыка на ошибке, stale/archive, семантический recall.
