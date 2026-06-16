@@ -42,6 +42,7 @@ import { CachingWebProvider, WebProvider } from "../integrations/web.js";
 import { createEpisodicMemory } from "../memory/episodic.js";
 import { createSkillProvider } from "../memory/skills.js";
 import { forgetClientContext } from "../proactive/salience.js";
+import { buildGreeting } from "../proactive/greeting.js";
 import { ExtensionBridge, type ExtSocket } from "./extension-bridge.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
@@ -358,32 +359,30 @@ function doHandshake(
   // §8: пробрасываем ранее записанные навыки в UI (список «Навыки» + возможность повтора).
   pushSavedSkills(ctx);
 
-  // Онбординг (§11): на свежую (не возобновлённую) сессию Джарвис здоровается
-  // голосом и спрашивает, как обращаться. На resume — молчит (уже знакомы).
-  if (!resumed) startOnboarding(ctx, session, log);
+  // Онбординг (§11): на свежую (не возобновлённую) сессию Джарвис здоровается голосом —
+  // КОНТЕКСТНО (время суток + что помнит о пользователе), при уместности с проактивным
+  // вопросом. На resume — молчит (уже знакомы).
+  if (!resumed) startOnboarding(ctx, session, brain, log);
 
   return ctx;
 }
 
-/** Приветствие (§11): по имени, если знаем (профиль), иначе спрашиваем как обращаться. */
-function greeting(): string {
-  const name = getProfile().displayName;
-  return name
-    ? `Добрый день, ${name}. Джарвис к вашим услугам.`
-    : "Добрый день, сэр. Джарвис к вашим услугам. Как мне к вам обращаться?";
-}
-
-function startOnboarding(ctx: SessionContext, session: Session, log: Logger): void {
+function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProviders, log: Logger): void {
   // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.
   const t = setTimeout(() => {
-    try {
-      // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript —
-      // иначе на каждое переподключение копится карточка-спам (НЕ чат-бот, §концепт).
-      ctx.voice.speak(greeting());
-      log.info("онбординг: приветствие произнесено");
-    } catch (e) {
-      log.warn("онбординг не удался", e instanceof Error ? e.message : String(e));
-    }
+    // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript — иначе на
+    // каждое переподключение копится карточка-спам (НЕ чат-бот, §концепт). Контекст — best-effort.
+    const p = getProfile();
+    void buildGreeting(
+      { llm: brain.llm, episodic: brain.episodic, models: brain.models },
+      session.userId,
+      { name: p.displayName, facts: p.facts },
+    )
+      .then((line) => {
+        ctx.voice.speak(line);
+        log.info("онбординг: приветствие произнесено");
+      })
+      .catch((e) => log.warn("онбординг не удался", e instanceof Error ? e.message : String(e)));
   }, 800);
   if (typeof t.unref === "function") t.unref();
 }
