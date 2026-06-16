@@ -63,6 +63,13 @@ export interface TtsChunk {
 export interface TtsOpts {
   voiceId?: string;
   sampleRate?: number;
+  /**
+   * Тонкая подстройка голоса под режим-маску (§11): сдвигает ПОДАЧУ на том же голосе.
+   * stability/style 0..1, speed ~0.7..1.2 (ElevenLabs voice_settings). undefined → дефолт.
+   */
+  stability?: number;
+  style?: number;
+  speed?: number;
 }
 
 /**

@@ -33,6 +33,7 @@ import { AsyncMutex, type Logger, Semaphore, type Tier, createLogger } from "@ja
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import type { ButlerAcks } from "../brain/persona/acks.js";
+import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { getProfile } from "../brain/profile.js";
 import type { SpendGuard } from "../billing/index.js";
@@ -148,6 +149,12 @@ export function makeSessionContext(
     stt: providers.stt,
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
+    // §11: голос активного режима-маски — берётся на каждый синтез из профиля, поэтому
+    // «будь дерзким» меняет подачу мгновенно (без пересоздания пайплайна).
+    getVoiceOpts: () => {
+      const m = getMode(getProfile().mode).voice;
+      return m ? { voiceId: m.voiceId, stability: m.stability, style: m.style, speed: m.speed } : undefined;
+    },
     // §3 wake word: реагировать только на обращение «Джарвис» (вне окна разговора).
     requireWakeWord: true,
     // brain на финальном тексте реплики (§21: {voice, display?}).

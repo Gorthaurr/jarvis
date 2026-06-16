@@ -69,7 +69,11 @@ class ElevenLabsHttpStream implements TtsStream {
   private readonly timeoutMs = 8_000;
   private timer?: ReturnType<typeof setTimeout>;
 
-  constructor(text: string, cfg: Required<Pick<ElevenLabsConfig, "apiKey" | "voiceId">> & ElevenLabsConfig) {
+  constructor(
+    text: string,
+    cfg: Required<Pick<ElevenLabsConfig, "apiKey" | "voiceId">> & ElevenLabsConfig,
+    private readonly settings: typeof VOICE_SETTINGS = VOICE_SETTINGS,
+  ) {
     void this.run(text, cfg);
   }
 
@@ -105,7 +109,7 @@ class ElevenLabsHttpStream implements TtsStream {
         body: JSON.stringify({
           text,
           model_id: model,
-          voice_settings: VOICE_SETTINGS,
+          voice_settings: this.settings,
           // Текст УЖЕ нормализован детерминированно по-русски (числа→слова, чистка markdown).
           // off отключает нормализацию ElevenLabs: на русском её встроенная логика читает
           // числа по английским правилам, плюс на flash/turbo вне Enterprise она и так не
@@ -170,6 +174,14 @@ export class ElevenLabsTtsProvider implements ITtsProvider {
   synthesize(text: string, opts?: TtsOpts): TtsStream {
     const voiceId = opts?.voiceId ?? this.cfg.voiceId;
     if (!this.cfg.apiKey || !voiceId) return new MockTtsStream(text);
-    return new ElevenLabsHttpStream(text, { ...this.cfg, apiKey: this.cfg.apiKey, voiceId });
+    // Подмешиваем подстройку режима-маски (§11) к базовым voice_settings, клампим в допустимое.
+    const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+    const settings = {
+      ...VOICE_SETTINGS,
+      ...(opts?.stability !== undefined ? { stability: clamp(opts.stability, 0, 1) } : {}),
+      ...(opts?.style !== undefined ? { style: clamp(opts.style, 0, 1) } : {}),
+      ...(opts?.speed !== undefined ? { speed: clamp(opts.speed, 0.7, 1.2) } : {}),
+    };
+    return new ElevenLabsHttpStream(text, { ...this.cfg, apiKey: this.cfg.apiKey, voiceId }, settings);
   }
 }

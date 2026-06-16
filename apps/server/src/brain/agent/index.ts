@@ -28,7 +28,8 @@ import type { EpisodicMemory } from "../../memory/episodic.js";
 import type { WorkingMemory } from "../../memory/working.js";
 import type { SpendGuard } from "../../billing/index.js";
 import { type UserContextSlot, buildSystemPrompt } from "../persona/index.js";
-import { setDisplayName } from "../profile.js";
+import { getProfile, setDisplayName, setMode } from "../profile.js";
+import { getMode, matchModeCommand } from "../persona/modes.js";
 import { type LocalIntent, classifyTier } from "../router/index.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
 import type { DynamicToolStore } from "../tools/dynamic.js";
@@ -154,6 +155,18 @@ export async function handleUserText(
     if (deps.userContext) deps.userContext.displayName = name;
     else deps.userContext = { displayName: name };
     const reply: AgentReply = { voice: verbalize(`Запомнил, ${name}. Рад знакомству.`) };
+    deps.memory.pushTurn("assistant", reply.voice);
+    return reply;
+  }
+
+  // Смена режима-маски (§11): «будь дерзким» / «будь собой» — детерминированно, без LLM.
+  // Персист в профиль; тон применится со следующего хода (и голос переключится в пайплайне).
+  const modeId = matchModeCommand(clean);
+  if (modeId) {
+    void setMode(modeId);
+    const mode = getMode(modeId);
+    const voice = verbalize(modeId === "butler" ? "Возвращаюсь к обычному тону, сэр." : `Готово — режим «${mode.name}».`);
+    const reply: AgentReply = { voice };
     deps.memory.pushTurn("assistant", reply.voice);
     return reply;
   }
@@ -341,6 +354,8 @@ async function runAgentLoop(
   const sys = buildSystemPrompt({
     ...deps.userContext,
     facts,
+    // Тон активного режима-маски (§11): берём из профиля (переживает рестарт), оверлеем поверх персоны.
+    personaTone: getMode(getProfile().mode).overlay || undefined,
     ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
   });
   // Набор = встроенные (минус служебные) + самописные инструменты (§8+ саморасширение):

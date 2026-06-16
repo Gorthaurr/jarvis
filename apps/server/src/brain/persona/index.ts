@@ -48,6 +48,8 @@ export interface UserContextSlot {
    * задачи. Вшивается в системный промпт — LLM ему СЛЕДУЕТ (гибко), не реплеит.
    */
   learnedSkill?: string;
+  /** Оверлей тона активного режима-маски (§11): доп. инструкция подачи. Пусто у дворецкого. */
+  personaTone?: string;
 }
 
 /**
@@ -71,6 +73,8 @@ export function buildSystemPrompt(slot: UserContextSlot = {}): {
 
 function renderDynamic(slot: UserContextSlot): string {
   const lines: string[] = [];
+  // Режим тона (§11) — первым: меняет ПОДАЧУ (не личность), действует поверх базовой персоны.
+  if (slot.personaTone) lines.push(slot.personaTone);
   if (slot.displayName) lines.push(`Пользователя зовут: ${slot.displayName}.`);
   if (slot.timezone) lines.push(`Часовой пояс пользователя: ${slot.timezone}.`);
   if (slot.environment) {

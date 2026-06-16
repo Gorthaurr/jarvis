@@ -16,6 +16,8 @@ export interface UserProfile {
   displayName?: string;
   /** Произвольные факты о пользователе (для «лучшего анализа»). */
   facts?: string[];
+  /** Текущий режим-«маска» Джарвиса (§11): id из persona/modes. По умолч. — дворецкий. */
+  mode?: string;
 }
 
 let cache: UserProfile = {};
@@ -42,6 +44,13 @@ export async function setDisplayName(name: string): Promise<void> {
   cache.displayName = name;
   await persist();
   log.info("профиль: имя сохранено", { displayName: name });
+}
+
+/** Сохранить текущий режим-маску (§11, персист). */
+export async function setMode(mode: string): Promise<void> {
+  cache.mode = mode;
+  await persist();
+  log.info("профиль: режим сохранён", { mode });
 }
 
 /** Добавить факт о пользователе (без дублей). */

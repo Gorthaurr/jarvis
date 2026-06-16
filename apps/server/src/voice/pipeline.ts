@@ -18,6 +18,7 @@ import type {
   ITtsProvider,
   SttStream,
   TtsChunk,
+  TtsOpts,
   TtsStream,
 } from "../integrations/voice-providers.js";
 import { LatencyTracker } from "./latency.js";
@@ -55,6 +56,11 @@ export interface VoicePipelineDeps {
   followupMs?: number;
   sttSampleRate?: number;
   ttsVoiceId?: string;
+  /**
+   * Голос активного режима-маски (§11): вызывается на КАЖДЫЙ синтез — переключение
+   * режима мгновенно меняет voiceId/подачу без пересоздания пайплайна. undefined → дефолт.
+   */
+  getVoiceOpts?: () => TtsOpts | undefined;
   /** Требовать обращение «Джарвис» вне активного разговора (§3 wake word). */
   requireWakeWord?: boolean;
   /** Окно активного разговора после реплики Джарвиса — продолжение без wake word (мс). */
@@ -359,7 +365,13 @@ export class VoicePipeline {
     // Джарвис заговорил → открываем окно активного разговора (продолжение без wake word).
     this.awake = true;
     this.lastSpokeAt = this.now();
-    const stream = this.deps.tts.synthesize(voiceText, { voiceId: this.deps.ttsVoiceId });
+    const v = this.deps.getVoiceOpts?.();
+    const stream = this.deps.tts.synthesize(voiceText, {
+      voiceId: v?.voiceId ?? this.deps.ttsVoiceId,
+      stability: v?.stability,
+      style: v?.style,
+      speed: v?.speed,
+    });
     this.ttsStream = stream;
     let first = true;
     stream.onChunk((c) => {
