@@ -151,6 +151,20 @@ describe("VoicePipeline (§10)", () => {
     }
   });
 
+  it("§20: озвучка фонового итога из idle переоткрывает слух (speaking → listening), не глохнет", () => {
+    // Репро бага «спросил и перестал слушать»: фоновая задача произносит вопрос из покоя.
+    const { pipe, tts, states } = makePipeline();
+    expect(pipe.state).toBe("idle");
+    pipe.speakQueued("Отправить Кате «доброе утро»?");
+    expect(tts.last).not.toBeNull();
+    tts.last!.push(0, false);
+    expect(pipe.state).toBe("speaking"); // ВОШЛИ в speaking (раньше застревали в idle)
+    tts.last!.push(1, true);
+    tts.last!.finish();
+    expect(pipe.state).toBe("listening"); // микрофон снова слушает — есть чем ответить
+    expect(states).toContain("speaking");
+  });
+
   it("stop() из speaking → idle", async () => {
     const { pipe, stt, tts } = makePipeline();
     pipe.onWake();

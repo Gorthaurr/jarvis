@@ -81,6 +81,11 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
     case "idle":
       // Активны только wake word. Всё прочее игнор (аудио ещё не стримится).
       if (ev.type === "wake") return go("listening", false, [{ type: "open_stt" }]);
+      // Программная речь из покоя — фоновый итог (§20 async) или проактивность (§9): входим
+      // в speaking, чтобы по завершении сработал штатный возврат speak_done → listening +
+      // follow-up. Без этого произнесённый фоном ВОПРОС не переоткрывал микрофон → «перестал
+      // слушать» (юзеру нечем ответить). Клиент при этом видит speaking → корректный эхо-гард.
+      if (ev.type === "speak_start") return go("speaking", false, []);
       return noop(ctx);
 
     case "listening": {
@@ -110,6 +115,11 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
           // Повторный wake во время listening — просто перезапускаем follow-up флаг.
           if (ctx.followupActive) return { context: { state: "listening", followupActive: false }, actions: [{ type: "disarm_followup" }] };
           return noop(ctx);
+        case "speak_start":
+          // Фоновый итог (§20) заговорил в окне follow-up: переходим в speaking, гася таймер
+          // follow-up (после речи он перезапустится через speak_done → listening). Иначе
+          // таймер истекал во время длинного ответа → уход в idle, и микрофон не возвращался.
+          return go("speaking", false, ctx.followupActive ? [{ type: "disarm_followup" }] : []);
         default:
           return noop(ctx);
       }

@@ -79,6 +79,30 @@ describe("voice state machine (§10)", () => {
     expect(types(r.actions)).toContain("arm_followup");
   });
 
+  it("§20: idle + speak_start → speaking (фоновый итог/проактивность из покоя)", () => {
+    const r = reduce(initialContext(), { type: "speak_start" });
+    expect(r.context.state).toBe("speaking");
+    expect(types(r.actions)).toContain("set_client_state");
+  });
+
+  it("§20: listening(follow-up) + speak_start → speaking, гасит таймер follow-up", () => {
+    const ctx: VoiceContext = { state: "listening", followupActive: true };
+    const r = reduce(ctx, { type: "speak_start" });
+    expect(r.context.state).toBe("speaking");
+    expect(types(r.actions)).toContain("disarm_followup");
+  });
+
+  it("§20: полный цикл фонового итога переоткрывает микрофон (idle→speaking→listening+follow-up)", () => {
+    // Раньше произнесённый фоном ВОПРОС не возвращал слух: speak_* игнорились вне thinking.
+    const speaking = reduce(initialContext(), { type: "speak_start" });
+    expect(speaking.context.state).toBe("speaking");
+    const back = reduce(speaking.context, { type: "speak_done" });
+    expect(back.context.state).toBe("listening");
+    expect(back.context.followupActive).toBe(true);
+    expect(types(back.actions)).toContain("open_stt"); // микрофон снова слушает
+    expect(types(back.actions)).toContain("arm_followup");
+  });
+
   it("follow-up: speech_start снимает follow-up и фиксирует реальный turn", () => {
     const ctx: VoiceContext = { state: "listening", followupActive: true };
     const r = reduce(ctx, { type: "speech_start" });
