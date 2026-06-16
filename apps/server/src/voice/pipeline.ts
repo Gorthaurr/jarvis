@@ -145,10 +145,13 @@ export class VoicePipeline {
 
   /**
    * Произнести произвольный текст вне пользовательского хода — онбординг-приветствие
-   * (§11) и проактивность (§9). Стримит TTS-чанки клиенту; не ждёт реплики юзера.
+   * (§11) и проактивность (§9). Стримит TTS-чанки клиенту; НЕ ждёт реплики юзера и НЕ
+   * трогает машину состояний (drive=false): это «выстрелил и забыл», слух остаётся как был
+   * (после приветствия мик доступен через wake-on-frame, как и раньше). Иначе приветствие
+   * уводило бы цикл в speaking и churn'ило STT на старте сессии → «не слышит».
    */
   speak(text: string): void {
-    this.startTts(text, this.gen);
+    this.startTts(text, this.gen, false);
   }
 
   /**
@@ -346,7 +349,13 @@ export class VoicePipeline {
     this.startTts(reply.voice, myGen);
   }
 
-  private startTts(voiceText: string, myGen: number): void {
+  /**
+   * Синтез и стрим TTS. drive=true (ответ на ход / фоновый итог §20) — гонит машину
+   * состояний speak_start→speaking→speak_done→listening+follow-up, чтобы по окончании
+   * речи микрофон корректно переоткрылся. drive=false (проактивность/онбординг §9/§11) —
+   * «выстрелил и забыл»: НЕ трогаем цикл, слух остаётся как был.
+   */
+  private startTts(voiceText: string, myGen: number, drive = true): void {
     // Джарвис заговорил → открываем окно активного разговора (продолжение без wake word).
     this.awake = true;
     this.lastSpokeAt = this.now();
@@ -359,7 +368,7 @@ export class VoicePipeline {
         first = false;
         this.latency.mark("tts_first_chunk");
         this.latency.mark("audio"); // первый звук пошёл к клиенту
-        this.dispatch({ type: "speak_start" });
+        if (drive) this.dispatch({ type: "speak_start" });
         this.log.info("latency (мс от конца фразы)", this.latency.report());
       }
       this.deps.sendSpeakChunk(c);
@@ -368,7 +377,7 @@ export class VoicePipeline {
     stream.onDone(() => {
       if (myGen !== this.gen) return;
       this.ttsStream = null;
-      this.dispatch({ type: "speak_done" });
+      if (drive) this.dispatch({ type: "speak_done" });
       this.maybeDrainSpeech(); // канал освободился — озвучим следующий фоновый результат, если есть
     });
   }

@@ -151,6 +151,20 @@ describe("VoicePipeline (§10)", () => {
     }
   });
 
+  it("§9/§11: проактивный speak() (онбординг) НЕ трогает машину состояний — слух не глохнет", () => {
+    // Регрессия «не слышит»: приветствие не должно уводить цикл в speaking и churn'ить STT.
+    const { pipe, tts, states } = makePipeline();
+    expect(pipe.state).toBe("idle");
+    pipe.speak("Здравствуйте, сэр.");
+    expect(tts.last).not.toBeNull();
+    tts.last!.push(0, false);
+    expect(pipe.state).toBe("idle"); // НЕ speaking — fire-and-forget
+    tts.last!.push(1, true);
+    tts.last!.finish();
+    expect(pipe.state).toBe("idle"); // слух как был (wake-on-frame доступен)
+    expect(states).not.toContain("speaking");
+  });
+
   it("§20: озвучка фонового итога из idle переоткрывает слух (speaking → listening), не глохнет", () => {
     // Репро бага «спросил и перестал слушать»: фоновая задача произносит вопрос из покоя.
     const { pipe, tts, states } = makePipeline();
