@@ -66,16 +66,27 @@ async function run() {
   await cp(resolve(root, "renderer/styles.css"), resolve(outdir, "renderer/styles.css"));
   await cp(resolve(root, "renderer/audio-worklet.js"), resolve(outdir, "renderer/audio-worklet.js"));
 
-  // Шрифт Inter (latin + cyrillic) — woff2 из node_modules в dist/renderer/fonts.
-  const fontsSrc = resolve(root, "node_modules/@fontsource-variable/inter/files");
+  // Шрифты (вариативные woff2 из node_modules в dist/renderer/fonts).
   const fontsOut = resolve(outdir, "renderer/fonts");
   await mkdir(fontsOut, { recursive: true });
+  // Inter (резерв, latin + cyrillic).
+  const interSrc = resolve(root, "node_modules/@fontsource-variable/inter/files");
   for (const [src, dst] of [
     ["inter-latin-wght-normal.woff2", "inter-latin.woff2"],
     ["inter-latin-ext-wght-normal.woff2", "inter-latin-ext.woff2"],
     ["inter-cyrillic-wght-normal.woff2", "inter-cyrillic.woff2"],
   ]) {
-    await cp(resolve(fontsSrc, src), resolve(fontsOut, dst));
+    await cp(resolve(interSrc, src), resolve(fontsOut, dst));
+  }
+  // Manrope (основной, latin + cyrillic). Если пакета нет — рестайл гладко откатится на Inter.
+  const manropeSrc = resolve(root, "node_modules/@fontsource-variable/manrope/files");
+  for (const [src, dst] of [
+    ["manrope-latin-wght-normal.woff2", "manrope-latin.woff2"],
+    ["manrope-cyrillic-wght-normal.woff2", "manrope-cyrillic.woff2"],
+  ]) {
+    await cp(resolve(manropeSrc, src), resolve(fontsOut, dst)).catch((e) => {
+      console.warn(`[build] Manrope не скопирован (${dst}) — фолбэк на Inter:`, e.message);
+    });
   }
 
   console.log("[build] клиент собран -> dist/");

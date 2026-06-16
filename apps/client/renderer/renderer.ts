@@ -402,9 +402,9 @@ function startWaveform(analyser: AnalyserNode): void {
     const w = waveCanvas.width;
     const h = waveCanvas.height;
     cctx.clearRect(0, 0, w, h);
-    // цвет под состояние: говорю — фиолетовый, иначе янтарный
+    // живая волна голоса — циан под палитру «Премиум-минимал» (монохром, accent #5ed6ff)
     cctx.lineWidth = Math.max(1.5, 2 * dpr);
-    cctx.strokeStyle = currentState === "speaking" ? "#a78bfa" : "#f4ac5e";
+    cctx.strokeStyle = "#5ed6ff";
     cctx.lineJoin = "round";
     cctx.beginPath();
     const step = w / buf.length;

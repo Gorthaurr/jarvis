@@ -91,7 +91,7 @@ function createWindow(): void {
     width: 420,
     height: 640,
     title: "Jarvis",
-    backgroundColor: "#0b0d12",
+    backgroundColor: "#0a0b0e",
     autoHideMenuBar: true,
     webPreferences: {
       // §3: renderer изолирован; node-доступа нет, только мост preload.

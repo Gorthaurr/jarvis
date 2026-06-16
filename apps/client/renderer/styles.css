@@ -1,10 +1,35 @@
 /* =============================================================================
- * Renderer UI Jarvis (§3, §21) — тёмная дизайн-система «Jarvis».
- * Собственная палитра (не копия Amnezia): слоёная глубина near-black, hairline-
- * бордеры low-alpha, сдержанный тёплый акцент. Единая модульная типошкала +
- * 8pt-сетка. Имена классов 1:1 с renderer.ts / index.html — чистый рестайл.
+ * Renderer UI Jarvis — рестайл «Премиум-минимал».
+ * Единый шрифт Manrope, циан-акцент, near-black слои, hairline-бордеры.
+ * Имена классов 1:1 с renderer.ts / index.html — чистый дроп-ин рестайл.
+ *
+ * ШРИФТ: положите вариативный Manrope в ./fonts/Manrope.woff2
+ *        (https://fonts.google.com/specimen/Manrope → Get font → woff2).
+ *        Если файла нет — гладко откатывается на встроенный Inter.
+ * ВОЛНА: цвет рисуется в renderer.ts (см. инструкцию) — поменяйте на циан.
  * ========================================================================== */
 
+/* ── Manrope (основной) — latin + cyrillic сабсеты (вариативный, веса 200–800) ── */
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/manrope-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/manrope-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+/* ── Inter (резерв, уже в проекте) ── */
 @font-face {
   font-family: "Inter";
   font-style: normal;
@@ -20,76 +45,70 @@
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;
-  src: url("./fonts/inter-latin-ext.woff2") format("woff2");
-  unicode-range: U+0100-02AF, U+0304, U+0308, U+0329, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
-    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
-}
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 100 900;
-  font-display: swap;
   src: url("./fonts/inter-cyrillic.woff2") format("woff2");
   unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
 }
 
 :root {
-  /* ── фон / слои поверхности (своя глубина, не плоские серые рамки) ── */
-  --bg: #0b0d12;            /* фон окна */
-  --bg-elev: #0e1117;       /* лёгкий подъём за сценой */
-  --surface-1: #14171e;     /* карточки, инпуты, ряды */
-  --surface-2: #191d26;     /* модалки, выделенные блоки */
-  --surface-3: #20242e;     /* hover-поверхность, трек */
-  --scrim: rgba(7, 9, 13, 0.66);
+  /* ── фон / слои поверхности ── */
+  --bg: #0a0b0e;
+  --bg-elev: #0e1117;
+  --surface-1: #111419;     /* карточки, инпуты, ряды */
+  --surface-2: #14181f;     /* модалки, выделенные блоки */
+  --surface-3: #1b2029;     /* hover-поверхность, трек */
+  --scrim: rgba(7, 9, 12, 0.66);
 
-  /* hairline-бордеры на low-alpha белом — премиальнее плоского серого */
+  /* hairline-бордеры на low-alpha белом */
   --line: rgba(255, 255, 255, 0.07);
   --line-strong: rgba(255, 255, 255, 0.13);
   --hover: rgba(255, 255, 255, 0.05);
   --press: rgba(255, 255, 255, 0.09);
 
-  /* ── акцент: тёплое золото, сдержанно ── */
-  --accent: #f4ac5e;
-  --accent-bright: #ffbf76;
-  --accent-deep: #cf8636;
-  --accent-ghost: rgba(244, 172, 94, 0.12);
-  --accent-line: rgba(244, 172, 94, 0.34);
-  --accent-glow: rgba(244, 172, 94, 0.40);
+  /* ── акцент: холодный циан ── */
+  --accent: #5ed6ff;
+  --accent-bright: #8af0ff;
+  --accent-deep: #1f9fd6;
+  --accent-ghost: rgba(94, 214, 255, 0.10);
+  --accent-line: rgba(94, 214, 255, 0.28);
+  --accent-glow: rgba(94, 214, 255, 0.40);
 
-  --violet: #a78bfa;        /* состояние «говорю» */
-  --violet-ghost: rgba(167, 139, 250, 0.13);
-  --violet-glow: rgba(167, 139, 250, 0.38);
+  /* «говорю» — тот же циан, чуть ярче (монохромная система) */
+  --violet: #5ed6ff;
+  --violet-ghost: rgba(94, 214, 255, 0.13);
+  --violet-glow: rgba(94, 214, 255, 0.42);
 
-  --danger: #f0616d;
-  --danger-ghost: rgba(240, 97, 109, 0.12);
+  --danger: #ff7a7a;
+  --danger-ghost: rgba(255, 122, 122, 0.12);
 
   /* ── текст ── */
-  --text: #e8eaef;          /* основной */
-  --text-soft: #aab0bb;     /* вторичный */
-  --text-mute: #6d7480;     /* подписи, плейсхолдеры */
-  --on-accent: #1a1205;     /* тёмный текст на золоте */
+  --text: #eef6fa;
+  --text-soft: #a4b6c1;
+  --text-mute: #5f6e78;
+  --on-accent: #06212b;     /* тёмный текст на циане */
 
   /* ── типошкала ── */
-  --fs-over: 11px;          /* overline / тех-метки */
-  --fs-hint: 12px;
+  --fs-over: 11px;
+  --fs-hint: 12.5px;
   --fs-sec: 13px;
   --fs-body: 14px;
-  --fs-val: 15px;           /* значения, инпуты */
+  --fs-val: 14.5px;
   --fs-h3: 16px;
-  --fs-h2: 19px;            /* заголовок карточки */
-  --fs-h1: 22px;            /* модалка / настройки */
+  --fs-h2: 19px;
+  --fs-h1: 22px;
 
   /* ── радиусы / тени ── */
-  --r-lg: 16px;
+  --r-lg: 18px;
   --r-md: 12px;
-  --r-sm: 9px;
+  --r-sm: 10px;
   --r-pill: 999px;
-  --shadow-modal: 0 20px 56px rgba(0, 0, 0, 0.62);
+  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.6);
   --shadow-panel: -18px 0 60px rgba(0, 0, 0, 0.5);
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
 }
 
 html,
@@ -101,31 +120,34 @@ body {
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "Manrope", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: var(--fs-body);
   line-height: 1.5;
-  font-feature-settings: "cv05" 1, "cv08" 1, "ss01" 1;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   user-select: none;
 }
 
 /* ── скроллбары — тонкие, ненавязчивые ── */
-.cards::-webkit-scrollbar,
-.settings__body::-webkit-scrollbar {
-  width: 9px;
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
 }
-.cards::-webkit-scrollbar-thumb,
-.settings__body::-webkit-scrollbar-thumb {
-  background: var(--line-strong);
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
   border: 2px solid transparent;
   background-clip: padding-box;
   border-radius: var(--r-pill);
 }
-.cards::-webkit-scrollbar-thumb:hover,
-.settings__body::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
   background-clip: padding-box;
+}
+::-webkit-scrollbar-button {
+  display: none;
 }
 
 /* ── оболочка ── */
@@ -133,11 +155,10 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  padding: 14px 16px;
+  padding: 16px 18px;
   gap: 12px;
-  /* мягкая глубина: тёплое пятно сверху-центр, к низу затухает */
   background:
-    radial-gradient(120% 70% at 50% -8%, var(--bg-elev), transparent 60%),
+    radial-gradient(110% 50% at 50% -2%, var(--accent-ghost), transparent 55%),
     var(--bg);
 }
 
@@ -147,33 +168,33 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
   -webkit-app-region: drag;
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
 }
 .brand__mark {
   width: 22px;
   height: 22px;
   border-radius: 7px;
   background:
-    radial-gradient(circle at 32% 30%, var(--accent-bright), var(--accent) 42%, var(--accent-deep) 100%);
-  box-shadow: 0 0 0 1px var(--accent-line), 0 4px 14px var(--accent-glow);
+    radial-gradient(circle at 32% 28%, var(--accent-bright), var(--accent) 44%, var(--accent-deep) 100%);
+  box-shadow: 0 0 0 1px var(--accent-line), 0 4px 16px var(--accent-glow);
 }
 .brand__name {
   font-size: var(--fs-h3);
   font-weight: 600;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
   color: var(--text);
 }
 .topbar__right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   -webkit-app-region: no-drag;
 }
 .link {
@@ -181,8 +202,8 @@ body {
   align-items: center;
   gap: 7px;
   font-size: var(--fs-hint);
-  font-weight: 500;
-  padding: 5px 11px 5px 9px;
+  font-weight: 600;
+  padding: 5px 11px;
   border-radius: var(--r-pill);
   border: 1px solid var(--line);
   background: var(--surface-1);
@@ -203,7 +224,7 @@ body {
 }
 .link--off {
   color: var(--danger);
-  border-color: rgba(240, 97, 109, 0.28);
+  border-color: rgba(255, 122, 122, 0.28);
   background: var(--danger-ghost);
 }
 .icon-btn {
@@ -211,9 +232,9 @@ body {
   place-items: center;
   width: 34px;
   height: 34px;
-  border-radius: var(--r-md);
+  border-radius: 11px;
   border: 1px solid var(--line);
-  background: var(--surface-1);
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text-soft);
   cursor: pointer;
   transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
@@ -233,12 +254,10 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
-/* ── ЦЕНТРАЛЬНЫЙ ПАССИВНЫЙ ИНДИКАТОР (визуализация, не кнопка) ──
-   overflow:hidden КЛИПУЕТ расходящееся кольцо и ореол — раньше они
-   вылезали за герой и рисовались поверх карточек («блоки наезжают»). */
+/* ── ЦЕНТРАЛЬНЫЙ ПАССИВНЫЙ ИНДИКАТОР ── */
 .hero {
   flex: 1 1 auto;
   min-height: 0;
@@ -246,25 +265,24 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 18px;
+  gap: 32px;
   overflow: hidden;
   pointer-events: none;
   user-select: none;
 }
 .hero__viz {
   position: relative;
-  width: 168px;
-  height: 168px;
+  width: 152px;
+  height: 152px;
   flex: none;
   display: grid;
   place-items: center;
   border-radius: 50%;
 }
-/* мягкий ореол — отдельным слоем под кольцами, не выходит за герой */
 .hero__viz::before {
   content: "";
   position: absolute;
-  inset: -26%;
+  inset: -30%;
   border-radius: 50%;
   background: radial-gradient(circle, var(--hero-glow, transparent), transparent 68%);
   opacity: 0.9;
@@ -278,36 +296,37 @@ body {
 }
 .hero__ring {
   fill: none;
-  stroke: var(--hero-stroke, rgba(232, 234, 239, 0.4));
-  stroke-width: 2.5;
+  stroke: var(--hero-stroke, rgba(232, 234, 239, 0.28));
+  stroke-width: 2;
   stroke-linecap: round;
   transition: stroke 0.25s ease;
 }
 .hero__arc {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 2.5;
+  stroke-width: 2;
   stroke-linecap: round;
   stroke-dasharray: 150 438;
   opacity: 0;
   transform-box: view-box;
   transform-origin: 95px 95px;
+  filter: drop-shadow(0 0 8px var(--accent-glow));
 }
 .hero__label {
   position: relative;
-  font-size: var(--fs-h1);
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
   color: var(--hero-label, var(--text-mute));
   transition: color 0.25s ease;
 }
-/* живая шкала голоса (колебания речи) — рисуется в renderer по AnalyserNode */
+/* живая шкала голоса (рисуется в renderer по AnalyserNode) */
 .hero__wave {
   width: 240px;
   height: 52px;
   margin-top: 2px;
 }
-/* расходящийся «пульс» — внутри героя, клипуется overflow:hidden */
 .hero__viz::after {
   content: "";
   position: absolute;
@@ -318,8 +337,8 @@ body {
 }
 
 .hero--idle {
-  --hero-stroke: rgba(232, 234, 239, 0.34);
-  --hero-glow: rgba(244, 172, 94, 0.10);
+  --hero-stroke: rgba(232, 234, 239, 0.26);
+  --hero-glow: rgba(94, 214, 255, 0.10);
   --hero-label: var(--text-mute);
 }
 .hero--idle .hero__viz {
@@ -337,8 +356,8 @@ body {
   animation: hero-ripple 2.3s ease-out infinite;
 }
 .hero--thinking {
-  --hero-stroke: rgba(232, 234, 239, 0.16);
-  --hero-glow: rgba(244, 172, 94, 0.14);
+  --hero-stroke: rgba(232, 234, 239, 0.14);
+  --hero-glow: rgba(94, 214, 255, 0.14);
   --hero-label: var(--text);
 }
 .hero--thinking .hero__arc {
@@ -346,9 +365,9 @@ body {
   animation: hero-spin 1.05s linear infinite;
 }
 .hero--speaking {
-  --hero-stroke: var(--violet);
+  --hero-stroke: var(--accent);
   --hero-glow: var(--violet-glow);
-  --hero-label: var(--violet);
+  --hero-label: var(--accent);
 }
 .hero--speaking .hero__viz {
   animation: hero-pulse 0.95s ease-in-out infinite;
@@ -369,11 +388,11 @@ body {
   to { transform: rotate(360deg); }
 }
 @keyframes hero-ripple {
-  0% { transform: scale(1); opacity: 0.55; }
+  0% { transform: scale(1); opacity: 0.5; }
   100% { transform: scale(1.22); opacity: 0; }
 }
 
-/* ── карточки диалога (ui.display, §21) ── */
+/* ── карточки диалога ── */
 .cards {
   flex: 1 1 auto;
   min-height: 0;
@@ -383,11 +402,10 @@ body {
   gap: 10px;
 }
 .card {
-  background: var(--surface-1);
+  background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  padding: 14px 16px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  padding: 16px 18px;
 }
 .card__title {
   font-weight: 600;
@@ -406,16 +424,16 @@ body {
   user-select: text;
 }
 
-/* ── панель задачи (§20) ── */
+/* ── панель задачи ── */
 .task {
   flex: none;
-  background: var(--surface-1);
+  background: rgba(255, 255, 255, 0.025);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
-  padding: 14px 16px;
+  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
 }
 .task--hidden {
   display: none;
@@ -423,38 +441,36 @@ body {
 .task__head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
 }
 .task__state {
   font-size: var(--fs-over);
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 3px 9px;
-  border-radius: var(--r-pill);
+  letter-spacing: 0.14em;
   white-space: nowrap;
-  color: var(--accent);
-  background: var(--accent-ghost);
+  color: var(--text-mute);
 }
 .task--paused .task__state,
 .task--waiting_confirm .task__state {
   color: var(--accent-bright);
-  background: rgba(244, 172, 94, 0.16);
 }
 .task--failed .task__state,
 .task--cancelled .task__state {
   color: var(--danger);
-  background: var(--danger-ghost);
 }
 .task__summary {
-  font-size: var(--fs-sec);
-  color: var(--text-soft);
+  font-size: var(--fs-h3);
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text);
   flex: 1;
   word-break: break-word;
 }
 .task__bar {
-  height: 5px;
-  background: var(--surface-3);
+  height: 6px;
+  background: rgba(255, 255, 255, 0.07);
   border-radius: var(--r-pill);
   overflow: hidden;
 }
@@ -463,11 +479,13 @@ body {
   width: 0;
   background: var(--accent);
   border-radius: var(--r-pill);
+  box-shadow: 0 0 10px var(--accent-glow);
   transition: width 0.3s ease;
 }
 .task--failed .task__bar-fill,
 .task--cancelled .task__bar-fill {
   background: var(--danger);
+  box-shadow: none;
 }
 .task__bar-fill--indeterminate {
   width: 100% !important;
@@ -482,24 +500,24 @@ body {
 }
 .task__actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
 }
 .task__actions .btn {
   flex: 1;
 }
 
-/* ── нижний статус-бар: состояние + распознанное ── */
+/* ── нижний статус-бар ── */
 .statusbar {
   flex: none;
   display: flex;
   align-items: center;
   gap: 11px;
-  padding-top: 12px;
+  padding-top: 14px;
   border-top: 1px solid var(--line);
 }
 .statusbar__dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   flex: none;
   background: var(--text-mute);
@@ -509,8 +527,8 @@ body {
 .statusbar__text {
   flex: none;
   font-size: var(--fs-over);
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font-weight: 700;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text-mute);
   transition: color 0.2s ease;
@@ -537,11 +555,11 @@ body {
 }
 .statusbar--thinking .statusbar__text { color: var(--accent); }
 .statusbar--speaking .statusbar__dot {
-  background: var(--violet);
-  box-shadow: 0 0 10px var(--violet);
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
   animation: dot-pulse 0.8s ease-in-out infinite;
 }
-.statusbar--speaking .statusbar__text { color: var(--violet); }
+.statusbar--speaking .statusbar__text { color: var(--accent); }
 .statusbar--mic .statusbar__dot {
   box-shadow: 0 0 0 3px var(--accent-ghost), 0 0 10px var(--accent);
 }
@@ -556,19 +574,17 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  height: 42px;
+  gap: 9px;
+  height: 44px;
   padding: 0 18px;
   border-radius: var(--r-md);
-  border: 1px solid transparent;
+  border: 1px solid var(--line-strong);
   font-family: inherit;
   font-size: var(--fs-body);
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, filter 0.15s ease;
-  /* дефолт: спокойная приподнятая тёмная кнопка с hairline-бордером */
-  background: var(--surface-2);
-  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text);
 }
 .btn:hover { background: var(--surface-3); }
@@ -578,8 +594,8 @@ body {
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-line);
 }
 .btn--sm {
-  height: 34px;
-  padding: 0 13px;
+  height: 38px;
+  padding: 0 14px;
   font-size: var(--fs-sec);
 }
 .btn--ghost {
@@ -591,13 +607,14 @@ body {
   background: var(--hover);
   color: var(--text);
 }
-/* акцент / «готово» / «начать» → золотая заливка */
+/* акцент / «готово» / «начать» → циан-заливка */
 .btn--accent,
 .btn--ok {
   background: var(--accent);
   border-color: transparent;
   color: var(--on-accent);
-  font-weight: 600;
+  font-weight: 700;
+  box-shadow: 0 0 18px rgba(94, 214, 255, 0.3);
 }
 .btn--accent:hover,
 .btn--ok:hover { background: var(--accent-bright); }
@@ -606,7 +623,7 @@ body {
 .btn--deny {
   background: transparent;
   color: var(--danger);
-  border-color: rgba(240, 97, 109, 0.4);
+  border-color: rgba(255, 122, 122, 0.32);
 }
 .btn--deny:hover { background: var(--danger-ghost); }
 .btn--wide { width: 100%; }
@@ -617,7 +634,7 @@ body {
 .select-input {
   -webkit-app-region: no-drag;
   width: 100%;
-  background: var(--surface-1);
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-md);
   color: var(--text);
@@ -629,11 +646,11 @@ body {
 }
 .text-input,
 .select-input {
-  height: 42px;
+  height: 44px;
   padding: 0 14px;
 }
 .text-area {
-  padding: 11px 14px;
+  padding: 12px 14px;
   line-height: 1.5;
   resize: vertical;
 }
@@ -659,7 +676,7 @@ body {
   color: var(--text);
 }
 
-/* ── модалки (§14, §8) ── */
+/* ── модалки ── */
 .overlay {
   position: fixed;
   inset: 0;
@@ -675,10 +692,11 @@ body {
 .modal {
   background: var(--surface-2);
   border: 1px solid var(--line-strong);
-  border-radius: var(--r-lg);
-  padding: 22px;
+  border-radius: 20px;
+  padding: 24px;
   width: 100%;
-  max-width: 380px;
+  max-width: 360px;
+  min-height: 320px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -687,28 +705,29 @@ body {
 .modal__head {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 11px;
 }
 .modal__kind {
   align-self: flex-start;
-  font-size: var(--fs-over);
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 3px 9px;
+  letter-spacing: 0.14em;
+  padding: 4px 10px;
   border-radius: var(--r-pill);
   color: var(--accent);
   background: var(--accent-ghost);
+  border: 1px solid var(--accent-line);
 }
 .modal__title {
   margin: 0;
   font-size: var(--fs-h1);
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: -0.015em;
   color: var(--text);
 }
 .modal__summary {
-  font-size: var(--fs-body);
+  font-size: 15px;
   line-height: 1.55;
   color: var(--text-soft);
   user-select: text;
@@ -716,7 +735,7 @@ body {
 .field {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
 }
 .field__label {
   font-size: var(--fs-sec);
@@ -726,6 +745,7 @@ body {
 .modal__actions {
   display: flex;
   gap: 8px;
+  margin-top: auto;
 }
 .modal__actions .btn { flex: 1; }
 
@@ -737,7 +757,6 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  border-left: 1px solid var(--line);
   box-shadow: var(--shadow-panel);
   transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -750,14 +769,14 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 18px 14px;
+  padding: 18px 20px 14px;
   border-bottom: 1px solid var(--line);
   -webkit-app-region: drag;
 }
 .settings__title {
   margin: 0;
   font-size: var(--fs-h1);
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: -0.015em;
   color: var(--text);
 }
@@ -766,14 +785,14 @@ body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px;
+  padding: 20px;
   display: flex;
   flex-direction: column;
   gap: 22px;
 }
 .settings__foot {
   flex: none;
-  padding: 14px 18px;
+  padding: 14px 20px 18px;
   border-top: 1px solid var(--line);
 }
 .settings__foot .btn { width: 100%; }
@@ -792,9 +811,9 @@ body {
 .setgroup__title {
   margin: 0;
   font-size: var(--fs-over);
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.14em;
   color: var(--text-mute);
   display: flex;
   align-items: center;
@@ -802,7 +821,7 @@ body {
 }
 .setgroup__dev {
   font-size: 9.5px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   padding: 2px 6px;
@@ -821,20 +840,20 @@ body {
 .plan {
   border: 1px solid var(--line);
   border-radius: var(--r-md);
-  background: var(--surface-1);
-  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.025);
+  padding: 4px 14px;
 }
 .plan__row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 8px 0;
+  padding: 11px 0;
   font-size: var(--fs-sec);
 }
 .plan__row + .plan__row { border-top: 1px solid var(--line); }
 .plan__label { color: var(--text-mute); }
 .plan__value {
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
   font-variant-numeric: tabular-nums;
 }
@@ -852,11 +871,11 @@ body {
 .device {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 12px 14px;
+  gap: 12px;
+  padding: 13px 14px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
-  background: var(--surface-1);
+  background: rgba(255, 255, 255, 0.025);
   font-size: var(--fs-body);
 }
 .device__dot {
@@ -864,24 +883,25 @@ body {
   height: 7px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 7px var(--accent);
+  box-shadow: 0 0 9px var(--accent);
 }
 .device__name {
   flex: 1;
   color: var(--text);
 }
 .device__tag {
-  font-size: var(--fs-over);
-  font-weight: 500;
+  font-size: 10px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 8px;
+  letter-spacing: 0.1em;
+  padding: 4px 9px;
   border-radius: var(--r-pill);
-  color: var(--violet);
-  background: var(--violet-ghost);
+  color: var(--text-mute);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line);
 }
 
-/* ── список навыков (§8) ── */
+/* ── список навыков ── */
 .skill-list {
   list-style: none;
   margin: 4px 0 0;
@@ -902,8 +922,8 @@ body {
   gap: 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
-  background: var(--surface-1);
-  padding: 11px 13px;
+  background: rgba(255, 255, 255, 0.025);
+  padding: 12px 13px;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 .skill:hover {
@@ -929,19 +949,23 @@ body {
   color: var(--text-mute);
 }
 
-/* ── модалка записи навыка (§8) ── */
+/* ── модалка записи навыка ── */
 .skill-rec {
   display: flex;
   flex-direction: column;
-  gap: 11px;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
 }
 .skill-rec__pulse {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: var(--fs-sec);
+  gap: 9px;
+  font-size: 13.5px;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   color: var(--danger);
 }
 .skill-rec__dot {
@@ -953,17 +977,20 @@ body {
   animation: dot-pulse 1.1s ease-in-out infinite;
 }
 .skill-rec__count {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   font-size: var(--fs-body);
   color: var(--text-soft);
 }
 .skill-rec__count strong {
-  font-size: var(--fs-h2);
-  font-weight: 600;
+  font-size: 24px;
+  font-weight: 700;
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 .skill-rec__last {
-  font-size: var(--fs-sec);
+  font-size: 13.5px;
   color: var(--accent);
   min-height: 18px;
   white-space: nowrap;
