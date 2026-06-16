@@ -380,6 +380,19 @@ body {
   animation: hero-ripple 0.9s ease-out infinite;
 }
 
+/* Кольцо-обводка — ТОЛЬКО в «Думаю» (фокус-спиннер). В покое / слушаю / говорю кольца
+   НЕТ: только светящаяся подпись + живые столбики, как в макете. */
+.hero--idle .hero__ring,
+.hero--listening .hero__ring,
+.hero--speaking .hero__ring {
+  opacity: 0;
+}
+.hero--idle .hero__viz::after,
+.hero--listening .hero__viz::after,
+.hero--speaking .hero__viz::after {
+  display: none;
+}
+
 @keyframes hero-breathe {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.035); }
