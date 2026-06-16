@@ -4,46 +4,71 @@
 > в памяти: `project_jarvis_architecture.md` (читать ПЕРВЫМ), `feedback_universal.md`,
 > `project_jarvis_handoff.md`, `project_jarvis_infra.md` — грузятся автоматически.
 
-## ГЛАВНАЯ ЗАДАЧА СЛЕДУЮЩЕЙ СЕССИИ: петля HERMES (самообучение навыками)
+## СДЕЛАНО: петля HERMES (самообучение навыками-процедурами) — РАБОТАЕТ, 296 тестов
 
-Пользователь хочет (эмоционально, многократно): **НЕ хардкодить под каждый сервис** (Telegram,
-потом YouTube, потом другой мессенджер). Нужен ОДИН общий самообучающийся агент — делает что
-угодно общими руками, **ошибается вначале, но каждое успешное действие сохраняет как НАВЫК** и
-переиспользует. Эталон — **HERMES** (Nous Research, самый используемый агент по OpenRouter):
-после сложной задачи (5+ шагов) сам пишет навык-процедуру в markdown (когда применять + шаги +
-грабли + проверка), индексирует, в следующий раз сам находит и СЛЕДУЕТ ему (не жёсткий реплей —
-гибко), дорабатывает со временем.
+Корневой принцип пользователя: **НЕ хардкодить под каждый сервис** — ОДИН самообучающийся
+агент, который ошибается вначале, но каждый успешный сложный приём сохраняет НАВЫКОМ и
+переиспользует (эталон — HERMES от Nous Research). НАВЫК = процедура-памятка, которой LLM
+СЛЕДУЕТ гибко, **НЕ реплей кликов**. Все 5 пунктов одобренного плана реализованы:
 
-**ПЛАН (одобрен пользователем — procedure-навыки, LLM-followed). 3 шва в
-`apps/server/src/brain/agent/index.ts` (`runAgentLoop`):**
+1. **`skill_save` (новый server-side инструмент)** — схема `packages/tools/src/index.ts`
+   (`SKILL_TOOLS`: `{name, when, procedure}`); хендлер `brain/tools/dispatch.ts` (`skillSave`).
+   Хранение: `memory/skills.ts` `createSkillProvider().save()` → `content_md` = фронтматтер
+   (`source: learned`, name, version, `description`=when) + тело-процедура; БД-upsert (`saveSkill`)
+   + осязаемый файл `data/skills/<id>.md` (общий `writeSkillFile`). Повторное сохранение того же
+   имени → version++ (улучшение, п.5). `slugify`/`writeSkillFile` вынесены в `skills.ts` (DRY —
+   `brain/skills/record.ts` теперь их переиспользует).
+2. **RECALL в начале задачи** — `runAgentLoop` зовёт `deps.skills.recall(userId, text)` ПОД
+   ТАЙМАУТОМ (как facts), лексический матч с грубым стеммингом (`matchLearnedSkill`, чистая
+   функция, порог ≥2 попаданий и ≥1/3 перекрытие — ложный recall вреднее пропуска). Найденный
+   навык форматируется (`formatRecalledSkill`) и вшивается через новое поле
+   `UserContextSlot.learnedSkill` → `buildSystemPrompt` отдельным блоком «# Подходящий выученный
+   навык» (руководство, не факт; модель вольна игнорировать, если не подходит).
+3. **AUTO-SAVE бэкстоп** — после успешной задачи (`!failed && !limited && !cancelled && finalText
+   && round>=3 && !recalled && !skillSavedInLoop && deps.skills`) `selfLearnSkill` гонит ≤4 узких
+   ходов (набор ТОЛЬКО `skill_save`/`skill_list` — рефлексия не делает реальных действий) с
+   траекторией инструментов (`toolTrajectory`) в нудже. Ошибки глушатся, голосовой ответ не
+   блокируется. `skill_save`, вызванный моделью ПО ХОДУ задачи, выставляет `skillSavedInLoop` →
+   повторно не нуждим.
+4. **Персона** (`persona.md` §8, version 12→13) — добавлен блок «Навыки — твоя процедурная память
+   (`skill_save`)»: сохраняй обобщённо после сложной задачи; в начале похожей следуй показанному
+   навыку; разовое не сохраняй.
+5. **Разделение реплей- и процедура-навыков** — `createSkillProvider().list/get` ФИЛЬТРУЮТ
+   `source: learned` (их нельзя реплеить через `skill_execute`; они только для recall). UI-каталог
+   («Навыки») через `listSkills`/`pushSavedSkills` по-прежнему видит всё.
 
-1. **`skill_save` (новый инструмент, server-side):** `packages/tools/src/index.ts` (схема) +
-   `apps/server/src/brain/tools/dispatch.ts` (хендлер). Агент пишет навык:
-   `{ name, when (когда применять), procedure (markdown: шаги + грабли + проверка) }`. Хранить
-   через `apps/server/src/memory/skills.ts` — `content_md` = фронтматтер (`source: "learned"`,
-   name, description=when) + тело-процедура; `steps: []` (НЕ исполняется детерминированно — навык
-   recall'ится КАК ТЕКСТ-руководство). Файл `data/skills/<id>.md` + БД (saveSkill уже upsert'ит).
-2. **RECALL в начале задачи** (`runAgentLoop` ~стр.317, рядом с `episodic.search`→facts): найти
-   подходящий learned-навык по `text` (семантика через `episodic.search` ИЛИ keyword по
-   `skills.list`), вшить его процедуру в системный промпт. Новое поле в
-   `apps/server/src/brain/persona/index.ts` `UserContextSlot` (напр. `learnedSkill?: string`) +
-   проброс в `buildSystemPrompt`. LLM следует процедуре (адаптируя).
-3. **AUTO-SAVE-нудж** после успешной сложной задачи (`runAgentLoop` ~стр.515, после
-   `tasks.finish`, при `!failed && !limited && !cancelled && round>=3` и навык НЕ использовался):
-   добавить системный нудж «сохрани навык через skill_save» (или правило в персоне). Для контекста
-   собирать траекторию: новая переменная `toolExecutionHistory` (`tu.name`+`!r.isError`) в цикле
-   исполнения инструментов (~стр.445).
-4. **Персона** (`persona.md` §8 «Самостоятельность»): «после успешной многошаговой задачи без
-   готового навыка — сохрани через `skill_save`. В начале задачи тебе покажут подходящий навык —
-   следуй ему». Уже есть «не сдавайся: исследуй→сделай→напиши инструмент→запомни» — дополнить.
-5. **Улучшение навыка:** при переиспользовании/ошибке обновлять (saveSkill upsert, version++).
-   Куратор (stale 30д / archive 90д, LLM-доработка) — позже. agentskills.io-стандарт — опционально.
+**Тесты (302, было 285):** `skills.test.ts` (serializeLearnedSkill/matchLearnedSkill +
+ложные-срабатывания стемминга/порог/тай-брейк, slugify, isLearnedMd, createSkillProvider
+save→recall БЕЗ БД с version++), `skill-tools.test.ts` (skill_save: ok/валидация/нет провайдера),
+`agent/index.test.ts` (recall вшивает процедуру; бэкстоп сохраняет; провал → НЕ сохраняем; recall
+сработал → НЕ навязываем). `pnpm -r typecheck` + `@jarvis/server test` зелёные.
 
-Детальная карта подсистемы (типы/функции/строки) была получена exploration-агентом в этой
-сессии — повторить при необходимости. Ключевое: `skills.ts` (parseSkillMd/saveSkill/serializeSkill,
-createSkillProvider, hasGuardSteps), `agent/index.ts` (`round`/`convo`/`resp.toolUses`{name,input}/
-`r.isError`/эскалация тиров), `episodic.ts` (search по эмбеддингам), `dynamic.ts` (tool_create).
-НАВЫК = процедура, которой LLM СЛЕДУЕТ, НЕ реплей кликов. `telegram_send/read` остаются seed-fast-path.
+**Пост-ревью хардненг (адверсариальный workflow, 9 подтверждённых → исправлены):**
+- **#1 крит:** `pushSavedSkills` (`gateway/router-ws.ts`) слал learned-процедуры в UI как
+  РЕПЛЕЙ-карточки (их derived-«шаги» из прозы могли исполниться по клику) → теперь фильтрует
+  `isLearnedMd` и ставит `needsReview = hasGuardSteps` (а не хардкод false).
+- **#2 крит:** learned и demonstrated навыки делили id-пространство (`slugify(name)`) → upsert
+  затирал друг друга. Теперь learned-id с префиксом `learned__` (slugify не порождает `_` →
+  коллизия невозможна).
+- **#3:** бэкстоп срабатывал и на ПРОВАЛЕ (`finalText` ставится и когда модель сдалась) → добавлен
+  гейт `anyToolSucceeded`.
+- **#6 (универсальность):** без БД skill_save «учил в пустоту» → in-memory-фолбэк в
+  `saveSkill/getSkill/listSkills` (как у эпизодической памяти); version++ работает и без Postgres.
+- **#7:** бэкстоп ел бюджет `maxStepsPerTask=30` той же задачи → отдельный метр `${taskId}:reflect`
+  (+лог при отказе предохранителя); spendCap/kill-switch по-прежнему действуют.
+- **#8/#9:** 4-симв. стемминг recall давал ложные совпадения (стол*/поч*) → длинозависимый порог
+  общего префикса `max(5, ⌈0.75·min(len)⌉)` + детерминир. тай-брейк по id.
+
+**ОТЛОЖЕНО (осознанно, на потом):**
+- **Клиентский confirm на UI-повтор навыка** (§14): `runSavedSkill` в `apps/client/main/index.ts`
+  реплеит guard-навык БЕЗ подтверждения (серверный `skill_execute` — с подтверждением). Это
+  ПРЕД-существующая дыра (не про HERMES; learned-процедуры туда уже не попадают). Заведена задача.
+- **Улучшение навыка на ОШИБКЕ** recall'нутого (сейчас version++ только при явном пере-`skill_save`).
+  Куратор: stale 30д / archive 90д, LLM-доработка.
+- **Семантический recall** (сейчас лексический + стемминг; навыки НЕ эмбеддятся) — если навыков
+  станет много с синонимичными формулировками, эмбеддить when/name и матчить косинусом.
+- **agentskills.io-стандарт** формата — опционально.
+- Учитывать `fail_count`/реальное «применил ли модель навык» вместо «recalled != null» как прокси.
 
 ## СДЕЛАНО этой сессией: «Браузер Джарвиса» + Telegram send/read (РАБОТАЕТ)
 

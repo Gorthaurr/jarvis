@@ -15,6 +15,12 @@ const provider: SkillProvider = {
     if (id === "send_vk") return { id, version: 3, steps: [{ action: "message.send" }], needsReview: true };
     return null;
   },
+  async save(_userId, input) {
+    return { id: "saved", name: input.name, version: 1 };
+  },
+  async recall() {
+    return null;
+  },
 };
 
 function makeCtx(over: Partial<ToolContext> = {}): { ctx: ToolContext; sendAction: ReturnType<typeof vi.fn> } {
@@ -84,5 +90,39 @@ describe("skill_list / skill_execute (§8 — выученные показом 
     expect(r.isError).toBe(false); // отказ — не ошибка инструмента
     expect(r.content).toContain("Отменено");
     expect(sendAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("skill_save (§8 HERMES — самообучение навыком)", () => {
+  it("сохраняет навык через провайдер и подтверждает", async () => {
+    const save = vi.fn(async (_u: string, input: { name: string }) => ({ id: "s", name: input.name, version: 1 }));
+    const { ctx } = makeCtx({ skills: { ...provider, save } });
+    const r = await dispatchTool(
+      "skill_save",
+      { name: "Отчёт в Telegram", when: "когда просят прислать отчёт в телегу", procedure: "1. собрать\n2. отправить" },
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    expect(save).toHaveBeenCalledWith("u1", {
+      name: "Отчёт в Telegram",
+      when: "когда просят прислать отчёт в телегу",
+      procedure: "1. собрать\n2. отправить",
+    });
+    expect(r.content).toContain("сохранён");
+  });
+
+  it("без name/procedure → ошибка, провайдер не зовётся", async () => {
+    const save = vi.fn();
+    const { ctx } = makeCtx({ skills: { ...provider, save } });
+    const r = await dispatchTool("skill_save", { name: "", when: "x", procedure: "" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("нет провайдера навыков → ошибка", async () => {
+    const { ctx } = makeCtx({ skills: undefined });
+    const r = await dispatchTool("skill_save", { name: "X", when: "y", procedure: "z" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("недоступно");
   });
 });

@@ -42,6 +42,12 @@ export interface UserContextSlot {
   facts?: readonly string[];
   /** Авто-профиль окружения (§9): браузер/приложения пользователя — чтобы агент адаптировался. */
   environment?: string;
+  /**
+   * Подобранный recall'ом выученный навык-процедура (§8 HERMES): готовый блок текста
+   * «когда применять + шаги + грабли + проверка» от прошлого успешного решения похожей
+   * задачи. Вшивается в системный промпт — LLM ему СЛЕДУЕТ (гибко), не реплеит.
+   */
+  learnedSkill?: string;
 }
 
 /**
@@ -76,8 +82,14 @@ function renderDynamic(slot: UserContextSlot): string {
     lines.push("Известные факты о пользователе:");
     for (const f of slot.facts) lines.push(`- ${f}`);
   }
-  if (lines.length === 0) return "";
-  return `# Контекст пользователя\n\n${lines.join("\n")}`;
+  const base = lines.length > 0 ? `# Контекст пользователя\n\n${lines.join("\n")}` : "";
+  if (slot.learnedSkill) {
+    // §8 HERMES: подобранный навык — отдельным блоком, не среди фактов, чтобы модель
+    // восприняла его как руководство к действию (следуй, если подходит), а не как факт.
+    const skillBlock = `# Подходящий выученный навык (§8)\n\n${slot.learnedSkill}`;
+    return base ? `${base}\n\n${skillBlock}` : skillBlock;
+  }
+  return base;
 }
 
 const FALLBACK_PERSONA = [

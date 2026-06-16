@@ -46,7 +46,7 @@ import { TaskManager } from "../brain/tasks/manager.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
 import { statusReport } from "../brain/tasks/narrate.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
-import { type SkillProvider, listSkills } from "../memory/skills.js";
+import { type SkillProvider, hasGuardSteps, isLearnedMd, listSkills } from "../memory/skills.js";
 import type { Task } from "../brain/tasks/task.js";
 import { type VoicePipeline, createVoicePipeline } from "../voice/index.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
@@ -330,17 +330,22 @@ async function onDemoSave(ctx: SessionContext, payload: DemoSave): Promise<void>
 export function pushSavedSkills(ctx: SessionContext): void {
   void listSkills(ctx.session.userId)
     .then((skills) => {
-      for (const s of skills) {
+      // ВАЖНО: выученные показом РЕПЛЕЙ-навыки — да; выученные-процедуры (§8 HERMES) — НЕТ:
+      // их «шаги» — это derived-парс прозы, их нельзя реплеить кнопкой (только следовать в
+      // recall'е). Иначе процедура с строкой вида `code.run …`/`confirm …` исполнилась бы по
+      // клику. needsReview берём из guard-шагов (§14), а не хардкодим false.
+      const replayable = skills.filter((s) => !isLearnedMd(s.contentMd));
+      for (const s of replayable) {
         const msg: SkillSaved = {
           id: s.id,
           name: String((s.steps.length && s.contentMd.match(/^name:\s*(.+)$/m)?.[1]) || s.id),
           version: s.version,
           steps: s.steps,
-          needsReview: false,
+          needsReview: hasGuardSteps(s.steps),
         };
         ctx.session.send("skill.saved", msg);
       }
-      if (skills.length) log.info(`проброшено навыков клиенту: ${skills.length}`);
+      if (replayable.length) log.info(`проброшено навыков клиенту: ${replayable.length}`);
     })
     .catch((e) => log.warn(`listSkills недоступен: ${e instanceof Error ? e.message : String(e)}`));
 }

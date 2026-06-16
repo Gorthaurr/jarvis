@@ -9,8 +9,20 @@ import { WorkingMemory } from "../../memory/working.js";
 import type { Session } from "../../gateway/session.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { TaskStatus } from "@jarvis/protocol";
+import type { SkillProvider } from "../../memory/skills.js";
 import { type AgentDeps, handleUserText, waitWhilePaused } from "./index.js";
 import type { Task } from "../tasks/task.js";
+
+/** Заглушка провайдера навыков (§8): по умолчанию пусто; точечно переопределяется в тестах. */
+function fakeSkills(over: Partial<SkillProvider> = {}): SkillProvider {
+  return {
+    list: async () => [],
+    get: async () => null,
+    save: async (_u, input) => ({ id: "saved", name: input.name, version: 1 }),
+    recall: async () => null,
+    ...over,
+  };
+}
 
 function fakeSession(
   sendAction = vi.fn((_cmd: ActionCommand, _t?: number) =>
@@ -178,6 +190,76 @@ describe("agent-loop (§7, §8)", () => {
     task.cancel.cancelled = true; // отмена во время паузы
     await p; // не должно зависнуть
     expect(true).toBe(true);
+  });
+
+  it("§8 HERMES: recall подбирает навык и вшивает его процедуру в системный промпт", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider([{ text: "Готово." }]);
+    const recall = vi.fn(async () => ({
+      id: "tg-report",
+      name: "Отчёт в Telegram",
+      when: "прислать отчёт в телеграм",
+      procedure: "1. собрать данные\n2. отправить через telegram_send",
+      version: 2,
+    }));
+    const deps = await makeDeps(llm, { skills: fakeSkills({ recall }) });
+    await handleUserText(session, "пришли отчёт в телеграм", deps);
+    expect(recall).toHaveBeenCalled();
+    const sys = llm.requests[0]?.systemDynamic ?? "";
+    expect(sys).toContain("Отчёт в Telegram"); // имя навыка попало в промпт
+    expect(sys).toContain("отправить через telegram_send"); // процедура вшита
+  });
+
+  it("§8 HERMES: после сложной задачи без навыка — бэкстоп предлагает сохранить (skill_save)", async () => {
+    const session = fakeSession();
+    // 3 tool-use раунда + финал → задача «сложная»; затем рефлексия зовёт skill_save.
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "1", name: "web_search", input: { query: "x" } }] },
+      { toolUses: [{ id: "2", name: "web_open", input: { url: "https://x" } }] },
+      { toolUses: [{ id: "3", name: "web_read", input: {} }] },
+      { text: "Готово, сделал." },
+      { toolUses: [{ id: "s", name: "skill_save", input: { name: "Навык", when: "когда", procedure: "шаги" } }] },
+      { text: "Сохранил." },
+    ]);
+    const save = vi.fn(async (_u: string, input: { name: string }) => ({ id: "n", name: input.name, version: 1 }));
+    const deps = await makeDeps(llm, { skills: fakeSkills({ save }) });
+    await handleUserText(session, "сделай сложную многошаговую задачу", deps);
+    expect(save).toHaveBeenCalled(); // приём сохранён бэкстопом самообучения
+  });
+
+  it("§8 HERMES: задача ПРОВАЛИЛАСЬ (все инструменты с ошибкой) — навык НЕ сохраняем", async () => {
+    // sendAction всегда падает → actuator-инструменты возвращают ошибку; finalText всё равно
+    // выставится (модель «сдалась» текстом), но это НЕ успех — бэкстоп не должен сработать.
+    const failingSend = vi.fn(() =>
+      Promise.resolve({ commandId: "c", ok: false, error: { code: "runtime" as const, message: "fail" }, durationMs: 1 }),
+    );
+    const session = fakeSession(failingSend);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "1", name: "app_launch", input: { app: "x" } }] },
+      { toolUses: [{ id: "2", name: "app_launch", input: { app: "x" } }] },
+      { toolUses: [{ id: "3", name: "app_launch", input: { app: "x" } }] },
+      { text: "Не смог, извините." },
+    ]);
+    const save = vi.fn();
+    const deps = await makeDeps(llm, { skills: fakeSkills({ save }) });
+    await handleUserText(session, "сделай сложную многошаговую задачу", deps);
+    expect(save).not.toHaveBeenCalled(); // из проваленной задачи «приём» не выучиваем
+  });
+
+  it("§8 HERMES: если навык применён (recall сработал) — бэкстоп НЕ навязывает сохранение", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "1", name: "web_search", input: { query: "x" } }] },
+      { toolUses: [{ id: "2", name: "web_open", input: { url: "https://x" } }] },
+      { toolUses: [{ id: "3", name: "web_read", input: {} }] },
+      { text: "Готово." },
+    ]);
+    const save = vi.fn();
+    const recall = vi.fn(async () => ({ id: "k", name: "К", when: "сложная задача", procedure: "шаги", version: 1 }));
+    const deps = await makeDeps(llm, { skills: fakeSkills({ save, recall }) });
+    await handleUserText(session, "сделай сложную многошаговую задачу по навыку", deps);
+    expect(recall).toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled(); // навык уже был — не плодим дубликат
   });
 
   it("M8 §20: отмена в петле останавливает задачу (≤1 шага), state cancelled", async () => {

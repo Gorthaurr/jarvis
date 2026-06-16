@@ -30,9 +30,9 @@ import type { SpendGuard } from "../../billing/index.js";
 import { type UserContextSlot, buildSystemPrompt } from "../persona/index.js";
 import { setDisplayName } from "../profile.js";
 import { type LocalIntent, classifyTier } from "../router/index.js";
-import { dispatchTool } from "../tools/dispatch.js";
+import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
 import type { DynamicToolStore } from "../tools/dynamic.js";
-import type { SkillProvider } from "../../memory/skills.js";
+import type { RecalledSkill, SkillProvider } from "../../memory/skills.js";
 import { verbalize } from "../verbalize/index.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { Task } from "../tasks/task.js";
@@ -325,7 +325,24 @@ async function runAgentLoop(
     log.debug("retrieval пропущен (таймаут/ошибка)", e instanceof Error ? e.message : String(e));
   }
 
-  const sys = buildSystemPrompt({ ...deps.userContext, facts });
+  // §8 HERMES: подобрать выученный навык-процедуру под задачу (recall). Как и факты —
+  // НЕОБЯЗАТЕЛЬНО, под жёстким таймаутом: лучше идти без навыка, чем повесить ход на БД.
+  // Если навык найден — его процедура вшивается в системный промпт, и модель ей СЛЕДУЕТ.
+  let recalled: RecalledSkill | null = null;
+  if (deps.skills) {
+    try {
+      recalled = await withTimeout(deps.skills.recall(deps.userId, text), 2000);
+    } catch (e) {
+      log.debug("recall навыка пропущен (таймаут/ошибка)", e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (recalled) log.info("recall навыка (§8)", { id: recalled.id, version: recalled.version });
+
+  const sys = buildSystemPrompt({
+    ...deps.userContext,
+    facts,
+    ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
+  });
   // Набор = встроенные (минус служебные) + самописные инструменты (§8+ саморасширение):
   // выученные Джарвисом инструменты становятся вызываемыми наравне со штатными.
   const tools = [
@@ -366,6 +383,14 @@ async function runAgentLoop(
   let cacheReadTokens = 0; // метрики prompt-кеша за задачу (§15)
   let cacheCreationTokens = 0;
   let failed = false;
+  // §8 HERMES: траектория инструментов (для нуджа самообучения) + флаг «навык уже сохранён
+  // в этой задаче» (модель вызвала skill_save сама) → не нуждить повторно после петли.
+  const toolTrajectory: string[] = [];
+  let skillSavedInLoop = false;
+  // Был ли хоть один НЕошибочный инструмент: finalText ставится и когда модель сдалась после
+  // сплошных ошибок (is_error в результатах не бросает исключение) — это НЕ успех, навык не
+  // сохраняем (иначе recall впредь подсунул бы «приём» из проваленной задачи).
+  let anyToolSucceeded = false;
   let consecErrorRounds = 0; // подряд провальных раундов → эскалация тира (§7)
   const ESCALATE_AFTER = 2;
   // Любое исключение из шага (брошенный dispatchTool, reject провайдера) НЕ должно
@@ -452,6 +477,10 @@ async function runAgentLoop(
       }
       const r = await dispatchTool(tu.name, tu.input, toolCtx);
       log.info("tool", { name: tu.name, isError: r.isError });
+      // §8: копим траекторию для самообучения; отмечаем успех и уже-сохранённый навык.
+      toolTrajectory.push(`${tu.name}${r.isError ? " (ошибка)" : ""}`);
+      if (!r.isError) anyToolSucceeded = true;
+      if (tu.name === "skill_save" && !r.isError) skillSavedInLoop = true;
       resultBlocks.push({
         type: "tool_result",
         tool_use_id: tu.id,
@@ -491,6 +520,25 @@ async function runAgentLoop(
     // Освобождаем аренду ввода на ЛЮБОМ выходе (успех/отмена/лимит/исключение, §20),
     // иначе следующая задача навечно зависнет на acquire. Терминал ниже ввод не трогает.
     if (holdsInput && arbiter) arbiter.release();
+  }
+
+  // §8 HERMES самообучение: задача решена САМА (многошагово, успешно), готового навыка не
+  // было (recalled===null) и сам не сохранил по ходу → один бэкстоп-ход предлагает сохранить
+  // приём навыком. Узкий набор (только skill_save/skill_list) — рефлексия не делает реальных
+  // действий. Не критично для пользователя: ошибки глушим, итог уже готов (finalText).
+  if (!failed && !limited && !cancelled && finalText && anyToolSucceeded && round >= 3 && !recalled && !skillSavedInLoop && deps.skills) {
+    await selfLearnSkill({
+      deps,
+      sys,
+      convo,
+      finalText,
+      round,
+      toolTrajectory,
+      toolCtx,
+      tier: currentTier,
+      model,
+      taskId,
+    }).catch((e) => log.debug("self-learn навыка пропущен", e instanceof Error ? e.message : String(e)));
   }
 
   deps.spend.finishTask(taskId);
@@ -654,5 +702,112 @@ export function markCacheBreakpoint(convo: LlmMessage[]): void {
   const lastBlock = last.content.at(-1);
   if (lastBlock && (lastBlock.type === "text" || lastBlock.type === "tool_result")) {
     lastBlock.cache_control = { type: "ephemeral" };
+  }
+}
+
+/**
+ * Блок системного промпта из подобранного recall'ом навыка (§8 HERMES). Подаём его как
+ * РУКОВОДСТВО к действию (следуй, если подходит), а не как факт — и явно разрешаем
+ * игнорировать, если к текущей задаче навык не подходит (recall лексический, не идеален).
+ */
+function formatRecalledSkill(s: RecalledSkill): string {
+  return [
+    `Навык «${s.name}» — применять, когда: ${s.when || "похожая задача"}.`,
+    "",
+    "Процедура (твой прошлый успешный приём):",
+    s.procedure,
+    "",
+    "Следуй ей гибко, адаптируя под текущую задачу. Если к этой задаче она не подходит — игнорируй.",
+  ].join("\n");
+}
+
+/** Узкий набор для рефлексии самообучения (§8): только мета-навыки, без реальных действий. */
+const SELF_LEARN_TOOLS = TOOL_SCHEMAS.filter((t) => t.name === "skill_save" || t.name === "skill_list");
+/** Потолок ходов рефлексии самообучения — бэкстоп, не должен раздувать стоимость задачи. */
+const MAX_SELF_LEARN_STEPS = 4;
+
+/**
+ * Бэкстоп самообучения (§8 HERMES): после успешной многошаговой задачи без готового навыка
+ * предлагаем модели сохранить приём через skill_save. Один-несколько узких ходов (только
+ * skill_save/skill_list) — модель либо пишет навык, либо отвечает текстом (отказ). Итог
+ * пользователю уже отдан; это фоновая дозапись знания, она не влияет на голосовой ответ.
+ */
+async function selfLearnSkill(args: {
+  deps: AgentDeps;
+  sys: { staticPrefix: string; dynamicSuffix: string };
+  convo: LlmMessage[];
+  finalText: string;
+  round: number;
+  toolTrajectory: readonly string[];
+  toolCtx: ToolContext;
+  tier: Exclude<Tier, "tier0">;
+  model: string;
+  taskId: string;
+}): Promise<void> {
+  const { deps, sys, convo, finalText, round, toolTrajectory, toolCtx, tier, model, taskId } = args;
+  const trajectory = toolTrajectory.length > 0 ? toolTrajectory.join(" → ") : "—";
+  const nudge =
+    `[самообучение §8] Задача решена за ${round} шагов, готового навыка не было. ` +
+    "Если этот приём пригодится для похожих задач в будущем — СОХРАНИ его одним вызовом " +
+    "skill_save({name, when, procedure}): описывай обобщённо (без разовых значений этой задачи), " +
+    "procedure — шаги по порядку + грабли + как проверить результат. " +
+    `Твоя траектория инструментов: ${trajectory}. ` +
+    "Если приём разовый и сохранять нечего — просто ответь коротким текстом, без вызова инструмента.";
+  // Хвост диалога заканчивается user-сообщением (tool_result) — добавляем ассистентский итог
+  // и user-нудж, чтобы convo по-прежнему оканчивался пользователем (Opus 4.8 не берёт префилл).
+  const reflectConvo: LlmMessage[] = [
+    ...convo,
+    { role: "assistant", content: finalText },
+    { role: "user", content: nudge },
+  ];
+
+  // Отдельный счётчик шагов под рефлексию: иначе длинная (у потолка maxStepsPerTask) задача —
+  // ровно та, которой навык нужнее всего — не смогла бы сохранить приём (§14). spendCap и
+  // kill-switch (глобальные) при этом продолжают действовать — платный цикл всё равно ограничен.
+  const reflectId = `${taskId}:reflect`;
+  try {
+    for (let s = 0; s < MAX_SELF_LEARN_STEPS; s += 1) {
+      const guard = deps.spend.check(reflectId, 0.01, 2000);
+      if (!guard.allowed) {
+        // Отличаем «предохранитель не пустил» от «модель решила не сохранять» (телеметрия).
+        log.info("самообучение пропущено предохранителем (§14)", { reason: guard.reason });
+        return;
+      }
+
+      const resp = await deps.llm.complete({
+        tier,
+        model,
+        systemStatic: sys.staticPrefix,
+        systemDynamic: sys.dynamicSuffix || undefined,
+        messages: reflectConvo,
+        tools: SELF_LEARN_TOOLS,
+      });
+      deps.spend.recordStep(reflectId);
+      deps.spend.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, estimateCost(resp.usage));
+
+      if (resp.toolUses.length === 0) return; // модель решила не сохранять — это нормально
+
+      const assistantBlocks: LlmContentBlock[] = [];
+      if (resp.text) assistantBlocks.push({ type: "text", text: resp.text });
+      for (const tu of resp.toolUses) {
+        assistantBlocks.push({ type: "tool_use", id: tu.id, name: tu.name, input: tu.input });
+      }
+      reflectConvo.push({ role: "assistant", content: assistantBlocks });
+
+      const resultBlocks: LlmContentBlock[] = [];
+      let saved = false;
+      for (const tu of resp.toolUses) {
+        const r = await dispatchTool(tu.name, tu.input, toolCtx);
+        resultBlocks.push({ type: "tool_result", tool_use_id: tu.id, content: r.content, is_error: r.isError });
+        if (tu.name === "skill_save" && !r.isError) saved = true;
+      }
+      reflectConvo.push({ role: "user", content: resultBlocks });
+      if (saved) {
+        log.info("самообучение: навык сохранён после задачи (§8)");
+        return;
+      }
+    }
+  } finally {
+    deps.spend.finishTask(reflectId); // не копим счётчики ephemeral-метра рефлексии
   }
 }

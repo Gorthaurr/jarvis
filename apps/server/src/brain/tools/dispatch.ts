@@ -95,6 +95,9 @@ export async function dispatchTool(
       return skillList(ctx);
     case "skill_execute":
       return skillExecute(ctx, input);
+    // Самообучение (§8 HERMES): Джарвис сам сохраняет навык-процедуру после сложной задачи.
+    case "skill_save":
+      return skillSave(ctx, input);
   }
 
   if (DEFERRED_TOOLS.has(name)) {
@@ -346,6 +349,23 @@ async function skillExecute(ctx: ToolContext, input: Record<string, unknown>): P
   );
   if (result.ok) return ok(result.data !== undefined ? JSON.stringify(result.data) : `Навык «${skillId}» выполнен.`);
   return err(`Навык «${skillId}» не выполнен: ${result.error?.code ?? "runtime"} ${result.error?.message ?? ""}`);
+}
+
+/**
+ * Сохранить выученный навык-процедуру (§8 HERMES): Джарвис сам пишет памятку
+ * {name, when, procedure} после того, как разобрался со сложной задачей. В отличие от
+ * skill_execute это НЕ реплей — навык recall'ится как текст-руководство в начале похожей
+ * задачи (см. agent/index.ts). Повторное сохранение того же имени — новая версия (улучшение).
+ */
+async function skillSave(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  if (!ctx.skills) return err("сохранение навыков недоступно (нет провайдера)");
+  const name = String(input.name ?? "").trim();
+  const when = String(input.when ?? "").trim();
+  const procedure = String(input.procedure ?? "").trim();
+  if (!name || !procedure) return err("skill_save: нужны name и procedure");
+  const saved = await ctx.skills.save(ctx.userId, { name, when, procedure });
+  if (!saved) return err("не удалось сохранить навык");
+  return ok(`Навык «${saved.name}» сохранён (v${saved.version}). В следующий раз применю его сам.`);
 }
 
 async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
