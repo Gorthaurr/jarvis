@@ -321,11 +321,26 @@ body {
   color: var(--hero-label, var(--text-mute));
   transition: color 0.25s ease;
 }
-/* живая шкала голоса (рисуется в renderer по AnalyserNode) */
+/* живой эквалайзер голоса — CSS-столбики (как в макете): пульсируют независимо, всегда живые.
+   Столбики строит renderer.ts (ширина/высота/фаза по огибающей sin). */
 .hero__wave {
-  width: 240px;
-  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 56px;
   margin-top: 2px;
+}
+.hero__bar {
+  display: block;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  transform-origin: center;
+  will-change: transform;
+}
+@keyframes eq {
+  0%, 100% { transform: scaleY(0.30); }
+  50% { transform: scaleY(1); }
 }
 .hero__viz::after {
   content: "";
@@ -364,9 +379,10 @@ body {
   opacity: 1;
   animation: hero-spin 1.05s linear infinite;
 }
-/* «Думаю» — фокус на крутящемся кольце, без живой волны (как в макете). */
-.hero--thinking .hero__wave {
-  opacity: 0;
+/* «Думаю»/покой — фокус на кольце-спиннере, без эквалайзера (как в макете). */
+.hero--thinking .hero__wave,
+.hero--idle .hero__wave {
+  display: none;
 }
 .hero--speaking {
   --hero-stroke: var(--accent);
@@ -814,6 +830,43 @@ body {
 }
 .settings__foot .btn { width: 100%; }
 
+/* ── вкладки настроек (Общее/Навыки/Ключи/Оплата) ── */
+.settings__tabs {
+  flex: none;
+  display: flex;
+  gap: 3px;
+  margin: 0 20px 10px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--line);
+}
+.settab {
+  flex: 1;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-mute);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.settab:hover { color: var(--text-soft); }
+.settab--active {
+  background: var(--accent-ghost);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+.settab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.settab-panel--hidden { display: none; }
+
 .setgroup {
   display: flex;
   flex-direction: column;
@@ -1021,6 +1074,7 @@ body {
   .hero__viz,
   .hero__viz::after,
   .hero__arc,
+  .hero__bar,
   .statusbar__dot,
   .skill-rec__dot,
   .task__bar-fill--indeterminate { animation: none !important; }

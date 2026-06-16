@@ -276,6 +276,17 @@ settingsSave.addEventListener("click", () => {
   settingsPanel.classList.add("settings--hidden");
 });
 
+// Вкладки настроек (Общее/Навыки/Ключи/Оплата): активная вкладка + показ её панели.
+for (const tab of document.querySelectorAll<HTMLButtonElement>(".settab")) {
+  tab.addEventListener("click", () => {
+    const name = tab.dataset.tab;
+    for (const t of document.querySelectorAll(".settab")) t.classList.toggle("settab--active", t === tab);
+    for (const p of document.querySelectorAll<HTMLElement>(".settab-panel")) {
+      p.classList.toggle("settab-panel--hidden", p.dataset.panel !== name);
+    }
+  });
+}
+
 // ── запись навыка демонстрацией (§8) ───────────────────────────
 const makeSkillBtn = $<HTMLButtonElement>("makeSkillBtn");
 const skillOverlay = $("skillOverlay");
@@ -382,61 +393,37 @@ jarvis.onSkillSaved((s) => {
   skillList.appendChild(li);
 });
 
-// ── живая шкала голоса (колебания речи) ─────────────────────────
-const waveCanvas = document.getElementById("wave") as HTMLCanvasElement | null;
-function startWaveform(analyser: AnalyserNode): void {
-  if (!waveCanvas) return;
-  const cctx = waveCanvas.getContext("2d");
-  if (!cctx) return;
-  const buf = new Uint8Array(analyser.frequencyBinCount);
-  const dpr = window.devicePixelRatio || 1;
-  const fit = (): void => {
-    waveCanvas.width = Math.max(1, Math.round(waveCanvas.clientWidth * dpr));
-    waveCanvas.height = Math.max(1, Math.round(waveCanvas.clientHeight * dpr));
-  };
-  fit();
-  window.addEventListener("resize", fit);
-  // Эквалайзер-столбики (как в макете «Премиум-минимал»): циан со свечением, симметрично
-  // от центра, мягкое сглаживание во времени. Голос даёт энергию в нижне-средних частотах —
-  // верхние (почти всегда пустые) бины отрезаем, чтобы столбики «жили» по всей ширине.
-  const BARS = 40;
-  const levels = new Float32Array(BARS); // сглаженные высоты (0..1) — чтобы не «дёргалось»
-  const draw = (): void => {
-    requestAnimationFrame(draw);
-    analyser.getByteFrequencyData(buf);
-    const w = waveCanvas.width;
-    const h = waveCanvas.height;
-    cctx.clearRect(0, 0, w, h);
-    const gap = 2 * dpr;
-    const barW = Math.max(1.5 * dpr, (w - gap * (BARS - 1)) / BARS);
-    const mid = h / 2;
-    const usable = Math.max(1, Math.floor(buf.length * 0.6)); // отрезаем пустой верх спектра
-    cctx.fillStyle = "#5ed6ff";
-    cctx.shadowColor = "rgba(94, 214, 255, 0.75)";
-    cctx.shadowBlur = 7 * dpr;
-    for (let i = 0; i < BARS; i += 1) {
-      const a = Math.floor((i / BARS) * usable);
-      const b = Math.max(a + 1, Math.floor(((i + 1) / BARS) * usable));
-      let sum = 0;
-      for (let j = a; j < b; j += 1) sum += buf[j]!;
-      const amp = sum / (b - a) / 255; // 0..1
-      // экспоненциальное сглаживание: вверх быстро, вниз плавно (живой, но не нервный эквалайзер)
-      const prev = levels[i]!;
-      levels[i] = amp > prev ? amp : prev * 0.82 + amp * 0.18;
-      const barH = Math.max(2 * dpr, levels[i]! * h * 0.94);
-      const x = i * (barW + gap);
-      cctx.beginPath();
-      cctx.roundRect(x, mid - barH / 2, barW, barH, Math.min(barW / 2, 2 * dpr));
-      cctx.fill();
-    }
-  };
-  draw();
+// ── живой эквалайзер голоса (CSS-анимация, как в макете «Премиум-минимал») ──
+// Столбики пульсируют независимо (keyframes eq) — «живые» ВСЕГДА, не зависят от микрофона
+// (так в дизайне). Параметры 1:1 с макетом: огибающая sin по ширине/высоте, разные фазы.
+function buildWave(): void {
+  const el = document.getElementById("wave");
+  if (!el) return;
+  el.replaceChildren();
+  const N = 26;
+  const W_MIN = 2.5;
+  const W_MAX = 4;
+  const MAX_H = 56;
+  const GLOW = 9;
+  for (let i = 0; i < N; i += 1) {
+    const t = (i + 0.5) / N;
+    const env = 0.24 + 0.76 * Math.sin(t * Math.PI);
+    const h = Math.max(5, env * MAX_H);
+    const w = W_MIN + (W_MAX - W_MIN) * Math.sin(t * Math.PI);
+    const dur = (0.62 + (i % 6) * 0.12).toFixed(2);
+    const delay = (-(i * 0.097) % 1.4).toFixed(2);
+    const bar = document.createElement("span");
+    bar.className = "hero__bar";
+    bar.style.cssText =
+      `width:${w.toFixed(1)}px;height:${h.toFixed(1)}px;` +
+      `box-shadow:0 0 ${GLOW}px var(--accent);` +
+      `animation:eq ${dur}s ease-in-out ${delay}s infinite`;
+    el.appendChild(bar);
+  }
 }
 
 // инициализация — ambient (§3): Джарвис слушает СРАЗУ с запуска, без клика по орбу.
 setLink({ online: false });
 setOrbState("listening");
-void ensureCapture().then(() => {
-  jarvis.activate();
-  if (capture?.analyser) startWaveform(capture.analyser);
-});
+buildWave();
+void ensureCapture().then(() => jarvis.activate());
