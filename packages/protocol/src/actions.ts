@@ -90,6 +90,7 @@ export type ActionCommand =
   | { kind: "jbrowser.open"; url: string } // открыть URL в браузере Джарвиса (невидимо) → читаемый контент
   | { kind: "jbrowser.read" } // прочитать текущую страницу браузера Джарвиса
   | { kind: "jbrowser.act"; intent: "click" | "type" | "scroll" | "key"; params?: Record<string, unknown> }
+  | { kind: "jbrowser.login"; url: string } // открыть страницу ВИДИМО для входа (тот же профиль) → дальше невидимо
   | { kind: "order.place"; vendor: string; items: Record<string, unknown>[]; total: number } // confirm + spend cap + idempotency
   // ── Файловая система (§6): прямое управление файлами на машине пользователя ──
   | { kind: "fs.read"; path: string; maxBytes?: number } // прочитать текстовый файл

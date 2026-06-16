@@ -73,6 +73,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "jbrowser.open",
       "jbrowser.read",
       "jbrowser.act",
+      "jbrowser.login",
       "order.place",
       "fs.read",
       "fs.write",

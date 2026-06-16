@@ -162,6 +162,12 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         const out = await jarvisBrowser().act(cmd.intent, cmd.params);
         return okResult(commandId, startedAt, out);
       }
+      case "jbrowser.login": {
+        // Не залогинен на сервисе → открыть его страницу ВИДИМО (тот же профиль), пользователь
+        // входит один раз, дальше Джарвис действует невидимо (§6, общий слой логина).
+        await jarvisBrowser().openLogin(cmd.url);
+        return okResult(commandId, startedAt, { opened: cmd.url });
+      }
       case "order.place": {
         // Гарды §14 пройдены на сервере; здесь — browser-автоматизация без ввода карты (§0).
         const out = await browser.placeOrder({ vendor: cmd.vendor, items: cmd.items, total: cmd.total });
