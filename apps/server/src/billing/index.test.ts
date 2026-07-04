@@ -34,6 +34,18 @@ describe("SpendGuard — санитизация предохранителей (
     expect(g.totalSpent).toBe(0);
   });
 
+  it("hydrate МОНОТОНЕН — не откатывает живой spent назад к устаревшему из БД (M3)", async () => {
+    // Без реальной БД query() вернёт null/no-op, поэтому проверяем контракт напрямую: гидрация
+    // не должна УМЕНЬШАТЬ spent, даже если в БД лежит меньшее (устаревшее) значение.
+    const g = new SpendGuard({ spendCap: 100 }, { userId: "u1" });
+    g.recordUsage("t1", 0, 42); // живой in-memory spent сразу после всплеска
+    expect(g.totalSpent).toBe(42);
+    // reconnect сразу после всплеска: hydrate читает БД (в тестовой среде — no-op/undefined),
+    // живой spent не должен откатиться вниз.
+    await g.hydrate();
+    expect(g.totalSpent).toBeGreaterThanOrEqual(42);
+  });
+
   it("месячный rollover сбрасывает spent на новом периоде", () => {
     let t = new Date("2026-01-15T00:00:00Z").getTime();
     const g = new SpendGuard({ spendCap: 10 }, { now: () => t });

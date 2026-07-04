@@ -101,6 +101,11 @@ async Task HandleRequestAsync(IpcRequest req)
             // §19 — выжимка a11y видимой области
             "read.window" => HandleReadWindow(req),
 
+            // §19 — «экран»: клиентский readContext('screen') всегда шлёт read.screen.
+            // Переиспользуем выжимку a11y по ФОКУСНОМУ окну (pid=null → FocusedElement),
+            // иначе операция валилась «Неизвестная операция».
+            "read.screen" => HandleReadWindow(req),
+
             // §6 — арбитраж ввода / user-takeover
             "raw-input.subscribe" => HandleRawInputSubscribe(req),
 

@@ -32,13 +32,15 @@ function resolveEnvVars(value: string): string {
 }
 
 /**
- * Windows: голые `npx`/`npm`/`node`/`uvx`/`uv` через Node-spawn (без shell) часто ENOENT — Node не
+ * Windows: голые `npx`/`npm`/`uvx`/`uv` через Node-spawn (без shell) часто ENOENT — Node не
  * применяет PATHEXT, нужно точное имя с расширением. npm-обёртки = `.cmd` (батники), uv-бинари = `.exe`.
- * Прочие команды (полный путь, python и т.п.) не трогаем. Экспортируется для юнит-теста.
+ * `node` НЕ трогаем — это `node.exe`, а не батник; мапить в `node.cmd` значило бы спавнить
+ * несуществующий файл (ENOENT наоборот). Прочие команды (полный путь, python и т.п.) не трогаем.
+ * Экспортируется для юнит-теста.
  */
 export function normalizeCommand(cmd: string): { command: string; viaShell: boolean } {
   if (process.platform === "win32") {
-    if (/^(npx|npm|node)$/i.test(cmd)) {
+    if (/^(npx|npm)$/i.test(cmd)) {
       return { command: cmd.toLowerCase().endsWith(".cmd") ? cmd : `${cmd}.cmd`, viaShell: false };
     }
     if (/^(uvx|uv)$/i.test(cmd)) {

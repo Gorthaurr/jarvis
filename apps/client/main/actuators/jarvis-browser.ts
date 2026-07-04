@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { screen } from "electron";
 import { AsyncMutex, type Candidate, createLogger, nameSearchVariants, pickRecipient } from "@jarvis/shared";
-import { chromeCandidates } from "./browser-cdp.js";
+import { chromeCandidates, safeBrowserUrl } from "./browser-cdp.js";
 import { type WsLike, cdpCommand, parseCdpReply, resolveWebSocketCtor, unwrapEvalResult } from "./cdp-core.js";
 import { PAGE } from "./jarvis-browser-page.js";
 
@@ -186,8 +186,16 @@ export class JarvisBrowser {
 
   private bumpIdle(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => void this.close(), IDLE_CLOSE_MS);
+    this.idleTimer = setTimeout(() => this.idleClose(), IDLE_CLOSE_MS);
     if (typeof this.idleTimer === "object" && "unref" in this.idleTimer) (this.idleTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** Idle-закрытие: если лок занят in-flight операцией — НЕ рвём её (close() убил бы Chrome/CDP
+   *  из-под ног), а перепланируем на следующий цикл простоя. Свободен — закрываем под локом,
+   *  чтобы close не пересёкся с операцией, стартовавшей в тот же тик. */
+  private idleClose(): void {
+    if (this.lock.locked) { this.bumpIdle(); return; }
+    void this.lock.run(() => this.close());
   }
 
   /** Живой тёплый браузер. БЕЗ лока — вызывается уже под this.lock. Перезапуск при мёртвом CDP. */
@@ -277,13 +285,11 @@ export class JarvisBrowser {
   async open(url: string): Promise<PageContent> {
     return this.lock.run(async () => {
       // C5 защита в глубину: в ЗАЛОГИНЕННОМ браузере Джарвиса открываем ТОЛЬКО http(s). file:///…/id_rsa,
-      // chrome://, data: и т.п. — отказ (сервер тоже фильтрует, но клиент не доверяет одному слою).
-      const scheme = (/^([a-z][a-z0-9+.-]*):/i.exec(url.trim())?.[1] ?? "https").toLowerCase();
-      if (scheme !== "http" && scheme !== "https") {
-        throw new Error(`небезопасная схема «${scheme}:» — в браузере Джарвиса открываю только http(s)`);
-      }
+      // chrome://, data: и т.п. — отказ (сервер тоже фильтрует, но клиент не доверяет одному слою);
+      // «-»-лидирующий url также отвергаем (флаг-инъекция при spawn окна входа тем же профилем).
+      const safe = safeBrowserUrl(url);
       const cdp = await this.ensureBrowser();
-      await cdp.send("Page.navigate", { url });
+      await cdp.send("Page.navigate", { url: safe });
       await this.waitLoad(cdp);
       await sleep(800);
       await this.ensureInjected(cdp);
@@ -464,6 +470,10 @@ export class JarvisBrowser {
 
   /** Без лока — вызывается изнутри уже залоченной операции (telegramSend/Read при not-logged-in). */
   private async _openLogin(url = WEBK_URL): Promise<void> {
+    // Санитайзер до spawn: url может прийти от модели (openLogin с произвольным url). ТОЛЬКО
+    // http(s), и НЕ «-»-лидирующий аргумент — иначе Chrome примет его в argv за флаг
+    // (--load-extension/--proxy-server и т.п. — флаг-инъекция в невидимый залогиненный профиль).
+    const safe = safeBrowserUrl(url);
     await this.close(); // закрыть тёплый невидимый — освободить профиль
     const exe = resolveChrome();
     const port = await getFreePort();
@@ -472,12 +482,12 @@ export class JarvisBrowser {
       `--user-data-dir=${profileDir()}`,
       "--no-first-run", "--no-default-browser-check",
       ...visibleArgs(),
-      url,
+      safe,
     ];
     const proc = spawn(exe, args, { windowsHide: false, stdio: "ignore", detached: true });
     proc.unref();
     this.loginProc = proc; // трекаем, чтобы убить перед поднятием тёплого (иначе лок профиля)
-    log.info("открыто видимое окно входа", { url, profile: profileDir() });
+    log.info("открыто видимое окно входа", { url: safe, profile: profileDir() });
   }
 
   async close(): Promise<void> {

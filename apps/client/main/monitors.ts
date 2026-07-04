@@ -25,20 +25,36 @@ interface MonitorConfig {
 export class MonitorManager {
   private target: MonitorTarget = "jarvis";
   private cfg: MonitorConfig = { jarvisIndex: null };
-  private readonly cfgPath: string;
+  /** Ленивый резолв (§M10): до первого обращения к cfgPath конструктор НЕ трогает app.getPath. */
+  private resolvedCfgPath: string | null = null;
+  private loaded = false;
   /** Хук перепозиционирования окна Джарвиса (регистрирует main). Зовётся при смене цели/индекса. */
   private onRelayout?: () => void;
 
   constructor(cfgPath?: string) {
-    // userData недоступен до app.ready — мягкий фоллбэк на cwd.
+    // Явный путь (тесты) — используем как есть, без обращения к app.getPath.
+    if (cfgPath) {
+      this.resolvedCfgPath = cfgPath;
+      this.load();
+    }
+    // Без явного пути резолв откладывается до первого реального доступа (после app.ready) —
+    // конструктор синглтона зовётся на import-time, ДО app.whenReady(), когда app.getPath('userData')
+    // бросает и раньше давал перманентный фоллбэк на cwd.
+  }
+
+  /** Путь конфига: явный — сразу; иначе резолвится лениво (и только раз) при первом доступе. */
+  private get cfgPath(): string {
+    if (this.resolvedCfgPath) return this.resolvedCfgPath;
     let base = process.cwd();
     try {
       base = app.getPath("userData");
     } catch {
-      /* до ready */
+      /* всё ещё до ready — фоллбэк на cwd в ЭТОТ раз, но не запоминаем как окончательный */
+      return join(base, "jarvis-monitors.json");
     }
-    this.cfgPath = cfgPath ?? join(base, "jarvis-monitors.json");
-    this.load();
+    this.resolvedCfgPath = join(base, "jarvis-monitors.json");
+    if (!this.loaded) this.load();
+    return this.resolvedCfgPath;
   }
 
   /** Все дисплеи (порядок Electron). */
@@ -180,6 +196,7 @@ export class MonitorManager {
   }
 
   private load(): void {
+    this.loaded = true;
     try {
       const raw = JSON.parse(readFileSync(this.cfgPath, "utf8")) as Partial<MonitorConfig>;
       if (typeof raw.jarvisIndex === "number" || raw.jarvisIndex === null) {

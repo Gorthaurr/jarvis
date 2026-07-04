@@ -96,24 +96,34 @@ describe("router task control (§20)", () => {
     expect(sent.some((e) => e.type === "task.status" && e.payload.state === "cancelled")).toBe(true);
   });
 
-  it("ack отмены ОЗВУЧИВАЕТСЯ (и голосовая, и UI): тишина после «прекрати…» — живой баг 2026-07-03", () => {
-    const tasks = new TaskManager();
-    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });
-    const { ctx, speakQueued } = fakeCtx(tasks);
+  it("M7: голосовой cancel ОЗВУЧИВАЕТСЯ; UI/текст — видимый ack (transcript+chat) БЕЗ голоса (§22 text-silent)", () => {
+    // Голосовой путь: ack звучит (живой баг тишины после «прекрати…» 2026-07-03 — не регрессируем).
+    const tasksV = new TaskManager();
+    tasksV.create({ userId: "u1", sessionId: "s1", goal: "gV" });
+    const voice = fakeCtx(tasksV);
+    expect(handleControlUtterance(voice.ctx, "отмени")).toBe(true); // default source = voice
+    expect(voice.speakQueued).toHaveBeenCalledTimes(1);
+    expect(String(voice.speakQueued.mock.calls[0]?.[0])).toContain("Остановил");
 
-    handleTaskControl(ctx, "cancel", t.taskId, "ui"); // UI-стоп раньше был полностью немым
-    expect(speakQueued).toHaveBeenCalledTimes(1);
-    expect(String(speakQueued.mock.calls[0]?.[0])).toContain("Остановил");
+    // UI-кнопка на карточке: НЕ озвучиваем (панель видит статус), но ack виден в transcript+chat.
+    const tasksU = new TaskManager();
+    const tU = tasksU.create({ userId: "u1", sessionId: "s1", goal: "gU" });
+    const ui = fakeCtx(tasksU);
+    handleTaskControl(ui.ctx, "cancel", tU.taskId, "ui");
+    expect(ui.speakQueued).not.toHaveBeenCalled(); // §22: UI-канал молчит голосом
+    expect(ui.sent.some((e) => e.type === "transcript" && String(e.payload.text).includes("Остановил"))).toBe(true);
+    expect(ui.sent.some((e) => e.type === "chat" && String(e.payload.text).includes("Остановил"))).toBe(true);
 
-    const tasks2 = new TaskManager();
-    tasks2.create({ userId: "u1", sessionId: "s1", goal: "g2" });
-    const second = fakeCtx(tasks2);
-    expect(handleControlUtterance(second.ctx, "отмени")).toBe(true); // голосовой путь
-    expect(second.speakQueued).toHaveBeenCalledTimes(1);
-    expect(String(second.speakQueued.mock.calls[0]?.[0])).toContain("Остановил");
+    // Текст-канал (dev.text / вкладка «Чат»): тоже НЕ звучит, ack в transcript+chat.
+    const tasksT = new TaskManager();
+    tasksT.create({ userId: "u1", sessionId: "s1", goal: "gT" });
+    const text = fakeCtx(tasksT);
+    expect(handleControlUtterance(text.ctx, "отмени", "text")).toBe(true);
+    expect(text.speakQueued).not.toHaveBeenCalled(); // §22: текст-канал молчит голосом
+    expect(text.sent.some((e) => e.type === "chat" && String(e.payload.text).includes("Остановил"))).toBe(true);
   });
 
-  it("статус: голосовое «что делаешь» озвучивается, UI-статус — только текстом (панель и так видит)", () => {
+  it("статус: голосовое «что делаешь» озвучивается, UI/текст-статус — только текстом (панель и так видит)", () => {
     const tasks = new TaskManager();
     const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "таблица расходов" });
     const voicePath = fakeCtx(tasks);

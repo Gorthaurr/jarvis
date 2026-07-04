@@ -8,7 +8,7 @@ import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol
 import { nameSearchVariants } from "@jarvis/shared";
 import { approveSend, isSendApproved } from "../../consent.js";
 import { CadenceGuard } from "../../messaging/cadence.js";
-import { sendOutbound } from "../../messaging/outbound.js";
+import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
@@ -64,6 +64,12 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
   const to = String(input.to ?? "").trim();
   const text = String(input.text ?? "").trim();
   if (!to || !text) return err("telegram_send: нужны to и text");
+  // M6: cadence-гард — тот же механизм, что message_send (анти-бан/анти-веер/анти-burst).
+  const cad = cadence.check({ userId: ctx.userId, channel: "telegram", recipient: to, neverMessagedBefore: false });
+  if (!cad.allowed) return err(`Не отправил «${to}»: cadence-лимит (${cad.reason}).`);
+  // M6: идемпотентность — тот же ключ/набор, что message_send. Ретрай агента после таймаута не дублирует отправку.
+  const key = idempotencyKey({ userId: ctx.userId, channel: "telegram", recipient: to, body: text });
+  if (sentKeys.has(key)) return ok(`Уже отправлено «${to}» в Telegram (повтор не ушёл).`);
   // §14: отправка — критичное действие, подтверждаем ОДИН раз на адресата (дальше помним навсегда).
   const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
   if (!gate.approved) return ok(`Не отправил — вы не подтвердили отправку «${to}».`);
@@ -74,6 +80,8 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
     const data = result.data as { chatTitle?: string; peerId?: string } | undefined;
     const who = chatTitleOf(result.data) || to; // называем РЕАЛЬНОГО адресата (мог отличаться: Герман→Herman)
     if (data?.chatTitle) ctx.resolutionMemory?.remember(ctx.userId, "telegram", to, { peerId: data.peerId, title: data.chatTitle });
+    sentKeys.add(key);
+    cadence.record(ctx.userId, "telegram", to);
     return ok(`Отправлено «${who}» в Telegram.`);
   }
   const rawReason = result.error?.message ?? "ошибка";
@@ -87,6 +95,8 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
     try {
       const out = await ctx.telegramSend(to, text, nameSearchVariants(to));
       const who = chatTitleOf(out) || to;
+      sentKeys.add(key);
+      cadence.record(ctx.userId, "telegram", to);
       return ok(`Отправлено «${who}» в Telegram (через расширение).`);
     } catch (e) {
       const em = stripResolveMarker(e instanceof Error ? e.message : String(e));

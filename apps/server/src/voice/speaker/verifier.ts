@@ -84,6 +84,11 @@ export interface ISpeakerVerifier {
    * (null: слишком короткий/тихий фрагмент → НЕ запираем, пропускаем). Порог применяет гейт.
    */
   identify(pcm: Int16Array, profiles: readonly VoiceProfile[]): Promise<SpeakerMatch | null>;
+  /**
+   * L3: освободить ресурсы движка (для сайдкар-реализации — убить дочерний процесс). Опционально —
+   * не у всех реализаций есть внешние ресурсы (Mock/in-process). Вызывается в gateway.close().
+   */
+  dispose?(): void;
 }
 
 /**

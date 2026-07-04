@@ -103,6 +103,16 @@ describe("fs actuator (§6) — CRUD на файлах", () => {
     expect(byContent.matches[0]?.line).toBe(1);
   });
 
+  it("search по ИМЕНИ не отдаёт секретные пути (§0, H3)", async () => {
+    const dir = join(root, "search-secret");
+    await makeDir(dir);
+    await fsp.writeFile(join(dir, ".env"), "SECRET=1", "utf8"); // мимо writeFile-guard'а — напрямую в fs
+    await writeFile(join(dir, "env-notes.txt"), "не секрет");
+    const byName = await search(dir, "env");
+    expect(byName.matches.some((m) => m.path.endsWith(".env"))).toBe(false);
+    expect(byName.matches.some((m) => m.path.includes("env-notes.txt"))).toBe(true);
+  });
+
   it("expandPath раскрывает переменные окружения", () => {
     process.env.JARVIS_TEST_DIR = root;
     expect(expandPath("%JARVIS_TEST_DIR%")).toBe(root);

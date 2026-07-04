@@ -120,6 +120,28 @@ describe("WatchService — durable повторяющееся наблюдени
     expect(r4.ok).toBe(false); // пустое what
   });
 
+  it("M12: cancel by-id уважает ownership — чужой userId НЕ снимает наблюдение по эхнутому id", async () => {
+    const svc = new WatchService(async () => ({ met: false, summary: "" }), new WatchStore(tempDir()), { minIntervalMs: 100 });
+    const mine = svc.add({ sessionId: "s", userId: "owner", what: "секрет-наблюдение", condition: "c", intervalMs: 100 });
+    const id = mine.ok ? mine.watch.id : "x";
+    // Чужой пользователь знает id (эхо) — снять НЕ может.
+    expect(svc.cancel(id, "attacker")).toBeNull();
+    expect(svc.list({ userId: "owner" })).toHaveLength(1); // цело
+    // Владелец — снимает.
+    expect(svc.cancel(id, "owner")?.id).toBe(id);
+    expect(svc.list({ userId: "owner" })).toHaveLength(0);
+  });
+
+  it("M13: svc.flush() дренирует стор → активное наблюдение видно свежему стору (gateway.close путь)", async () => {
+    const dir = tempDir();
+    const svc = new WatchService(async () => ({ met: false, summary: "" }), new WatchStore(dir), { minIntervalMs: 100 });
+    svc.add({ sessionId: "s", userId: "u", what: "сборка CI", condition: "зелёная", intervalMs: 100 });
+    await svc.flush(); // M13: дренируем через сервис (не store.flush()) — как в gateway.close()
+    const store2 = new WatchStore(dir);
+    await store2.load();
+    expect(store2.list({ userId: "u" })).toHaveLength(1);
+  });
+
   it("cancel по id и по тексту-запросу; durable — активные переживают перезагрузку с диска", async () => {
     const dir = tempDir();
     const store = new WatchStore(dir);

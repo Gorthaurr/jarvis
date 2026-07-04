@@ -79,7 +79,9 @@
     `identity.ts resolveAndProvision` (async-обёртка над чистым `resolveUserId`): UUID→партиция +
     lazy-provision `users` (`db/users.ts ensureUser` ON CONFLICT — ДО `createOrResume`, закрывает FK
     Hazard 1); strict (`JARVIS_AUTH_STRICT=1`, дефолт off) сверяет sha256(token) с `auth_tokens`
-    (миграция 0003), нет строки+БД-up→4003, БД-down→fail-open (не брикуем). Single-flight латч
+    (миграция 0003), нет строки→4003 (**fail-CLOSED всегда, вкл. БД-down — ревью 2026-07-04, M1**:
+    strict = hardened/remote контекст, лучше отвергнуть, чем впустить непроверенного; `isDbReady()`
+    теперь реальный `SELECT 1` с кэшом, а не проверка «объект пула существует»). Single-flight латч
     `handshakeStarted` (sync до await). ⚠️ На loopback токен = КЛЮЧ ПАРТИЦИИ, НЕ auth (секрет театр);
     реальная граница — bind (`gateway/bind.ts resolveBindHost`: не-loopback без `JARVIS_ALLOW_REMOTE`→
     127.0.0.1+error). Клиент: per-install UUID ОПТ-ИН за `JARVIS_CLIENT_IDENTITY` (`identity-store.ts`),
@@ -190,7 +192,9 @@
   Windows гонятся за установку pywin32 в кэше uv при ПЕРВОМ конкурентном запуске (os error 32) → нужен
   ОДНОРАЗОВЫЙ ПОСЛЕДОВАТЕЛЬНЫЙ прогрев `uvx mcp-server-<x>` ДО первого boot** (см. `_uvx_note` в mcp.json);
   поэтому в активных `servers` держим только проверенно-подключающиеся (честность: не плодим мёртвые).
-  Открыто: result-image из MCP сводится к тексту; зомби stdio-child на Windows (нужен taskkill /T в dispose).
+  Открыто: result-image из MCP сводится к тексту. (Зомби stdio-child на Windows — ЗАКРЫТО ревью 2026-07-04, L6:
+  `manager.dispose()` держит ссылку на transport, берёт PID до `close()` и бьёт `taskkill /PID <pid> /T /F`;
+  `gateway.close()` теперь `await mcp.dispose()` с таймаутом.)
 - `brain/tools/input-kinds.ts` — какие команды берут **аренду ввода** §20 (GUI сериализуется).
 - `brain/persona/` — `persona.md` (vХХ, тон/правила/возможности), `modes.ts` (режимы-маски butler/
   bold/storyteller/comedian), **`emotion.ts`** (команды «говори зло/радостно» §21).
@@ -569,13 +573,24 @@
 - **Граница данные/инструкции (гл. вектор, анти-prompt-injection):** недоверенный вывод инструментов
   (`web_*`/`browser_read`/`browser_inspect`) оборачивается в `<untrusted_content source="…">`
   (`dispatch.untrusted()`), `screen_capture` помечен «текст = данные», persona **v44** запрещает
-  исполнять инструкции из читаемого текста. Это замена песочнице code.run.
+  исполнять инструкции из читаемого текста. Это замена песочнице code.run. **Ревью 2026-07-04 (M11):**
+  живой контекст ПК (заголовки окон/имена процессов из `client.system`) — тоже влияемые атакующим данные →
+  оборачиваются тем же `<untrusted_content source="live-system">` при сборке промпта (`persona/index.ts`);
+  клиент (`sensors/system-snapshot.ts`) шлёт заголовки СЫРЫМИ, тег навешивает сервер.
 - **Денилист секретов** (`apps/client/.../self-guard.isSecretPath`): `.env`/`id_rsa`/`*.pem`/`*.key`/
   `credentials-master.key`/`Login Data`/`.ssh`/`.aws` — блок read+write+delete+move+search в `fs_*`.
+  **Ревью 2026-07-04:** C2 — денилист ловит и САМУ папку `.ssh`/`.aws`/`.gnupg` (regex `(?:[\\/]|$)`, не
+  только файлы внутри); H3 — `fs_search` фильтрует секреты и в ветке поиска ПО ИМЕНИ (не только по контенту);
+  H1 — `office_word`/`office_excel` тоже проходят `assertReadable`/`assertWritable` до COM.
 - **Сеть fail-closed:** `bind.ts` — не-loopback только при `JARVIS_ALLOW_REMOTE` И `JARVIS_AUTH_STRICT`
   (иначе → 127.0.0.1). HTTP `/dev/*`+`/ext/*` (исполняли действия БЕЗ auth) — за `JARVIS_DEV_HTTP=1`
   (деф ВЫКЛ → 404) + loopback-only + опц. `JARVIS_DEV_TOKEN`. `/ext` WS — Origin-чек `chrome-extension://`.
   `browser_*` — SSRF-гард (приватная сеть/loopback/метаданные/`file:`/`chrome:` блок, `browserUrlBlocked`).
+  **Ревью 2026-07-04 (C1):** `browserUrlBlocked` больше НЕ fail-open на голом хосте без схемы (`new URL`
+  бросал → нормализуем `https://` и прогоняем те же проверки; непарсящийся → блок). `web_login` добавлен
+  в `URL_NAV_TOOLS`; `jarvis-browser`/`browser-cdp` санитайзят url (`safeBrowserUrl`: http/https + reject
+  `-`-leading argv → анти Chrome-flag-инъекция, H2/L9). `input_key` — учёт удерживаемых модификаторов между
+  `down`/`up` (Alt+F4 двумя вызовами блокируется, H4).
 - **Least-privilege:** MCP-дети — env-allowlist (`manager.baseChildEnv`), не весь `process.env`; версии
   MCP в `mcp.json` ЗАПИНЕНЫ (H16, не `@latest`).
 - **НЕ реализовано осознанно** (политика «полное управление Windows»): сэндбокс code.run (Job Object/

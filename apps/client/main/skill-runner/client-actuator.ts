@@ -19,9 +19,32 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : v === undefined ? "" : String(v);
 }
 
-export function createClientActuator(): SkillActuator {
+/** Действия навыка, ФИЗИЧЕСКИ инжектящие ввод в сессию юзера (мышь/клава через SendInput). */
+const PHYSICAL_STEP_ACTIONS = new Set<SkillStep["action"]>(["input.type", "input.key", "input.click"]);
+
+/**
+ * §H5: USER_BUSY-гейт для skill-runner. dispatch() глушит физ.ввод проактивной команды при активном
+ * юзере, но skill.execute идёт мимо него — createClientActuator дёргает input.* напрямую. Прокидываем
+ * тот же сигнал присутствия, чтобы проактивный навык НЕ трогал мышь/клаву, пока юзер сам за вводом.
+ */
+export interface ClientActuatorOptions {
+  /** Навык запущен проактивно (Джарвис сам затеял) — гейтить физ.ввод при активном юзере. */
+  isProactive?: boolean;
+  /** Активен ли пользователь СЕЙЧАС (тот же userActiveNow, что в actuators/index.ts). */
+  userActiveNow?: () => boolean;
+}
+
+export function createClientActuator(options: ClientActuatorOptions = {}): SkillActuator {
+  const { isProactive = false, userActiveNow } = options;
   return {
     async executeStep(step: SkillStep): Promise<void> {
+      // §H5: проактивный навык не инжектит физ.ввод, пока юзер сам за мышью/клавой — честный провал
+      // шага (не ложный успех), раннер эскалирует/валит как обычную неудачу.
+      if (isProactive && PHYSICAL_STEP_ACTIONS.has(step.action) && userActiveNow?.()) {
+        throw new Error(
+          `USER_BUSY: пользователь сам за вводом — физическую мышь/клавиатуру (${step.action}) сейчас не трогаю`,
+        );
+      }
       const p = step.params ?? {};
       switch (step.action) {
         case "app.launch":

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type Candle, MockMarketDataProvider, PredictionStore, type Quote, TradingService, inferMarket } from "./index.js";
-import { parseBinanceCandles, parseIssTable, parseMoexCandles, parseMoexQuote } from "./market.js";
+import { moexDate, parseBinanceCandles, parseIssTable, parseMoexCandles, parseMoexQuote } from "./market.js";
 
 describe("market parsers — чистые, без сети (§трейдинг)", () => {
   it("parseIssTable: {columns,data} → массив объектов по колонкам", () => {
@@ -33,6 +33,25 @@ describe("market parsers — чистые, без сети (§трейдинг)"
     const bc = parseBinanceCandles(bin);
     expect(bc[0]).toEqual({ t: 1700000000000, o: 42000, h: 42500, l: 41800, c: 42300, v: 12.5 });
     expect(parseBinanceCandles({})).toEqual([]);
+  });
+
+  it("MOEX-время трактуется как МСК (UTC+3): begin «10:00 MSK» = 07:00 UTC", () => {
+    // ISS begin — московское wall-clock. «2024-01-10 10:00:00» МСК = 2024-01-10T07:00:00Z (UTC).
+    const moex = { candles: { columns: ["open", "close", "high", "low", "value", "volume", "begin"], data: [[100, 105, 106, 99, 0, 5000, "2024-01-10 10:00:00"]] } };
+    const mc = parseMoexCandles(moex);
+    expect(mc[0]!.t).toBe(Date.parse("2024-01-10T07:00:00Z"));
+  });
+
+  it("moexDate: UTC-инстант → МСК wall-clock (07:00 UTC → «10:00» строкой)", () => {
+    // Обратное преобразование для from/till: тот же 07:00 UTC должен уйти в ISS как 10:00 МСК.
+    expect(moexDate(Date.parse("2024-01-10T07:00:00Z"))).toBe("2024-01-10 10:00:00");
+  });
+
+  it("round-trip moexDate↔parseMoexCandles на известном UTC-инстанте не сдвигает время", () => {
+    const utc = Date.parse("2024-06-15T12:30:00Z");
+    const begin = moexDate(utc); // UTC → строка МСК, как ISS ждёт в from/till
+    const moex = { candles: { columns: ["open", "close", "high", "low", "value", "volume", "begin"], data: [[1, 1, 1, 1, 0, 1, begin]] } };
+    expect(parseMoexCandles(moex)[0]!.t).toBe(utc); // строка МСК → тот же UTC-инстант
   });
 });
 

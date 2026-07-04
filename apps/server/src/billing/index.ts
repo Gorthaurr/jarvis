@@ -97,6 +97,12 @@ export class SpendGuard {
    * Подтянуть накопленные траты за ТЕКУЩИЙ период из usage_quota (§14). Без этого рестарт
    * (краш/деплой/OOM) обнуляет `spent` → месячный потолок обходится именно когда нужнее. Звать
    * на старте ДО первого check(). Best-effort: без userId/БД — no-op, не роняет старт.
+   *
+   * МОНОТОННОСТЬ (M3, гонка reconnect): hydrate зовётся не только на boot, но на КАЖДОМ
+   * handshake/reconnect. Безусловная перезапись `this.spent = prior` откатывала бы назад живой
+   * in-memory spent, если reconnect пришёл сразу после recordUsage (персист fire-and-forget ещё
+   * не долетел до БД или гонка чтения) — прочитали бы stale и обнулили только что учтённый расход,
+   * обходя spend cap. Берём max(живое, из БД) — гидрация двигает счётчик только ВПЕРЁД.
    */
   async hydrate(): Promise<void> {
     if (!this.userId) return;
@@ -107,7 +113,7 @@ export class SpendGuard {
         [this.userId, this.currentPeriod()],
       );
       const prior = res?.rows?.[0] ? Number(res.rows[0].cost_estimate) : 0;
-      if (Number.isFinite(prior) && prior > 0) {
+      if (Number.isFinite(prior) && prior > 0 && prior > this.spent) {
         this.spent = prior;
         log.info("SpendGuard: траты периода восстановлены из usage_quota", { spent: this.spent, period: this.currentPeriod() });
       }

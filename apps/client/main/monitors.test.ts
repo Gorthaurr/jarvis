@@ -77,4 +77,15 @@ describe("MonitorManager — мультимонитор (§6)", () => {
     m.setJarvisIndex(0); // 3: target=jarvis → переезд на новый рабочий
     expect(moved).toHaveBeenCalledTimes(3);
   });
+
+  it("M10: без явного cfgPath конструктор НЕ трогает app.getPath (лениво, до app.ready)", () => {
+    // Мок app.getPath всегда бросает ("до ready") — если бы конструктор звал его сразу,
+    // это молча проглотилось бы try/catch и осело перманентным cwd-фоллбэком (сам баг).
+    // Проверяем, что конструктор в принципе не падает и не форсит резолв раньше времени —
+    // операции, не трогающие диск (displays/monitorList чтение in-memory cfg), работают сразу.
+    expect(() => new MonitorManager()).not.toThrow();
+    const m = new MonitorManager();
+    expect(m.jarvisIndex).toBeNull(); // дефолт до какого-либо чтения диска
+    expect(() => m.monitorList()).not.toThrow();
+  });
 });

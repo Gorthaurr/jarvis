@@ -51,7 +51,7 @@ export async function recordToken(userId: string, tokenHash: string, label = "de
 
 /**
  * Найти userId по хешу токена (только свежие: expires_at IS NULL или в будущем).
- * null — нет строки ИЛИ БД недоступна (вызывающий в strict-режиме различает их через isDbReady()).
+ * null — нет строки ИЛИ БД недоступна. В strict-режиме оба случая → отказ (fail-closed).
  */
 export async function findUserByTokenHash(tokenHash: string): Promise<string | null> {
   const res = await query<{ user_id: string }>(

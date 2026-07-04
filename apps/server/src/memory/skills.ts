@@ -553,6 +553,8 @@ export interface SavedLearnedSkill {
  */
 export interface RecalledSkill {
   id: string;
+  /** Владелец записи (userId или SHARED_USER_ID) — скоуп кэша векторов триггеров (M8: не течёт между тенантами). */
+  ownerId: string;
   name: string;
   /** Когда применять (frontmatter description). */
   when: string;
@@ -628,6 +630,7 @@ function readLearned(rec: SkillRecord): RecalledSkill | null {
   if (String(fm.source ?? "").toLowerCase() !== "learned") return null;
   return {
     id: rec.id,
+    ownerId: rec.userId,
     name: String(fm.name ?? rec.id),
     when: String(fm.description ?? ""),
     procedure: splitFrontmatter(rec.contentMd).body.trim(),

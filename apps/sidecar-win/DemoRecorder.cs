@@ -70,6 +70,7 @@ public sealed class DemoRecorder
     private uint _threadId;
     private IntPtr _hook;
     private WinEventDelegate? _proc; // держим ссылку — иначе GC соберёт делегат под нативным хуком
+    private volatile bool _hookOk;  // удалось ли реально прикрепить WinEvent-хук (§8, честность)
 
     private string _lastKey = "";
     private long _lastTs;
@@ -82,18 +83,31 @@ public sealed class DemoRecorder
         _log = log;
     }
 
-    /// <summary>Начать запись (idempotent). Поднимает хук в отдельном STA-потоке.</summary>
+    /// <summary>
+    /// Начать запись (idempotent). Поднимает хук в отдельном STA-потоке.
+    /// H13 (§8, честность): бросает, если WinEvent-хук РЕАЛЬНО не прикрепился —
+    /// вызывающий (HandleDemoRecord) отдаёт ok:false вместо ложного «запись начата».
+    /// </summary>
     public void Start()
     {
         if (_thread is not null) return;
         lock (_lock) { _events.Clear(); _lastKey = ""; _lastTs = 0; }
 
+        _hookOk = false;
         using var ready = new ManualResetEventSlim(false);
         var t = new Thread(() => RunLoop(ready)) { IsBackground = true, Name = "demo-recorder" };
         t.SetApartmentState(ApartmentState.STA);
         _thread = t;
         t.Start();
         ready.Wait(2000);
+        if (!_hookOk)
+        {
+            // Хук не встал (SetWinEventHook → NULL) — поток уже вышел сам после ready.Set().
+            // Сбрасываем состояние, чтобы повторный Start мог попробовать снова, и честно падаем.
+            _thread = null;
+            _log("demo.record: SetWinEventHook вернул NULL — запись НЕ начата");
+            throw new InvalidOperationException("demo.record: не удалось прикрепить UIA-хук записи");
+        }
         _log("demo.record: запись начата (UIA-хук поднят)");
     }
 
@@ -121,6 +135,7 @@ public sealed class DemoRecorder
             EVENT_OBJECT_INVOKED, EVENT_OBJECT_SELECTIONWITHIN,
             IntPtr.Zero, _proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        _hookOk = _hook != IntPtr.Zero; // сигналим успех прикрепления ДО ready.Set() (H13)
         ready.Set();
 
         if (_hook == IntPtr.Zero)

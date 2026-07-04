@@ -16,7 +16,17 @@ export function browserUrlBlocked(raw: string): boolean {
   try {
     u = new URL(raw);
   } catch {
-    return false; // не URL (bare host) — резолвится в публичный сайт, не SSRF-кейс
+    // C1 (SSRF fail-open): "169.254.169.254"/"localhost"/"127.0.0.1" без схемы валят new URL —
+    // раньше это трактовалось как "не URL, не SSRF-кейс" и ПРОПУСКАЛО гейт. Нормализуем схему и
+    // прогоняем ТЕ ЖЕ private/loopback/link-local/metadata-проверки, что isFetchUrlAllowed.
+    const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`;
+    try {
+      u = new URL(withScheme);
+    } catch {
+      return true; // и с https-схемой не парсится — блокируем (fail-closed)
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return true;
+    return !isFetchUrlAllowed(withScheme);
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return true; // file:/chrome:/data: — блок
   return !isFetchUrlAllowed(raw); // приватный/loopback/metadata http(s) — блок

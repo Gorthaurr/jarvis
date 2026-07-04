@@ -49,8 +49,12 @@ let lastJarvisInputAt = 0;
 /** Команды, которые ФИЗИЧЕСКИ инжектят ввод в сессию пользователя (в отличие от UIA-invoke/CDP). */
 const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key"]);
 
-/** Активен ли пользователь ПРЯМО СЕЙЧАС (недавно вводил сам, а не Джарвис). Логика — в user-presence. */
-function userActiveNow(): boolean {
+/**
+ * Активен ли пользователь ПРЯМО СЕЙЧАС (недавно вводил сам, а не Джарвис). Логика — в user-presence.
+ * Экспортируется, чтобы skill-runner применял ТОТ ЖЕ гейт присутствия к физ.вводу проактивного навыка
+ * (иначе skill.execute → createClientActuator дёргал бы input.* в обход USER_BUSY-сторожа dispatch, H5).
+ */
+export function userActiveNow(): boolean {
   let idleMs: number;
   try {
     idleMs = Math.round(powerMonitor.getSystemIdleTime() * 1000);
@@ -229,13 +233,16 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       // ── skill-runner (tier-0.5, §8): локальное исполнение шагов без LLM ──
       case "skill.execute": {
         const cancel = { cancelled: false }; // TODO(M8): связать с отменой задачи (§20)
+        // H5: тот же USER_BUSY-гейт, что в dispatch — навык, запущенный ПРОАКТИВНО (Джарвис сам затеял),
+        // не должен инжектить физ.мышь/клаву мимо сторожа. Явный (origin==="user") навык НЕ гейтим.
+        const skillProactive = cmd.origin === "proactive" || cmd.proactive === true;
         const outcome = await runSkill({
           skillId: cmd.skillId,
           version: cmd.version,
           steps: cmd.steps,
           params: cmd.params,
           cancel,
-          actuator: createClientActuator(),
+          actuator: createClientActuator({ isProactive: skillProactive, userActiveNow }),
           // escalate (needs_llm: сочинить значение шага по месту; exhausted: починка) — клиент↔сервер
           // round-trip ещё не подключён (TODO M4+). Пока хук не передаётся → раннер честно ВАЛИТ
           // needsLlm-шаг (не исполняет вслепую с незаполненным плейсхолдером). Детерминированные шаги

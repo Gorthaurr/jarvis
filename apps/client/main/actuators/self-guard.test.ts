@@ -35,6 +35,20 @@ describe("self-guard — рельсы самомодификации", () => {
     expect(isSecretPath("C:/proj/apps/server/src/keymap.ts")).toBe(false);
   });
 
+  it("C2: сама папка секретов (без файла-потомка) тоже защищена — fs_delete{path:'~/.ssh'} не проходит", () => {
+    for (const s of [
+      "C:/Users/anton/.ssh",
+      "C:/Users/anton/.ssh/",
+      "C:/Users/anton/.aws",
+      "C:/Users/anton/.gnupg",
+    ]) {
+      expect(isSecretPath(s)).toBe(true);
+      expect(() => assertWritable(s)).toThrow();
+    }
+    // Файлы ВНУТРИ папки по-прежнему ловятся (регресс старого поведения не допускаем).
+    expect(isSecretPath("C:/Users/anton/.ssh/known_hosts")).toBe(true);
+  });
+
   it("ИСХОДНИКИ разрешены — их и надо менять для самоулучшения", () => {
     const src = "C:/proj/apps/server/src/brain/agent/index.ts";
     expect(isProtectedSelfPath(src)).toBe(false);

@@ -43,11 +43,18 @@ const WALL_CLOCK_MS = (() => {
  * Окружение для раннера: РЕАЛЬНЫЙ env пользователя (USERPROFILE/APPDATA/PATH/… — нужно для
  * настоящего управления Windows), но БЕЗ секретов: вырезаем ключи вида *KEY/SECRET/TOKEN/PASSWORD/
  * CREDENTIAL, чтобы скрипт (теперь с сетью) не мог их выгрузить.
+ *
+ * Denylist по ИМЕНИ не ловит секрет в ЗНАЧЕНИИ безобидной переменной (DATABASE_URL=postgres://
+ * user:PASS@host) — дополнительно вырезаем переменные, чьё значение похоже на URL с кредами
+ * (scheme://user:pass@host).
  */
-function runnerEnv(): NodeJS.ProcessEnv {
+const CREDS_IN_URL_RE = /:\/\/[^/@\s]+:[^/@\s]+@/;
+
+export function runnerEnv(): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (/key|secret|token|password|passwd|credential/i.test(k)) continue;
+    if (v !== undefined && CREDS_IN_URL_RE.test(v)) continue;
     out[k] = v;
   }
   return out;

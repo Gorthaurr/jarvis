@@ -46,7 +46,8 @@ export interface OutboundResult {
   messageKey?: string;
 }
 
-function idempotencyKey(p: { userId: string; channel: string; recipient: string; body: string }): string {
+/** Экспортируется: telegram_send (messaging.ts) переиспользует тот же ключ для своей идемпотентности (M6). */
+export function idempotencyKey(p: { userId: string; channel: string; recipient: string; body: string }): string {
   let h = 5381;
   const s = `${p.userId}|${p.channel}|${p.recipient}|${p.body}`;
   for (let i = 0; i < s.length; i += 1) h = (h * 33) ^ s.charCodeAt(i);

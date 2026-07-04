@@ -129,14 +129,24 @@ const SKILL_SEMANTIC_MIN = (() => {
   return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.82;
 })();
 
-/** Кэш векторов триггеров навыков (id→{version,vec}) — не эмбеддить «name. when» каждый ход. */
+/**
+ * Кэш векторов триггеров навыков (ключ→{version,vec}) — не эмбеддить «name. when» каждый ход.
+ * M8 (security): ключ композитный "ownerId:id", НЕ голый id — иначе приватные навыки двух юзеров
+ * с одинаковым slug (тот же id, напр. "learned-open-notion") делят кэш-вектор через listSkillsMerged,
+ * и recall одного тенанта мог отдать вектор чужого. ownerId берётся из самой записи (owner-scope).
+ */
 const triggerVecCache = new Map<string, { version: number; vec: number[] }>();
 
+function triggerVecKey(s: RecalledSkill): string {
+  return `${s.ownerId}:${s.id}`;
+}
+
 async function triggerVec(embedder: IEmbeddingProvider, s: RecalledSkill): Promise<number[] | null> {
-  const hit = triggerVecCache.get(s.id);
+  const key = triggerVecKey(s);
+  const hit = triggerVecCache.get(key);
   if (hit && hit.version === s.version) return hit.vec;
   const vec = await embedder.embed(`${s.name}. ${s.when}`, "passage");
-  if (vec) triggerVecCache.set(s.id, { version: s.version, vec });
+  if (vec) triggerVecCache.set(key, { version: s.version, vec });
   return vec;
 }
 

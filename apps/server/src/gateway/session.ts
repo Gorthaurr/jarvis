@@ -66,6 +66,15 @@ export class Session {
    */
   private readonly scopedStore = new Map<string, unknown>();
 
+  /**
+   * H8: коллбэк финальной очистки сессии — выполняется ТОЛЬКО при РЕАЛЬНОМ удалении (teardown из
+   * registry.remove/teardownAll), НЕ на обрыве сокета в resume-grace. Сюда makeSessionContext вешает
+   * отмену фоновых §20-задач: раньше её звали синхронно на ws-close → reconnect в 120с grace-окне
+   * находил задачу уже УБИТОЙ (результат потерян), хотя память цела. Теперь задача живёт весь grace и
+   * снимается лишь когда сессия действительно уходит. Один слот (перезапись при rebind — актуален
+   * последний ctx). */
+  private onTeardownCb?: () => void;
+
   constructor(sessionId: string, userId: string, socket: SessionSocket) {
     this.sessionId = sessionId;
     this.userId = userId;
@@ -81,6 +90,14 @@ export class Session {
   scoped<T>(key: string, factory: () => T): T {
     if (!this.scopedStore.has(key)) this.scopedStore.set(key, factory());
     return this.scopedStore.get(key) as T;
+  }
+
+  /**
+   * H8: зарегистрировать коллбэк финальной очистки (запускается в teardown — реальное удаление сессии,
+   * а НЕ обрыв сокета в resume-grace). makeSessionContext вешает сюда отмену фоновых задач. Перезапись
+   * при reconnect (актуален последний ctx). */
+  onTeardown(cb: () => void): void {
+    this.onTeardownCb = cb;
   }
 
   /** Переподключить сессию к новому сокету (resume, §5). In-flight сохраняются. */
@@ -203,6 +220,18 @@ export class Session {
       pending.resolve({ requestId: "", approved: false });
     }
     this.pendingConfirms.clear();
+    // H8: финальная очистка (отмена фоновых §20-задач и т.п.) — ТОЛЬКО здесь, на реальном удалении
+    // сессии (grace истёк / shutdown), не на каждом обрыве сокета. Одноразово: снимаем слот, чтобы
+    // повторный teardown не выполнял её дважды. Не роняем teardown, если коллбэк бросил.
+    const cb = this.onTeardownCb;
+    this.onTeardownCb = undefined;
+    if (cb) {
+      try {
+        cb();
+      } catch (e) {
+        this.log.warn("ошибка финальной очистки сессии (teardown)", e instanceof Error ? e.message : String(e));
+      }
+    }
   }
 
   /** Сколько действий сейчас в полёте (диагностика/тесты). */

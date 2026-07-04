@@ -292,6 +292,19 @@ async function robustClickMain(params) {
     const b = el.getBoundingClientRect();
     return b.width > 1 && b.height > 1;
   };
+  // РОБАСТ-матч по тексту (зеркало packages/shared/src/ui-match.ts bestTextMatch): голый .includes()
+  // цеплял ложь — «удалить».includes(«да») → клик НЕ ТУДА. fold + короткий запрос (≤3) только точно/словом.
+  const foldTxt = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
+  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const scoreText = (q, hay) => {
+    if (!q || !hay) return 0;
+    if (hay === q) return 100;
+    if (new RegExp("(^| )" + escRe(q) + "( |$)").test(hay)) return 80;
+    const short = q.length <= 3;
+    if (!short && hay.startsWith(q)) return 60;
+    if (!short && q.length >= 4 && hay.includes(q)) return 30;
+    return 0;
+  };
   const resolve = () => {
     if (P.selector) {
       try {
@@ -300,14 +313,16 @@ async function robustClickMain(params) {
         return null;
       }
     }
-    const n = lc(P.text || "");
-    return [...document.querySelectorAll("a,button,[role=button],[role=link],[role=tab],[aria-label],[data-test-id],[tabindex]")].find(
-      (e) =>
-        document.contains(e) &&
-        !(e.closest && e.closest(".swiper-slide-duplicate")) &&
-        visible(e) &&
-        (lc(e.innerText) + lc(e.getAttribute("aria-label")) + lc(e.title)).includes(n),
-    );
+    const q = foldTxt(P.text || "");
+    if (!q) return null;
+    let best = null;
+    let bestScore = 0;
+    for (const e of document.querySelectorAll("a,button,[role=button],[role=link],[role=tab],[aria-label],[data-test-id],[tabindex]")) {
+      if (!(document.contains(e) && !(e.closest && e.closest(".swiper-slide-duplicate")) && visible(e))) continue;
+      const s = scoreText(q, foldTxt((e.innerText || "") + " " + (e.getAttribute("aria-label") || "") + " " + (e.title || "")));
+      if (s > bestScore) { bestScore = s; best = e; }
+    }
+    return best;
   };
   let node = resolve();
   if (!node && P.text) {
@@ -515,10 +530,33 @@ async function pageActInPage(intent, params) {
     const b = el.getBoundingClientRect();
     return b.width > 1 && b.height > 1;
   };
-  const byText = (t) =>
-    [...document.querySelectorAll("a,button,[role=button],[role=link],[role=tab],[aria-label],[data-test-id]")].find(
-      (e) => visible(e) && (lc(e.innerText) + lc(e.getAttribute("aria-label")) + lc(e.title)).includes(lc(t)),
-    );
+  // РОБАСТ-матч по тексту (зеркало packages/shared/src/ui-match.ts bestTextMatch): голый .includes()
+  // давал ложные попадания — «удалить».includes(«да»)===true → «нажми да» кликало «Удалить». fold
+  // (регистр/пунктуация/ё) с обеих сторон; короткий запрос (≤3 симв.) — ТОЛЬКО точно/целым словом
+  // (никакой подстроки), подстрока — лишь для запросов ≥4. Скоринг: точное>слово>префикс>подстрока.
+  const foldTxt = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
+  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const scoreText = (q, hay) => {
+    if (!q || !hay) return 0;
+    if (hay === q) return 100; // точное
+    if (new RegExp("(^| )" + escRe(q) + "( |$)").test(hay)) return 80; // целое слово
+    const short = q.length <= 3;
+    if (!short && hay.startsWith(q)) return 60; // префикс (не для коротких)
+    if (!short && q.length >= 4 && hay.includes(q)) return 30; // подстрока — лишь для ≥4
+    return 0;
+  };
+  const byText = (t) => {
+    const q = foldTxt(t);
+    if (!q) return null;
+    let best = null;
+    let bestScore = 0;
+    for (const e of document.querySelectorAll("a,button,[role=button],[role=link],[role=tab],[aria-label],[data-test-id]")) {
+      if (!visible(e)) continue;
+      const s = scoreText(q, foldTxt((e.innerText || "") + " " + (e.getAttribute("aria-label") || "") + " " + (e.title || "")));
+      if (s > bestScore) { bestScore = s; best = e; }
+    }
+    return best;
+  };
   const media = () => document.querySelector("video, audio");
   // НАСТОЯЩИЙ клик: SPA Яндекса игнорировал синтетический el.click() («страница действие не отдаёт» —
   // прямо из лога). Шлём полную последовательность pointer/mouse-событий по реальной кнопке (closest

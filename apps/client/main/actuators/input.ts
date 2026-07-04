@@ -62,6 +62,31 @@ export function isBlockedCombo(combo: string): boolean {
   return BLOCKED_COMBOS.has(normalizeCombo(combo));
 }
 
+/**
+ * §6 «не навреди», H4: множество ФИЗИЧЕСКИ УДЕРЖИВАЕМЫХ клавиш между вызовами. Режимы down/up
+ * держат модификатор зажатым МЕЖДУ RPC-вызовами → опасное комбо (Alt+F4) можно собрать по частям:
+ * `Alt` (down) + `F4` (down) — каждый вызов по отдельности не в блок-листе, но итог = Alt+F4.
+ * Поэтому перед КАЖДЫМ down сверяем итоговую комбинацию (held ∪ новые клавиши), а не только клавиши
+ * одного вызова. Сбрасываем на up/полном press/ошибке, чтобы состояние не залипало.
+ */
+const heldKeys: Set<string> = new Set();
+
+/** Разложить combo в набор нормализованных клавиш (переиспользуем логику normalizeCombo). */
+function comboKeys(combo: string): string[] {
+  const norm = normalizeCombo(combo);
+  return norm ? norm.split("+") : [];
+}
+
+/** Тест-хелпер: сбросить учёт удерживаемых клавиш (изоляция между кейсами). */
+export function resetHeldKeys(): void {
+  heldKeys.clear();
+}
+
+/** Тест-хелпер: засеять «удерживаемые» клавиши (эмуляция успешного down без сайдкара). */
+export function seedHeldKeys(combo: string): void {
+  for (const k of comboKeys(combo)) heldKeys.add(k);
+}
+
 /** Печать текста посимвольно с человеческим джиттером в сайдкаре (§3 принцип 3). */
 export async function typeText(text: string): Promise<void> {
   ensure();
@@ -88,8 +113,29 @@ export async function pressKey(
     log.warn("input.key: опасное комбо заблокировано", { combo });
     throw new BlockedKeyError(combo);
   }
+  const keys = comboKeys(combo);
+  // H4: down/up держат модификаторы зажатыми МЕЖДУ вызовами. Перед down сверяем ИТОГОВУЮ
+  // комбинацию (уже удерживаемое ∪ новые клавиши) — иначе Alt(down)+F4(down) обходит блок-лист.
+  if (mode === "down") {
+    const effective = [...heldKeys, ...keys].join("+");
+    if (isBlockedCombo(effective)) {
+      log.warn("input.key: опасное комбо собрано удержанием — заблокировано", { effective, held: [...heldKeys] });
+      heldKeys.clear(); // не оставляем зажатые модификаторы висеть в учёте
+      throw new BlockedKeyError(effective);
+    }
+  }
   ensure();
-  await sidecar().request("key", { combo, mode, scancode });
+  try {
+    await sidecar().request("key", { combo, mode, scancode });
+  } catch (e) {
+    // Ошибка исполнения — считаем клавиши отпущенными (реального удержания нет), чтобы не залипало.
+    if (mode === "down") for (const k of keys) heldKeys.delete(k);
+    throw e;
+  }
+  // Учёт удержания ведём только по успеху RPC. press = атомарное нажать+отпустить (не удерживается).
+  if (mode === "down") for (const k of keys) heldKeys.add(k);
+  else if (mode === "up") for (const k of keys) heldKeys.delete(k);
+  else heldKeys.clear(); // полный press: сбрасываем накопленное удержание (клавиатура «отпущена»)
 }
 
 /** Заблокированное опасное комбо (§6). dispatch маппит в runtime-ошибку — агент выберет иной путь. */

@@ -76,6 +76,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "jbrowser.inspect",
       "jbrowser.act",
       "jbrowser.login",
+      "jbrowser.import_cookies",
       "order.place",
       "fs.read",
       "fs.write",
@@ -97,6 +98,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "monitor.list",
       "monitor.assign",
       "obs.request",
+      "system.layout",
     ];
     for (const kind of expectedKinds) {
       const toolName = ACTUATOR_TOOL_BY_KIND[kind];

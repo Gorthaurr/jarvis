@@ -213,11 +213,14 @@ export function makeSessionContext(
   // по userId (переживает рестарт сервера/клиента) — иначе «забывал, о чём говорили». На новой сессии
   // поднимается из data/memory/<user>.json, дальше авто-сохраняется (см. working-store).
   const memory = session.scoped("workingMemory", () => loadWorkingMemory(session.userId));
-  // Per-session состояние async-контура (§20): живёт с сессией, GC'ится с контекстом —
-  // никаких процесс-глобальных Map по sessionId (прежний bgChains тёк на каждой сессии).
-  const inputArbiter = new AsyncMutex(); // аренда мыши/клавы/фокуса — сериализует GUI-команды
-  const concurrency = new Semaphore(MAX_PARALLEL_TASKS); // потолок параллельных agent-loop'ов
-  const bgTasks = new Set<Promise<void>>(); // живые фоновые задачи (для чистки на закрытии)
+  // H10: async-контур (§20) СКОУПЛЕН на Session (как workingMemory/toolActivation) → ПЕРЕЖИВАЕТ reconnect.
+  // Раньше makeSessionContext создавал новый мьютекс/семафор/набор на КАЖДЫЙ коннект: команда на новом ctx
+  // захватывала input-lease с ПОЛНЫМИ пермитами конкурентно с осиротевшей задачей старого ctx (в resume-grace
+  // задача жива, см. H8) → ломалась single-writer GUI-сериализация и потолок параллельности. Теперь единые на
+  // сессию: та же аренда ввода и тот же семафор видят и старую фоновую задачу, и команды после rebind.
+  const inputArbiter = session.scoped("inputArbiter", () => new AsyncMutex()); // аренда мыши/клавы/фокуса — сериализует GUI-команды
+  const concurrency = session.scoped("concurrency", () => new Semaphore(MAX_PARALLEL_TASKS)); // потолок параллельных agent-loop'ов
+  const bgTasks = session.scoped("bgTasks", () => new Set<Promise<void>>()); // живые фоновые задачи (для чистки на закрытии)
   let closed = false;
   const agentDeps: AgentDeps = {
     memory,
@@ -357,16 +360,30 @@ export function makeSessionContext(
   brain.ambient?.registerSpeaker(session.sessionId, session.userId, (text, urgent) => voice.speakQueued(verbalize(text), urgent));
   // §6B/B5: начальный снимок расхода/лимитов для вкладки «Оплата» (read-only; per-user SpendGuard).
   sendUsage(session, brain.spend.forUser(session.userId));
-  const disposeAgent = (): void => {
-    closed = true;
-    // Снимаем ВСЕ незавершённые задачи сессии одним проходом: петли увидят cancel-флаг,
-    // выйдут ≤1 шага и освободят аренду ввода; задачи сами удалятся из bgTasks по завершении.
-    // Озвучку фонового итога глушит isClosed() — в мёртвую сессию не говорим (§20).
-    brain.tasks.cancelSession(session.sessionId);
+  // Отписать каналы проактивной озвучки ЭТОГО соединения (голосовой пайплайн умирает). Проактивные
+  // события в grace-окне уйдут в pending и догонят владельца на reconnect (flushPending по userId).
+  const detachSpeakers = (): void => {
     brain.reminders?.unregisterSpeaker(session.sessionId); // §9: больше не доставляем сюда
     brain.watch?.unregisterSpeaker(session.sessionId); // §долгие-задачи: больше не доставляем сюда
     brain.ambient?.unregisterSpeaker(session.sessionId); // §проактив-всё: больше не доставляем сюда
   };
+  // H8: обрыв сокета (resume-grace) — НЕ убиваем фоновые §20-задачи. Раньше disposeAgent синхронно звал
+  // cancelSession → reconnect в 120с находил задачу УБИТОЙ (результат потерян), хотя память цела. Теперь
+  // на закрытии лишь отписываем озвучку этого соединения; задача живёт весь grace. Реальная отмена — в
+  // finalTeardown (ниже), она навешена на Session.onTeardown и срабатывает лишь при РЕАЛЬНОМ удалении
+  // сессии (grace истёк / shutdown), когда reconnect уже невозможен.
+  const disposeAgent = (): void => {
+    detachSpeakers();
+  };
+  // H8: финальная очистка сессии — отмена задач + глушение фонового итога. Выполняется registry.remove/
+  // teardownAll через Session.teardown → onTeardown, а НЕ на каждом обрыве сокета.
+  session.onTeardown(() => {
+    closed = true;
+    // Снимаем ВСЕ незавершённые задачи сессии одним проходом: петли увидят cancel-флаг, выйдут ≤1 шага
+    // и освободят аренду ввода; задачи сами удалятся из bgTasks по завершении. Озвучку глушит isClosed().
+    brain.tasks.cancelSession(session.sessionId);
+    detachSpeakers(); // идемпотентно (могли уже отписать на grace-close)
+  });
   const ctx: SessionContext = {
     session,
     memory,
@@ -535,7 +552,8 @@ export async function onDevText(ctx: SessionContext, payload: DevText): Promise<
   // Голосовое/текстовое управление задачей (§20): «отмени»/«пауза»/«продолжи»/«что
   // делаешь» перехватываем ДО агента, если есть активная задача. «стоп» (stop_tts)
   // рубит озвучку. Иначе — обычная реплика идёт в агент.
-  if (handleControlUtterance(ctx, text)) return;
+  // M7: dev.text — ТЕКСТОВЫЙ канал (вкладка «Чат»/dev-драйвер), ack НЕ озвучиваем (§22 text-silent).
+  if (handleControlUtterance(ctx, text, "text")) return;
 
   ctx.session.send("chat", { role: "user", text }); // §22 чат: напечатанная реплика в историю
   ctx.session.send("client.state", { state: "thinking" });

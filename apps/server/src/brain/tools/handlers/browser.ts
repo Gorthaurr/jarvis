@@ -216,10 +216,11 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     const target = resolveBrowserTarget(ctx, input);
     if (!target) return err(`browser_act: сначала открой нужную страницу (browser_open) — непонятно, в какой вкладке делать «${intent}».`);
     try {
-      // ЧЕСТНОСТЬ: пробрасываем исход расширения (autoplayBlocked/navigated/already/playing/currentTime) —
+      // ЧЕСТНОСТЬ: пробрасываем исход расширения (navigated/already/playing/currentTime) —
       // иначе модель не видит, что play НЕ дал звук (autoplay-гейт), и врёт «готово, играет».
+      // Примечание: при ok:false расширение (tab.act) бросает исключение — autoplay-провал приходит
+      // ЧЕРЕЗ catch ниже (единый путь обработки, без параллельной ветки на r.ok===false).
       const r = ((await ctx.ext.tabAct(target.url, intent, params, target.tabId)) ?? {}) as {
-        autoplayBlocked?: boolean;
         note?: string;
         navigated?: unknown;
         already?: boolean;
@@ -227,13 +228,6 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         currentTime?: number;
         error?: string;
       };
-      if (r.autoplayBlocked) {
-        markBrowserActMiss(ctx); // P2.1: DOM-клик не дал звук → разрешаем координатный клик по вкладке
-        return err(
-          `browser_act «${intent}»: браузер ЗАБЛОКИРОВАЛ автоплей — звук НЕ пошёл. Нужен живой клик по вкладке: ` +
-            `screen_capture → найди элемент глазами → input_click по координатам → ПЕРЕСНИМИ и сверь. НЕ говори «играет».`,
-        );
-      }
       const diagObj: Record<string, unknown> = {};
       for (const k of ["note", "navigated", "already", "playing", "currentTime"] as const) {
         if (r[k] !== undefined) diagObj[k] = r[k];
@@ -242,8 +236,14 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       return ok(`Сделал «${intent}» в браузере.${diag}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      markBrowserActMiss(ctx); // P2.1: DOM-путь исчерпан (нет элемента/исключение) → разрешаем координатный клик
+      markBrowserActMiss(ctx); // P2.1: DOM-путь исчерпан (нет элемента/исключение/autoplay-гейт) → разрешаем координатный клик
       // НЕ откатываемся на системную медиа-клавишу (глобальный тумблер уходит чужой медиа-сессии). Честная ошибка.
+      if (/autoplay/i.test(msg)) {
+        return err(
+          `browser_act «${intent}»: браузер ЗАБЛОКИРОВАЛ автоплей — звук НЕ пошёл (${msg}). Нужен живой клик по вкладке: ` +
+            `screen_capture → найди элемент глазами → input_click по координатам → ПЕРЕСНИМИ и сверь. НЕ говори «играет».`,
+        );
+      }
       return err(
         `Не вышло «${intent}» на странице: ${msg}. Возможно, это canvas/видео без DOM-кнопки — тогда: ` +
           `screen_capture → найди цель глазами → input_click по координатам → ПЕРЕСНИМИ и сверь исход.`,

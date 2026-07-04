@@ -392,7 +392,11 @@ export class VoicePipeline {
     }
     if (state === "barge_in") {
       this.userSpeaking = true;
-      this.dispatch({ type: "barge_in" });
+      // H11: сообщаем редьюсеру, жив ли синтез. В listening (follow-up открыт STT) cancel_tts бампнул бы
+      // gen и убил бы STT-стрим текущего хода → follow-up потерян; пусть шлёт cancel_tts только если есть
+      // что глушить. В speaking/thinking редьюсер решает сам (флаг там не смотрится).
+      const ttsActive = !!(this.ttsStream || this.phraseSpeaker?.active);
+      this.dispatch({ type: "barge_in", ttsActive });
       return;
     }
     // speech_end: решение об эндпоинте — turn detector (§10).

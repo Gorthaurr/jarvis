@@ -120,4 +120,27 @@ describe("SidecarSpeakerVerifier (прокси §3)", () => {
     proxy.fail();
     expect(await p).toBeNull();
   });
+
+  it("L3: dispose() убивает дочерний процесс (kill) и резолвит ожидающих в null (fail-open)", async () => {
+    let killed = 0;
+    let live = true;
+    const proxy = new SidecarSpeakerVerifier({
+      hello: HELLO,
+      send: () => {},
+      alive: () => live,
+      kill: () => {
+        killed += 1;
+        live = false;
+      },
+    });
+    const p = proxy.identify(new Int16Array([1]), [PROFILE]); // ожидание в полёте
+    proxy.dispose();
+    expect(killed).toBe(1); // дочерний процесс убит (иначе зомби с моделью в памяти)
+    expect(await p).toBeNull(); // ожидание резолвлено в null (гейт пропускает — fail-open)
+  });
+
+  it("L3: dispose() без kill в deps не бросает (юнит-путь без spawn)", () => {
+    const { proxy } = makeProxy();
+    expect(() => proxy.dispose()).not.toThrow();
+  });
 });

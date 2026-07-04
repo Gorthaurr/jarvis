@@ -69,6 +69,31 @@ describe("ReminderService — durable-таймер + проактивная до
     expect(spoken).toEqual([]);
   });
 
+  it("M13: svc.flush() дренирует стор → запланированное напоминание видно свежему стору (gateway.close путь)", async () => {
+    let clock = 1_000_000;
+    const dir = join(tmpdir(), `jarvis-rem-flush-${process.pid}-${Date.now()}-${counter++}`);
+    const svc = new ReminderService(new ReminderStore(dir), { now: () => clock });
+    await svc.start();
+    svc.add({ sessionId: "s1", userId: "u", text: "не потеряться", fireAt: clock + 60_000 });
+    await svc.flush(); // M13: дренируем через сервис (не store.flush()) — как в gateway.close()
+    const store2 = new ReminderStore(dir);
+    await store2.load();
+    expect(store2.list({ userId: "u" })).toHaveLength(1);
+  });
+
+  it("L2: cancel by-id уважает ownership — чужая сессия НЕ снимает напоминание по эхнутому id", async () => {
+    let clock = 1_000_000;
+    const svc = new ReminderService(makeStore(), { now: () => clock });
+    await svc.start();
+    const mine = svc.add({ sessionId: "sOwner", userId: "u", text: "личное", fireAt: clock + 5000 });
+    // Чужая сессия знает id (эхо) — снять НЕ может (by-id теперь фильтруется по sessionId).
+    expect(svc.cancel(mine.id, "sAttacker")).toBeNull();
+    expect(svc.list("sOwner")).toHaveLength(1); // цело
+    // Своя сессия — снимает.
+    expect(svc.cancel(mine.id, "sOwner")?.id).toBe(mine.id);
+    expect(svc.list("sOwner")).toHaveLength(0);
+  });
+
   it("catch-up: просроченное сверх grace при старте — пропускается", async () => {
     const clock = 100_000_000;
     const store = makeStore();

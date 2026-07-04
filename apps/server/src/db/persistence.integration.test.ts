@@ -19,7 +19,7 @@ import { HashEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { PgVectorEpisodicMemory } from "../memory/episodic.js";
 import { getSkill, saveSkill } from "../memory/skills.js";
 import { buildActionLogEntry, insertActionLog } from "./action-log.js";
-import { __setQueryClientForTests, query } from "./pool.js";
+import { __setQueryClientForTests, isDbReady, query } from "./pool.js";
 
 /** Dev-пользователь из seed (0002_seed_dev.sql). */
 const DEV_USER = "00000000-0000-0000-0000-000000000001";
@@ -46,6 +46,11 @@ describe("персистентность: схема §13 ↔ запросы к�
   afterAll(async () => {
     __setQueryClientForTests(null);
     await db?.close();
+  });
+
+  it("isDbReady: РЕАЛЬНЫЙ SELECT 1 против живого бэкенда → true (DB1)", async () => {
+    // testClient (PGlite) внедрён в beforeAll → query('SELECT 1') отвечает успешно.
+    await expect(isDbReady()).resolves.toBe(true);
   });
 
   it("миграции применяются: расширение vector, seed-пользователь и dev-навык на месте", async () => {

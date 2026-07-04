@@ -15,18 +15,26 @@ import type { Session } from "./session.js";
 
 const log: Logger = createLogger("task-control");
 
-/** Откуда пришла команда управления: голосом (handleControlUtterance) или из UI (task.control). */
-export type ControlSource = "voice" | "ui";
+/**
+ * Откуда пришла команда управления: голосом (handleControlUtterance по голосовому вводу), из текст-канала
+ * (dev.text / вкладка «Чат», §22) или из UI (task.control — кнопка на карточке задачи).
+ */
+export type ControlSource = "voice" | "text" | "ui";
 
 /**
- * Ack управления — В ОБА канала (аудит лога 2026-07-03): текстовый transcript И голос через очередь
- * озвучки. Раньше ack был text-only → голосовое «что делаешь?» отвечало молча в чат, а UI-стоп был
- * полностью немым (пользователь снял задачу и не услышал подтверждения — «прекрати поиск у доти»
- * закончилось тишиной). speakQueued не перебивает пользователя — произносит, когда канал свободен.
+ * Ack управления. M7: озвучиваем (speakQueued) ТОЛЬКО голосовой канал — команды из текст-канала
+ * (dev.text/вкладка «Чат») и из UI НЕ должны звучать голосом (нарушало бы text-channel-silent конвенцию
+ * §22 mute: печатаешь/в mute — Джарвис отвечает текстом, не говорит). Для не-голосовых каналов ack идёт
+ * в transcript + chat-историю (как sendReply), чтобы пользователь ВИДЕЛ подтверждение. speakQueued не
+ * перебивает пользователя — произносит, когда канал свободен.
+ *
+ * (Аудит лога 2026-07-03: голосовое «что делаешь?» раньше отвечало молча в чат, а UI-стоп был полностью
+ * немым — «прекрати поиск у доти» закончилось тишиной. Теперь голос звучит, а текст/UI видны в истории.)
  */
-function ackControl(ctx: SessionContext, text: string): void {
+function ackControl(ctx: SessionContext, text: string, source: ControlSource): void {
   ctx.session.send("transcript", { text, final: true });
-  ctx.voice.speakQueued(verbalize(text));
+  if (source === "voice") ctx.voice.speakQueued(verbalize(text));
+  else ctx.session.send("chat", { role: "assistant", text }); // §22: текст/UI — в чат-историю, без голоса
 }
 
 /**
@@ -36,8 +44,11 @@ function ackControl(ctx: SessionContext, text: string): void {
  *  - «стоп»/«заткнись» (stop_tts) — рубит ТОЛЬКО озвучку (barge-in), задача живёт;
  *  - «отмени»/«пауза»/«продолжи»/«что делаешь» — действуют на активную задачу сессии;
  *    без активной задачи такие реплики НЕ перехватываются (уходят в агент как контент).
+ *
+ * `source` (M7): голосовой ввод → "voice" (ack звучит), текст-канал (dev.text/вкладка «Чат») → "text"
+ * (ack только в чат, без голоса — §22). По умолчанию "voice" (обратная совместимость).
  */
-export function handleControlUtterance(ctx: SessionContext, text: string): boolean {
+export function handleControlUtterance(ctx: SessionContext, text: string, source: ControlSource = "voice"): boolean {
   if (!ctx.agentDeps.tasks) return false;
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;
@@ -65,10 +76,10 @@ export function handleControlUtterance(ctx: SessionContext, text: string): boole
   // снимаем все, а не только самую свежую (иначе остальные доедут и озвучат итог).
   // Пауза/возобновление/статус — по самой свежей активной (taskId).
   if (decision.kind === "cancel") {
-    handleTaskControl(ctx, "cancel");
+    handleTaskControl(ctx, "cancel", undefined, source);
     return true;
   }
-  handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId);
+  handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId, source);
   return true;
 }
 
@@ -94,6 +105,7 @@ export function handleTaskControl(
     ackControl(
       ctx,
       cancelled.length === 0 ? "Нет активной задачи." : cancelled.length > 1 ? "Остановил все, сэр." : "Остановил.",
+      source,
     );
     ctx.session.send("client.state", { state: "idle" });
     return;
@@ -107,7 +119,7 @@ export function handleTaskControl(
   }
   if (!task) {
     log.info("task.control: без активной задачи", { source, action });
-    ackControl(ctx, action === "status" ? "Сейчас ничего не выполняю." : "Нет активной задачи.");
+    ackControl(ctx, action === "status" ? "Сейчас ничего не выполняю." : "Нет активной задачи.", source);
     return;
   }
 
@@ -116,7 +128,7 @@ export function handleTaskControl(
       const ok = tasks.cancel(task.taskId);
       emitTaskStatus(ctx.session, task);
       log.info("task.control: cancel", { source, taskId: task.taskId, title: task.title, ok });
-      ackControl(ctx, ok ? "Остановил." : "Уже завершено.");
+      ackControl(ctx, ok ? "Остановил." : "Уже завершено.", source);
       ctx.session.send("client.state", { state: "idle" });
       break;
     }
@@ -124,21 +136,22 @@ export function handleTaskControl(
       const ok = tasks.pause(task.taskId);
       emitTaskStatus(ctx.session, task);
       log.info("task.control: pause", { source, taskId: task.taskId, ok });
-      ackControl(ctx, ok ? "Поставил на паузу." : "Сейчас нельзя поставить на паузу.");
+      ackControl(ctx, ok ? "Поставил на паузу." : "Сейчас нельзя поставить на паузу.", source);
       break;
     }
     case "resume": {
       const ok = tasks.resume(task.taskId);
       emitTaskStatus(ctx.session, task);
       log.info("task.control: resume", { source, taskId: task.taskId, ok });
-      ackControl(ctx, ok ? "Продолжаю." : "Нечего возобновлять.");
+      ackControl(ctx, ok ? "Продолжаю." : "Нечего возобновлять.", source);
       break;
     }
     case "status": {
-      // Статус: голосом отвечаем на ГОЛОСОВОЙ вопрос («что делаешь?»); из UI панель и так всё видит.
+      // Статус: голосом отвечаем на ГОЛОСОВОЙ вопрос («что делаешь?»); из текст-канала/UI — только текстом
+      // (панель и так всё видит; §22 — не озвучиваем печатающему/в mute). ackControl сам гейтит голос по source.
       const text = statusReport(task);
       log.info("task.control: status", { source, taskId: task.taskId });
-      if (source === "voice") ackControl(ctx, text);
+      if (source === "voice") ackControl(ctx, text, source);
       else ctx.session.send("transcript", { text, final: true });
       break;
     }

@@ -91,7 +91,9 @@ export class ReminderService {
   /** Отменить по id или по тексту-запросу (последнее совпадение). Возвращает отменённую запись или null. */
   cancel(idOrQuery: string, sessionId?: string): Reminder | null {
     const byId = this.store.get(idOrQuery);
-    let target = byId && byId.status === "scheduled" ? byId : undefined;
+    // §sec (L2): by-id fast-path ТОЖЕ уважает sessionId-фильтр (как text-fallback ниже) — иначе, зная
+    // эхнутый id, можно снять ЧУЖОЕ напоминание. С sessionId — id обязан принадлежать этой сессии.
+    let target = byId && byId.status === "scheduled" && (!sessionId || byId.sessionId === sessionId) ? byId : undefined;
     if (!target) {
       const q = idOrQuery.toLowerCase().trim();
       const matches = this.store
@@ -122,6 +124,12 @@ export class ReminderService {
   stop(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
+  }
+
+  /** M13: дождаться отложенных записей стора (graceful shutdown) — иначе отменённое напоминание,
+   *  чья запись не успела лечь на диск, всё равно «сработает» после рестарта. */
+  async flush(): Promise<void> {
+    await this.store.flush();
   }
 
   // ── внутреннее ──────────────────────────────────────────────

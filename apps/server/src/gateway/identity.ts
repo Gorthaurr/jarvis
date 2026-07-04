@@ -14,7 +14,6 @@
  * JARVIS_CLIENT_IDENTITY; дефолт «dev-token» → DEV_USER, нулевая потеря данных существующей установки).
  */
 import { type Logger, createLogger } from "@jarvis/shared";
-import { isDbReady } from "../db/pool.js";
 import { ensureUser, findUserByTokenHash, recordToken, sha256hex } from "../db/users.js";
 
 const log: Logger = createLogger("identity");
@@ -49,8 +48,8 @@ export function resolveUserId(token: string | undefined, env: NodeJS.ProcessEnv 
  *  • Дефолт (loopback, JARVIS_AUTH_STRICT=0): UUID-токен → чистый ключ партиции (TOFU); провижним
  *    users + записываем auth_tokens (TOFU/last_seen). Возвращаем userId. 4003 НИКОГДА не срабатывает.
  *  • STRICT (JARVIS_AUTH_STRICT=1, LAN/hosted): UUID сверяется с auth_tokens по sha256(token). Нет
- *    строки И БД доступна → null (handshake закроет 4003). БД недоступна → НЕ закрываем (не брикуем
- *    локального юзера) — провижним и пускаем как партицию, логируя «accepted unverified».
+ *    строки → ВСЕГДА null (handshake закроет 4003), независимо от доступности БД — fail-closed
+ *    (hardened/remote контекст: лучше отвергнуть непроверенного, чем впустить).
  *  • Не-UUID (dev-token/пусто/мусор) → dev-фолбэк (как раньше); провижним DEV_USER (идемпотентно).
  */
 export async function resolveAndProvision(
@@ -69,12 +68,11 @@ export async function resolveAndProvision(
         void recordToken(found, hash); // best-effort бамп last_seen
         return found;
       }
-      if (await isDbReady()) {
-        log.warn("strict: токен не найден в auth_tokens — отклоняю", { userId });
-        return null; // strict + БД есть + нет строки → reject (4003)
-      }
-      log.warn("strict: БД недоступна — пускаю без верификации (не брикуем локального юзера)", { userId });
-      // fall-through: провижн + партиция
+      // strict = осознанно hardened/remote контекст: неверифицированный токен ВСЕГДА
+      // отвергаем (fail-closed), независимо от доступности БД — лучше отклонить, чем
+      // впустить непроверенного. Ветки accepted-unverified быть НЕ должно.
+      log.error("strict: токен не верифицирован — отклоняю", { userId });
+      return null; // handshake закроет 4003
     }
     await ensureUser(userId);
     await recordToken(userId, hash); // TOFU: запоминаем/обновляем токен

@@ -8,7 +8,7 @@
  * Чистая логика (resolveOne/computeWinRate) тестируется без сети/времени; PredictionStore хранит и
  * персистит. Время и цены инъектируются (детерминизм тестов, как в TaskManager).
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { Candle, Market } from "./market.js";
@@ -336,7 +336,21 @@ export class PredictionStore {
     if (!this.file) return;
     try {
       mkdirSync(dirname(this.file), { recursive: true });
-      writeFileSync(this.file, JSON.stringify([...this.items.values()]), "utf8");
+      // Атомарная запись (tmp→rename, как в tasks/task-store.ts): kill/крэш посреди writeFileSync не
+      // оставит битый JSON — читатель видит либо старый файл целиком, либо новый.
+      const tmp = `${this.file}.tmp`;
+      writeFileSync(tmp, JSON.stringify([...this.items.values()]), "utf8");
+      try {
+        renameSync(tmp, this.file);
+      } catch (e) {
+        // rename упал (антивирус/лок на target в Windows) — не оставляем осиротевший .tmp на диске.
+        try {
+          unlinkSync(tmp);
+        } catch {
+          /* best-effort */
+        }
+        throw e;
+      }
     } catch (e) {
       log.warn("не удалось сохранить прогнозы", e instanceof Error ? e.message : String(e));
     }

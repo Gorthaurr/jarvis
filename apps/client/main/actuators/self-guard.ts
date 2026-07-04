@@ -30,8 +30,9 @@ export function isSecretPath(abs: string): boolean {
   if (b === ".npmrc" || b === ".netrc" || b === "credentials") return true; // npm/aws-creds/netrc
   if (/\.(pem|key|ppk|pfx|p12|keystore|jks)$/.test(b)) return true; // приватные ключи/хранилища
   if (b === "login data" || b === "cookies" || b === "cookies.sqlite" || b === "key4.db" || b === "logins.json") return true; // браузерные креды
-  // Каталоги секретов целиком: ~/.ssh, ~/.aws, ~/.gnupg.
-  if (/[\\/]\.(?:ssh|aws|gnupg)[\\/]/.test(p)) return true;
+  // Каталоги секретов целиком: ~/.ssh, ~/.aws, ~/.gnupg — и файлы/подпапки ВНУТРИ них, и сама
+  // папка как конечный путь (fs_delete{path:'~/.ssh'} — разделителя ПОСЛЕ имени нет, конец строки).
+  if (/[\\/]\.(?:ssh|aws|gnupg)(?:[\\/]|$)/.test(p)) return true;
   return false;
 }
 

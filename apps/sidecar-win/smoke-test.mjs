@@ -50,6 +50,12 @@ try {
   check("read.window → text", rw.ok === true && typeof rw.data?.text === "string",
     rw.ok ? `${rw.data.text.length} симв.` : rw.error);
 
+  // 2b) read.screen: клиентский readContext('screen') шлёт именно этот op (M16) —
+  // раньше падал «Неизвестная операция». Должен дать текст (выжимка фокусного окна).
+  const rs = await rpc("2b", "read.screen", {});
+  check("read.screen → text (не 'Неизвестная операция')", rs.ok === true && typeof rs.data?.text === "string",
+    rs.ok ? `${rs.data.text.length} симв.` : rs.error);
+
   // 3) Неизвестная операция → корректная ошибка.
   const bad = await rpc("3", "nonsense.op", {});
   check("неизвестный op → ok:false", bad.ok === false && typeof bad.error === "string");

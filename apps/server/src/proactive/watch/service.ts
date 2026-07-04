@@ -55,6 +55,12 @@ export class WatchService {
     this.timer = undefined;
   }
 
+  /** M13: дождаться отложенных записей стора (graceful shutdown) — чтобы снятое/сработавшее наблюдение
+   *  не потерялось на рестарте внутри debounce-окна записи. */
+  async flush(): Promise<void> {
+    await this.store.flush();
+  }
+
   /** Итог постановки наблюдения: ok + запись, либо отказ с причиной (лимит). */
   add(input: {
     sessionId: string;
@@ -91,7 +97,9 @@ export class WatchService {
   /** Снять наблюдение по id или по совпадению в `what` (последнее). Возвращает снятую запись или null. */
   cancel(idOrQuery: string, userId?: string): Watch | null {
     const byId = this.store.get(idOrQuery);
-    let target = byId && byId.status === "active" ? byId : undefined;
+    // §sec (M12): by-id fast-path ТОЖЕ уважает userId-фильтр (как text-fallback ниже) — иначе, зная
+    // эхнутый id, можно снять ЧУЖОЕ наблюдение. С userId — id обязан принадлежать этому пользователю.
+    let target = byId && byId.status === "active" && (!userId || byId.userId === userId) ? byId : undefined;
     if (!target) {
       const q = idOrQuery.toLowerCase().trim();
       const matches = this.store.list(userId ? { userId } : undefined).filter((w) => w.what.toLowerCase().includes(q));

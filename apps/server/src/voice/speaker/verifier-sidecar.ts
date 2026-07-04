@@ -35,6 +35,8 @@ export interface SidecarProxyDeps {
   send: (req: HostRequest) => void;
   /** Жив ли канал; false → запросы безопасно деградируют (identify→null, feed→0). */
   alive: () => boolean;
+  /** L3: убить дочерний процесс сайдкара (для dispose на gateway.close()). Опционально (юнит-тест без spawn). */
+  kill?: () => void;
   /** Таймаут ответа сайдкара, мс (деф 8000). */
   timeoutMs?: number;
 }
@@ -80,6 +82,17 @@ export class SidecarSpeakerVerifier implements ISpeakerVerifier {
       p.resolve(null);
     }
     this.pending.clear();
+  }
+
+  /** L3: остановить сайдкар — убить дочерний процесс и резолвить ожидания (иначе sherpa-child остаётся
+   *  зомби с моделью в памяти при taskkill /F на порту сервера). Вызывается в gateway.close(). Идемпотентно. */
+  dispose(): void {
+    try {
+      this.deps.kill?.();
+    } catch {
+      /* уже мёртв */
+    }
+    this.fail();
   }
 
   private request(make: (id: number) => HostRequest): Promise<HostResponse | null> {
@@ -203,6 +216,14 @@ export async function createSpeakerVerifierSidecar(opts?: { helloTimeoutMs?: num
           hello: frame,
           alive,
           send: (req) => child.stdin?.write(`${JSON.stringify(req)}\n`),
+          kill: () => {
+            dead = true;
+            try {
+              child.kill();
+            } catch {
+              /* уже мёртв */
+            }
+          },
         });
         log.info("движок отпечатка готов (sherpa в сайдкаре, изолирован от e5)", { dim: frame.dim, modelId: frame.modelId });
         finishWith(proxy);

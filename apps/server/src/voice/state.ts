@@ -21,7 +21,7 @@ export type VoiceEvent =
   | { type: "transcript_final"; text: string } // STT финализировал фразу
   | { type: "speak_start" } // первый TTS-чанк пошёл
   | { type: "speak_done" } // TTS завершился
-  | { type: "barge_in" } // юзер заговорил во время speaking (§10)
+  | { type: "barge_in"; ttsActive?: boolean } // юзер заговорил во время speaking (§10); ttsActive — жив ли ещё синтез (заполняет pipeline)
   | { type: "followup_timeout" } // окно follow-up истекло (§10)
   | { type: "stop" } // внешний стоп («заткнись»): рубим TTS, в idle
   | { type: "mute" }; // честный mute: стоп захвата, в idle (§0.6)
@@ -122,11 +122,13 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
           return go("speaking", false, ctx.followupActive ? [{ type: "disarm_followup" }] : []);
         case "barge_in":
           // §barge: поздний barge_in приходит, когда сервер УЖЕ ушёл в listening (вышел из speaking по
-          // концу СИНТЕЗА), а клиент ещё доигрывает хвост очереди озвучки. Раньше это был немой default
-          // → хвост не заткнуть серверно. Теперь гасим возможный ещё-живой синтез: cancel_tts бампает
-          // gen и обрывает phraseSpeaker/ttsStream если живы; в чистом listening (синтеза нет) — безвредный
-          // no-op (только инкремент gen). Состояние НЕ меняем (остаёмся в listening, ждём речь юзера).
-          return { context: ctx, actions: [{ type: "cancel_tts" }] };
+          // концу СИНТЕЗА), а клиент ещё доигрывает хвост очереди озвучки. Гасим ещё-живой синтез:
+          // cancel_tts бампает gen и обрывает phraseSpeaker/ttsStream если живы.
+          // H11: НЕ бампать gen, когда глушить нечего. cancel_tts безусловно делает gen+=1, а в listening
+          // уже открыт STT-стрим ЭТОГО хода (follow-up) — лишний инкремент инвалидирует его onPartial-гард
+          // (myGen!==gen), и follow-up-команда молча теряется. Поэтому cancel_tts шлём ТОЛЬКО если синтез
+          // реально жив (pipeline проставил ttsActive). Синтеза нет → тихий no-op, STT цел.
+          return { context: ctx, actions: ev.ttsActive ? [{ type: "cancel_tts" }] : [] };
         default:
           return noop(ctx);
       }

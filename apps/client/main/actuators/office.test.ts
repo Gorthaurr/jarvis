@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EXCEL_SCRIPT, WORD_SCRIPT, buildExcelArgs, buildWordArgs } from "./office.js";
+import { EXCEL_SCRIPT, WORD_SCRIPT, buildExcelArgs, buildWordArgs, runExcel, runWord } from "./office.js";
 
 describe("office actuator (§6) — COM-скрипты и аргументы", () => {
   it("Excel-скрипт драйвит COM и читает аргументы из env-JSON (не из тела)", () => {
@@ -43,5 +43,23 @@ describe("office actuator (§6) — COM-скрипты и аргументы", (
     const a = buildWordArgs({ kind: "office.word", op: "append", path: "doc.docx", text: "привет" });
     expect(a.op).toBe("append");
     expect(a.text).toBe("привет");
+  });
+
+  it("H1: денилист секретов — write в .env валится ДО COM (честная ошибка)", async () => {
+    await expect(
+      runExcel({ kind: "office.excel", op: "append_row", path: ".env", row: ["x"] }),
+    ).rejects.toThrow(/защита самосохранности/);
+  });
+
+  it("H1: денилист секретов — read id_rsa валится ДО COM (не утекаем ключ)", async () => {
+    await expect(
+      runWord({ kind: "office.word", op: "read", path: "C:\\Users\\anton\\.ssh\\id_rsa" }),
+    ).rejects.toThrow(/защита секретов/);
+  });
+
+  it("H1: write_cell в node_modules — мутация критичного пути блокируется", async () => {
+    await expect(
+      runExcel({ kind: "office.excel", op: "write_cell", path: "node_modules/foo/data.xlsx", cell: "A1", value: "x" }),
+    ).rejects.toThrow(/защита самосохранности/);
   });
 });

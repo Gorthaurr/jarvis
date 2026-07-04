@@ -14,10 +14,11 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { ActionCommand } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
 import { expandPath } from "./fs.js";
+import { assertReadable, assertWritable } from "./self-guard.js";
 
 const log = createLogger("actuator:office");
 
@@ -120,20 +121,55 @@ export function buildWordArgs(cmd: WordCmd): Record<string, unknown> {
   return { op: cmd.op, path: expandPath(cmd.path), text: cmd.text ?? "" };
 }
 
+/**
+ * §0/§sec: до любого COM — денилист секретов (тот же guard, что в fs.ts). op=read → assertReadable
+ * (не читаем .env-секреты в контекст), мутирующие op → assertWritable (не пишем в node_modules/.env/
+ * бинарь). Путь к секрету → честная ошибка ДО запуска Office.
+ */
+function assertOfficePath(op: string, absPath: string): void {
+  if (op === "read") assertReadable(absPath);
+  else assertWritable(absPath); // write/write_cell/append/append_row
+}
+
+/**
+ * M9 (конкурентность): сериализуем вызовы к ОДНОМУ файлу. Два append_row на один .xlsx через COM
+ * гонятся (оба читают UsedRange до записи → теряют строку). Цепочка промисов per-normalized-path;
+ * запись в хвост цепочки атомарна (single-threaded event loop), запись стирается после опустошения.
+ */
+const pathLocks = new Map<string, Promise<unknown>>();
+
+function withPathLock<T>(absPath: string, fn: () => Promise<T>): Promise<T> {
+  const key = resolve(absPath).toLowerCase();
+  const prev = pathLocks.get(key) ?? Promise.resolve();
+  // цепляемся за хвост (игнорируя исход предыдущего — свой вызов не должен падать из-за чужого)
+  const run = prev.catch(() => undefined).then(fn);
+  pathLocks.set(key, run);
+  // подчищаем запись, если мы всё ещё последний в цепочке (иначе новый вызов уже её перезаписал)
+  const cleanup = (): void => {
+    if (pathLocks.get(key) === run) pathLocks.delete(key);
+  };
+  run.then(cleanup, cleanup);
+  return run;
+}
+
 export async function runExcel(cmd: ExcelCmd): Promise<unknown> {
-  return runOffice(EXCEL_SCRIPT, buildExcelArgs(cmd));
+  const args = buildExcelArgs(cmd);
+  assertOfficePath(cmd.op, args.path as string);
+  return withPathLock(args.path as string, () => runOffice(EXCEL_SCRIPT, args, "EXCEL.EXE"));
 }
 
 export async function runWord(cmd: WordCmd): Promise<unknown> {
-  return runOffice(WORD_SCRIPT, buildWordArgs(cmd));
+  const args = buildWordArgs(cmd);
+  assertOfficePath(cmd.op, args.path as string);
+  return withPathLock(args.path as string, () => runOffice(WORD_SCRIPT, args, "WINWORD.EXE"));
 }
 
-async function runOffice(script: string, args: Record<string, unknown>): Promise<unknown> {
+async function runOffice(script: string, args: Record<string, unknown>, officeImage: string): Promise<unknown> {
   const tmp = join(tmpdir(), `jarvis-office-${randomUUID()}.json`); // уникально на конкурентные вызовы
   await fsp.writeFile(tmp, JSON.stringify(args), "utf8");
   log.info("office COM", { op: args.op, path: args.path });
   try {
-    const out = await runPowershell(script, { JARVIS_OFFICE_ARGS: tmp });
+    const out = await runPowershell(script, { JARVIS_OFFICE_ARGS: tmp }, officeImage);
     const line = out.split(/\r?\n/).find((l) => l.startsWith(RESULT_MARKER));
     if (!line) throw new Error("Office COM не вернул результат (возможно, Office не установлен)");
     const res = JSON.parse(line.slice(RESULT_MARKER.length)) as { ok: boolean; error?: string };
@@ -144,7 +180,7 @@ async function runOffice(script: string, args: Record<string, unknown>): Promise
   }
 }
 
-function runPowershell(script: string, env: Record<string, string>): Promise<string> {
+function runPowershell(script: string, env: Record<string, string>, officeImage: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
       windowsHide: true,
@@ -156,7 +192,14 @@ function runPowershell(script: string, env: Record<string, string>): Promise<str
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (d: string) => { if (out.length < 4_000_000) out += d; });
     child.stderr.on("data", (d: string) => { err += String(d); });
-    const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("Office COM таймаут (зависание)")); }, TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      // M9: SIGKILL по powershell НЕ убивает порождённый headless-сервер Office (EXCEL/WINWORD),
+      // висящий по COM. taskkill /T убивает дерево процессов powershell целиком; затем целевым
+      // ударом снимаем ТОЛЬКО невидимый (headless) экземпляр Office — чтобы не тронуть окна юзера.
+      killOfficeTree(child.pid, officeImage);
+      child.kill("SIGKILL");
+      reject(new Error("Office COM таймаут (зависание)"));
+    }, TIMEOUT_MS);
     child.on("error", (e) => { clearTimeout(timer); reject(e); });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -165,4 +208,19 @@ function runPowershell(script: string, env: Record<string, string>): Promise<str
       else reject(new Error(`powershell код ${code}${err ? `: ${err.slice(0, 200)}` : ""}`));
     });
   });
+}
+
+/**
+ * Убить зависшее дерево COM-вызова по таймауту. (1) taskkill /T /F по PID powershell — снимает всё,
+ * что powershell породил. (2) Осиротевший headless-сервер Office (Visible=$false) COM-протоколом НЕ
+ * является потомком powershell → отдельно снимаем ТОЛЬКО невидимые экземпляры нужного образа
+ * (фильтр по свойству MainWindowHandle=0), чтобы НЕ закрыть открытые пользователем документы.
+ */
+function killOfficeTree(pid: number | undefined, officeImage: string): void {
+  if (pid !== undefined) {
+    spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => undefined);
+  }
+  // Снять только headless-экземпляры (без видимого окна) — щадим документы юзера.
+  const ps = `Get-Process -Name '${officeImage.replace(/\.exe$/i, "")}' -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -eq 0 } | Stop-Process -Force -ErrorAction SilentlyContinue`;
+  spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], { windowsHide: true, stdio: "ignore" }).on("error", () => undefined);
 }

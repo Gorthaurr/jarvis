@@ -18,7 +18,13 @@ import type { EpisodicMemory } from "../../memory/episodic.js";
 import { knowledgeConsult, memorySearch, webFetch, webSearch } from "./handlers/info.js";
 import type { IWebProvider } from "../../integrations/web.js";
 /** Инструменты, навигирующие браузер по URL → SSRF-гард обязателен (C5: web_* раньше его обходили). */
-const URL_NAV_TOOLS: ReadonlySet<string> = new Set(["web_open", "web_read", "web_act", "web_inspect"]);
+const URL_NAV_TOOLS: ReadonlySet<string> = new Set([
+  "web_open",
+  "web_read",
+  "web_act",
+  "web_inspect",
+  "web_login", // C1: одноразовый видимый вход по URL — тоже навигация, тоже под SSRF-гардом
+]);
 import { executeGuardedCode, runCodeGuarded } from "./handlers/code.js";
 import { messageSend, orderPlace, telegramSend, telegramSendVoiceHandler } from "./handlers/messaging.js";
 import type { DynamicToolStore } from "./dynamic.js";

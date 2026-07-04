@@ -165,11 +165,11 @@ export async function search(root: string, query: string, inContent = false, max
       if (d.isDirectory()) { await walk(full); continue; }
       if (!d.isFile()) continue;
       files += 1;
+      if (isSecretPath(full)) continue; // §0: не отдаём секретные пути ни по имени, ни по содержимому
       if (!inContent) {
         if (d.name.toLowerCase().includes(needle)) matches.push({ path: full });
         continue;
       }
-      if (isSecretPath(full)) continue; // §0: не сканируем .env — превью утекло бы секретом
       try {
         const buf = await fsp.readFile(full);
         if (buf.length > DEFAULT_MAX_READ) continue; // не сканируем гигантские/бинарные

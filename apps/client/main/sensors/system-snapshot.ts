@@ -110,13 +110,21 @@ function shortMon(w: WindowSnap): string {
   return w.primary ? "осн. монитор" : `монитор ${w.monitorIndex + 1}`;
 }
 
-/** Компактная live-сводка для промпта (чистая — для теста). */
+/**
+ * §sec (M11) ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ: заголовок окна — текст, который может задать ЛЮБОЙ сторонний
+ * сайт/приложение (вкладка браузера, документ) — это НЕДОВЕРЕННЫЕ данные, а не команды владельца.
+ * Здесь заголовки идут СЫРЫМИ; формальный маркер `<untrusted_content>` навешивает СЕРВЕР при сборке
+ * системного промпта (persona/index.ts, тем же тегом, что web_search/browser_read) — так модель
+ * распознаёт границу тем же обученным механизмом, а не самодельной текстовой пометкой на клиенте.
+ */
+
+/** Компактная live-сводка для промпта (чистая — для теста). Заголовки — сырые (untrusted-обёртка на сервере). */
 export function formatAmbient(wins: readonly WindowSnap[], monitorCount: number): string {
   if (wins.length === 0) return monitorCount > 1 ? `Мониторов: ${monitorCount}.` : "";
   const cut = (s: string): string => (s.length > 50 ? `${s.slice(0, 49)}…` : s);
   const parts: string[] = [];
   const fg = wins.find((w) => w.foreground);
-  if (fg) parts.push(`На переднем плане: ${fg.process}${fg.title ? ` («${cut(fg.title)}»)` : ""} — ${shortMon(fg)}`);
+  if (fg) parts.push(`На переднем плане: ${fg.process}${fg.title ? ` ${cut(fg.title)}` : ""} — ${shortMon(fg)}`);
   // Остальные окна — по процессу, с монитором; свёрнутые помечаем.
   const others = wins.filter((w) => w !== fg).slice(0, 10);
   if (others.length) {

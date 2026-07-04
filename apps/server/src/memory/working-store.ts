@@ -5,7 +5,7 @@
  * историю, и Джарвис «забывал, о чём говорили». Теперь храним по userId в data/memory/<user>.json:
  * на старте сессии грузим (если свежее TTL), на каждое изменение — дебаунс-сохранение.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { dataPath } from "../paths.js";
@@ -29,6 +29,8 @@ function fileFor(userId: string): string {
 }
 
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Память с НЕсброшенной отложенной записью per-userId — для flush на завершении процесса (H9). */
+const pendingSaves = new Map<string, WorkingMemory>();
 
 /** Загрузить рабочую память пользователя с диска (свежую — иначе пустую) + повесить авто-сохранение. */
 export function loadWorkingMemory(userId: string): WorkingMemory {
@@ -49,19 +51,59 @@ export function loadWorkingMemory(userId: string): WorkingMemory {
   return mem;
 }
 
+/** H9: атомарная запись снимка памяти (tmp→rename) — kill посреди записи не оставит усечённый JSON,
+ *  из-за которого на boot терялась вся дневная память (writeFileSync писал прямо в финальный путь). */
+function writeSnapshot(userId: string, mem: WorkingMemory): void {
+  if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true });
+  const data: Persisted = { savedAt: Date.now(), ...mem.toJSON() };
+  const file = fileFor(userId);
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, JSON.stringify(data), "utf8");
+  try {
+    renameSync(tmp, file); // атомарная замена: читатель видит либо старый, либо новый файл целиком
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort */
+    }
+    throw e;
+  }
+}
+
 function scheduleSave(userId: string, mem: WorkingMemory): void {
   const prev = saveTimers.get(userId);
   if (prev) clearTimeout(prev);
+  pendingSaves.set(userId, mem);
   const timer = setTimeout(() => {
     saveTimers.delete(userId);
+    pendingSaves.delete(userId);
     try {
-      if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true });
-      const data: Persisted = { savedAt: Date.now(), ...mem.toJSON() };
-      writeFileSync(fileFor(userId), JSON.stringify(data), "utf8");
+      writeSnapshot(userId, mem);
     } catch (e) {
       log.warn("не удалось сохранить память", { userId, error: e instanceof Error ? e.message : String(e) });
     }
   }, SAVE_DEBOUNCE_MS);
   if (typeof timer === "object" && "unref" in timer) (timer as { unref?: () => void }).unref?.();
   saveTimers.set(userId, timer);
+}
+
+/**
+ * H9: синхронно сбросить ВСЕ отложенные записи рабочей памяти (вызывать в gateway.close() перед выходом).
+ * Зеркалит flushTaskStores/flushResolutionStores: debounce-таймер unref'нут → на graceful-shutdown он бы
+ * НЕ успел сработать, и только что состоявшийся ход потерялся бы («забыл, о чём говорили» после деплоя).
+ * Идемпотентно.
+ */
+export function flushWorkingStores(): void {
+  for (const [userId, mem] of pendingSaves) {
+    const timer = saveTimers.get(userId);
+    if (timer) clearTimeout(timer);
+    saveTimers.delete(userId);
+    try {
+      writeSnapshot(userId, mem);
+    } catch (e) {
+      log.warn("flush рабочей памяти не удался", { userId, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  pendingSaves.clear();
 }

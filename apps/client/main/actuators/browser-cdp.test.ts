@@ -6,6 +6,7 @@ import {
   buildReadScript,
   cdpCommand,
   chromeCandidates,
+  safeBrowserUrl,
 } from "./browser-cdp.js";
 
 describe("browser-cdp (§6) — построители и валидация", () => {
@@ -50,5 +51,27 @@ describe("browser-cdp (§6) — построители и валидация", (
     expect(BROWSER_INTENTS).toContain("type");
     expect(BROWSER_INTENTS).toContain("scroll");
     expect(BROWSER_INTENTS).not.toContain("eval");
+  });
+
+  it("safeBrowserUrl пропускает http(s) и отклоняет опасные схемы", () => {
+    expect(safeBrowserUrl("https://web.telegram.org/k/")).toBe("https://web.telegram.org/k/");
+    expect(safeBrowserUrl("  http://example.com  ")).toBe("http://example.com");
+    expect(safeBrowserUrl("example.com")).toBe("example.com"); // без схемы → трактуется как https
+    expect(() => safeBrowserUrl("file:///C:/Users/anton/.ssh/id_rsa")).toThrow(/схема/);
+    expect(() => safeBrowserUrl("chrome://settings")).toThrow(/схема/);
+    expect(() => safeBrowserUrl("data:text/html,x")).toThrow(/схема/);
+  });
+
+  it("safeBrowserUrl отклоняет «-»-лидирующий аргумент (флаг-инъекция Chrome)", () => {
+    // Chrome в argv принял бы «--load-extension=…» / «--proxy-server=…» за ФЛАГ, не URL.
+    expect(() => safeBrowserUrl("--load-extension=/tmp/evil")).toThrow(/флаг/);
+    expect(() => safeBrowserUrl("  --proxy-server=http://attacker")).toThrow(/флаг/);
+    expect(() => safeBrowserUrl("-vfoo")).toThrow(/флаг/);
+  });
+
+  it("open() отклоняет опасный URL ДО запуска браузера", async () => {
+    const ctrl = new CdpBrowserController();
+    await expect(ctrl.open("file:///etc/passwd")).rejects.toThrow(/схема/);
+    await expect(ctrl.open("--proxy-server=http://attacker")).rejects.toThrow(/флаг/);
   });
 });

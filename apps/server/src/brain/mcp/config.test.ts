@@ -6,9 +6,13 @@ import { normalizeCommand } from "./config.js";
 describe("normalizeCommand — резолв команды под Node-spawn", () => {
   const win = process.platform === "win32";
 
-  it("npx/npm/node → .cmd на Windows, без изменений на *nix", () => {
+  it("npx/npm → .cmd на Windows, без изменений на *nix", () => {
     expect(normalizeCommand("npx").command).toBe(win ? "npx.cmd" : "npx");
-    expect(normalizeCommand("node").command).toBe(win ? "node.cmd" : "node");
+    expect(normalizeCommand("npm").command).toBe(win ? "npm.cmd" : "npm");
+  });
+
+  it("node НЕ трогает — это node.exe, а не .cmd-батник", () => {
+    expect(normalizeCommand("node").command).toBe("node");
   });
 
   it("uvx/uv → .exe на Windows, без изменений на *nix", () => {

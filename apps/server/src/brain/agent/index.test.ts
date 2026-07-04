@@ -112,7 +112,7 @@ describe("agent-loop (§7, §8)", () => {
       list: async () => [],
       get: async () => null,
       save: async () => null,
-      recall: async () => ({ id: "tg", name: "Отправить Герману", when: "написать Herman", procedure: "шаги...", version: 1 }),
+      recall: async () => ({ id: "tg", ownerId: "u-1", name: "Отправить Герману", when: "написать Herman", procedure: "шаги...", version: 1 }),
       learnedCatalog: async () => [{ name: "Отправить Герману", when: "написать Herman" }],
     };
     await handleUserText(session, "что там по работе нужно", await makeDeps(llm, { skills }));
@@ -616,6 +616,7 @@ describe("agent-loop (§7, §8)", () => {
     const llm = new MockLlmProvider([{ text: "Готово." }]);
     const recall = vi.fn(async () => ({
       id: "tg-report",
+      ownerId: "u-1",
       name: "Отчёт в Telegram",
       when: "прислать отчёт в телеграм",
       procedure: "1. собрать данные\n2. отправить через telegram_send",
@@ -643,6 +644,7 @@ describe("agent-loop (§7, §8)", () => {
     ]);
     const recall = vi.fn(async () => ({
       id: "learned__dota-search",
+      ownerId: "u-1",
       name: "Поиск в доте",
       when: "запустить поиск матча",
       procedure: "проза процедуры",
@@ -675,6 +677,7 @@ describe("agent-loop (§7, §8)", () => {
     const llm = new MockLlmProvider([{ text: "Хорошо, сэр." }]);
     const recall = vi.fn(async () => ({
       id: "learned__risky",
+      ownerId: "u-1",
       name: "Рискованный",
       when: "что-то необратимое",
       procedure: "проза",
@@ -736,7 +739,7 @@ describe("agent-loop (§7, §8)", () => {
       { text: "Готово." },
     ]);
     const save = vi.fn();
-    const recall = vi.fn(async () => ({ id: "k", name: "К", when: "сложная задача", procedure: "шаги", version: 1 }));
+    const recall = vi.fn(async () => ({ id: "k", ownerId: "u-1", name: "К", when: "сложная задача", procedure: "шаги", version: 1 }));
     const deps = await makeDeps(llm, { skills: fakeSkills({ save, recall }) });
     await handleUserText(session, "сделай сложную многошаговую задачу по навыку", deps);
     expect(recall).toHaveBeenCalled();

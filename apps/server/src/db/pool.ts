@@ -141,9 +141,22 @@ export async function query<R extends QueryResultRow = QueryResultRow>(
   }
 }
 
-/** Готова ли БД (есть бэкенд). Полезно для health-чека. */
+// Короткий кэш результата health-пинга: не гоняем SELECT 1 на каждый вызов.
+const DB_READY_CACHE_MS = 2500;
+let dbReadyCache: { at: number; ready: boolean } | null = null;
+
+/**
+ * Готова ли БД — РЕАЛЬНАЯ проверка коннекта (лёгкий `SELECT 1`), не просто наличие
+ * объекта пула (node-pg коннектится лениво → лежачая БД дала бы ложный true).
+ * databaseUrl не задан → false (no-op семантика). Результат кэшируется ~2.5с.
+ */
 export async function isDbReady(): Promise<boolean> {
-  return (await getBackend()) !== null;
+  if (!databaseUrl && !testClient) return false; // no-op бэкенд → не готова
+  const now = Date.now();
+  if (dbReadyCache && now - dbReadyCache.at < DB_READY_CACHE_MS) return dbReadyCache.ready;
+  const ready = (await query("SELECT 1")) !== null; // успех запроса = БД реально отвечает
+  dbReadyCache = { at: now, ready };
+  return ready;
 }
 
 /** Корректно закрыть бэкенд при graceful shutdown. */
@@ -158,6 +171,7 @@ export async function closeDb(): Promise<void> {
     embedded = null;
     closeBackend = null;
     initTried = false;
+    dbReadyCache = null; // сброс health-кэша — иначе stale ready пережил бы закрытие
   }
 }
 

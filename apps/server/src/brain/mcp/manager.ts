@@ -8,6 +8,7 @@
  *  - MCP-инструменты — ХОЛОДНЫЕ: схемы не шлём каждый ход, только каталог; dispatch роутит по callTool;
  *  - честность по ошибкам: callTool ловит сбой → isError (петля переживёт), не throw наружу.
  */
+import { spawn } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { type Logger, createLogger } from "@jarvis/shared";
@@ -16,6 +17,7 @@ import type { McpConfig, McpServerConfig } from "./config.js";
 
 interface ServerEntry {
   client: Client;
+  transport?: StdioClientTransport; // §L6: держим ссылку → force-kill дерева ребёнка на dispose
   tools: ToolSchema[]; // уже в namespaced-виде (имя = mcp__server__tool)
   state: "connected" | "error";
 }
@@ -81,9 +83,10 @@ export class McpManager {
   }
 
   private async connectOne(name: string, sc: McpServerConfig): Promise<void> {
+    let transport: StdioClientTransport | undefined;
     try {
       const client = new Client({ name: "jarvis", version: "1.0.0" }, { capabilities: {} });
-      const transport = new StdioClientTransport({
+      transport = new StdioClientTransport({
         command: sc.command,
         args: sc.args ?? [],
         // §sec (H15): базовый allowlist + ТОЛЬКО объявленный sc.env — не разворачиваем весь process.env
@@ -99,10 +102,11 @@ export class McpManager {
         this.index.set(ns, { server: name, bare: t.name });
         tools.push({ name: ns, description: `[MCP:${name}] ${t.description ?? t.name}`, input_schema: normSchema(t.inputSchema) });
       }
-      this.servers.set(name, { client, tools, state: "connected" });
+      this.servers.set(name, { client, transport, tools, state: "connected" });
       this.log.info("MCP сервер подключён", { server: name, tools: tools.length });
     } catch (e) {
-      this.servers.set(name, { client: null as unknown as Client, tools: [], state: "error" });
+      // transport мог уже спавнить ребёнка до провала connect — сохраняем для kill в dispose.
+      this.servers.set(name, { client: null as unknown as Client, transport, tools: [], state: "error" });
       this.log.warn("MCP сервер не подключился", { server: name, error: e instanceof Error ? e.message : String(e) });
     }
   }
@@ -149,11 +153,32 @@ export class McpManager {
   }
 
   async dispose(): Promise<void> {
+    const isWin = process.platform === "win32";
     for (const e of this.servers.values()) {
+      // PID берём ДО close() — close может обнулить процесс в транспорте.
+      const pid = (e.transport as { pid?: number | null } | undefined)?.pid ?? undefined;
       try {
         await e.client?.close?.();
       } catch {
         /* ignore */
+      }
+      // §L6: client.close() на Windows НЕ убивает дерево дочернего npx/npm (внуки-node остаются
+      // зомби, держат порты/хендлы на каждом рестарте). Форс-килл дерева по PID.
+      if (typeof pid === "number" && pid > 0) {
+        try {
+          if (isWin) {
+            spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
+          } else {
+            // posix: убить группу процессов (npx→node), фолбэк — сам pid.
+            try {
+              process.kill(-pid, "SIGKILL");
+            } catch {
+              process.kill(pid, "SIGKILL");
+            }
+          }
+        } catch {
+          /* процесс уже мёртв / нет прав — не критично */
+        }
       }
     }
     this.servers.clear();

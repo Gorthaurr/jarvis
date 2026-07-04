@@ -28,6 +28,7 @@ import { type FileLogSink, initFileLog } from "../obs/file-log.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { flushTaskStores, loadTaskManager } from "../brain/tasks/task-store.js";
 import { flushResolutionStores, loadResolutionMemory } from "../memory/resolution-memory.js";
+import { flushWorkingStores } from "../memory/working-store.js";
 import { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { McpManager } from "../brain/mcp/manager.js";
 import { loadMcpConfig } from "../brain/mcp/config.js";
@@ -81,6 +82,9 @@ import type { Session, SessionSocket } from "./session.js";
 
 /** Окно на присылку client.hello после коннекта (§5). */
 const HANDSHAKE_TIMEOUT_MS = 5_000;
+
+/** WebSocket.OPEN === 1 по спецификации; держим локально, чтобы не тащить ws в типы (как в session.ts). */
+const WS_OPEN = 1;
 
 export interface Gateway {
   app: FastifyInstance;
@@ -537,14 +541,32 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     async close() {
       clearInterval(taskSweep);
       autoPredictor?.stop(); // §трейдинг: остановить авто-предиктор
+      brain.reminders.stop(); // §9: остановить таймер напоминаний (симметрично watch/ambient) перед flush
       brain.watch?.stop(); // §долгие-задачи: остановить таймер наблюдений
       brain.ambient?.stop(); // §проактив-всё: остановить ambient-движок
       flushTaskStores(); // §5/§20: дописать отложенный снимок реестра, чтобы «сделал?» пережил graceful-рестарт
       flushResolutionStores(); // §: дописать опытную память резолвов перед выходом
+      flushWorkingStores(); // H9: дописать рабочую память диалога (иначе ход за <120мс до рестарта теряется)
+      // M13: дописать durable-сторы проактива (reminders/watch/ambient-seen/obligations) — иначе рестарт
+      // терял in-flight запись (отменённое напоминание всё равно срабатывало; уже-показанное ambient
+      // пере-срабатывало). Bounded 2с — зависший диск не должен держать выход (как drainAll ниже).
+      await Promise.race([
+        Promise.all([
+          brain.reminders.flush().catch(() => {}),
+          brain.watch?.flush().catch(() => {}),
+          brain.ambient?.flush().catch(() => {}),
+          obligationStore.flush().catch(() => {}),
+        ]),
+        new Promise((r) => setTimeout(r, 2000)),
+      ]);
       // §14: дописать последний best-effort персист потраченного (раньше drain() не дожидались →
       // usage_quota терялся при graceful-рестарте). Bounded 2с — зависшая БД не должна держать выход.
       await Promise.race([brain.spend.drainAll().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
-      void mcp.dispose(); // § закрыть MCP-клиенты (stdio-child)
+      // L3: убить speaker-сайдкар (sherpa-child) — иначе зомби с моделью в памяти при taskkill /F на порту.
+      providers.speakerVerifier?.dispose?.();
+      // L6: дождаться закрытия MCP-клиентов (stdio-child), bounded — зависший клиент не держит выход.
+      // ⚠️ kill дерева stdio-детей на Windows (taskkill /T) — внутри McpManager.dispose (вне этого кластера).
+      await Promise.race([mcp.dispose().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
       registry.teardownAll();
       await app.close();
       log.info("gateway остановлен");
@@ -584,6 +606,11 @@ function onConnection(
   // СИНХРОННО до любого await — между hello и резолвом промиса handshakeDone ещё false, поэтому любой
   // промежуточный кадр падает в ту же ignore-ветку, что и сегодня (буфер не нужен, семантика та же).
   let handshakeStarted = false;
+  // H7: сокет мог закрыться ПОКА doHandshake ждал БД (resolveAndProvision/hydrate). ws.on('close')
+  // тогда срабатывает с ctx===null и выходит БЕЗ scheduleRemove; затем промис резолвится и без этого
+  // флага вставил бы Session + heartbeat + приветствие в МЁРТВЫЙ сокет, который уже не закроется →
+  // перманентная утечка сессии. Флаг ставится в close, сверяется после await (см. .then ниже).
+  let socketClosed = false;
 
   // Адаптер RawWs → SessionSocket (минимальный контракт Session).
   const sock: SessionSocket = {
@@ -624,6 +651,18 @@ function onConnection(
       // 'registerSpeaker' рушил процесс → шторм ECONNREFUSED на клиенте). Падает только ЭТО соединение.
       void doHandshake(env as Envelope<Hello>, sock, ws, config, registry, providers, brain, log)
         .then((c) => {
+          // H7: сокет закрылся, пока doHandshake ждал БД → немедленный teardown вместо утечки. НЕ
+          // регистрируем в liveCtxs и НЕ полагаемся на ws.on('close') (он уже отработал с ctx===null).
+          if (c && (socketClosed || ws.readyState !== WS_OPEN)) {
+            log.warn("handshake завершился после закрытия сокета — сношу сессию (H7)", { sessionId: c.session.sessionId });
+            c.heartbeat.stop();
+            c.voice.dispose();
+            // isBoundTo-гард (как в ws.on('close')): сносим сессию, ТОЛЬКО если её всё ещё держит ЭТОТ
+            // сокет. Если гонка reconnect уже забрала сессию новым соединением (resume) — не трогаем её,
+            // лишь глушим heartbeat/voice ЭТОГО мёртвого канала (иначе снесли бы живую чужую сессию).
+            if (c.session.isBoundTo(sock)) registry.remove(c.session.sessionId); // teardown → onTeardown (отмена задач) + снятие с учёта
+            return;
+          }
           ctx = c;
           handshakeDone = c !== null; // null (version_mismatch/unauthorized/internal) → сокет уже закрыт в doHandshake
           if (c) liveCtxs.set(c.session.sessionId, c); // §dev /dev/say
@@ -645,6 +684,7 @@ function onConnection(
 
   ws.on("close", () => {
     clearTimeout(handshakeTimer);
+    socketClosed = true; // H7: если doHandshake ещё в полёте — его .then увидит флаг и снесёт сессию сам
     if (!ctx) return;
     // Heartbeat ЭТОГО соединения глушим всегда (иначе при resume на одну Session работали бы ДВА
     // heartbeat-а — старый добивал бы живой сокет ложным onDead).

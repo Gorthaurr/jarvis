@@ -75,11 +75,21 @@ describe("voice state machine (§10)", () => {
     expect(types(r.actions)).toContain("open_stt");
   });
 
-  it("listening + barge_in (хвост озвучки) → рубит ещё-живой синтез, остаётся listening (§barge)", () => {
+  it("listening + barge_in (хвост озвучки ЖИВ) → рубит ещё-живой синтез, остаётся listening (§barge)", () => {
     const ctx: VoiceContext = { state: "listening", followupActive: true };
-    const r = reduce(ctx, { type: "barge_in" });
+    const r = reduce(ctx, { type: "barge_in", ttsActive: true });
     expect(r.context.state).toBe("listening"); // не дёргаем состояние — ждём речь юзера
     expect(types(r.actions)).toContain("cancel_tts"); // гасим хвост синтеза, если жив
+  });
+
+  it("H11: listening + barge_in без живого TTS → НЕ рубит (не бампаем gen, STT-стрим цел)", () => {
+    // Синтеза нет (ttsActive не проставлен): cancel_tts бампнул бы gen и убил бы уже открытый
+    // STT-стрим этого хода → follow-up-команда потерялась бы. Ждём тишину действий.
+    const ctx: VoiceContext = { state: "listening", followupActive: true };
+    const r = reduce(ctx, { type: "barge_in" });
+    expect(r.context.state).toBe("listening"); // состояние не трогаем
+    expect(types(r.actions)).not.toContain("cancel_tts"); // нечего глушить → тихий no-op
+    expect(r.actions).toHaveLength(0);
   });
 
   it("speaking + speech_start тоже трактуется как barge-in", () => {

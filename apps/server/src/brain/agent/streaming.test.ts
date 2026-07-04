@@ -81,6 +81,23 @@ describe("brain пофразный стрим (§10)", () => {
     expect(sentences).toEqual(["Раз.", "Два.", "Три."]);
   });
 
+  it("M5: аварийный стаб, уже озвученный в sink, НЕ перезаписывается другой фразой (память=произнесённое)", async () => {
+    // Стаб LLM (stopReason==="stub") на step0-стриме проговаривается пофразно (spokeAny/streamedFinal).
+    // Терминал llmStubbed раньше возвращал ДРУГОЙ текст («связь прервалась») → память/чат расходились
+    // с тем, что реально прозвучало. Теперь done()/voice == реально произнесённый стаб-текст.
+    const llm = new MockLlmProvider([
+      { text: "Первое предложение стаба. Второе предложение стаба.", stopReason: "stub" },
+    ]);
+    const { sink, sentences, getDone } = collectSink();
+    const reply = await handleUserText(session, "поболтай со мной немного", makeDeps(llm), sink);
+    // Прозвучал именно стаб-текст (пофразно), а не «связь с сервером прервалась».
+    expect(sentences).toEqual(["Первое предложение стаба.", "Второе предложение стаба."]);
+    expect(reply.voice).not.toMatch(/связь/i); // терминал НЕ подставил чужую фразу
+    // done()/voice == реально произнесённое (сшитое из тех же предложений).
+    expect(getDone()).toBe(reply.voice);
+    expect(reply.voice).toBe(sentences.join(" "));
+  });
+
   it("детерминированный путь (имя) ничего не стримит, но финализирует через done()", async () => {
     const llm = new MockLlmProvider([]);
     const { sink, sentences, getDone } = collectSink();

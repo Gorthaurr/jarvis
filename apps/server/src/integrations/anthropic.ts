@@ -23,10 +23,14 @@ const log: Logger = createLogger("llm:anthropic");
 type ThinkingParam = { type: "adaptive" } | { type: "enabled"; budget_tokens: number };
 export function thinkingArg(effort: ThinkingEffort | undefined, model: string): ThinkingParam | undefined {
   if (!effort || effort === "off") return undefined;
-  const isOpus = /opus/i.test(model);
-  // Opus 4.8 = adaptive-thinking-only (enabled/budget → 400). Sonnet 4.6 = adaptive ИЛИ enabled+budget.
+  // adaptive-only семейства (enabled/budget_tokens → HTTP 400): Opus (4.7/4.8), Fable/Mythos 5, Sonnet 5+.
+  // Allowlist того, что ТОЧНО принимает enabled+budget — Sonnet 4.x и раньше; всё нераспознанное
+  // (новые семейства/версии) честно уходит в adaptive, не гадаем числовым бюджетом вслепую.
+  const acceptsEnabledBudget = /sonnet-[0-4](\D|$)/i.test(model);
   if (effort === "adaptive") return { type: "adaptive" };
-  if (typeof effort === "number") return isOpus ? { type: "adaptive" } : { type: "enabled", budget_tokens: effort };
+  if (typeof effort === "number") {
+    return acceptsEnabledBudget ? { type: "enabled", budget_tokens: effort } : { type: "adaptive" };
+  }
   return undefined;
 }
 

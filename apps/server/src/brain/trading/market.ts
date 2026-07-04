@@ -101,11 +101,20 @@ export function parseMoexQuote(json: unknown, symbol: string, market: Market = "
   };
 }
 
-/** Свечи MOEX ISS (блок candles: open/close/high/low/value/volume/begin). */
+/**
+ * Смещение московского времени от UTC в мс (+03:00, БЕЗ перехода на летнее время — MSK фиксирован с 2014).
+ * ISS отдаёт `begin` как МОСКОВСКОЕ локальное wall-clock без таймзоны → чтобы получить корректный UTC-инстант,
+ * вычитаем это смещение. Симметрично moexDate() прибавляет его при формировании from/till. Двойной парсинг
+ * как UTC (было) давал сдвиг −3ч на записи и +3ч на запросе → окно path-сверки промахивалось по свечам.
+ */
+const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
+
+/** Свечи MOEX ISS (блок candles: open/close/high/low/value/volume/begin). `begin` — МОСКОВСКОЕ время (MSK, UTC+3). */
 export function parseMoexCandles(json: unknown): Candle[] {
   return parseIssTable(json, "candles")
     .map((r) => ({
-      t: Date.parse(`${String(r.begin).replace(" ", "T")}Z`),
+      // Трактуем как UTC (суффикс Z), затем сдвигаем на −3ч → корректный UTC-инстант момента МСК.
+      t: Date.parse(`${String(r.begin).replace(" ", "T")}Z`) - MSK_OFFSET_MS,
       o: num(r.open) ?? 0,
       h: num(r.high) ?? 0,
       l: num(r.low) ?? 0,
@@ -129,9 +138,12 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** unix ms → строка даты MOEX ISS (UTC, «YYYY-MM-DD HH:MM:SS») для параметров from/till. */
-function moexDate(ms: number): string {
-  const d = new Date(ms);
+/**
+ * unix ms → строка даты MOEX ISS для параметров from/till. ISS ожидает МОСКОВСКОЕ wall-clock (MSK, UTC+3),
+ * поэтому прибавляем +03:00 к UTC-инстанту и форматируем через getUTC* (сдвинутая дата → нужные компоненты).
+ */
+export function moexDate(ms: number): string {
+  const d = new Date(ms + MSK_OFFSET_MS);
   const p = (n: number): string => String(n).padStart(2, "0");
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }

@@ -61,7 +61,9 @@ describe("resolveAndProvision — async резолв + provision БЕЗ БД (г
     await expect(resolveAndProvision("dev-token", { JARVIS_DEV_USER_ID: U })).resolves.toBe(U);
   });
 
-  it("strict + БД недоступна: НЕ брикуем — пускаем UUID как партицию (fail-open на DB-down)", async () => {
-    await expect(resolveAndProvision(U, { JARVIS_AUTH_STRICT: "1" })).resolves.toBe(U);
+  it("strict + токен не верифицирован (нет строки/БД недоступна) → null (fail-closed, M1)", async () => {
+    // strict = hardened/remote контекст: непроверенный токен ВСЕГДА отвергаем,
+    // независимо от доступности БД — раньше тут был fail-open на DB-down.
+    await expect(resolveAndProvision(U, { JARVIS_AUTH_STRICT: "1" })).resolves.toBeNull();
   });
 });

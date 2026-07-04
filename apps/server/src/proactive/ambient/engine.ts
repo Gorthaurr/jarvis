@@ -55,6 +55,12 @@ export class AmbientEngine {
     this.timer = undefined;
   }
 
+  /** M13: дождаться отложенных записей seen-стора (graceful shutdown) — иначе уже-показанное ambient
+   *  пере-сработает после рестарта (пометка «seen» не успела лечь на диск). */
+  async flush(): Promise<void> {
+    await this.store.flush();
+  }
+
   /** Зарегистрировать канал озвучки сессии (с владельцем) и сразу отдать отложенные ЭТОГО юзера. */
   registerSpeaker(sessionId: string, userId: string, speak: (text: string, urgent: boolean) => void): void {
     this.speakers.set(sessionId, { userId, speak });

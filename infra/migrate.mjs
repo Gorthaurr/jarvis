@@ -206,12 +206,17 @@ async function migratePglite(dataDir) {
         const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf-8');
         console.log(`[migrate] Применяем (PGlite): ${file} ...`);
         const t0 = Date.now();
+
+        // Каждая миграция — в отдельной транзакции для атомарности (зеркалим нативную ветку)
+        await db.exec('BEGIN');
         try {
             await db.exec(sql);
             await db.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
+            await db.exec('COMMIT');
             console.log(`[migrate] ✓ ${file} (${Date.now() - t0}ms)`);
             applied_count++;
         } catch (err) {
+            await db.exec('ROLLBACK');
             console.error(`[migrate] ✗ Ошибка в ${file}:\n  ${err.message}`);
             await db.close();
             process.exit(1);

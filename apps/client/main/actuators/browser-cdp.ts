@@ -52,6 +52,25 @@ export interface BrowserController {
 /** Допустимые интенты browser.act (валидируются — не enum в рантайме). */
 export const BROWSER_INTENTS = ["play", "pause", "next", "prev", "scroll", "click", "type", "back", "forward"] as const;
 
+/**
+ * Санитайзер URL перед spawn/navigate. Защита в глубину (сервер тоже фильтрует, но клиент
+ * не доверяет одному слою): (1) ТОЛЬКО http/https — file:///…/id_rsa, chrome://, data: → отказ;
+ * (2) кандидат, начинающийся с «-» (в т.ч. после trim), Chrome в argv принял бы за ФЛАГ
+ * (--load-extension/--proxy-server/…) — отклоняем до попадания в spawn. Возвращает очищенный
+ * URL или бросает осмысленную ошибку.
+ */
+export function safeBrowserUrl(url: string): string {
+  const u = String(url ?? "").trim();
+  if (u.startsWith("-")) {
+    throw new Error("небезопасный URL: аргумент, начинающийся с «-», может быть воспринят как флаг браузера");
+  }
+  const scheme = (/^([a-z][a-z0-9+.-]*):/i.exec(u)?.[1] ?? "https").toLowerCase();
+  if (scheme !== "http" && scheme !== "https") {
+    throw new Error(`небезопасная схема «${scheme}:» — открываю только http(s)`);
+  }
+  return u;
+}
+
 /** Кандидаты пути chrome.exe (Windows). Чистая функция — тестируется. */
 export function chromeCandidates(): string[] {
   const pf = process.env["ProgramFiles"] ?? "C:\\Program Files";
@@ -132,13 +151,16 @@ export class CdpBrowserController implements BrowserController {
   constructor(private readonly opts: { headless?: boolean; chromePath?: string; userDataDir?: string } = {}) {}
 
   async open(url: string): Promise<void> {
+    // Санитайзер до spawn/navigate: только http(s), и НЕ «-»-лидирующий аргумент (иначе
+    // Chrome в argv принял бы его за флаг — --load-extension/--proxy-server и т.п.).
+    const safe = safeBrowserUrl(url);
     // Браузер ещё не поднят → запускаем его СРАЗУ с целевым URL стартовой страницей,
     // а не с about:blank + последующим navigate (иначе пользователь видит мелькание
     // about:blank → сайт). Если браузер уже работал — переходим на URL обычным navigate.
     const already = Boolean(this.ws && this.ws.readyState === 1);
-    await this.ensureConnected(url);
+    await this.ensureConnected(safe);
     await this.send("Page.enable");
-    if (already) await this.send("Page.navigate", { url });
+    if (already) await this.send("Page.navigate", { url: safe });
     await this.waitForLoad();
   }
 

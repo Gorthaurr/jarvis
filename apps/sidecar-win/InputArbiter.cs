@@ -76,7 +76,20 @@ public sealed class InputArbiter
         t.SetApartmentState(ApartmentState.STA);
         _thread = t;
         t.Start();
-        ready.Wait(2000);
+        bool signalled = ready.Wait(2000);
+        if (!signalled)
+        {
+            // M15: поток НЕ уложился в 2с ready-wait. Он мог просто затормозить на старте —
+            // и всё равно поднимет LL-хуки и войдёт в GetMessage-петлю, оставшись жить.
+            // Просто обнулить ссылку нельзя: осиротевший поток продолжит слать user-input,
+            // а повторный Start заспавнит ВТОРОЙ. Гарантированно сносим спавненный поток до
+            // возврата: дожидаемся, пока RunLoop проставит _threadId, шлём WM_QUIT и Join'им.
+            // (WM_QUIT в очередь до её создания теряется — потому ждём _threadId и хендл хука.)
+            ReapOrphan(t);
+            _thread = null;
+            _log("raw-input.subscribe: LL-хуки не встали за отведённое время — арбитраж не активен, поток снят");
+            return;
+        }
         if (!_hooksOk)
         {
             // Хуки не встали — сбрасываем состояние, чтобы арбитр не «завис активным»
@@ -95,6 +108,28 @@ public sealed class InputArbiter
         PostThreadMessage(_threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
         t.Join(2000);
         _thread = null;
+    }
+
+    // M15: снять поток, «просроченный» на ready-wait, но, возможно, ещё поднимающийся.
+    // Дожидаемся, пока RunLoop проставит _threadId (иначе WM_QUIT уйдёт в пустоту — очередь
+    // сообщений потока ещё не создана), затем шлём WM_QUIT и Join'им. Если поток уже завершился
+    // сам (хуки не встали → RunLoop вышел) — Join вернётся сразу.
+    private void ReapOrphan(Thread t)
+    {
+        // Ждём появления threadId (или смерти потока) — коротко, поток уже почти поднялся.
+        for (int i = 0; i < 100 && _threadId == 0 && t.IsAlive; i++)
+            Thread.Sleep(20);
+
+        if (_threadId != 0)
+            PostThreadMessage(_threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+
+        // Дожидаемся выхода RunLoop (снятия хуков). Если WM_QUIT не дошёл (очередь ещё не
+        // готова была), повторяем на всякий случай.
+        if (!t.Join(2000) && _threadId != 0)
+        {
+            PostThreadMessage(_threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+            t.Join(2000);
+        }
     }
 
     private void RunLoop(ManualResetEventSlim ready)
