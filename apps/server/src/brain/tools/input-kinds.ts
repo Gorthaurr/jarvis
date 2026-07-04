@@ -24,6 +24,7 @@ export const INPUT_BEARING_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>(
   "ui.invoke",
   "app.launch",
   "app.focus",
+  "app.close",
   "browser.open",
   "browser.act",
   "skill.execute",

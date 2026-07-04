@@ -13,7 +13,12 @@ import {
   type TtsChunk,
   type TtsOpts,
   type TtsStream,
+  adaptiveSpeed,
+  isV3Model,
+  sanitizeV3Tags,
+  stripAudioTags,
 } from "./voice-providers.js";
+import { type Emotion, elevenStabilityFor, elevenV3Tag } from "./tts-emotion.js";
 
 const log: Logger = createLogger("tts:elevenlabs");
 
@@ -33,6 +38,32 @@ export interface ElevenLabsConfig {
 // Переопределяется ELEVENLABS_MODEL.
 const DEFAULT_MODEL = process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
 
+// ГИБРИД скорость/качество (§10): короткие реплики-подтверждения («Готово», «Я здесь, сэр») —
+// на БЫСТРОЙ модели (мгновенный звук, эмоция там не нужна); содержательные ответы — на rich
+// (DEFAULT_MODEL, напр. eleven_v3 с интонацией). Так простые реакции не тормозят на тяжёлой модели.
+const FAST_MODEL = process.env.ELEVENLABS_MODEL_FAST || "eleven_flash_v2_5";
+/** Реплики ≤ стольких символов и без интонац-тегов уходят на FAST_MODEL. 0 = гибрид выключен. */
+const FAST_MAX_CHARS = (() => {
+  const n = Number.parseInt(process.env.ELEVENLABS_FAST_MAX_CHARS ?? "", 10);
+  return Number.isFinite(n) ? Math.max(0, n) : 64;
+})();
+const AUDIO_TAG_TEST = /\[[a-z][a-z ]{1,30}\]/u;
+
+/**
+ * Выбор модели под реплику (гибрид): короткий ack без интонац-тега → быстрая модель; иначе rich.
+ * Наличие тега = осознанная эмоция → всегда rich (быстрая модель теги не понимает). Чистая функция.
+ */
+export function selectTtsModel(
+  text: string,
+  richModel: string,
+  fastModel: string,
+  maxChars: number,
+): string {
+  const t = text.trim();
+  if (maxChars > 0 && t.length <= maxChars && !AUDIO_TAG_TEST.test(t)) return fastModel;
+  return richModel;
+}
+
 /** Прочитать float из env в [min,max] с фоллбэком (для тюнинга голоса без правок кода). */
 function envFloat(name: string, fallback: number, min: number, max: number): number {
   const raw = process.env[name];
@@ -42,17 +73,20 @@ function envFloat(name: string, fallback: number, min: number, max: number): num
 }
 
 /**
- * voice_settings под размеренного дворецкого (подтверждено доками ElevenLabs):
- *   stability 0.6 — ровный предсказуемый тон (0.5 на flash «гулял» → ощущение брака);
- *   similarity_boost 0.8 — узнаваемо, но без артефактов исходного сэмпла (0.85 — у предела);
- *   style 0.0 — КЛЮЧ для дворецкого: style добавляет «игру»/нестабильность + латентность;
- *   use_speaker_boost true — чёткость; speed 0.95 — лёгкая размеренность без искажений.
- * Все четыре крутятся через ELEVENLABS_* env без перекомпиляции.
+ * voice_settings под ЖИВОГО дворецкого (калибровка по ресёрчу ElevenLabs 2026).
+ *   stability 0.40 — на multilingual_v2 высокая стабильность (0.6) = МОНОТОННОСТЬ (сужает
+ *     эмоц. диапазон → «диктор-автомат»). 0.30–0.45 = живая просодия/микро-интонация без
+ *     «гуляния». Прежние 0.6 были защитой от нестабильности flash — на v2 читались плоско.
+ *   similarity_boost 0.8 — узнаваемо, без артефактов сэмпла.
+ *   style 0.10 — лёгкая теплота/характер; ≤0.2 безопасно, выше — дестабилизация + латентность.
+ *   use_speaker_boost true — чёткость; speed 0.95 — размеренность без искажений.
+ * Генерация стохастична: при артефактах поднимать stability на +0.05, потом гасить style.
+ * Все крутятся через ELEVENLABS_* env без перекомпиляции; режимы §11 (modes.ts) слоятся поверх.
  */
 const VOICE_SETTINGS = {
-  stability: envFloat("ELEVENLABS_STABILITY", 0.6, 0, 1),
+  stability: envFloat("ELEVENLABS_STABILITY", 0.4, 0, 1),
   similarity_boost: envFloat("ELEVENLABS_SIMILARITY", 0.8, 0, 1),
-  style: envFloat("ELEVENLABS_STYLE", 0.0, 0, 1),
+  style: envFloat("ELEVENLABS_STYLE", 0.1, 0, 1),
   use_speaker_boost: (process.env.ELEVENLABS_SPEAKER_BOOST ?? "true") !== "false",
   speed: envFloat("ELEVENLABS_SPEED", 0.95, 0.7, 1.2),
 };
@@ -95,6 +129,13 @@ class ElevenLabsHttpStream implements TtsStream {
     if (typeof this.timer === "object" && "unref" in this.timer) this.timer.unref?.();
     try {
       const model = cfg.modelId ?? DEFAULT_MODEL;
+      // Аудио-теги интонации [warmly]/… понимает ТОЛЬКО v3 — там оставляем валидные (чистим мусорные
+      // скобки), на остальных моделях вырезаем целиком (иначе прочитались бы вслух буквально).
+      const finalText = isV3Model(model) ? sanitizeV3Tags(text) : stripAudioTags(text);
+      // На длинной фразе чуть поджимаем темп (запрос Антона); короткую не трогаем. Кламп под
+      // допустимый диапазон ElevenLabs (0.7–1.2). Длину меряем по реально звучащему тексту.
+      const speed = Math.min(1.2, Math.max(0.7, adaptiveSpeed(finalText, this.settings.speed ?? 1)));
+      const settings = { ...this.settings, speed };
       const url =
         `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(cfg.voiceId)}` +
         `?output_format=mp3_44100_128`;
@@ -107,9 +148,9 @@ class ElevenLabsHttpStream implements TtsStream {
           accept: "audio/mpeg",
         },
         body: JSON.stringify({
-          text,
+          text: finalText,
           model_id: model,
-          voice_settings: this.settings,
+          voice_settings: settings,
           // Текст УЖЕ нормализован детерминированно по-русски (числа→слова, чистка markdown).
           // off отключает нормализацию ElevenLabs: на русском её встроенная логика читает
           // числа по английским правилам, плюс на flash/turbo вне Enterprise она и так не
@@ -123,7 +164,7 @@ class ElevenLabsHttpStream implements TtsStream {
       }
       const audio = await resp.arrayBuffer();
       if (this._cancelled) return;
-      log.info("TTS синтез готов", { bytes: audio.byteLength });
+      log.info("TTS синтез готов", { bytes: audio.byteLength, model });
       this.chunkCb?.({ audio, seq: 0, last: true });
       this.finish();
     } catch (e) {
@@ -182,6 +223,17 @@ export class ElevenLabsTtsProvider implements ITtsProvider {
       ...(opts?.style !== undefined ? { style: clamp(opts.style, 0, 1) } : {}),
       ...(opts?.speed !== undefined ? { speed: clamp(opts.speed, 0.7, 1.2) } : {}),
     };
-    return new ElevenLabsHttpStream(text, { ...this.cfg, apiKey: this.cfg.apiKey, voiceId }, settings);
+    // §21 эмоция: v3 несёт эмоцию аудио-тегом + более «творческой» (низкой) стабильностью. Тег
+    // ставим в начало, если фраза ещё не помечена (LLM мог поставить свой). neutral — без изменений.
+    const emotion = opts?.emotion as Emotion | undefined;
+    let outText = text;
+    if (emotion && emotion !== "neutral") {
+      const tag = elevenV3Tag(emotion);
+      if (tag && !text.trimStart().startsWith("[")) outText = `${tag} ${text}`;
+      settings.stability = elevenStabilityFor(emotion, settings.stability);
+    }
+    // Гибрид: модель подбираем под реплику (короткий ack → быстрая, иначе rich). Явный cfg.modelId — override.
+    const modelId = this.cfg.modelId ?? selectTtsModel(outText, DEFAULT_MODEL, FAST_MODEL, FAST_MAX_CHARS);
+    return new ElevenLabsHttpStream(outText, { ...this.cfg, apiKey: this.cfg.apiKey, voiceId, modelId }, settings);
   }
 }

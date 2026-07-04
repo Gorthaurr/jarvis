@@ -60,6 +60,20 @@ async function run() {
     format: "iife",
   });
 
+  // расширение «Jarvis Web Hands» (MV3 service-worker): бандлим background.js (+ ./modules/*) в ОДИН
+  // файл — Chrome грузит classic SW по пути из манифеста (dist/background.js). Бандл РЕЗОЛВИТ import/export
+  // → оборванная ссылка между модулями = ОШИБКА СБОРКИ (node --check её НЕ ловит — был баг tgSendFileInPage).
+  // Инжекторы (executeScript func) остаются self-contained — проверено: esbuild НЕ переписывает их тела.
+  // iife (один файл) + top-level листенеры исполняются синхронно на спавне SW (как раньше).
+  const extRoot = resolve(root, "..", "extension");
+  await build({
+    ...common,
+    entryPoints: [resolve(extRoot, "background.js")],
+    outfile: resolve(extRoot, "dist/background.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
   // Статика renderer (включая AudioWorklet — он грузится как отдельный модуль, не бандлится).
   await mkdir(resolve(outdir, "renderer"), { recursive: true });
   await cp(resolve(root, "renderer/index.html"), resolve(outdir, "renderer/index.html"));

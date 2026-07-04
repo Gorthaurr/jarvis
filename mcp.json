@@ -1,0 +1,44 @@
+{
+  "_comment": "MCP-серверы Джарвиса (§ арсенал). Добавляй сервер строкой: имя -> {command,args,env}. Секреты ТОЛЬКО через ${ENV}. Инструменты появляются в ХОЛОДНОМ каталоге (модель грузит схему через tool_load по имени mcp__<имя>__<tool>). npx/uvx на Windows нормализуются в .cmd/.exe автоматически (config.normalizeCommand). connectAll fire-and-forget — не блокирует boot. В servers держим ТОЛЬКО проверенно подключающиеся сервера (честность: не плодим неработающие). 'think' проверен end-to-end (npx).",
+  "_uvx_note": "uvx-сервера (Python: git/fetch/time/postgres) на Windows при ПЕРВОМ запуске конкурентно гонятся за установку pywin32 в кэше uv (os error 32 — файл занят) → не подключаются. Лечится ОДНОРАЗОВЫМ ПОСЛЕДОВАТЕЛЬНЫМ прогревом ДО первого boot: `uvx mcp-server-git`, затем `uvx mcp-server-fetch`, затем `uvx mcp-server-time` — каждый до конца, по одному. После прогрева кэш общий → конкурентный connectAll переиспользует его без гонки. Тогда перенести нужный сервер из _disabled в servers.",
+  "_disabled": {
+    "git": {
+      "_note": "Python через uvx. См. _uvx_note — прогреть кэш, затем перенести в servers.",
+      "command": "uvx",
+      "args": ["mcp-server-git"]
+    },
+    "fetch": {
+      "_note": "Python через uvx (веб-fetch→markdown, дополняет нативный web_fetch). См. _uvx_note.",
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    },
+    "time": {
+      "_note": "Python через uvx (время/таймзоны). См. _uvx_note.",
+      "command": "uvx",
+      "args": ["mcp-server-time"]
+    },
+    "postgres": {
+      "_note": "Нужна строка подключения (есть DATABASE_URL в .env). Перенести в servers, DSN через ${DATABASE_URL}.",
+      "command": "uvx",
+      "args": ["postgres-mcp", "${DATABASE_URL}"]
+    },
+    "playwright": {
+      "_note": "Тяжёлый (качает браузеры). Включить при необходимости автоматизации сайтов вне расширения.",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    }
+  },
+  "servers": {
+    "_pin_note": "§sec (H16): версии MCP-серверов ЗАПИНЕНЫ (не `@latest`/без пина) — иначе каждый boot тянет свежий npm-пакет в дочерний процесс = supply-chain RCE при компрометации/тайпсквоттинге. Бамп версии — ОСОЗНАННО (поправить число + проверить). Свежесть: `npm view <pkg> version`. Записи на `_`-ключах сервером игнорируются.",
+    "think": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking@2025.12.18"]
+    },
+    "github": {
+      "_note": "Проверено end-to-end: 26 инструментов (репы/файлы/issues/PR/поиск). Токен GITHUB_PERSONAL_ACCESS_TOKEN в .env (сейчас — токен gh CLI, scopes repo/gist/read:org). Версия запинена (H16).",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}" }
+    }
+  }
+}

@@ -7,7 +7,7 @@
  */
 import type { SkillStep } from "@jarvis/protocol";
 import type { UiPattern } from "@jarvis/protocol";
-import { createLogger } from "@jarvis/shared";
+import { createLogger, sleep } from "@jarvis/shared";
 import * as apps from "../actuators/apps.js";
 import * as ground from "../actuators/ground.js";
 import * as input from "../actuators/input.js";
@@ -48,12 +48,19 @@ export function createClientActuator(): SkillActuator {
           return;
         case "input.click":
           if (!step.target) throw new Error("input.click без target");
-          await input.click(step.target);
+          // method из шага (§8 реплей-макрос пишет physical для игр/canvas — silent там заведомо слеп).
+          await input.click(step.target, p.method === "physical" ? "physical" : "silent");
           return;
+        case "wait": {
+          // Реальная пауза (§8 реплей-макрос: дать UI перерисоваться между кликами). Кламп — защита
+          // от абсурдного ms в контенте навыка. Без ms — no-op (совместимость со старым смыслом wait).
+          const ms = Math.min(15_000, Math.max(0, Number(p.ms) || 0));
+          if (ms > 0) await sleep(ms);
+          return;
+        }
         case "ground":
         case "verify":
-        case "wait":
-          // verify/ground/wait выражаются через expect (auto-wait) — отдельного действия нет.
+          // verify/ground выражаются через expect (auto-wait) — отдельного действия нет.
           return;
         default:
           log.warn(`неизвестное действие шага: ${step.action}`);
@@ -62,7 +69,11 @@ export function createClientActuator(): SkillActuator {
     },
 
     async checkExpect(expect): Promise<boolean> {
-      // Постусловие: элемент с ролью/именем присутствует в a11y-дереве (§6 auto-wait).
+      // VISUAL-постусловие (canvas/игры/видео без a11y): локальной OCR-сверки пока нет → НЕ
+      // подтверждаем локально (иначе ложный успех) → false ведёт к retry→эскалации к LLM,
+      // который ВИДИТ экран через screen_capture и сверяет. TODO: локальный OCR/template-матч.
+      if (expect.kind === "visual") return false;
+      // Постусловие a11y: элемент с ролью/именем присутствует в UIA-дереве (§6 auto-wait).
       if (!expect.role) return true;
       try {
         await ground.ground({ role: expect.role, name: expect.name });

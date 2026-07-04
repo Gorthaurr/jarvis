@@ -56,12 +56,30 @@ describe("voice state machine (§10)", () => {
     expect(r.context.state).toBe("speaking");
   });
 
+  it("thinking + speak_done (синтез без звука) → listening+follow-up, НЕ виснет (§10)", () => {
+    // Регресс: при сбое/нуле чанков TTS speak_done приходит из thinking (не было speak_start).
+    // Раньше это был noop → цикл навсегда висел в thinking. Теперь — штатный возврат к слуху.
+    const ctx: VoiceContext = { state: "thinking", followupActive: false };
+    const r = reduce(ctx, { type: "speak_done" });
+    expect(r.context.state).toBe("listening");
+    expect(r.context.followupActive).toBe(true);
+    expect(types(r.actions)).toContain("open_stt");
+    expect(types(r.actions)).toContain("arm_followup");
+  });
+
   it("speaking + barge_in → listening, рубит TTS и открывает STT (§10)", () => {
     const ctx: VoiceContext = { state: "speaking", followupActive: false };
     const r = reduce(ctx, { type: "barge_in" });
     expect(r.context.state).toBe("listening");
     expect(types(r.actions)).toContain("cancel_tts");
     expect(types(r.actions)).toContain("open_stt");
+  });
+
+  it("listening + barge_in (хвост озвучки) → рубит ещё-живой синтез, остаётся listening (§barge)", () => {
+    const ctx: VoiceContext = { state: "listening", followupActive: true };
+    const r = reduce(ctx, { type: "barge_in" });
+    expect(r.context.state).toBe("listening"); // не дёргаем состояние — ждём речь юзера
+    expect(types(r.actions)).toContain("cancel_tts"); // гасим хвост синтеза, если жив
   });
 
   it("speaking + speech_start тоже трактуется как barge-in", () => {

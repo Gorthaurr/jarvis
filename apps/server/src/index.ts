@@ -5,34 +5,29 @@
  * вешает graceful shutdown на SIGINT/SIGTERM.
  */
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { createLogger } from "@jarvis/shared";
 import { loadConfig } from "./config.js";
+import { buildEnvCandidates, findEnvFile } from "./env-path.js";
 import { closeDb, configureDb } from "./db/pool.js";
 import { createGateway } from "./gateway/server.js";
 import { warmupWhisper } from "./integrations/whisper-stt.js";
 
 /**
- * Загрузить .env, ища его вверх по дереву от cwd и от модуля — сервер
- * запускается из apps/server (pnpm), а .env лежит в корне монорепо.
+ * Загрузить .env устойчиво к установке (§универсальность): JARVIS_ENV_PATH → %APPDATA%/Jarvis/.env →
+ * cwd/.env → ../.env → module-relative (dev-монорепо). См. env-path.ts (тестируемо).
  */
 function loadEnv(): void {
   const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    resolve(process.cwd(), ".env"),
-    resolve(process.cwd(), "../.env"),
-    resolve(here, "../../../.env"), // apps/server/src → корень репо
-    resolve(here, "../../../../.env"),
-  ];
+  const candidates = buildEnvCandidates({ here });
+  const found = findEnvFile(candidates, existsSync);
   // override: .env — источник истины для сервера, важнее унаследованного окружения
   // (напр. ANTHROPIC_BASE_URL родителя не должен перебивать прокси из .env).
-  for (const p of candidates) {
-    if (existsSync(p)) {
-      dotenv.config({ path: p, override: true });
-      return;
-    }
+  if (found) {
+    dotenv.config({ path: found, override: true });
+    return;
   }
   dotenv.config({ override: true });
 }

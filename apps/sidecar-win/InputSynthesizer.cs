@@ -122,11 +122,44 @@ public static class InputSynthesizer
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
 
+    // §бесшумный-ввод: сохранить/вернуть позицию курсора вокруг физ.клика (клик С ВОЗВРАТОМ) — чтобы
+    // синтетический клик не оставлял курсор пользователя смещённым. SetCursorPos телепортирует без
+    // промежуточного движения и НЕ порождает WM с dwExtraInfo (на арбитраж ввода не влияет).
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int X, int Y);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int x, y; }
 
     private const uint MONITOR_DEFAULTTONEAREST = 2;
     private const uint MDT_EFFECTIVE_DPI = 0;
+
+    // DPI-awareness health-check (§18): убедиться, что манифест PerMonitorV2 реально применился —
+    // иначе GetSystemMetrics/GetDpiForMonitor врут масштабированные значения и клик мажет.
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    private static extern int GetAwarenessFromDpiAwarenessContext(IntPtr value);
+
+    /// <summary>
+    /// Диагностика DPI: уровень awareness процесса + размер виртуального экрана. Если awareness &lt; 2
+    /// (per-monitor) — процесс НЕ DPI-aware, координаты будут мазать на масштабе ≠100%.
+    /// awareness: 0=UNAWARE, 1=SYSTEM, 2=PER_MONITOR(_V2). Виртуальный экран в DPI-aware процессе —
+    /// в ФИЗИЧЕСКИХ пикселях (напр. 4480×1440), в unaware — масштабированный.
+    /// </summary>
+    public static string ReportDpiAwareness()
+    {
+        int aware;
+        try { aware = GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()); }
+        catch { aware = -1; }
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        string name = aware switch { 0 => "UNAWARE", 1 => "SYSTEM", 2 => "PER_MONITOR(V2)", _ => "INVALID" };
+        string warn = aware >= 2 ? "OK" : "⚠ НЕ per-monitor — клики будут мазать на масштабе ≠100%";
+        return $"DPI awareness={name}({aware}) virtualScreen={vw}x{vh} [{warn}]";
+    }
 
     // -----------------------------------------------------------------------
     // Публичный API
@@ -136,10 +169,10 @@ public static class InputSynthesizer
     /// Нажать левую (или правую/среднюю) кнопку мыши по логическим координатам (96 dpi).
     /// §18 — маппинг vision-координат на физические пиксели с учётом DPI монитора.
     /// </summary>
-    public static void Click(double logicalX, double logicalY, string button = "left")
+    public static void Click(double logicalX, double logicalY, string button = "left", bool restoreCursor = false)
     {
         (int px, int py) = LogicalToAbsolute(logicalX, logicalY);
-        ClickAbsolute(px, py, button);
+        ClickAbsolute(px, py, button, restoreCursor);
     }
 
     /// <summary>
@@ -147,16 +180,38 @@ public static class InputSynthesizer
     /// UIA BoundingRectangle/GetClickablePoint в Per-Monitor-V2 процессе уже в физических
     /// пикселях — DPI-масштабирование тут НЕ применяем (иначе двойной масштаб).
     /// </summary>
-    public static void ClickPhysical(double physX, double physY, string button = "left")
+    public static void ClickPhysical(double physX, double physY, string button = "left", bool restoreCursor = false)
     {
         (int ax, int ay) = PhysicalToAbsolute(physX, physY);
-        ClickAbsolute(ax, ay, button);
+        ClickAbsolute(ax, ay, button, restoreCursor);
     }
 
-    private static void ClickAbsolute(int absX, int absY, string button)
+    /// <summary>Логические (96dpi virtual-desktop) координаты → ФИЗИЧЕСКИЕ пиксели (для UIA FromPoint). §18.</summary>
+    public static (double physX, double physY) LogicalToPhysical(double logX, double logY)
     {
+        var pt = new POINT { x = (int)logX, y = (int)logY };
+        IntPtr hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        uint dpiX = 96, dpiY = 96;
+        _ = GetDpiForMonitor(hMon, MDT_EFFECTIVE_DPI, out dpiX, out dpiY);
+        return (logX * (dpiX / 96.0), logY * (dpiY / 96.0));
+    }
+
+    private static void ClickAbsolute(int absX, int absY, string button, bool restoreCursor = false)
+    {
+        // §бесшумный-ввод: запомнить позицию курсора, чтобы вернуть после клика (клик С ВОЗВРАТОМ).
+        POINT saved = default;
+        bool restore = restoreCursor && GetCursorPos(out saved);
+
         // Сначала переместить курсор
         SendMouseMove(absX, absY);
+
+        // Игровые UI (Source/Panorama — Dota 2 и т.п.) опрашивают позицию курсора ПО КАДРАМ, а не
+        // берут её из события клика: мгновенный пакет move→down→up→возврат укладывался в один кадр,
+        // и нажатие обрабатывалось уже по ВЕРНУВШЕМУСЯ курсору — клик уходил «мимо» кнопки (живой
+        // прогон: «НАЙТИ ИГРУ» в Dota 2 не нажималась). Даём выдержку ~2 кадра на цели, реальный
+        // интервал нажатия и кадр после отпускания — и только потом телепортируем курсор назад.
+        // Для пользователя это незаметно (<0.1с), обычным приложениям безвредно.
+        System.Threading.Thread.Sleep(40);
 
         (uint downFlag, uint upFlag) = button.ToLowerInvariant() switch
         {
@@ -165,13 +220,16 @@ public static class InputSynthesizer
             _        => (MOUSEEVENTF_LEFTDOWN,   MOUSEEVENTF_LEFTUP),
         };
 
-        INPUT[] inputs =
-        [
-            BuildMouseInput(absX, absY, downFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK),
-            BuildMouseInput(absX, absY, upFlag   | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK),
-        ];
+        SendInputs([BuildMouseInput(absX, absY, downFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+        System.Threading.Thread.Sleep(25);
+        SendInputs([BuildMouseInput(absX, absY, upFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
 
-        SendInputs(inputs);
+        // Телепортируем курсор обратно (без промежуточного движения) — юзер не видит смещения.
+        if (restore)
+        {
+            System.Threading.Thread.Sleep(30);
+            SetCursorPos(saved.x, saved.y);
+        }
     }
 
     /// <summary>
@@ -224,22 +282,33 @@ public static class InputSynthesizer
     {
         (ushort[] vkModifiers, ushort vkMain) = ParseCombo(combo);
 
-        var inputs = new List<INPUT>();
-
-        // Нажать модификаторы
+        // §6 КРИТИЧНО ДЛЯ ИГР: раздельная отправка фронтов с микропаузой. Раньше down+up основной
+        // клавиши шли ОДНИМ SendInput-батчем — Source2/RawInput (Dota) часто успевал прочитать только
+        // один фронт → нажатие «проглатывалось» («две кнопки нажать не могу»). Теперь каждый фронт —
+        // отдельный SendInput с паузой удержания + джиттером (анти-дроп + человекоподобно).
         foreach (ushort vk in vkModifiers)
-            inputs.Add(BuildKey(vk, down: true, scancode));
+            SendInputs([BuildKey(vk, down: true, scancode)]);
+        if (vkModifiers.Length > 0) HoldDelay();
 
-        // Основная клавиша: down + up
-        inputs.Add(BuildKey(vkMain, down: true, scancode));
-        inputs.Add(BuildKey(vkMain, down: false, scancode));
+        SendInputs([BuildKey(vkMain, down: true, scancode)]);
+        HoldDelay(); // клавиша РЕАЛЬНО удерживается, а не мгновенный down→up в одном кадре
+        SendInputs([BuildKey(vkMain, down: false, scancode)]);
 
-        // Отпустить модификаторы в обратном порядке
         for (int i = vkModifiers.Length - 1; i >= 0; i--)
-            inputs.Add(BuildKey(vkModifiers[i], down: false, scancode));
-
-        SendInputs(inputs.ToArray());
+            SendInputs([BuildKey(vkModifiers[i], down: false, scancode)]);
     }
+
+    /// <summary>Длительность удержания клавиши между down и up (мс). Env JARVIS_KEY_HOLD_MS, деф 25.</summary>
+    private static readonly int HoldMs = ParseHoldMs();
+
+    private static int ParseHoldMs()
+    {
+        string? s = Environment.GetEnvironmentVariable("JARVIS_KEY_HOLD_MS");
+        return int.TryParse(s, out int v) && v >= 0 && v <= 500 ? v : 25;
+    }
+
+    /// <summary>Пауза удержания + случайный джиттер 0–10мс (анти-дроп в raw-input играх + человекоподобно).</summary>
+    private static void HoldDelay() => System.Threading.Thread.Sleep(HoldMs + Random.Shared.Next(0, 11));
 
     /// <summary>
     /// Нажать и УДЕРЖАТЬ комбинацию (только keydown, без keyup) — для движения в игре.

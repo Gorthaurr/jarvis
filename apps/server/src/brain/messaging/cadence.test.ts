@@ -18,7 +18,7 @@ describe("CadenceGuard (§14 анти-бан)", () => {
     let t = 0;
     const g = guard(() => t);
     for (let i = 0; i < DEFAULT_CADENCE.maxPerRecipient; i += 1) {
-      g.record("u", "x");
+      g.record("u", "telegram", "x");
       t += DEFAULT_CADENCE.minGapMs + 1; // обходим burst
     }
     const d = g.check({ userId: "u", channel: "telegram", recipient: "x", neverMessagedBefore: false });
@@ -30,7 +30,7 @@ describe("CadenceGuard (§14 анти-бан)", () => {
     let t = 0;
     const g = guard(() => t);
     for (let i = 0; i < DEFAULT_CADENCE.maxDistinctRecipients; i += 1) {
-      g.record("u", `r${i}`);
+      g.record("u", "telegram", `r${i}`);
       t += DEFAULT_CADENCE.minGapMs + 1;
     }
     const d = g.check({ userId: "u", channel: "telegram", recipient: "newbie", neverMessagedBefore: false });
@@ -41,7 +41,7 @@ describe("CadenceGuard (§14 анти-бан)", () => {
   it("запрет burst: слишком быстро подряд", () => {
     let t = 0;
     const g = guard(() => t);
-    g.record("u", "x");
+    g.record("u", "telegram", "x");
     t += 500; // < minGapMs
     const d = g.check({ userId: "u", channel: "telegram", recipient: "y", neverMessagedBefore: false });
     expect(d.allowed).toBe(false);
@@ -51,9 +51,21 @@ describe("CadenceGuard (§14 анти-бан)", () => {
   it("разные пользователи не влияют друг на друга", () => {
     let t = 0;
     const g = guard(() => t);
-    g.record("u1", "x");
+    g.record("u1", "telegram", "x");
     t += 100;
     const d = g.check({ userId: "u2", channel: "telegram", recipient: "x", neverMessagedBefore: false });
     expect(d.allowed).toBe(true);
+  });
+
+  it("каналы не конфлюентят: лимит TG не влияет на VK тому же адресату", () => {
+    let t = 0;
+    const g = guard(() => t);
+    for (let i = 0; i < DEFAULT_CADENCE.maxPerRecipient; i += 1) {
+      g.record("u", "telegram", "x");
+      t += DEFAULT_CADENCE.minGapMs + 1;
+    }
+    // TG исчерпан, но VK тому же «x» — свободен.
+    expect(g.check({ userId: "u", channel: "telegram", recipient: "x", neverMessagedBefore: false }).allowed).toBe(false);
+    expect(g.check({ userId: "u", channel: "vk", recipient: "x", neverMessagedBefore: false }).allowed).toBe(true);
   });
 });

@@ -8,16 +8,24 @@
  * parseSkillMd — реальный базовый парсер (frontmatter + шаги). CRUD идёт через
  * pg; без БД операции no-op (stub), но parseSkillMd работает всегда.
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { SkillStep, Target, UiPattern } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { query } from "../db/pool.js";
+import { dataPath } from "../paths.js";
+import { isDbReady, query } from "../db/pool.js";
+import { extractSlots } from "./skill-slots.js";
+import type { IEmbeddingProvider } from "../integrations/openai-embeddings.js";
+import { findDuplicateSemantic, findDuplicateSkill, matchLearnedSkill, recallSemantic } from "./skill-recall.js";
+import { attachReplaySection } from "./skill-macro.js";
+
+// Recall/дедуп вынесены в skill-recall.ts (§ревью); ре-экспорт — обратная совместимость импортёров/тестов.
+export { findDuplicateSemantic, findDuplicateSkill, matchLearnedSkill, recallSemantic };
 
 const log: Logger = createLogger("skills");
 
-/** Папка осязаемых SKILL.md на диске (рядом с рабочей директорией сервера, §8). */
-const SKILLS_DIR = join(process.cwd(), "data", "skills");
+/** Папка осязаемых SKILL.md на диске (§универсальность: JARVIS_DATA_DIR → иначе cwd/data). */
+const SKILLS_DIR = dataPath("skills");
 
 /**
  * Префикс id выученных навыков-процедур (§8 HERMES). Развязывает их пространство имён с
@@ -26,6 +34,14 @@ const SKILLS_DIR = join(process.cwd(), "data", "skills");
  * не-`[a-z0-9-]` → `-`), поэтому learned-id не может совпасть с demonstrated-id.
  */
 const LEARNED_ID_PREFIX = "learned__";
+
+/**
+ * Псевдо-пользователь ОБЩЕЙ библиотеки навыков (мультитенант, Фаза 1). Навыки под этим userId видны
+ * ВСЕМ (recall/list сливают `private ∪ shared`), но частный навык того же id ПЕРЕКРЫВАЕТ общий —
+ * так «общие скилы под все компы» (TG/YouTube-процедуры и т.п.) не нужно учить каждому юзеру, а свой
+ * вариант всегда главнее. Нулевой UUID ≠ DEV_USER (`…0001`) — отдельная партиция, не пересекается.
+ */
+export const SHARED_USER_ID = "00000000-0000-0000-0000-000000000000";
 
 /**
  * Фолбэк-хранилище навыков на процесс, когда БД недоступна (DATABASE_URL пуст/недоступен).
@@ -69,6 +85,66 @@ export async function writeSkillFile(id: string, contentMd: string): Promise<voi
   } catch (e) {
     log.warn(`не удалось записать SKILL.md на диск: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+// ── МУЛЬТИ-ДЕМО ДИСТИЛЛЯЦИЯ (идея BrowserBC: запись N показов одной capability → ОДИН обобщённый
+//    устойчивый навык сильной моделью, вместо хрупкого «как сделал последний раз»). Закрывает TODO
+//    «дистилляция процедуры». Демонстрации копятся per-(user,skill) рядом со SKILL.md; распознавание
+//    «той же capability» — существующий семантический дедуп в save(). Исполнение/verify-loop не меняем. ──
+
+const DEMOS_DIR = join(SKILLS_DIR, "_demos");
+
+/** Одна сырая демонстрация: как пользователь сделал задачу один раз. */
+export interface SkillDemonstration {
+  when: string;
+  procedure: string;
+  ts?: number;
+}
+
+/** Дистиллятор: из нескольких демонстраций одной capability → ОДНА обобщённая процедура (LLM, сильный тир). */
+export type SkillDistiller = (input: {
+  name: string;
+  when: string;
+  demonstrations: readonly SkillDemonstration[];
+}) => Promise<string | null>;
+
+/** Прочитать накопленные демонстрации навыка (per-user). Нет файла/сбой → []. */
+async function readDemos(userId: string, id: string): Promise<SkillDemonstration[]> {
+  try {
+    const arr = JSON.parse(await readFile(join(DEMOS_DIR, `${userId}__${id}.json`), "utf8"));
+    return Array.isArray(arr) ? (arr as SkillDemonstration[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Сохранить демонстрации навыка (per-user). Не фатально. */
+async function writeDemos(userId: string, id: string, demos: readonly SkillDemonstration[]): Promise<void> {
+  try {
+    await mkdir(DEMOS_DIR, { recursive: true });
+    await writeFile(join(DEMOS_DIR, `${userId}__${id}.json`), JSON.stringify(demos), "utf8");
+  } catch (e) {
+    log.warn(`не удалось сохранить демонстрации навыка: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Выбрать процедуру для сохранения (ЧИСТАЯ, distiller инъектируется → тестируема без сети):
+ * при ≥2 демонстрациях И наличии дистиллятора — обобщённый дистиллят; иначе — свежая процедура.
+ * Дистиллятор упал/вернул пусто → честный фолбэк на свежую (не теряем сохранение).
+ */
+export async function distillProcedure(
+  name: string,
+  when: string,
+  demonstrations: readonly SkillDemonstration[],
+  freshProcedure: string,
+  distiller?: SkillDistiller,
+): Promise<string> {
+  if (distiller && demonstrations.length >= 2) {
+    const d = await distiller({ name, when, demonstrations }).catch(() => null);
+    if (d && d.trim()) return d.trim();
+  }
+  return freshProcedure.trim();
 }
 
 /** Распарсенный SKILL.md. */
@@ -176,7 +252,7 @@ function buildStep(action: string, kv: Record<string, string>): SkillStep {
 
   // Служебные ключи, которые не уходят в params (target/expect/мета).
   const RESERVED = new Set([
-    "role", "name", "handle", "x", "y", "by",
+    "role", "name", "handle", "x", "y", "by", "space",
     "expectrole", "expectname", "expectstate", "needsllm", "timeoutms", "retries",
   ]);
 
@@ -218,7 +294,8 @@ function buildTarget(kv: Record<string, string>): Target | undefined {
   if (kv.x && kv.y) {
     const x = Number.parseFloat(kv.x);
     const y = Number.parseFloat(kv.y);
-    if (!Number.isNaN(x) && !Number.isNaN(y)) return { by: "coords", x, y };
+    // space="screen" (§8 реплей-макрос): АБСОЛЮТНЫЕ экранные DIP — клиент не применяет маппинг скрина.
+    if (!Number.isNaN(x) && !Number.isNaN(y)) return { by: "coords", x, y, ...(kv.space === "screen" ? { space: "screen" as const } : {}) };
   }
   return undefined;
 }
@@ -300,9 +377,16 @@ export async function saveSkill(
     [id, userId, version, contentMd, JSON.stringify(parsed.steps)],
   );
   if (!res) {
-    // БД недоступна → держим в памяти процесса (фолбэк), чтобы recall в этой сессии нашёл навык.
+    // query() даёт null И при отсутствии БД, И при ОШИБКЕ запроса. Держим в памяти процесса
+    // (фолбэк, чтобы recall в этой сессии нашёл навык), но различаем причину:
     memSkills.set(memKey(userId, id), record);
-    log.debug("saveSkill: БД нет — навык сохранён в памяти процесса (фолбэк)");
+    if (await isDbReady()) {
+      // БД ЕСТЬ, но запрос упал → навык НЕ персистён, после рестарта пропадёт. Это потеря
+      // выученного — кричим (warn), а не молчим (debug), чтобы было видно в логах.
+      log.warn("saveSkill: БД доступна, но запись упала — навык только в памяти (потеряется при рестарте)", { id });
+    } else {
+      log.debug("saveSkill: БД нет — навык сохранён в памяти процесса (фолбэк)");
+    }
   }
   return record;
 }
@@ -352,10 +436,76 @@ export async function listSkills(userId: string): Promise<SkillRecord[]> {
   }));
 }
 
-/** Удалить навык. Возвращает true, если запрос ушёл в БД. */
+/** Удалить навык. Возвращает true, если запрос ушёл в БД. ОБЩИЙ навык так НЕ удаляется (его
+ *  user_id = SHARED_USER_ID ≠ userId юзера) — безопасно по построению, отдельный гард не нужен. */
 export async function deleteSkill(userId: string, id: string): Promise<boolean> {
   const res = await query(`delete from skills where user_id = $1 and id = $2`, [userId, id]);
   return res !== null;
+}
+
+/**
+ * P2.3 НАДЁЖНОСТЬ: скорректировать счётчик провалов навыка. delta=+1 на провал задачи, где навык
+ * применялся; delta=-1 (не ниже 0) на успех — надёжный навык «восстанавливается», хронически падающий
+ * копит провалы и перестаёт подсовываться recall'ом (SKILL_FAIL_SUPPRESS). Нет БД → mem-фолбэк.
+ */
+export async function adjustSkillFailCount(userId: string, id: string, delta: number): Promise<void> {
+  const res = await query(
+    `update skills set fail_count = greatest(fail_count + $3, 0) where user_id = $1 and id = $2`,
+    [userId, id, delta],
+  );
+  if (!res) {
+    const rec = memSkills.get(memKey(userId, id)); // нет БД/запрос упал → фолбэк в памяти процесса
+    if (rec) rec.failCount = Math.max(0, rec.failCount + delta);
+  }
+}
+
+/**
+ * Навыки юзера + ОБЩИЕ (shared) одним списком, с дедупом по id: ЧАСТНЫЙ навык перекрывает общий
+ * того же id (улучшённый/свой вариант главнее). Используется agent-facing путями (recall/list/
+ * каталог/execute) — НЕ дедупом на сейве (тот смотрит только свои, чтобы не мёржить в общий id).
+ */
+export async function listSkillsMerged(userId: string): Promise<SkillRecord[]> {
+  if (userId === SHARED_USER_ID) return listSkills(SHARED_USER_ID); // сам общий — только его записи
+  const [own, shared] = await Promise.all([listSkills(userId), listSkills(SHARED_USER_ID)]);
+  const byId = new Map<string, SkillRecord>();
+  for (const r of shared) byId.set(r.id, r); // сперва общие…
+  for (const r of own) byId.set(r.id, r); // …затем свои перекрывают по id
+  return [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Навык по id из СВОИХ, иначе из ОБЩИХ (частный перекрывает общий). Для skill_execute/резолва. */
+export async function getSkillMerged(userId: string, id: string): Promise<SkillRecord | null> {
+  const own = await getSkill(userId, id);
+  if (own || userId === SHARED_USER_ID) return own;
+  return getSkill(SHARED_USER_ID, id);
+}
+
+/**
+ * Идемпотентно залить курируемый стартовый набор в ОБЩУЮ библиотеку (Фаза 1, boot-seed). Каждый
+ * элемент — канонический content_md (как `serializeLearnedSkill`). Перезаписываем ТОЛЬКО если в общей
+ * библиотеке нет навыка с этим id ИЛИ сид-версия НОВЕЕ (не затираем то, что мог улучшить promote).
+ * Возвращает число записанных. Сбой отдельного навыка не валит остальные (best-effort).
+ */
+export async function seedSharedSkills(mdContents: readonly string[]): Promise<number> {
+  let written = 0;
+  for (const md of mdContents) {
+    try {
+      const { frontmatter } = parseSkillMd(md);
+      const id = String(frontmatter.id ?? "");
+      const seedVer = Number(frontmatter.version ?? 1);
+      if (!id) continue;
+      const existing = await getSkill(SHARED_USER_ID, id);
+      if (existing && existing.version >= seedVer) continue; // в общей уже свежее — не трогаем
+      if (await saveSkill(SHARED_USER_ID, md)) {
+        await writeSkillFile(id, md);
+        written += 1;
+      }
+    } catch (e) {
+      log.warn("seedSharedSkills: пропуск навыка", e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (written > 0) log.info(`общая библиотека навыков: засеяно ${written}`);
+  return written;
 }
 
 // ── Провайдер навыков для agent-loop (§8): каталог + резолв для skill_execute ──
@@ -367,6 +517,8 @@ export interface SkillInfo {
   version: number;
   /** Есть guard-шаги (message.send/order.place/code.run/confirm) → нужно подтверждение (§14). */
   needsReview: boolean;
+  /** Имена переменных {{slot}}, которые надо передать в params при skill_execute (§8). Пусто/нет — навык литеральный. */
+  slots?: string[];
 }
 
 /** Резолвнутый навык для исполнения (skill_execute → ActionCommand skill.execute). */
@@ -407,17 +559,62 @@ export interface RecalledSkill {
   /** Тело процедуры (markdown после фронтматтера). */
   procedure: string;
   version: number;
+  /** Навык из ОБЩЕЙ библиотеки (shared), а не личный — для честной формулировки в промпте (§мультитенант). */
+  fromShared?: boolean;
+  /** P2.3 НАДЁЖНОСТЬ: счётчик чистых провалов задач с этим навыком. recall перестаёт подсовывать навык
+   *  при fail_count ≥ порога (см. SKILL_FAIL_SUPPRESS) — «учится на ошибках», не повторяет провальный приём. */
+  failCount?: number;
+  /** §8 МАКРОС: машинные шаги из секции «## Шаги (реплей)» (derived parseSkillMd). Есть ≥2 —
+   *  агент сперва гонит детерминированный реплей ($0, секунды), LLM остаётся сверка глазами. */
+  steps?: SkillStep[];
+  /** Guard-шаги (send/order/code/confirm) в реплее → авто-прогон запрещён (§14). */
+  needsReview?: boolean;
+}
+
+/** Итог попытки поднять навык в общую библиотеку (skill_promote, §мультитенант). */
+export interface PromoteResult {
+  ok: boolean;
+  /** Имя навыка при успехе. */
+  name?: string;
+  /** Причина отказа: not_found | not_learned | already_shared | save_failed. */
+  reason?: "not_found" | "not_learned" | "already_shared" | "save_failed";
 }
 
 export interface SkillProvider {
-  /** Каталог РЕПЛЕЙ-навыков (записанных показом) для skill_list/skill_execute (§8). */
+  /** Каталог РЕПЛЕЙ-навыков (записанных показом) для skill_list/skill_execute (§8). Свои + общие. */
   list(userId: string): Promise<SkillInfo[]>;
   /** Резолв реплей-навыка по id для skill_execute (§8). Выученные-процедуры сюда не входят. */
   get(userId: string, id: string): Promise<ResolvedSkill | null>;
   /** Сохранить выученный навык-процедуру (§8 HERMES, инструмент skill_save). */
   save(userId: string, input: LearnedSkillInput): Promise<SavedLearnedSkill | null>;
-  /** Подобрать подходящий выученный навык под текст задачи (recall, §8). null — нет. */
+  /** Подобрать подходящий выученный навык под текст задачи (recall, §8). null — нет. Свои + общие. */
   recall(userId: string, text: string): Promise<RecalledSkill | null>;
+  /** Поднять СВОЙ выученный навык в ОБЩУЮ библиотеку (§мультитенант): копия под SHARED_USER_ID.
+   *  Опционально (как learnedCatalog) — тест-моки могут не реализовывать; dispatch гардит наличие. */
+  promote?(userId: string, id: string): Promise<PromoteResult>;
+  /** Компактный каталог ВЫУЧЕННЫХ навыков (имя+когда) — для семантического self-recall Claude'ом
+   *  на лексическом промахе (выученные процедуры в skill_list НЕ входят). §8 Фаза 3. */
+  learnedCatalog?(userId: string): Promise<Array<{ name: string; when: string }>>;
+  /** P2.3 НАДЁЖНОСТЬ: записать исход задачи, где применялся выученный навык. success=false → +1 провал
+   *  (навык приближается к подавлению в recall), success=true → -1 (восстановление). Опц. (моки могут не иметь). */
+  recordOutcome?(userId: string, id: string, success: boolean): Promise<void>;
+  /** §8 МАКРОС: вписать в СВОЙ выученный навык секцию авто-реплея (машинные строки шагов из
+   *  успешного прогона). true — записано (версия++); false — нет изменений/не свой/не learned. */
+  attachReplay?(userId: string, id: string, lines: readonly string[]): Promise<boolean>;
+}
+
+/**
+ * Компактный каталог выученных навыков для контекста (§8 Фаза 3): по строке «• имя — когда».
+ * Инжектится в НЕкешируемый хвост ТОЛЬКО при лексическом промахе (recall===null), капается —
+ * чтобы Claude сам применил подходящий навык ПО СМЫСЛУ (падежи/синонимы/Герман↔Herman), без
+ * эмбеддингов (у Claude их нет) и без токен-блоата каждый ход. Чистая функция — юнит-тест.
+ */
+export function formatSkillCatalog(skills: ReadonlyArray<{ name: string; when: string }>, cap = 10): string {
+  const items = skills
+    .slice(0, cap)
+    .map((s) => `• ${String(s.name).trim()} — ${String(s.when).replace(/\s+/g, " ").trim().slice(0, 100)}`)
+    .filter((l) => l.length > 4);
+  return items.join("\n");
 }
 
 /** Это выученный навык-процедура (HERMES, source: learned), а не реплей записанного показом? */
@@ -435,6 +632,10 @@ function readLearned(rec: SkillRecord): RecalledSkill | null {
     when: String(fm.description ?? ""),
     procedure: splitFrontmatter(rec.contentMd).body.trim(),
     version: rec.version,
+    failCount: rec.failCount, // P2.3: надёжность — recall подавит хронически падающий навык
+    ...(rec.userId === SHARED_USER_ID ? { fromShared: true } : {}),
+    // §8 МАКРОС: derived-шаги (проза не парсится; ≠[] только если в навыке есть машинная секция реплея).
+    ...(rec.steps.length > 0 ? { steps: rec.steps, needsReview: hasGuardSteps(rec.steps) } : {}),
   };
 }
 
@@ -458,80 +659,33 @@ export function serializeLearnedSkill(input: {
   return `---\n${fm}\n---\n\n${input.procedure.trim()}\n`;
 }
 
-/** Значимые токены (≥4 симв., ё→е) для лексического матча recall (§8). */
-function skillTokens(s: string): string[] {
-  const norm = s.toLowerCase().replace(/ё/g, "е");
-  return (norm.match(/[a-zа-я0-9]+/gu) ?? []).filter((w) => w.length >= 4);
-}
-
-/** Длина общего префикса двух строк. */
-function commonPrefixLen(a: string, b: string): number {
-  const n = Math.min(a.length, b.length);
-  let i = 0;
-  while (i < n && a[i] === b[i]) i += 1;
-  return i;
-}
-
-/**
- * Стемминг-матч с ДЛИНОЗАВИСИМЫМ порогом общего префикса (§8). Точное совпадение — всегда
- * матч. Иначе нужен общий префикс ≥ max(5, ⌈0.75·min(len)⌉): это терпит русскую морфологию
- * («отчёт»/«отчёта», «отправь»/«отправить»), но НЕ ловит чужие слова с коротким общим
- * префиксом («столкнулся»/«столица», «почта»/«почти», «привет»/«приватный») — ложный recall
- * вреднее пропуска. Короткие токены (4 симв.) матчатся только точно.
- */
-function tokenHit(q: ReadonlySet<string>, target: string): boolean {
-  if (q.has(target)) return true;
-  for (const w of q) {
-    const need = Math.max(5, Math.ceil(0.75 * Math.min(w.length, target.length)));
-    if (commonPrefixLen(w, target) >= need) return true;
-  }
-  return false;
-}
-
-/**
- * Подобрать лучший выученный навык под текст задачи (§8 HERMES). Лексический матч с
- * грубым стеммингом по имени+описанию навыка. Порог намеренно консервативный (≥2
- * значимых попадания и ≥1/3 перекрытие): ложный recall вреднее пропуска — лишняя
- * процедура в промпте сбивает; пропущенный навык модель просто переоткроет. Чистая
- * функция (без БД) — для прямого юнит-теста.
- */
-export function matchLearnedSkill(text: string, skills: readonly RecalledSkill[]): RecalledSkill | null {
-  const q = new Set(skillTokens(text));
-  if (q.size === 0) return null;
-  let best: RecalledSkill | null = null;
-  let bestScore = 0;
-  for (const s of skills) {
-    const targets = [...new Set(skillTokens(`${s.name} ${s.when}`))];
-    if (targets.length === 0) continue;
-    let hits = 0;
-    for (const t of targets) if (tokenHit(q, t)) hits += 1;
-    const score = hits / Math.min(q.size, targets.length);
-    // Тай-брейк детерминирован (по id), чтобы recall не зависел от порядка listSkills.
-    if (hits >= 2 && (score > bestScore || (score === bestScore && best !== null && s.id < best.id))) {
-      best = s;
-      bestScore = score;
-    }
-  }
-  return bestScore >= 0.34 ? best : null;
-}
-
 /** Человекочитаемое имя навыка из фронтматтера (иначе — id). */
 function skillName(rec: SkillRecord): string {
   return String(parseSkillMd(rec.contentMd).frontmatter.name ?? rec.id);
 }
 
-/** Адаптер над listSkills/getSkill: каталог и резолв навыков для мозга (§8). */
-export function createSkillProvider(): SkillProvider {
+/** Адаптер над listSkills/getSkill: каталог и резолв навыков для мозга (§8).
+ *  embedder (опц.) включает СЕМАНТИЧЕСКИЙ recall; без него — лексический (как раньше). */
+export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: SkillDistiller): SkillProvider {
   return {
     async list(userId) {
-      const recs = await listSkills(userId);
+      const recs = await listSkillsMerged(userId); // свои + общие (частный перекрывает общий)
       // Выученные-процедуры (HERMES) не реплеятся — их место в recall, а не в skill_execute.
       return recs
         .filter((r) => !isLearnedMd(r.contentMd))
-        .map((r) => ({ id: r.id, name: skillName(r), version: r.version, needsReview: hasGuardSteps(r.steps) }));
+        .map((r) => {
+          const slots = extractSlots(r.steps);
+          return {
+            id: r.id,
+            name: skillName(r),
+            version: r.version,
+            needsReview: hasGuardSteps(r.steps),
+            ...(slots.length > 0 ? { slots } : {}),
+          };
+        });
     },
     async get(userId, id) {
-      const r = await getSkill(userId, id);
+      const r = await getSkillMerged(userId, id); // свой, иначе общий
       if (!r || isLearnedMd(r.contentMd)) return null; // процедуру нельзя реплеить — только следовать
       return { id: r.id, version: r.version, steps: r.steps, needsReview: hasGuardSteps(r.steps) };
     },
@@ -542,21 +696,87 @@ export function createSkillProvider(): SkillProvider {
         return null;
       }
       // Пространство id выученных навыков изолировано от записанных показом (см. LEARNED_ID_PREFIX).
-      const id = LEARNED_ID_PREFIX + slugify(name);
+      const slugId = LEARNED_ID_PREFIX + slugify(name);
+      // ДЕДУП (§8): не плодить дубли на вариации ИМЕНИ (дота/доте/лишнее слово раньше → 3 строки).
+      // Сначала точный slug, иначе семантически-похожий существующий learned-навык (скоринг как recall,
+      // но СТРОЖЕ) → пишем в ЕГО id (upsert обновит версию); новый id только если похожего нет.
+      const learned = (await listSkills(userId)).map(readLearned).filter((x): x is RecalledSkill => x !== null);
+      const dup =
+        learned.find((s) => s.id === slugId) ??
+        (embedder ? await findDuplicateSemantic(embedder, name, input.when, learned) : findDuplicateSkill(name, input.when, learned));
+      const id = dup ? dup.id : slugId;
+      if (dup && dup.id !== slugId) log.info("skill save: дедуп — обновляю похожий навык", { id, insteadOf: slugId });
       // Повторное сохранение того же навыка — новая версия (улучшение, §8): version++.
       const existing = await getSkill(userId, id);
       const version = existing ? existing.version + 1 : 1;
-      const contentMd = serializeLearnedSkill({ id, name, version, when: input.when, procedure: input.procedure });
+      // МУЛЬТИ-ДЕМО ДИСТИЛЛЯЦИЯ (BrowserBC): копим показы одной capability → дистиллируем в ОДНУ
+      // обобщённую устойчивую процедуру (вместо «как сделал последний раз»). Без дистиллятора/при 1 показе — свежая.
+      const demos = await readDemos(userId, id);
+      demos.push({ when: input.when, procedure: input.procedure.trim(), ts: Date.now() });
+      const procedure = await distillProcedure(name, input.when, demos, input.procedure, distiller);
+      if (procedure !== input.procedure.trim()) log.info("skill save: навык дистиллирован из демонстраций", { id, demos: demos.length });
+      await writeDemos(userId, id, demos);
+      const contentMd = serializeLearnedSkill({ id, name, version, when: input.when, procedure });
       const rec = await saveSkill(userId, contentMd);
       await writeSkillFile(id, contentMd);
       return { id, name, version: rec?.version ?? version };
     },
     async recall(userId, text) {
-      const recs = await listSkills(userId);
+      const recs = await listSkillsMerged(userId); // свои + общие (частный перекрывает общий)
       const learned = recs
         .map(readLearned)
         .filter((x): x is RecalledSkill => x !== null);
+      if (learned.length === 0) return null;
+      // Семантический авто-инжект (эмбеддер e5): ловит падежи/синонимы/перефраз. Эмбеддер не передан /
+      // вернул null → лексический matchLearnedSkill (как раньше). learnedCatalog (self-recall Claude'ом
+      // по каталогу) остаётся бэкстопом на промахах обоих.
+      if (embedder) return recallSemantic(embedder, text, learned);
       return matchLearnedSkill(text, learned);
+    },
+    async learnedCatalog(userId) {
+      const recs = await listSkillsMerged(userId); // свои + общие
+      return recs
+        .map(readLearned)
+        .filter((x): x is RecalledSkill => x !== null)
+        .map((s) => ({ name: s.name, when: s.when }));
+    },
+    async recordOutcome(userId, id, success) {
+      // P2.3: успех гасит провалы (-1, не ниже 0), провал копит (+1). Подавление в recall — по порогу.
+      await adjustSkillFailCount(userId, id, success ? -1 : 1);
+    },
+    async promote(userId, id) {
+      // Поднять можно ТОЛЬКО свой навык (owner-check через приватный getSkill, не merged).
+      if (userId === SHARED_USER_ID) return { ok: false, reason: "already_shared" };
+      const rec = await getSkill(userId, id);
+      if (!rec) return { ok: false, reason: "not_found" };
+      // В общую библиотеку поднимаем выученные ПРОЦЕДУРЫ (HERMES), не записанные показом реплеи.
+      if (!isLearnedMd(rec.contentMd)) return { ok: false, reason: "not_learned" };
+      const shared = await saveSkill(SHARED_USER_ID, rec.contentMd);
+      if (!shared) return { ok: false, reason: "save_failed" };
+      await writeSkillFile(rec.id, rec.contentMd);
+      log.info("skill promote: навык поднят в общую библиотеку", { id });
+      return { ok: true, name: skillName(rec) };
+    },
+    async attachReplay(userId, id, lines) {
+      // §8 МАКРОС: только СВОЙ выученный навык (owner-write; координаты экрана — личные, не shared).
+      const rec = await getSkill(userId, id);
+      if (!rec || !isLearnedMd(rec.contentMd) || lines.length === 0) return false;
+      const fm = parseSkillMd(rec.contentMd).frontmatter;
+      const body = splitFrontmatter(rec.contentMd).body.trim();
+      const newBody = attachReplaySection(body, lines);
+      if (newBody === body) return false; // тот же реплей уже вписан — не бампаем версию
+      const contentMd = serializeLearnedSkill({
+        id,
+        name: String(fm.name ?? id),
+        version: rec.version + 1,
+        when: String(fm.description ?? ""),
+        procedure: newBody,
+      });
+      const saved = await saveSkill(userId, contentMd);
+      if (!saved) return false;
+      await writeSkillFile(id, contentMd);
+      log.info("§8 макрос: авто-реплей вписан в навык", { id, version: saved.version, steps: lines.length });
+      return true;
     },
   };
 }
@@ -611,6 +831,7 @@ export function serializeStep(step: SkillStep, index: number): string {
       toks.push(`handle="${escapeAttr(t.handle)}"`);
     } else {
       toks.push(`x=${t.x}`, `y=${t.y}`);
+      if (t.space === "screen") toks.push(`space="screen"`);
     }
   }
   for (const [k, v] of Object.entries(step.params ?? {})) {

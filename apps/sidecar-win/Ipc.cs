@@ -59,6 +59,9 @@ public static class ArgsHelper
     {
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        // handle гуляет как число (C# int) ↔ строка (TS Target.handle: string). Разрешаем читать число из
+        // строки, иначе invoke/click по handle-строке падал десериализацией (латентный баг ui.invoke-по-handle).
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
     };
 
     public static T Deserialize<T>(JsonElement el)
@@ -78,6 +81,12 @@ public sealed record GroundArgs(
     [property: JsonPropertyName("scope")]   string? Scope   // pid или "" = весь рабочий стол
 );
 
+// §бесшумный-ввод: грунд по КООРДИНАТАМ (логические 96dpi, как у click) → handle actionable-элемента.
+public sealed record GroundAtPointArgs(
+    [property: JsonPropertyName("x")] double X,
+    [property: JsonPropertyName("y")] double Y
+);
+
 public sealed record InvokeArgs(
     [property: JsonPropertyName("handle")]  int Handle,
     [property: JsonPropertyName("pattern")] string Pattern, // invoke|setValue|select|toggle|expand|scroll
@@ -88,7 +97,9 @@ public sealed record ClickArgs(
     [property: JsonPropertyName("x")]       double? X,
     [property: JsonPropertyName("y")]       double? Y,
     [property: JsonPropertyName("handle")]  int? Handle,    // fallback: грунд уже есть
-    [property: JsonPropertyName("button")]  string? Button  // "left"|"right"|"middle", по умолчанию "left"
+    [property: JsonPropertyName("button")]  string? Button, // "left"|"right"|"middle", по умолчанию "left"
+    // §бесшумный-ввод: вернуть курсор на прежнее место после физ.клика (клиент ставит true при простое юзера).
+    [property: JsonPropertyName("restoreCursor")] bool? RestoreCursor
 );
 
 public sealed record TypeArgs(

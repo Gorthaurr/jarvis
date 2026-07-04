@@ -9,6 +9,21 @@ import type {
 } from "../integrations/voice-providers.js";
 import { VoicePipeline } from "./pipeline.js";
 import type { VoiceState } from "./state.js";
+import { MockSpeakerVerifier, type VoiceProfile } from "./speaker/verifier.js";
+import type { TurnDetector } from "./turn.js";
+
+/** Турн-детектор-заглушка: всегда «endpoint» на speech_end (для теста гейта диктора). */
+function alwaysEndpointTurn(): TurnDetector {
+  return {
+    onSpeechStart() {},
+    onInterim() {},
+    onSpeechEnd: () => "endpoint",
+    tick: () => "wait",
+    reset() {},
+    minSilenceMs: 200,
+    maxSilenceMs: 800,
+  } as unknown as TurnDetector;
+}
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -189,5 +204,172 @@ describe("VoicePipeline (§10)", () => {
     pipe.stop();
     expect(pipe.state).toBe("idle");
     expect(tts.last!.cancelled).toBe(true);
+  });
+});
+
+describe("VoicePipeline — окно разговора (wake word, §3)", () => {
+  /**
+   * Сетап с requireWakeWord + управляемыми часами. say() прогоняет полный ход: эмитит финал
+   * на текущем STT-стриме и, если агента позвали, докручивает TTS до speak_done (→ снова
+   * listening). followupMs огромный — таймер follow-up не вмешивается в проверку окна.
+   */
+  function setup(conversationWindowMs: number) {
+    let clock = 0;
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs,
+      followupMs: 1_000_000,
+      now: () => clock,
+    });
+    const advance = (ms: number) => {
+      clock += ms;
+    };
+    const say = async (text: string) => {
+      pipe.onWake(); // гарантируем listening + открытый STT (идемпотентно в активном окне)
+      const callsBefore = onUserTurn.mock.calls.length;
+      stt.last!.emit({ text, final: true });
+      await flush();
+      // Агента позвали (реплика принята) → докрутим свежий TTS до speak_done (→ снова listening).
+      if (onUserTurn.mock.calls.length > callsBefore && tts.last) {
+        tts.last.push(0, true);
+        tts.last.finish();
+        await flush();
+      }
+    };
+    return { pipe, onUserTurn, advance, say };
+  }
+
+  it("без обращения «Джарвис» до пробуждения — игнор (агент не зовётся)", async () => {
+    const { onUserTurn, say } = setup(1_000);
+    await say("открой блокнот");
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("«Джарвис» будит; дальше в окне можно без обращения", async () => {
+    const { onUserTurn, say } = setup(1_000);
+    await say("Джарвис, который час");
+    expect(onUserTurn).toHaveBeenLastCalledWith("который час");
+    await say("а какое число"); // без «Джарвис», окно ещё открыто
+    expect(onUserTurn).toHaveBeenLastCalledWith("а какое число");
+    expect(onUserTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("окно КАТИТСЯ от каждой принятой реплики (корень фикса «глохнет посреди разговора»)", async () => {
+    const { onUserTurn, advance, say } = setup(1_000);
+    await say("Джарвис, привет"); // t=0
+    advance(800); // < окна
+    await say("как дела"); // принято → окно сдвинулось на t=800
+    advance(800); // t=1600: >1000 от ПЕРВОЙ реплики, но <1000 от второй
+    await say("спасибо"); // принимается благодаря качению окна
+    expect(onUserTurn).toHaveBeenNthCalledWith(3, "спасибо");
+    expect(onUserTurn).toHaveBeenCalledTimes(3);
+  });
+
+  it("после паузы дольше окна реплика без обращения — игнор", async () => {
+    const { onUserTurn, advance, say } = setup(1_000);
+    await say("Джарвис, привет");
+    const calls = onUserTurn.mock.calls.length;
+    advance(2_000); // > окна, активности не было
+    await say("ещё раз"); // без «Джарвис» → игнор
+    expect(onUserTurn).toHaveBeenCalledTimes(calls);
+  });
+});
+
+describe("VoicePipeline — верификация диктора (§3 kill-фича)", () => {
+  const PROFILE: VoiceProfile = { name: "Антон", data: new Uint8Array([1]), createdAt: 0 };
+
+  function setup(score: number) {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const verifier = new MockSpeakerVerifier({ ready: true, threshold: 0.5, match: () => ({ name: "Антон", score }) });
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      turnDetector: alwaysEndpointTurn(),
+      speaker: { verifier, profiles: () => [PROFILE] },
+    });
+    // Прогон хода через VAD-эндпоинт (где работает гейт): wake → речь (interim+аудио) → speech_end.
+    const turn = async (text: string) => {
+      pipe.onWake();
+      stt.last!.emit({ text, final: false }); // interim — для спекулятивного финала
+      pipe.onAudioFrame(new Int16Array([10, 20, 30, 40]).buffer); // накопить аудио хода (>0)
+      pipe.onVadEvent("speech_end"); // endpoint → checkSpeaker (async) → gateWake
+      await flush();
+      await flush();
+    };
+    return { onUserTurn, turn, stt, pipe };
+  }
+
+  it("СВОЙ голос (score ≥ порога) → реплика обрабатывается", async () => {
+    const { onUserTurn, turn } = setup(0.82);
+    await turn("какая погода");
+    expect(onUserTurn).toHaveBeenCalledWith("какая погода");
+  });
+
+  it("ЧУЖОЙ голос/музыка (score < порога) → ход молча отброшен (агент не зван)", async () => {
+    const { onUserTurn, turn } = setup(0.2);
+    await turn("какая погода");
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("ПОЗДНИЙ реальный финал отклонённого хода НЕ протекает после переоткрытия STT (фикс протечки гейта)", async () => {
+    const { onUserTurn, stt, pipe } = setup(0.2); // чужой
+    // 1. Отклонённый ход: interim + аудио + эндпоинт. Спекулятивный путь блокируется.
+    pipe.onWake();
+    const rejectedStream = stt.last!; // запоминаем стрим отклонённого хода
+    rejectedStream.emit({ text: "какая погода", final: false });
+    pipe.onAudioFrame(new Int16Array([10, 20, 30, 40]).buffer);
+    pipe.onVadEvent("speech_end"); // endpoint → checkSpeaker → speakerRejected + пометка стрима
+    await flush();
+    await flush();
+    expect(onUserTurn).not.toHaveBeenCalled();
+    // 2. Новый цикл слушания (idle→wake→open_stt) СБРАСЫВАЕТ глобальный speakerRejected и открывает
+    //    НОВЫЙ стрим — именно здесь раньше терялся вердикт для позднего финала старого стрима.
+    pipe.onWake();
+    await flush();
+    expect(stt.last).not.toBe(rejectedStream); // действительно открылся новый стрим
+    // 3. Поздний реальный финал приходит на СТАРОМ стриме (как делает Deepgram на close).
+    rejectedStream.emit({ text: "какая погода", final: true });
+    await flush();
+    await flush();
+    expect(onUserTurn).not.toHaveBeenCalled(); // НЕ должен протечь к агенту
+  });
+});
+
+describe("VoicePipeline — само-восстановление прослушки (§10 «глохнет после пустого хода»)", () => {
+  it("STT закрылся в listening (эндпоинт без транскрипта) → следующий кадр ПЕРЕОТКРЫВАЕТ стрим", async () => {
+    const stt = new CtrlSttProvider();
+    const pipe = new VoicePipeline({
+      stt,
+      tts: new CtrlTtsProvider(),
+      onUserTurn: vi.fn(async () => ({ voice: "ок" })),
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      turnDetector: alwaysEndpointTurn(),
+    });
+    // 1. Активация: первый кадр из idle → wake → открыт STT (stream1), состояние listening.
+    pipe.onAudioFrame(new Int16Array([1, 2, 3, 4]).buffer);
+    const stream1 = stt.last!;
+    expect(stream1).not.toBeNull();
+    // 2. Пустой эндпоинт (тишина/чужой без транскрипта): speech_end → close_stt. Состояние остаётся
+    //    listening, но STT закрыт — раньше тут Джарвис «глох» навсегда (кадры в закрытый стрим).
+    pipe.onVadEvent("speech_end");
+    await flush();
+    expect(stream1.closed).toBe(true);
+    // 3. Следующий кадр в listening с закрытым STT → САМО-восстановление: открывается новый стрим.
+    pipe.onAudioFrame(new Int16Array([5, 6, 7, 8]).buffer);
+    expect(stt.last).not.toBe(stream1); // переоткрылся — Джарвис снова слышит
   });
 });

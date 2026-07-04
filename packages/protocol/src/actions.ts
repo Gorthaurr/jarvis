@@ -15,7 +15,10 @@
 export type Target =
   | { by: "role"; role: string; name?: string }
   | { by: "handle"; handle: string } // из предыдущего ui.ground
-  | { by: "coords"; x: number; y: number }; // fallback only — vision-координаты
+  // coords: по умолчанию — vision-координаты ПОСЛЕДНЕГО screen_capture (клиент переводит через
+  // маппинг снимка). space="screen" — АБСОЛЮТНЫЕ экранные DIP virtual-desktop, без маппинга
+  // (реплей-макросы §8: клик записан в разрешённых координатах и воспроизводится без скрина).
+  | { by: "coords"; x: number; y: number; space?: "screen" };
 
 /** UIA-паттерны для ui.invoke — ОСНОВНОЙ путь действия (по handle, без фокуса/захвата курсора, §6). */
 export type UiPattern =
@@ -32,14 +35,18 @@ export type CodeLang = "python" | "node" | "powershell";
 /** Канал переписки от лица пользователя (§12). */
 export type MessageChannel = "vk" | "telegram";
 
-/** Операции питания ОС. shutdown/restart/logoff необратимы → confirm (§4). */
-export type PowerOp = "sleep" | "shutdown" | "restart" | "logoff";
+/**
+ * Операции питания ОС. shutdown/restart/logoff необратимы → confirm (§4).
+ * shutdown/restart исполняются С ЗАДЕРЖКОЙ и предупреждением ОС (окно отмены), а не мгновенно;
+ * `cancel` отменяет запланированное выключение/перезагрузку (безопасно, без confirm).
+ */
+export type PowerOp = "sleep" | "shutdown" | "restart" | "logoff" | "cancel";
 
 /** Управление медиа (глобальные media-клавиши). */
-export type MediaOp = "play" | "pause" | "next" | "prev" | "stop";
+export type MediaOp = "play" | "pause" | "next" | "prev" | "stop" | "state";
 
 /** Управление громкостью. set требует level (0..100). */
-export type VolumeOp = "set" | "mute" | "up" | "down";
+export type VolumeOp = "set" | "mute" | "up" | "down" | "get";
 
 /** Операции Excel (через COM). */
 export type ExcelOp = "read" | "write_cell" | "append_row";
@@ -51,7 +58,23 @@ export type WordOp = "read" | "write" | "append";
  * Абстрактная команда действия (server -> client).
  * Конверт: envelope.id = commandId; payload несёт timeoutMs (§5).
  */
-export type ActionCommand =
+/**
+ * `proactive?` — команда инициирована САМИМ Джарвисом (напоминание/проактив), а НЕ в ответ на просьбу юзера.
+ * Сторож USER_BUSY (`actuators/index.ts`) глушит физический ввод (мышь/клава) ТОЛЬКО при `proactive===true`
+ * — ЗАПРОШЕННОЕ юзером действие НЕ блокируется (он сам попросил, мешать тут нечему). По умолчанию
+ * (undefined/false) = реактивная команда = выполняется, даже если юзер сейчас за вводом.
+ */
+export type ActionCommand = ActionCommandKind & {
+  proactive?: boolean;
+  /**
+   * Происхождение хода (ставится СЕРВЕРОМ, не моделью): "user" = явная реплика юзера → физ.ввод НЕ гейтить
+   * (он сам попросил); "proactive" = само-инициатива Джарвиса → гейт присутствия глушит физ.ввод при активном
+   * юзере. Канон; `proactive` оставлен для совместимости (proactive===true эквивалент origin==="proactive").
+   */
+  origin?: "user" | "proactive";
+};
+
+type ActionCommandKind =
   | { kind: "input.type"; text: string }
   | {
       kind: "input.key";
@@ -59,12 +82,19 @@ export type ActionCommand =
       mode?: "press" | "down" | "up"; // press (по умолч.), down (удержать), up (отпустить) — для игр
       scancode?: boolean; // true → слать сканкодами (DirectInput/RawInput игр)
     }
-  | { kind: "input.click"; target: Target } // синтетический ввод — FALLBACK (§6)
+  // input.click — §6 клик. method (клиент выбирает лестницу деградации): "silent" (дефолт на десктопе) =
+  // без движения физ.курсора (UIA-invoke по handle/координатам → оконное сообщение → физ.клик С ВОЗВРАТОМ
+  // курсора); "physical" = сразу SendInput (игры/canvas, где silent заведомо не сработает — не тратим round-trip).
+  | { kind: "input.click"; target: Target; method?: "silent" | "physical" }
   | { kind: "ui.invoke"; target: Target; pattern: UiPattern; value?: string } // UIA-паттерны — ОСНОВНОЙ путь
   | { kind: "ui.ground"; query: { role: string; name?: string } } // -> возвращает handle/bbox в ActionResult.data
   | { kind: "app.launch"; app: string }
   | { kind: "app.focus"; app: string }
-  | { kind: "browser.open"; url: string }
+  // Закрыть приложение ПО ПРОЦЕССУ (§6). graceful (CloseMainWindow, как клик по крестику) по
+  // умолчанию; force — жёсткий kill (теряет несохранённое) → confirm. НИКОГДА не закрывает сам
+  // Джарвис/критические процессы (self-exclusion в актуаторе). Закрытие НЕ через Alt+F4.
+  | { kind: "app.close"; app: string; force?: boolean }
+  | { kind: "browser.open"; url: string; inDefault?: boolean } // inDefault: открыть в ДЕФОЛТНОМ (залогиненном) браузере пользователя через shell (не CDP-инстанс) — для «просто открой/включи»
   | {
       kind: "browser.act";
       // CDP-драйв: медиа/прокрутка/навигация/клик/ввод по видимому тексту или селектору.
@@ -80,21 +110,26 @@ export type ActionCommand =
       steps: SkillStep[];
       params?: Record<string, unknown>;
     } // клиентский skill-runner, §8
-  | { kind: "screen.capture" }
+  | { kind: "screen.capture"; monitor?: string | number } // monitor: "active"(дефолт, под курсором)|"primary"|"jarvis"|индекс
   | { kind: "context.read"; scope: "selection" | "active_window" | "screen" } // дейксис, §19
   | { kind: "demo.record"; op: "start" | "stop" } // обучение демонстрацией, §8
   | { kind: "message.send"; channel: MessageChannel; to: string; body: string } // ТРЕБУЕТ confirm + cadence guard
-  | { kind: "telegram.send"; to: string; text: string } // НЕВИДИМО через выделенный Chrome+CDP (НЕ MTProto/userbot — см. message.send)
-  | { kind: "telegram.read"; to: string; count?: number } // прочитать последние сообщения чата
+  // НЕВИДИМО через выделенный Chrome+CDP (НЕ MTProto/userbot — см. message.send). preferredTitle/hintPeerId —
+  // опытная память: открыть чат СРАЗУ по запомненному резолву (fast-path), минуя поиск+дизамбигуацию.
+  | { kind: "telegram.send"; to: string; text: string; preferredTitle?: string; hintPeerId?: string }
+  | { kind: "telegram.read"; to: string; count?: number; preferredTitle?: string; hintPeerId?: string }
   // ── «Браузер Джарвиса» (§6): его СОБСТВЕННЫЙ невидимый залогиненный Chrome, общие примитивы ──
   | { kind: "jbrowser.open"; url: string } // открыть URL в браузере Джарвиса (невидимо) → читаемый контент
   | { kind: "jbrowser.read" } // прочитать текущую страницу браузера Джарвиса
+  | { kind: "jbrowser.inspect"; query?: string; cap?: number } // инвентарь интерактивных элементов (глаза на любой сайт)
   | { kind: "jbrowser.act"; intent: "click" | "type" | "scroll" | "key"; params?: Record<string, unknown> }
   | { kind: "jbrowser.login"; url: string } // открыть страницу ВИДИМО для входа (тот же профиль) → дальше невидимо
+  | { kind: "jbrowser.import_cookies"; cookies: Array<Record<string, unknown>> } // §перенос логинов: куки из расширения → браузер Джарвиса (CDP setCookie)
   | { kind: "order.place"; vendor: string; items: Record<string, unknown>[]; total: number } // confirm + spend cap + idempotency
   // ── Файловая система (§6): прямое управление файлами на машине пользователя ──
   | { kind: "fs.read"; path: string; maxBytes?: number } // прочитать текстовый файл
   | { kind: "fs.write"; path: string; content: string; createDirs?: boolean } // создать/перезаписать (правка файла)
+  | { kind: "fs.edit"; path: string; old: string; new: string; replaceAll?: boolean } // точечная правка: заменить фрагмент (без перезаписи всего файла)
   | { kind: "fs.append"; path: string; content: string } // дописать в конец
   | { kind: "fs.list"; path: string; recursive?: boolean } // содержимое каталога
   | { kind: "fs.delete"; path: string; recursive?: boolean } // удалить файл/каталог — ТРЕБУЕТ confirm (§4)
@@ -107,8 +142,11 @@ export type ActionCommand =
   | { kind: "system.media"; op: MediaOp } // глобальные media-клавиши
   | { kind: "system.volume"; op: VolumeOp; level?: number } // громкость (set требует level 0..100)
   | { kind: "system.clipboard"; op: "read" | "write"; text?: string } // буфер обмена
+  | { kind: "system.layout"; lang: "ru" | "en" | "toggle" } // переключить раскладку клавиатуры активного окна (игры/консоль/ввод)
   // ── Мультимонитор (§6): на какой монитор уводить видимую активность Джарвиса ──
-  | { kind: "monitor.set"; target: "jarvis" | "primary" } // jarvis=рабочий (вторичный), primary=основной пользователя
+  | { kind: "monitor.set"; target: "jarvis" | "primary" } // ВРЕМЕННО: jarvis=рабочий, primary=основной пользователя
+  | { kind: "monitor.list" } // перечислить мониторы (для выбора рабочего)
+  | { kind: "monitor.assign"; index: number | null } // ПЕРСИСТЕНТНО назначить рабочий монитор Джарвиса (null=авто)
   // ── Office как ЖИВЫЕ приложения (§6): Word/Excel через COM ──
   | {
       kind: "office.excel";
@@ -125,18 +163,42 @@ export type ActionCommand =
       op: WordOp;
       path: string;
       text?: string; // для write (заменить) / append (дописать абзац)
-    };
+    }
+  // ── OBS Studio через obs-websocket v5 (§): ПРОГРАММНОЕ управление вместо хрупких кликов ──
+  | { kind: "obs.request"; requestType: string; requestData?: Record<string, unknown> }; // напр. SetStreamServiceSettings
 
 export type ActionKind = ActionCommand["kind"];
+
+/** Описание одного монитора для выбора рабочего экрана Джарвиса (§6 мультимонитор). */
+export interface MonitorInfo {
+  /** Индекс в screen.getAllDisplays() — им же назначается рабочий монитор. */
+  index: number;
+  /** Человеко-метка: «Монитор 1 — 1920×1080 (основной, слева)». */
+  label: string;
+  width: number;
+  height: number;
+  /** Основной монитор ОС (там пользователь). */
+  isPrimary: boolean;
+  /** Текущий рабочий монитор Джарвиса (куда уходят его окна). */
+  isJarvis: boolean;
+}
+
+/** Список мониторов + текущая настройка (для UI и автономного выбора). */
+export interface MonitorList {
+  monitors: MonitorInfo[];
+  /** Настроенный индекс рабочего монитора Джарвиса; null = авто (вторичный). */
+  jarvisIndex: number | null;
+}
 
 /**
  * Распарсенный шаг SKILL.md (derived из content_md, §8).
  * needsLlm=true — единственный случай, когда runner зовёт сервер не по ошибке
  * (сочинить текст по месту).
- * expect — постусловие шага: runner поллит a11y до наступления (auto-wait);
- * по таймауту — re-ground + retry; исчерпал retries — эскалация.
- * Шаг без expect — слепой клик; допустим только там, где постусловие
- * невыразимо (видео-канвас).
+ * expect — постусловие шага: runner поллит до наступления (auto-wait); по таймауту — re-ground +
+ * retry; исчерпал retries — эскалация. kind="a11y" (дефолт) — проверка по UIA (role/name/state).
+ * kind="visual" — для поверхностей БЕЗ a11y (canvas/игры/видео): сверка по ЭКРАНУ (text — что должно
+ * появиться). Локальной OCR-проверки visual пока нет → честная эскалация к LLM (он видит screen_capture),
+ * НЕ ложный успех. Шаг без expect — слепой клик (только где постусловие невыразимо).
  */
 export interface SkillStep {
   /** ActionKind или верхнеуровневый интент шага ("ground", "verify", ...). */
@@ -144,7 +206,15 @@ export interface SkillStep {
   target?: Target;
   params?: Record<string, unknown>;
   needsLlm?: boolean;
-  expect?: { role?: string; name?: string; state?: string };
+  expect?: {
+    /** Способ проверки: "a11y" (UIA, дефолт) | "visual" (по экрану — для canvas/игр/видео). */
+    kind?: "a11y" | "visual";
+    role?: string;
+    name?: string;
+    state?: string;
+    /** Для kind="visual": что должно появиться на экране (текст для OCR/сверки глазами). */
+    text?: string;
+  };
   timeoutMs?: number;
   retries?: number;
 }

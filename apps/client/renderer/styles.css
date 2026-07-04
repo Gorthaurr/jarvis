@@ -77,6 +77,10 @@
   --violet-ghost: rgba(94, 214, 255, 0.13);
   --violet-glow: rgba(94, 214, 255, 0.42);
 
+  /* «слушаю» — светлая волна из макета (waveListen #bfe9f7): тише и тоньше цианового «говорю» */
+  --wave-listen: #bfe9f7;
+  --wave-listen-glow: rgba(191, 233, 247, 0.5);
+
   --danger: #ff7a7a;
   --danger-ghost: rgba(255, 122, 122, 0.12);
 
@@ -322,33 +326,27 @@ body {
   transition: color 0.25s ease;
 }
 /* живой эквалайзер голоса — CSS-столбики (как в макете): пульсируют независимо, всегда живые.
-   Столбики строит renderer.ts (ширина/высота/фаза по огибающей sin). */
+   Столбики строит wave.ts (инлайном только ширина/высота/фаза); вид и контейнер — здесь. */
 .hero__wave {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 6px;
   height: 56px;
   margin-top: 2px;
+  transition: transform 0.25s ease;
 }
 .hero__bar {
   display: block;
   border-radius: var(--r-pill);
   background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
   transform-origin: center;
   will-change: transform;
 }
 @keyframes eq {
   0%, 100% { transform: scaleY(0.30); }
   50% { transform: scaleY(1); }
-}
-.hero__viz::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 2px solid var(--hero-stroke, transparent);
-  opacity: 0;
 }
 
 .hero--idle {
@@ -367,11 +365,14 @@ body {
 .hero--listening .hero__viz {
   animation: hero-pulse 1.9s ease-in-out infinite;
 }
-.hero--listening .hero__viz::after {
-  animation: hero-ripple 2.3s ease-out infinite;
+/* «слушаю»: светлая тонкая волна (макет waveListen), свечение тише */
+.hero--listening .hero__bar {
+  background: var(--wave-listen);
+  box-shadow: 0 0 5px var(--wave-listen-glow);
 }
 .hero--thinking {
-  --hero-stroke: rgba(232, 234, 239, 0.14);
+  /* бледный трек под дугой-спиннером — как в макете (rgba white 0.07) */
+  --hero-stroke: rgba(255, 255, 255, 0.07);
   --hero-glow: rgba(94, 214, 255, 0.14);
   --hero-label: var(--text);
 }
@@ -392,21 +393,21 @@ body {
 .hero--speaking .hero__viz {
   animation: hero-pulse 0.95s ease-in-out infinite;
 }
-.hero--speaking .hero__viz::after {
-  animation: hero-ripple 0.9s ease-out infinite;
+/* «говорю»: волна крупнее и ярче (макет waveSpeak — выше/шире, свечение сильнее) */
+.hero--speaking .hero__wave {
+  transform: scale(1.12, 1.2);
+}
+.hero--speaking .hero__bar {
+  box-shadow: 0 0 9px var(--accent-glow);
 }
 
-/* Кольцо-обводка — ТОЛЬКО в «Думаю» (фокус-спиннер). В покое / слушаю / говорю кольца
-   НЕТ: только светящаяся подпись + живые столбики, как в макете. */
+/* Кольцо-обводка — ТОЛЬКО в «Думаю» (бледный трек под дугой-спиннером, как в макете).
+   В покое / слушаю / говорю кольца и ряби НЕТ (по просьбе): только мягкое гало +
+   светящаяся подпись + живые столбики. */
 .hero--idle .hero__ring,
 .hero--listening .hero__ring,
 .hero--speaking .hero__ring {
   opacity: 0;
-}
-.hero--idle .hero__viz::after,
-.hero--listening .hero__viz::after,
-.hero--speaking .hero__viz::after {
-  display: none;
 }
 
 @keyframes hero-breathe {
@@ -420,12 +421,9 @@ body {
 @keyframes hero-spin {
   to { transform: rotate(360deg); }
 }
-@keyframes hero-ripple {
-  0% { transform: scale(1); opacity: 0.5; }
-  100% { transform: scale(1.22); opacity: 0; }
-}
 
 /* ── карточки диалога ── */
+/* Карточки диалога (дизайн «Премиум-минимал»): ответ под индикатором. */
 .cards {
   flex: 1 1 auto;
   min-height: 0;
@@ -458,69 +456,114 @@ body {
 }
 
 /* ── панель задачи ── */
-.task {
+/* ── док задач (§20): компактные чипы в углу окна, по одному на задачу ── */
+/* Чипы задач — В ПОТОКЕ (над строкой состояния), НЕ плавают поверх контента → нет наложений. */
+.taskdock {
   flex: none;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 8px;
+  padding: 2px 2px 0;
 }
-.task--hidden {
+.taskdock:empty {
   display: none;
 }
-.task__head {
+.taskchip {
+  pointer-events: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  padding: 10px 12px;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: chip-in 0.18s ease;
 }
-.task__state {
-  font-size: var(--fs-over);
+@keyframes chip-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+.taskchip__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.taskchip__state {
+  flex: none;
+  font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.1em;
   white-space: nowrap;
   color: var(--text-mute);
 }
-.task--paused .task__state,
-.task--waiting_confirm .task__state {
+.taskchip--paused .taskchip__state,
+.taskchip--waiting_confirm .taskchip__state {
   color: var(--accent-bright);
 }
-.task--failed .task__state,
-.task--cancelled .task__state {
+.taskchip--done .taskchip__state {
+  color: var(--accent);
+}
+.taskchip--failed .taskchip__state,
+.taskchip--cancelled .taskchip__state {
   color: var(--danger);
 }
-.task__summary {
-  font-size: var(--fs-h3);
-  font-weight: 500;
-  line-height: 1.35;
-  color: var(--text);
+.taskchip__title {
   flex: 1;
-  word-break: break-word;
+  min-width: 0;
+  font-size: var(--fs-sec);
+  font-weight: 500;
+  line-height: 1.3;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.task__bar {
-  height: 6px;
-  background: rgba(255, 255, 255, 0.07);
+/* мета-строка прогресса: «Шаг N из M» + «NN%» (как в макете «Задача в работе») */
+.taskchip__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: -2px;
+}
+.taskchip__step {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  color: var(--text-mute);
+}
+.taskchip__pct {
+  font-size: var(--fs-hint);
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.taskchip--failed .taskchip__pct,
+.taskchip--cancelled .taskchip__pct {
+  color: var(--danger);
+}
+.taskchip__bar {
+  height: 4px;
+  background: var(--surface-3);
   border-radius: var(--r-pill);
   overflow: hidden;
 }
-.task__bar-fill {
+.taskchip__bar-fill {
   height: 100%;
   width: 0;
   background: var(--accent);
   border-radius: var(--r-pill);
-  box-shadow: 0 0 10px var(--accent-glow);
   transition: width 0.3s ease;
 }
-.task--failed .task__bar-fill,
-.task--cancelled .task__bar-fill {
+.taskchip--failed .taskchip__bar-fill,
+.taskchip--cancelled .taskchip__bar-fill {
   background: var(--danger);
-  box-shadow: none;
 }
-.task__bar-fill--indeterminate {
+.taskchip__bar-fill--indeterminate {
   width: 100% !important;
   background: linear-gradient(90deg, transparent, var(--accent), transparent);
   background-size: 40% 100%;
@@ -531,12 +574,36 @@ body {
   0% { background-position: -40% 0; }
   100% { background-position: 140% 0; }
 }
-.task__actions {
+.taskchip__actions {
   display: flex;
-  gap: 10px;
+  gap: 6px;
 }
-.task__actions .btn {
+.taskchip__btn {
   flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.taskchip__btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.taskchip__btn--deny {
+  color: var(--danger);
+  border-color: var(--danger-ghost);
+}
+.taskchip__btn--ok {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+.taskchip--hidden {
+  display: none;
 }
 
 /* ── нижний статус-бар ── */
@@ -556,6 +623,37 @@ body {
   background: var(--text-mute);
   box-shadow: 0 0 7px var(--text-mute);
   transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+/* Индикатор состояния — мини-эквалайзер (вместо орба). Активен в listening/thinking/speaking. */
+.statusbar__wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 14px;
+  flex: none;
+}
+.statusbar__wave i {
+  display: block;
+  width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--text-mute);
+  transition: background 0.2s ease;
+}
+.statusbar--listening .statusbar__wave i,
+.statusbar--thinking .statusbar__wave i,
+.statusbar--speaking .statusbar__wave i {
+  background: var(--accent);
+  animation: sbwave 1s ease-in-out infinite;
+}
+.statusbar__wave i:nth-child(2) { animation-delay: 0.12s; }
+.statusbar__wave i:nth-child(3) { animation-delay: 0.24s; }
+.statusbar__wave i:nth-child(4) { animation-delay: 0.36s; }
+.statusbar--thinking .statusbar__wave i { animation-duration: 0.7s; }
+.statusbar--speaking .statusbar__wave i { animation-duration: 0.55s; }
+@keyframes sbwave {
+  0%, 100% { height: 4px; }
+  50% { height: 13px; }
 }
 .statusbar__text {
   flex: none;
@@ -623,6 +721,17 @@ body {
 .btn:hover { background: var(--surface-3); }
 .btn:active { background: var(--press); }
 .btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-line);
+}
+/* видимый фокус-ринг (a11y) на остальных интерактивных контролах — единый стиль с .btn */
+.icon-btn:focus-visible,
+.settab:focus-visible,
+.composer__input:focus-visible,
+.composer__send:focus-visible,
+.taskchip__btn:focus-visible,
+.select-input:focus-visible,
+.monitor__row:focus-within {
   outline: none;
   box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-line);
 }
@@ -709,6 +818,40 @@ body {
   color: var(--text);
 }
 
+/* ── ползунок (громкость Джарвиса) ── */
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.range-input {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-strong, rgba(255, 255, 255, 0.18));
+  cursor: pointer;
+}
+.range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+}
+.range-row__val {
+  flex: none;
+  min-width: 42px;
+  text-align: right;
+  font-size: var(--fs-sec);
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── модалки ── */
 .overlay {
   position: fixed;
@@ -777,10 +920,19 @@ body {
 }
 .modal__actions {
   display: flex;
+  flex-wrap: wrap; /* узкое окно: кнопки переносятся, а не вылезают за модалку */
   gap: 8px;
   margin-top: auto;
 }
-.modal__actions .btn { flex: 1; }
+/* min-width:0 — КЛЮЧ: без него flex-кнопки не сжимаются ниже своего текста и «Подтвердить»
+   вылезала за правый край модалки (фидбэк по скриншоту). Меньше паддинг/шрифт — три русские
+   подписи помещаются в ряд ~312px; flex-basis 30% даёт перенос на узких раскладках. */
+.modal__actions .btn {
+  flex: 1 1 30%;
+  min-width: 0;
+  padding: 0 10px;
+  font-size: 14px;
+}
 
 /* ── панель настроек (slide-over) ── */
 .settings {
@@ -971,6 +1123,56 @@ body {
   border: 1px solid var(--line);
 }
 
+/* ── список мониторов (§6 мультимонитор): выбор рабочего экрана Джарвиса ── */
+.monitor-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.monitor__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.monitor__row:hover {
+  border-color: var(--accent-line);
+}
+.monitor__radio {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+.monitor__text {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.monitor__name {
+  color: var(--text);
+  font-size: var(--fs-body);
+}
+.monitor__tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 9px;
+  border-radius: var(--r-pill);
+  color: var(--accent);
+  background: var(--accent-ghost);
+  border: 1px solid var(--accent-line);
+}
+
 /* ── список навыков ── */
 .skill-list {
   list-style: none;
@@ -1072,10 +1274,109 @@ body {
 /* ── доступность ── */
 @media (prefers-reduced-motion: reduce) {
   .hero__viz,
-  .hero__viz::after,
   .hero__arc,
   .hero__bar,
   .statusbar__dot,
   .skill-rec__dot,
-  .task__bar-fill--indeterminate { animation: none !important; }
+  .taskchip__bar-fill--indeterminate { animation: none !important; }
 }
+
+/* ── §22 кнопки топбара: активное / mute-состояние ── */
+.icon-btn--active { color: var(--accent); background: var(--accent-ghost); border-color: var(--accent-line); }
+.icon-btn--danger { color: var(--danger); }
+.muteBtn__slash { opacity: 0; }
+.icon-btn--danger .muteBtn__waves { opacity: 0; }
+.icon-btn--danger .muteBtn__slash { opacity: 1; }
+
+/* ── §22 режим чата: history + composer ── */
+/* Чат — обычный поток (НЕ absolute inset:0): иначе он накрывал topbar и кнопку выхода → «не выйти».
+   Теперь топбар (mute/чат/настройки) виден всегда, а выйти можно и кнопкой «‹» в шапке чата. */
+.chatview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chatview--hidden { display: none; }
+.chatview__head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.chatview__title {
+  font-size: var(--fs-sec);
+  font-weight: 600;
+  color: var(--text-soft);
+}
+.app.chat-active .stage,
+body.chat-active .stage { display: none; }
+.chatlog {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 18px 10px;
+}
+.chatlog__empty {
+  margin: auto;
+  color: var(--text-mute);
+  font-size: var(--fs-sec);
+  text-align: center;
+  max-width: 280px;
+}
+.bubble {
+  max-width: 82%;
+  padding: 10px 13px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-body);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.bubble--user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #06151c;
+  border-bottom-right-radius: 4px;
+}
+.bubble--assistant {
+  align-self: flex-start;
+  background: var(--surface-2, rgba(255,255,255,0.06));
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+}
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+}
+.composer__input {
+  flex: 1;
+  padding: 11px 14px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: var(--fs-body);
+  outline: none;
+}
+.composer__input:focus { border-color: var(--accent-line); }
+.composer__send {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent);
+  color: #06151c;
+  cursor: pointer;
+}
+.composer__send:hover { background: var(--accent-bright); }

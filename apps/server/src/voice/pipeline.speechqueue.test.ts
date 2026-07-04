@@ -53,6 +53,18 @@ function make(onUserTurn: () => Promise<{ voice: string }>) {
   return { stt, tts, pipe };
 }
 
+/** Пайплайн с управляемым флагом «пользователь занят» (§9). Свежий = idle → дренаж сразу. */
+function makeBusy(busy: { value: boolean }) {
+  const tts = new CtrlTtsProvider();
+  const pipe = new VoicePipeline({
+    stt: new CtrlSttProvider(), tts,
+    onUserTurn: async () => ({ voice: "" }),
+    sendSpeakChunk: () => {}, sendClientState: () => {}, followupMs: 50,
+    isUserBusy: () => busy.value,
+  });
+  return { tts, pipe };
+}
+
 describe("очередь озвучки фоновых итогов (§20)", () => {
   it("НЕ застревает: проливается при возврате в idle после barge-in на thinking", async () => {
     const turn: { resolve?: (r: { voice: string }) => void } = {};
@@ -86,5 +98,29 @@ describe("очередь озвучки фоновых итогов (§20)", () 
     pipe.mute();
     await flush();
     expect(tts.texts).not.toContain("Стейл-итог.");
+  });
+});
+
+describe("§9 уважительная проактивность — не мешать занятому пользователю", () => {
+  it("занят (звонок/полный экран) → НЕсрочный фоновый итог ДЕРЖИТСЯ, не озвучивается", () => {
+    const { tts, pipe } = makeBusy({ value: true });
+    pipe.speakQueued("Готово, нашёл пять машин."); // несрочное
+    expect(tts.texts).not.toContain("Готово, нашёл пять машин.");
+  });
+
+  it("занят → СРОЧНОЕ напоминание (будильник) озвучивается ВСЁ РАВНО", () => {
+    const { tts, pipe } = makeBusy({ value: true });
+    pipe.speakQueued("Пора в зал, сэр.", true); // urgent
+    expect(tts.texts).toContain("Пора в зал, сэр.");
+  });
+
+  it("освободился (drainPending) → отложенный несрочный итог отдаётся", () => {
+    const busy = { value: true };
+    const { tts, pipe } = makeBusy(busy);
+    pipe.speakQueued("Готово, нашёл пять машин.");
+    expect(tts.texts).not.toContain("Готово, нашёл пять машин."); // держится, пока занят
+    busy.value = false; // вышел из звонка/полноэкранки
+    pipe.drainPending();
+    expect(tts.texts).toContain("Готово, нашёл пять машин."); // отдан по освобождении
   });
 });

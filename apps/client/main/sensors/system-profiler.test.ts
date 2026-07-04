@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BROWSER_SPECS, detectApps, detectBrowsers, formatProfileSummary, progIdToBrowserId } from "./system-profiler.js";
+import { BROWSER_SPECS, detectApps, detectAutomationTools, detectBrowsers, formatHardwareSummary, formatProfileSummary, onPath, progIdToBrowserId } from "./system-profiler.js";
 
 describe("system-profiler (§9) — авто-детект окружения", () => {
   it("ProgId дефолтного браузера → id браузера", () => {
@@ -34,11 +34,13 @@ describe("system-profiler (§9) — авто-детект окружения", (
         { id: "edge", name: "Microsoft Edge", exe: "e", userDataDir: "u2", cdpCapable: true, isDefault: false },
       ],
       apps: [{ id: "telegram", name: "Telegram", exe: "t" }],
+      tools: [{ id: "ffmpeg", name: "FFmpeg", surface: "видео через code_run" }],
     });
     expect(s).toContain("Google Chrome");
     expect(s).toContain("Microsoft Edge");
     expect(s).toContain("Telegram");
-    expect(formatProfileSummary({ os: "win32 x64", browsers: [], apps: [] })).toBe("");
+    expect(s).toContain("FFmpeg"); // арсенал программного пути попал в сводку
+    expect(formatProfileSummary({ os: "win32 x64", browsers: [], apps: [], tools: [] })).toBe("");
   });
 
   it("detectBrowsers/detectApps возвращают массивы (без падения)", () => {
@@ -49,5 +51,49 @@ describe("system-profiler (§9) — авто-детект окружения", (
       expect(typeof b.cdpCapable).toBe("boolean");
     }
     expect(Array.isArray(detectApps())).toBe(true);
+  });
+
+  it("onPath находит команду по .exe в каталоге PATH (инжектируемый exists)", () => {
+    const has = (p: string): boolean => p === "C:\\bin\\ffmpeg.exe";
+    expect(onPath("ffmpeg", "C:\\bin;C:\\other", has)).toBe(true);
+    expect(onPath("git", "C:\\bin;C:\\other", has)).toBe(false);
+  });
+
+  it("detectAutomationTools отдаёт каталог с surface для найденных (инжектируемый exists/PATH)", () => {
+    // На PATH «есть» только ffmpeg и git (по .exe).
+    const has = (p: string): boolean => p.endsWith("ffmpeg.exe") || p.endsWith("git.exe");
+    const tools = detectAutomationTools(has, "C:\\bin");
+    const ids = tools.map((t) => t.id);
+    expect(ids).toContain("ffmpeg");
+    expect(ids).toContain("git");
+    expect(ids).not.toContain("docker");
+    // surface — непустая подсказка «как драйвить»
+    expect(tools.find((t) => t.id === "ffmpeg")?.surface).toMatch(/code_run/);
+  });
+
+  it("detectAutomationTools находит OBS по известному exe-пути", () => {
+    const has = (p: string): boolean => p.toLowerCase().includes("obs-studio");
+    const tools = detectAutomationTools(has, "");
+    expect(tools.map((t) => t.id)).toContain("obs");
+    expect(tools.find((t) => t.id === "obs")?.surface).toMatch(/obs_request/);
+  });
+
+  it("formatHardwareSummary: компактная строка железа (CPU/GPU/VRAM/мать/мониторы)", () => {
+    const s = formatHardwareSummary({
+      cpu: "AMD Ryzen 7 7800X3D",
+      cores: "8 ядер / 16 потоков",
+      gpu: ["NVIDIA GeForce RTX 5080"],
+      vram: "16 ГБ",
+      motherboard: "MSI B850 GAMING PLUS WIFI",
+      ramGB: 64,
+      disks: ["Samsung 990 EVO Plus 1TB"],
+      monitors: ["MSI MAG 271QP X28", "SAM F27G3xTF"],
+      audio: ["Realtek"],
+    });
+    expect(s).toContain("AMD Ryzen 7 7800X3D");
+    expect(s).toContain("RTX 5080 16 ГБ"); // VRAM рядом с видяхой
+    expect(s).toContain("64 ГБ");
+    expect(s).toContain("MSI MAG 271QP X28"); // мониторы как устройства
+    expect(formatHardwareSummary({})).toBe(""); // пусто → пустая строка
   });
 });

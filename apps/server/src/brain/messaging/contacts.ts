@@ -27,9 +27,14 @@ function norm(s: string): string {
 /** Совпадает ли запрос с контактом (по имени или алиасу). */
 function matches(query: string, c: Contact): boolean {
   const q = norm(query);
+  // FAIL-CLOSED: пустой запрос (тишина/обрыв STT) НЕ матчит никого — иначе `…includes("")===true`
+  // делал адресатом любого/единственного контакта → сообщение НЕ ТОМУ человеку. Подстрочный матч
+  // разрешаем только для запросов ≥2 символов (1 символ тоже даёт массовые ложные совпадения).
+  if (q.length === 0) return false;
   if (norm(c.displayName) === q) return true;
-  if (norm(c.displayName).includes(q)) return true;
-  return c.aliases.some((a) => norm(a) === q || norm(a).includes(q));
+  const allowSubstr = q.length >= 2;
+  if (allowSubstr && norm(c.displayName).includes(q)) return true;
+  return c.aliases.some((a) => norm(a) === q || (allowSubstr && norm(a).includes(q)));
 }
 
 /**

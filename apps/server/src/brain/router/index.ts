@@ -15,6 +15,7 @@
  * Позже (§7) haiku-классификатор может уточнять пограничные случаи — за интерфейсом.
  */
 import type { Tier } from "@jarvis/shared";
+import type { MediaOp, VolumeOp } from "@jarvis/protocol";
 
 /** Результат классификации: тир + (для tier0) распознанный локальный интент. */
 export interface RouteDecision {
@@ -23,13 +24,70 @@ export interface RouteDecision {
   local?: LocalIntent;
   /** Человекочитаемая причина выбора (для логов/отладки §22). */
   reason: string;
+  /** РАЗГОВОР (вопрос/рассуждение/трёп) → отвечаем СИНХРОННО (стримом), НЕ заводим фоновую §20-задачу с
+   *  дворецким-ack. ДЕЙСТВИЕ (undefined/false) → фоновая задача (sonnet/fable). Фикс «каждый вопрос как задача». */
+  conversational?: boolean;
 }
 
 /** Локальные интенты tier0 — обрабатываются без LLM (§7). */
 export type LocalIntent =
   | { kind: "app.launch"; app: string }
   | { kind: "app.focus"; app: string }
-  | { kind: "browser.open"; url: string };
+  | { kind: "browser.open"; url: string; inDefault?: boolean }
+  // Медиа/громкость (§): мгновенные глобальные клавиши — пауза/плей/след./пред./громче/тише/громкость N.
+  // tier0 ($0, без LLM): простая повторяемая команда не должна гонять полный Sonnet-ход (лечит «перемотал
+  // дважды»/«та же скорость»/«нигде не сохранилась»). Исполняется СИНХРОННО без ack (одна фраза).
+  | { kind: "media"; op: MediaOp }
+  | { kind: "volume"; op: VolumeOp; level?: number }
+  // Консьерж (§): голая команда-сервис («Джарвис, ютуб») — мгновенный короткий вопрос с вариантами,
+  // БЕЗ LLM (иначе лаг 2–13с). Ответ резолвится resolveClarifyAnswer (тоже tier0, мгновенно).
+  | { kind: "clarify"; key: string; question: string };
+
+/** Каталог консьерж-уточнений: сервис → короткий вопрос + варианты (слово-триггеры → действие). */
+interface QuickOption {
+  words: readonly string[];
+  intent: LocalIntent;
+  /** H8: поисковый вариант — строит URL из остатка ответа (query), а не открывает голую главную с ложным
+   *  «Открыл». Пустой query → undefined (доуточнить через LLM), НЕ homepage. */
+  searchUrl?: (query: string) => string;
+}
+interface QuickIntent {
+  question: string;
+  options: QuickOption[];
+}
+const QUICK_INTENTS: Record<string, QuickIntent> = {
+  // inDefault:true — открываем в ТВОЁМ дефолтном (залогиненном) браузере (shell), а не в отдельном
+  // CDP-инстансе: и логин на месте, и мышь не трогаем, и без 12с-лага singleton-лока.
+  youtube: {
+    question: "Рекомендации или конкретное видео?",
+    options: [
+      { words: ["рекоменд", "лент", "главн", "домой", "просто", "так", "обычн"], intent: { kind: "browser.open", url: "https://youtube.com", inDefault: true } },
+      {
+        words: ["конкрет", "видео", "ролик", "найд", "поищ", "ищи", "поиск"],
+        intent: { kind: "browser.open", url: "https://youtube.com", inDefault: true },
+        searchUrl: (q) => `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`,
+      },
+    ],
+  },
+  yandexmusic: {
+    question: "Волну, коллекцию или поиск?",
+    options: [
+      { words: ["волн", "мою", "моя"], intent: { kind: "browser.open", url: "https://music.yandex.ru", inDefault: true } },
+      { words: ["коллекц", "плейлист", "библиотек", "сохран", "медиатек"], intent: { kind: "browser.open", url: "https://music.yandex.ru/users", inDefault: true } },
+      {
+        words: ["поиск", "найд", "ищи", "поищ"],
+        intent: { kind: "browser.open", url: "https://music.yandex.ru", inDefault: true },
+        searchUrl: (q) => `https://music.yandex.ru/search?text=${encodeURIComponent(q)}`,
+      },
+    ],
+  },
+};
+/** Алиасы голосом → ключ каталога. Только ТОЧНОЕ совпадение всей фразы (без «специфики» после). */
+const QUICK_ALIASES: Record<string, string> = {
+  ютуб: "youtube", ютьюб: "youtube", ютюб: "youtube", ютубе: "youtube", youtube: "youtube", "юью туб": "youtube",
+  "яндекс музыка": "yandexmusic", "яндекс музыку": "yandexmusic", "яндексмузыка": "yandexmusic",
+  "яндекс.музыка": "yandexmusic", "яндекс музыке": "yandexmusic", "yandex music": "yandexmusic", "яндекс муз": "yandexmusic",
+};
 
 /**
  * Паттерны запуска приложений: «открой <app>», «запусти <app>», «включи <app>».
@@ -63,7 +121,8 @@ const WEB_SERVICES: Record<string, string> = {
   гугл: "https://google.com",
   google: "https://google.com",
   гмейл: "https://mail.google.com",
-  почта: "https://mail.google.com",
+  // «почта» УБРАНА: на Windows это нативное приложение «Почта», а не Gmail — fuzzy ловил «почту»
+  // (падеж) → открывал mail.google.com вместо приложения. Для веб-почты: «гмейл»/«gmail».
   gmail: "https://mail.google.com",
   чатгпт: "https://chatgpt.com",
   chatgpt: "https://chatgpt.com",
@@ -93,11 +152,112 @@ export function classifyTier(text: string): RouteDecision {
     return { tier: "tier0", local, reason: `локальный интент ${local.kind}` };
   }
 
-  // 2) Эвристика haiku vs sonnet.
-  if (looksComplex(trimmed)) {
-    return { tier: "sonnet", reason: "многошаговая/рассуждающая задача" };
+  // 1.5) Биржа/торговля → СРАЗУ макс модель (Opus), без тиров (обдуманность; прямой роут быстрее эскалации).
+  if (looksLikeTrading(trimmed)) {
+    return { tier: "fable", reason: "биржа/торговля — максимальная модель (Opus), без тиров" };
   }
-  return { tier: "haiku", reason: "короткая реплика/болтовня" };
+
+  // 2) Явная болтовня/приветствие → дешёвый haiku, РАЗГОВОР (синхронно, не задача).
+  if (looksLikeSmallTalk(trimmed) && !looksComplex(trimmed)) {
+    return { tier: "haiku", reason: "явный трёп/приветствие", conversational: true };
+  }
+  // 2.5) ВОПРОС vs ДЕЙСТВИЕ (корень жалобы «каждый вопрос воспринимает как задачу»): вопрос («какая столица?»,
+  //   «сколько…», «что такое…») и рассуждение/совет («объясни/сравни/как лучше») — это РАЗГОВОР: отвечаем
+  //   СИНХРОННО (стримом), БЕЗ фоновой §20-задачи и дворецкого-ack. Глубокое рассуждение идёт на сильную
+  //   модель (Opus) РАДИ КАЧЕСТВА (P1.1, «мало понимает на разборе»), но ВСЁ РАВНО разговором, не задачей.
+  //   Простой вопрос — на дешёвый тир (token-эконом). ДЕЙСТВИЕ (открой/отправь/создай/сделай) → задача (ниже).
+  const isQuestion = looksLikeQuestion(trimmed);
+  // Рассуждение-РАЗГОВОР только БЕЗ глагола-действия: «проанализируй мой план» = ответ (разговор), но
+  // «проанализируй данные и СОСТАВЬ отчёт» = задача (производит результат) → фон. Вопрос (по «?»/первому
+  // слову) — разговор ВСЕГДА, даже если в нём мелькнёт глагол (там действие — не суть запроса).
+  const isHard = looksHardReasoning(trimmed) && !looksLikeAction(trimmed);
+  if (isQuestion || isHard) {
+    return {
+      tier: isHard ? "fable" : "haiku",
+      conversational: true,
+      reason: isHard ? "рассуждение/разбор — разговор (синхронно, не задача)" : "вопрос — разговор (синхронно, не задача)",
+    };
+  }
+  // 3) ДЕЙСТВИЕ: неизвестный непустой ввод без вопросительного признака — команда-задача → способный тир
+  //    с ПОЛНОЙ петлёй инструментов (фон + прогресс, см. agent §20).
+  return {
+    tier: "sonnet",
+    reason: looksComplex(trimmed) ? "многошаговая задача-действие" : "запрос-действие (задача)",
+  };
+}
+
+/**
+ * Медиа/громкость-паттерны (§): команда = ВСЯ очищенная фраза (^…$), чтобы «пауза»/«следующий трек»/
+ * «громче» не ловились в середине предложения («расскажи дальше про…» НЕ матчит). Консервативно:
+ * лучше пропустить в LLM, чем ложно дёрнуть глобальную клавишу. Бар «назад» НЕ берём (конфликт с
+ * browser-back). Точную перемотку на N секунд НЕ берём — media-клавиши seek-по-секундам не умеют (нужен
+ * отдельный seek-актуатор, отдельной задачей).
+ */
+// Объект воспроизведения («…видео/музыку/трек…») и локация («…на ютубе / в браузере») — опциональные
+// хвосты медиа-команды. Аудит 2026-07-02: «продолжи видео на ютубе» и «останови музыку» гоняли полный
+// LLM-ход (десятки секунд) вместо мгновенной media-клавиши.
+const MEDIA_OBJ_REQ = String.raw`\s+(?:видео|фильм|музыку|песн[юя]|трек|ролик|плеер|воспроизведение|композици[юя])`;
+const MEDIA_OBJ = `(?:${MEDIA_OBJ_REQ})?`;
+const MEDIA_LOC = String.raw`(?:\s+(?:на|в)\s+[\p{L}\p{N}-]+)?`;
+const MEDIA_PATTERNS: ReadonlyArray<readonly [RegExp, LocalIntent]> = [
+  [/^(пауза|на паузу|поставь на паузу|поставь паузу|приостанови|останови|стоп)$/iu, { kind: "media", op: "pause" }],
+  // «останови/выключи МУЗЫКУ (на ютубе)» — пауза с ОБЯЗАТЕЛЬНЫМ объектом (голое «выключи» — не медиа!).
+  [new RegExp(String.raw`^(?:останови|приостанови|выключи|поставь на паузу)${MEDIA_OBJ_REQ}${MEDIA_LOC}$`, "iu"), { kind: "media", op: "pause" }],
+  [/^(продолжи|возобнови|продолжай|плей|играй|воспроизведи)$/iu, { kind: "media", op: "play" }],
+  // «продолжи видео на ютубе», «возобнови музыку» — однозначные resume-глаголы + объект/локация.
+  // «продолжу/продолжим» — частая STT-вариация команды (живой случай 2026-07-02).
+  // «включи/запусти видео…» сюда НЕ входят (это чаще «найди и включи» — контент-задача для LLM).
+  [new RegExp(String.raw`^(?:продолж(?:и|ай|у|им)|возобнови)${MEDIA_OBJ}${MEDIA_LOC}$`, "iu"), { kind: "media", op: "play" }],
+  // «сними с паузы» / «паузы сними» / «убери паузу» = снять с паузы → play (живой случай «Videos, паузы сними»).
+  [/^(?:(?:сними|убери)\s+(?:с\s+)?пауз\p{L}*|пауз\p{L}*\s+сними)$/iu, { kind: "media", op: "play" }],
+  // M5-фикс: \w НЕ матчит кириллицу — «включи следующий»/«переключи на следующую песню» были мертвы.
+  [
+    new RegExp(String.raw`^(?:(?:включи|переключи(?:\s+на)?|давай|поставь)\s+)?следующ\p{L}*(?:\s+(?:трек|песн[юя]|видео|ролик|композици[юя]))?$`, "iu"),
+    { kind: "media", op: "next" },
+  ],
+  [
+    new RegExp(String.raw`^(?:(?:включи|переключи(?:\s+на)?|верни|поставь)\s+)?(?:предыдущ\p{L}*|прошл\p{L}*)(?:\s+(?:трек|песн[юя]|видео|ролик|композици[юя]))?$`, "iu"),
+    { kind: "media", op: "prev" },
+  ],
+  [/^(громче|погромче|сделай\s+(?:по)?громче|прибавь(?:\s+(?:громкость|звук))?)$/iu, { kind: "volume", op: "up" }],
+  [/^(тише|потише|сделай\s+(?:по)?тише|убавь(?:\s+(?:громкость|звук))?)$/iu, { kind: "volume", op: "down" }],
+  [/^(без звука|выключи звук|включи звук|верни звук|заглуши|mute|мьют)$/iu, { kind: "volume", op: "mute" }],
+];
+/** «громкость 30», «поставь громкость на 50%» → set level 0..100. */
+const VOLUME_SET_RE = /^(?:поставь\s+|сделай\s+|выстави\s+|установи\s+)?громкость(?:\s+на)?\s+(\d{1,3})\s*%?$/iu;
+
+// M10: хвостовая вежливость/поторапливание не должна выбивать команду из tier0 («потише пожалуйста»).
+const MEDIA_TRAIL_RE = /[\s,]+(?:пожалуйста|плиз|давай|быстро|сейчас|срочно|же)\s*$/iu;
+
+/** Ядро матчинга: команда = ВСЯ фраза (после срезов). */
+function matchMediaCore(t: string): LocalIntent | undefined {
+  for (const [re, intent] of MEDIA_PATTERNS) if (re.test(t)) return intent;
+  const vol = VOLUME_SET_RE.exec(t);
+  if (vol) {
+    const level = Math.max(0, Math.min(100, Number.parseInt(vol[1]!, 10)));
+    return { kind: "volume", op: "set", level };
+  }
+  return undefined;
+}
+
+/** Распознать медиа/громкость-интент из очищенной фразы (или undefined). Чистая функция (юнит-тест). */
+export function matchMediaIntent(cleaned: string): LocalIntent | undefined {
+  let t = cleaned.trim().replace(/[.!?]+$/u, "").trim();
+  for (let i = 0; i < 3; i += 1) {
+    const next = t.replace(MEDIA_TRAIL_RE, "").trim();
+    if (next === t) break;
+    t = next;
+  }
+  const direct = matchMediaCore(t);
+  if (direct) return direct;
+  // STT-шум перед запятой (живой случай «Videos, паузы сними»): пробуем КОРОТКИЙ хвост после
+  // последней запятой (≤3 слов — консервативно, чтобы не дёргать клавишу на «…, стоп» внутри длинной речи).
+  const comma = t.lastIndexOf(",");
+  if (comma >= 0) {
+    const tail = t.slice(comma + 1).trim();
+    if (tail && tail.split(/\s+/u).length <= 3) return matchMediaCore(tail);
+  }
+  return undefined;
 }
 
 /**
@@ -110,22 +270,30 @@ export function matchLocalIntent(text: string): LocalIntent | undefined {
   // началу) не сработает и команда уйдёт в LLM, которая «врёт, что открыла».
   const cleaned = stripWakeAndFiller(text);
 
+  // Медиа/громкость — мгновенные глобальные клавиши ($0, без LLM). Проверяем первыми: «пауза»/«громче»/
+  // «следующий трек» не должны уходить в Sonnet (гоняло полный ход на каждую перемотку/паузу).
+  const media = matchMediaIntent(cleaned);
+  if (media) return media;
+
   const launch = LAUNCH_RE.exec(cleaned);
   if (launch?.groups?.app) {
     let arg = stripTrailingFiller(stripQuotes(launch.groups.app.trim()));
 
+    // tier0-открытия — это «просто открой» → inDefault:true: в ТВОЙ залогиненный браузер через
+    // расширение/shell (с учётом открытых вкладок), а НЕ в отдельный CDP-инстанс (где 136+ ломает
+    // debug → 12с-залипание + дубль-вкладки). CDP-управление эмитит LLM отдельным browser.open без флага.
     // «открой сайт x» / «открой ссылку x» → browser.open.
     if (SITE_HINT_RE.test(arg)) {
-      return { kind: "browser.open", url: normalizeUrl(arg.replace(SITE_HINT_RE, "").trim()) };
+      return { kind: "browser.open", url: normalizeUrl(arg.replace(SITE_HINT_RE, "").trim()), inDefault: true };
     }
     // «открой example.com» → browser.open (URL целиком или первым словом).
     const first = arg.split(/\s+/u)[0] ?? "";
-    if (URL_RE.test(arg)) return { kind: "browser.open", url: normalizeUrl(arg) };
-    if (URL_RE.test(first)) return { kind: "browser.open", url: normalizeUrl(first) };
+    if (URL_RE.test(arg)) return { kind: "browser.open", url: normalizeUrl(arg), inDefault: true };
+    if (URL_RE.test(first)) return { kind: "browser.open", url: normalizeUrl(first), inDefault: true };
     // Известный веб-сервис ГДЕ-УГОДНО во фразе («инстаграм в браузере», «открой ютуб
     // пожалуйста») → сайт в браузере. Сканируем токены, не требуем точного совпадения.
     const site = findWebService(arg);
-    if (site) return { kind: "browser.open", url: site };
+    if (site) return { kind: "browser.open", url: site, inDefault: true };
     // Имя приложения — короткое (≤3 слов) и без вопросительных слов («открой мне почему
     // так дорого» → не приложение, уходит в LLM).
     const app = normalizeAppName(arg);
@@ -138,7 +306,58 @@ export function matchLocalIntent(text: string): LocalIntent | undefined {
     if (app.length > 0 && looksLikeAppName(app)) return { kind: "app.focus", app };
   }
 
+  // Консьерж: ГОЛАЯ команда-сервис без глагола («Джарвис, ютуб») → мгновенное уточнение.
+  // (С глаголом «открой/запусти ютуб» сработал бы LAUNCH_RE выше → прямое открытие, как раньше.)
+  return matchQuickIntent(cleaned);
+}
+
+/** Голая команда-сервис → консьерж-уточнение (только точное совпадение всей фразы, без специфики). */
+export function matchQuickIntent(cleaned: string): LocalIntent | undefined {
+  const norm = normalizeAppName(stripTrailingFiller(stripQuotes(cleaned)));
+  const key = QUICK_ALIASES[norm];
+  if (!key) return undefined;
+  const qi = QUICK_INTENTS[key];
+  if (!qi) return undefined;
+  return { kind: "clarify", key, question: qi.question };
+}
+
+/**
+ * Ответ на консьерж-уточнение → конкретный tier0-интент (мгновенно, без LLM). Сопоставляет
+ * слова ответа с триггерами вариантов. Не подошло — undefined (значит это не ответ, а новая реплика).
+ */
+export function resolveClarifyAnswer(key: string, answer: string): LocalIntent | undefined {
+  const qi = QUICK_INTENTS[key];
+  if (!qi) return undefined;
+  const a = stripWakeAndFiller(answer).toLowerCase();
+  if (!a.trim()) return undefined;
+  // Триггеры — СТЕМЫ («волн»→«волну/волной»). Матчим стем на ГРАНИЦЕ СЛОВА (токен начинается со
+  // стема), а НЕ подстрокой где попало: иначе «волнующие вопросы» ложно ловило «волн». А если ответ
+  // подходит к НЕСКОЛЬКИМ вариантам (или к нулю) — это НЕ однозначный tier0-выбор: отдаём в LLM, она
+  // решит в контексте уточнения (recall тупой функцией, РЕШЕНИЕ при неоднозначности — модели).
+  const tokens = a.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const optMatches = (opt: QuickOption) => opt.words.some((w) => tokens.some((t) => t.startsWith(w)));
+  const hits = qi.options.filter(optMatches);
+  if (hits.length === 1) {
+    const opt = hits[0]!;
+    if (opt.searchUrl) {
+      // H8: поисковый вариант — строим URL из ОСТАТКА ответа (query), а не открываем голую главную с
+      // ложным «Открыл». Пустой query → undefined (LLM доуточнит «что искать?»), не homepage.
+      const query = extractQuery(tokens, opt.words);
+      return query ? { kind: "browser.open", url: opt.searchUrl(query), inDefault: true } : undefined;
+    }
+    return opt.intent;
+  }
+  // 0 → не ответ (новая реплика); >1 → неоднозначно. И там, и там — НЕ угадываем (undefined → LLM).
   return undefined;
+}
+
+/** H8: query из ответа = токены минус слова-триггеры варианта и типовой filler («видео/ролик/про»). */
+function extractQuery(tokens: string[], triggers: readonly string[]): string {
+  const FILLER = ["видео", "ролик", "песн", "трек", "клип", "конкрет", "про", "музык"];
+  return tokens
+    .filter((t) => !triggers.some((w) => t.startsWith(w)) && !FILLER.some((w) => t.startsWith(w)))
+    .join(" ")
+    .trim();
 }
 
 /** Слова-будильники (+ частые ослышки Whisper) и ведущая вежливость — срезаем с начала. */
@@ -197,6 +416,9 @@ function fuzzyWebService(norm: string): string | undefined {
       if (Math.abs(key.length - tok.length) > thr) continue;
       if (key.slice(0, 3) !== tok.slice(0, 3)) continue; // одинаковое начало
       const d = levenshtein(tok, key);
+      // Замена ТОЛЬКО последней буквы при равной длине — это падежное окончание («почту» vs
+      // «почта»), а не опечатка STT. Не матчим: иначе склонение обычного слова → ложный сервис.
+      if (d === 1 && tok.length === key.length && tok.slice(0, -1) === key.slice(0, -1)) continue;
       if (d <= thr && (!best || d < best.dist)) best = { url: WEB_SERVICES[key]!, dist: d };
     }
   }
@@ -224,11 +446,23 @@ function levenshtein(a: string, b: string): number {
 /** Вопросительные/служебные слова: их присутствие = это не имя приложения, а фраза. */
 const NON_APP_WORDS_RE = /(?<![\p{L}\p{N}])(?:почему|зачем|как|что|чё|чо|где|когда|кто|какой|какая|какие|ли|мне|нам)(?![\p{L}\p{N}])/iu;
 
-/** Похоже ли на имя приложения: ≤3 слов и без вопросительных слов. */
+// P1.2: предлог-связка внутри МНОГОсловной фразы = это инструкция, а не голое имя приложения
+// («запусти X В поиске», «поставь музыку НА паузу»). Границы — по Unicode (не \b), исключая и цифры,
+// чтобы «про100»/«в2» (имена) НЕ ловились. Решение такой фразы — за моделью, не за слепым app.launch.
+const LAUNCH_PREP_RE = /(?<![\p{L}\p{N}])(?:в|во|на|по|через|для|под|про|об|из|от|без|с|со)(?![\p{L}\p{N}])/iu;
+// Контент-существительные (медиа/сообщения/поиск): «включи джазовый ПЛЕЙЛИСТ», «найди ТРЕК» — это
+// задача-действие через браузер/инструменты, а не запуск exe с таким именем. Модель справится лучше.
+const LAUNCH_CONTENT_RE =
+  /(?<![\p{L}\p{N}])(?:плейлист\p{L}*|песн\p{L}*|музык\p{L}*|трек\p{L}*|видео|ролик\p{L}*|поиск\p{L}*|вкладк\p{L}*|сообщени\p{L}*|письм\p{L}*|подкаст\p{L}*)(?![\p{L}\p{N}])/iu;
+
+/** Похоже ли на имя приложения: ≤3 слов, без вопросительных слов, без предлога-связки и контент-нуждов. */
 function looksLikeAppName(arg: string): boolean {
   const words = arg.split(/\s+/u).filter(Boolean);
   if (words.length > 3) return false;
   if (NON_APP_WORDS_RE.test(arg)) return false;
+  // P1.2: фраза-инструкция (предлог-связка в многословии / контент-существительное) — НЕ голое имя.
+  if (words.length > 1 && LAUNCH_PREP_RE.test(arg)) return false;
+  if (LAUNCH_CONTENT_RE.test(arg)) return false;
   return true;
 }
 
@@ -253,6 +487,100 @@ const COMPLEX_MARKERS: readonly RegExp[] = [
 function looksComplex(text: string): boolean {
   if (text.length > 140) return true; // длинная формулировка ≈ составная задача
   return COMPLEX_MARKERS.some((re) => re.test(text));
+}
+
+/**
+ * P1.1: маркеры ТЯЖЁЛОГО РАССУЖДЕНИЯ — объяснение/сравнение/анализ/совет/планирование. Это запросы,
+ * где качество ОТВЕТА (а не наличие инструмента) решает, и слабый тир «мало понимает». Их роутим прямо
+ * в Opus (fable), не дожидаясь эскалации §7 (она для ПРОВАЛА инструментов — у чистого рассуждения их нет).
+ * Узко и высокоточно: обычные команды-действия сюда НЕ попадают (остаются на Sonnet с петлёй+эскалацией).
+ */
+const HARD_REASONING_MARKERS: readonly RegExp[] = [
+  word("объясни|поясни|растолку[йе]|почему|зачем|отчего"),
+  word("сравни|сопоставь|проанализиру[йе]|разбери|оцени|взвесь|обоснуй|докажи"),
+  word("как (?:мне |нам )?(?:лучше|правильно|быть)|что (?:из них |тут |лучше)|стоит ли|посоветуй|порекомендуй|подскажи как"),
+  word("спланиру[йе]|придума[йе] план|составь план|страте[гж][\\p{L}]*|продума[йе]"),
+];
+
+function looksHardReasoning(text: string): boolean {
+  return HARD_REASONING_MARKERS.some((re) => re.test(text));
+}
+
+// Вопросительные слова — ПЕРВЫМ значимым словом фразы (после среза будильника/вежливости). Проверка по
+// ПЕРВОМУ слову, а НЕ «где угодно»: иначе «сделай ЧТО-нибудь» ложно стало бы вопросом (буквальное «что»).
+const QUESTION_FIRST = new Set([
+  "кто", "что", "чего", "чему", "чём", "чем", "чей", "чья", "чьё", "чьи", "какой", "какая", "какое", "какие",
+  "каков", "какова", "сколько", "где", "куда", "откуда", "когда", "почему", "зачем", "отчего", "как", "насколько",
+  "который", "которая", "которое", "ли", "разве", "неужели", "правда", "верно",
+]);
+// Явные «объяснительные» зачины — это вопрос-к-знанию, даже без вопросительного первого слова.
+const QUESTION_LEAD_RE = /^(?:расскажи|объясни|поясни|что так|кто так|в ч[ёе]м|стоит ли|правда ли|можешь ли|умеешь ли|знаешь ли|есть ли)/iu;
+
+/**
+ * Похоже ли на ВОПРОС (ответить знанием/разговором), а не команду-действие. Сигналы: «?» в конце; первое
+ * значимое слово — вопросительное; объяснительный зачин. Действие-команды («открой/сделай/отправь») сюда
+ * не попадают (нет вопросительного первого слова), даже если в середине мелькнёт «что/как».
+ */
+// Глаголы-ДЕЙСТВИЯ (производят результат / меняют состояние). Консультируется ТОЛЬКО для рассуждения
+// (isHard): их наличие переводит «проанализируй … и составь …» из разговора в задачу-действие (фон).
+// `[\p{L}]*` — словоформы по кириллице. (открой/запусти/включи как tier0 ловятся раньше.)
+const ACTION_VERB_RE = word(
+  "созда[\\p{L}]*|сдела[\\p{L}]*|сохран[\\p{L}]*|запиш[\\p{L}]*|удал[\\p{L}]*|настро[\\p{L}]*|собер[\\p{L}]*|" +
+    "состав[\\p{L}]*|напиш[\\p{L}]*|отправ[\\p{L}]*|пошл[\\p{L}]*|скача[\\p{L}]*|переименуй|перемест[\\p{L}]*|" +
+    "заполн[\\p{L}]*|нарису[\\p{L}]*|сгенериру[\\p{L}]*|перевед[\\p{L}]*|конвертиру[\\p{L}]*|заброниру[\\p{L}]*|" +
+    "закаж[\\p{L}]*|поставь|включ[\\p{L}]*|след[\\p{L}]*|монитор[\\p{L}]*|напомн[\\p{L}]*",
+);
+function looksLikeAction(text: string): boolean {
+  return ACTION_VERB_RE.test(text);
+}
+
+// Частица «ли» — почти всегда вопрос («законно ЛИ парсить», «можно ЛИ», «успею ЛИ»). Ловим где угодно.
+const QUESTION_LI_RE = word("ли");
+
+function looksLikeQuestion(text: string): boolean {
+  const t = stripWakeAndFiller(text).trim();
+  if (!t) return false;
+  if (t.endsWith("?")) return true;
+  if (QUESTION_LEAD_RE.test(t)) return true;
+  if (QUESTION_LI_RE.test(t)) return true; // да/нет-вопрос с частицей «ли» (даже без «?»)
+  const first = t.toLowerCase().match(/[\p{L}\p{N}]+/u)?.[0] ?? "";
+  return QUESTION_FIRST.has(first);
+}
+
+/**
+ * Биржа/торговля → МАКС модель (Opus), БЕЗ тиров (требование: на биржах важна обдуманность, а прямой
+ * роут в Opus ещё и быстрее, чем Sonnet→эскалация). Высокоточная лексика (низкий ложняк); остальные
+ * биржевые случаи добивает эскалация по биржевому инструменту в петле (agent §трейдинг). `[\p{L}]*` —
+ * словоформы по кириллице (\w в JS кириллицу НЕ ловит).
+ */
+const TRADING_MARKERS: readonly RegExp[] = [
+  word("бирж[\\p{L}]*|фьючерс[\\p{L}]*|фьюч[\\p{L}]*|котировк[\\p{L}]*|трейд[\\p{L}]*|трейдинг|теханализ|мосбирж[\\p{L}]*|облигац[\\p{L}]*"),
+  word("инвестиц[\\p{L}]*|портфел[\\p{L}]*|дивергенц[\\p{L}]*|перекуплен[\\p{L}]*|перепродан[\\p{L}]*|тикер[\\p{L}]*|индикатор[\\p{L}]*"),
+  word("moex|rsi|macd|atr|тинькоф[\\p{L}]*|биткоин[\\p{L}]*|биткойн[\\p{L}]*|эфириум[\\p{L}]*|лонг|шорт|спот|крипт[\\p{L}]*|btc|eth"),
+];
+
+export function looksLikeTrading(text: string): boolean {
+  return TRADING_MARKERS.some((re) => re.test(text));
+}
+
+/**
+ * Явный трёп/социальная реплика — ЕДИНСТВЕННОЕ, что вправе идти в дешёвый haiku.
+ * Позитивный детектор ПО СМЫСЛУ (вежливость/реакция/приветствие), а НЕ отрицание-allowlist команд:
+ * поэтому новый синоним-глагол действия («стартани/врубай/запили») по умолчанию идёт в ЗАДАЧУ, а не
+ * проваливается в «болтовню» (корень бага «стартани поиск в доте» → haiku). Без хардкода под фразу.
+ */
+const SMALL_TALK: readonly RegExp[] = [
+  word("привет|здаров|здарова|здравствуй(?:те)?|хай|салют|добр(?:ое|ый|ого)\\s+(?:утро|день|вечер|ночи)"),
+  word("пока|до\\s+встречи|спокойной\\s+ночи|увидимся"),
+  word("спасибо|благодарю|спс|пасиб|круто|класс|супер|ясно|понятно|окей|ок|угу|ага"),
+  word("как\\s+дела|как\\s+ты|что\\s+нового|как\\s+жизнь|как\\s+сам"),
+  // Похвала/реакция БЕЗ задачи — социальная реплика, не команда (фикс «красава → task-ack»).
+  word("красав(?:а|чик|ец|цы)|молодец|умница|могёшь|мощно|огонь|бомба|чётко|четко|шикарно|лучший|респект|красота|ого|ничего\\s+себе|вот\\s+это\\s+да"),
+];
+function looksLikeSmallTalk(text: string): boolean {
+  const words = text.split(/\s+/u).filter(Boolean);
+  if (words.length > 6) return false; // длиннее ≈6 слов — уже не реплика-реакция
+  return SMALL_TALK.some((re) => re.test(text));
 }
 
 // ── нормализация аргументов ──────────────────────────────────

@@ -120,6 +120,13 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
           // follow-up (после речи он перезапустится через speak_done → listening). Иначе
           // таймер истекал во время длинного ответа → уход в idle, и микрофон не возвращался.
           return go("speaking", false, ctx.followupActive ? [{ type: "disarm_followup" }] : []);
+        case "barge_in":
+          // §barge: поздний barge_in приходит, когда сервер УЖЕ ушёл в listening (вышел из speaking по
+          // концу СИНТЕЗА), а клиент ещё доигрывает хвост очереди озвучки. Раньше это был немой default
+          // → хвост не заткнуть серверно. Теперь гасим возможный ещё-живой синтез: cancel_tts бампает
+          // gen и обрывает phraseSpeaker/ttsStream если живы; в чистом listening (синтеза нет) — безвредный
+          // no-op (только инкремент gen). Состояние НЕ меняем (остаёмся в listening, ждём речь юзера).
+          return { context: ctx, actions: [{ type: "cancel_tts" }] };
         default:
           return noop(ctx);
       }
@@ -130,6 +137,12 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
         case "speak_start":
           // brain отдал ответ, пошёл первый TTS-чанк.
           return go("speaking", false, []);
+        case "speak_done":
+          // speak_done БЕЗ предшествующего speak_start = синтез не дал ни одного звука
+          // (ошибка/таймаут TTS, нулевой ответ провайдера). НЕ виснем в thinking (это был бы
+          // noop → микрофон не вернуть): возвращаемся слушать с follow-up окном, как после
+          // обычной речи. Один сбой синтеза не должен вешать весь голосовой цикл (§10).
+          return go("listening", true, [{ type: "open_stt" }, { type: "arm_followup" }]);
         case "barge_in":
         case "speech_start":
           // Юзер перебил на этапе обдумывания — ОТМЕНЯЕМ запущенный ход агента

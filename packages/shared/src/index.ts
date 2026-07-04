@@ -2,6 +2,11 @@
  * @jarvis/shared — общие типы и утилиты (тиры §7, Result, логгер, env-хелперы).
  */
 
+// Сопоставление имён/получателей кросс-скрипт (Герман↔Herman, §13): recall таблицей, решение — моделью.
+export * from "./name-match.js";
+// Робастный матч кликабельного элемента по тексту (общий browser_act, §6 Фаза 5): без ложных подстрок.
+export * from "./ui-match.js";
+
 /** Тиры маршрутизации моделей (§7). */
 export type Tier = "tier0" | "haiku" | "sonnet" | "fable";
 
@@ -11,12 +16,47 @@ export const TIER_MODEL_ENV: Record<Exclude<Tier, "tier0">, string> = {
   fable: "TIER3_MODEL",
 };
 
-/** Дефолтные id моделей (§7), если env не задан. */
+/**
+ * Дефолтные id моделей (§7), если env не задан. Тир «haiku» — это СЛОТ дешёвого тира, не привязка к
+ * модели Haiku: Haiku забракована (слабая), поэтому дешёвый слот по умолчанию = Sonnet 4.6. Сильный
+ * тир (эскалация при застревании) — флагман fable-5. Конкретная установка может переопределить через
+ * TIER1/2/3_MODEL (напр. сильный=opus-4-8).
+ */
 export const DEFAULT_MODELS: Record<Exclude<Tier, "tier0">, string> = {
-  haiku: "claude-haiku-4-5",
+  // Только Sonnet 4.6 (дешёвый/дефолтный) и Opus 4.8 (сильный/эскалация) — Haiku и Fable НЕ используем
+  // (требование владельца). Слоты исторически называются haiku/sonnet/fable, но модели — Sonnet/Opus.
+  haiku: "claude-sonnet-4-6",
   sonnet: "claude-sonnet-4-6",
-  fable: "claude-fable-5",
+  fable: "claude-opus-4-8",
 };
+
+/**
+ * «Эффорт» рассуждения по тиру = параметр `thinking` Anthropic (живой зонд 2026-06-24: `effort`/
+ * `reasoning_effort` API НЕ принимает; глубину рулит ТОЛЬКО `thinking`). Значения: "off" — без
+ * размышления (быстро, для тривиальных ходов); "adaptive" — модель сама решает глубину (оба тира);
+ * число N — явный бюджет токенов размышления (`thinking.type=enabled`, ТОЛЬКО Sonnet; на Opus
+ * автоконвертится в adaptive, т.к. Opus 4.8 = adaptive-thinking-only). Env JARVIS_TIER{1,2,3}_THINKING.
+ */
+export type ThinkingEffort = "off" | "adaptive" | number;
+export const DEFAULT_TIER_THINKING: Record<Exclude<Tier, "tier0">, ThinkingEffort> = {
+  haiku: "off", // самый дешёвый слот — без размышления (быстрые тривиальные ходы)
+  sonnet: "adaptive", // дефолт ходов — модель думает по необходимости (умнее, но не тупит на простом)
+  fable: "adaptive", // сильный/эскалация (Opus) — глубокое адаптивное размышление
+};
+export const TIER_THINKING_ENV: Record<Exclude<Tier, "tier0">, string> = {
+  haiku: "JARVIS_TIER1_THINKING",
+  sonnet: "JARVIS_TIER2_THINKING",
+  fable: "JARVIS_TIER3_THINKING",
+};
+/** Распарсить env-значение эффорта ("off"|"adaptive"|число) → ThinkingEffort, иначе дефолт. */
+export function parseThinkingEffort(raw: string | undefined, fallback: ThinkingEffort): ThinkingEffort {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (!v) return fallback;
+  if (v === "off" || v === "none" || v === "0") return "off";
+  if (v === "adaptive" || v === "auto") return "adaptive";
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) && n >= 1024 ? n : fallback; // бюджет thinking минимум 1024 (требование API)
+}
 
 /** Result без исключений — для предсказуемого control-flow в раннере/агенте. */
 export type Result<T, E = Error> = { ok: true; value: T } | { ok: false; error: E };
@@ -62,6 +102,17 @@ export function envOptional(name: string): string | undefined {
   return v === undefined || v === "" ? undefined : v;
 }
 
+/**
+ * Булев флаг из env. true ← "1"|"true"|"yes"|"on" (регистр игнор), иначе fallback.
+ * `source` — для тестируемости (можно передать подменённый env вместо process.env).
+ */
+export function envBool(name: string, fallback = false, source: NodeJS.ProcessEnv = process.env): boolean {
+  const v = source[name];
+  if (v === undefined || v === "") return fallback;
+  const s = v.trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
 // ── логгер ───────────────────────────────────────────────────
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
@@ -75,6 +126,23 @@ export interface Logger {
   child(scope: string): Logger;
 }
 
+/**
+ * Дополнительный приёмник логов (напр. файл на сервере). shared НЕ знает про fs — сервер регистрирует
+ * свой sink через `addLogSink`. Sink получает КАЖДУЮ прошедшую по уровню запись; должен быть fail-safe
+ * (не бросать — иначе повалит логирующий код). Уровневая фильтровка та же, что у консоли.
+ */
+export type LogSink = (entry: { ts: number; level: LogLevel; scope: string; msg: string; meta?: unknown }) => void;
+const logSinks: LogSink[] = [];
+
+/** Зарегистрировать приёмник логов (файл/сеть). Возвращает функцию отписки. */
+export function addLogSink(sink: LogSink): () => void {
+  logSinks.push(sink);
+  return () => {
+    const i = logSinks.indexOf(sink);
+    if (i >= 0) logSinks.splice(i, 1);
+  };
+}
+
 /** Минимальный структурный логгер. В проде заменить на pino за этим интерфейсом. */
 export function createLogger(scope = "jarvis", minLevel: LogLevel = "info"): Logger {
   const emit = (level: LogLevel, msg: string, meta?: unknown) => {
@@ -83,6 +151,17 @@ export function createLogger(scope = "jarvis", minLevel: LogLevel = "info"): Log
     const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
     if (meta !== undefined) fn(line, meta);
     else fn(line);
+    // Дополнительные приёмники (файл и т.п.). Fail-safe: сбой sink не должен ломать вызвавший код.
+    if (logSinks.length > 0) {
+      const entry = { ts: Date.now(), level, scope, msg, meta };
+      for (const sink of logSinks) {
+        try {
+          sink(entry);
+        } catch {
+          /* приёмник упал — игнорируем, консоль уже отработала */
+        }
+      }
+    }
   };
   return {
     debug: (m, meta) => emit("debug", m, meta),

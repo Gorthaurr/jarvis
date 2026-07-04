@@ -13,6 +13,7 @@ function baseDeps(over: Partial<OutboundDeps> = {}): { deps: OutboundDeps; sende
     isAlreadySent: (k) => sent.has(k),
     markSent: (k) => sent.add(k),
     send: async (channel, recipient, body) => sender.send({ channel, recipient, body }),
+    sleep: async () => {}, // no-op: не ждём анти-бан задержку в тестах
     ...over,
   };
   return { deps, sender, sent };
@@ -58,7 +59,7 @@ describe("sendOutbound (§14, UC-2)", () => {
   it("cadence блокирует burst → blocked, без confirm", async () => {
     const confirm = vi.fn(async () => ({ approved: true }));
     const cadence = new CadenceGuard(undefined, () => 1000);
-    cadence.record("u", "@masha"); // только что писали → burst
+    cadence.record("u", "telegram", "@masha"); // только что писали → burst
     const { deps, sender } = baseDeps({ cadence, requestConfirm: confirm });
     const r = await sendOutbound(params, deps);
     expect(r.status).toBe("blocked");

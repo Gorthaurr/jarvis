@@ -33,6 +33,8 @@ export interface OutboundDeps {
   /** Фактическая отправка (клиентский userbot, §12). */
   send: (channel: MessageChannel, recipient: string, body: string) => Promise<{ ok: boolean; error?: string }>;
   maxRevisions?: number;
+  /** Задержка перед отправкой (§14 человеческий конверт). Инъекция для тестов; деф — реальный sleep. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export type OutboundStatus = "sent" | "blocked" | "denied" | "duplicate" | "error";
@@ -87,11 +89,17 @@ export async function sendOutbound(params: OutboundParams, deps: OutboundDeps): 
     return { status: "duplicate", body, reason: "уже отправлено (idempotency)", messageKey: key };
   }
 
-  // 4) Отправка через userbot (§12).
+  // 4) Человеческий конверт (§14): пауза перед отправкой, чтобы не палиться равномерной частотой.
+  if (cad.suggestedDelayMs > 0) {
+    const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    await sleep(cad.suggestedDelayMs);
+  }
+
+  // 5) Отправка через userbot (§12).
   const sent = await deps.send(params.channel, params.recipient, body);
   if (!sent.ok) return { status: "error", body, reason: sent.error ?? "ошибка отправки", messageKey: key };
 
   deps.markSent(key);
-  deps.cadence.record(params.userId, params.recipient);
+  deps.cadence.record(params.userId, params.channel, params.recipient);
   return { status: "sent", body, messageKey: key };
 }

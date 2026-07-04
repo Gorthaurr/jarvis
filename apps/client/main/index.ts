@@ -13,23 +13,28 @@
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
  */
-import { app, BrowserWindow, Menu, ipcMain, session } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, powerMonitor, session } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
-import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep } from "@jarvis/protocol";
+import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep, ClientSettings } from "@jarvis/protocol";
 
 import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
 import { dispatch } from "./actuators/index.js";
 import * as tier0 from "./tier0/index.js";
+import { monitors } from "./monitors.js";
+import { settingsStore } from "./settings-store.js";
+import { identityStore } from "./identity-store.js";
 import { AudioCoordinator } from "./audio/index.js";
 import { sidecar } from "./actuators/sidecar-client.js";
 import { browserController } from "./actuators/browser-cdp.js";
 import { buildSystemProfile, formatProfileSummary } from "./sensors/system-profiler.js";
+import { captureAmbient } from "./sensors/system-snapshot.js";
+import { Sensors } from "./sensors/index.js";
 import { runSkill } from "./skill-runner/index.js";
 import { createClientActuator } from "./skill-runner/client-actuator.js";
 import { IPC } from "./ipc-contract.js";
-import type { ConfirmResultPayload, SkillRecState } from "./ipc-contract.js";
+import type { ConfirmResultPayload, SkillRecState, SettingsPatch } from "./ipc-contract.js";
 
 const log = createLogger("main");
 
@@ -63,7 +68,9 @@ function transportConfig() {
   return {
     host: readEnv("HOST", "127.0.0.1"),
     port: envInt("PORT", 8787),
-    token: readEnv("JARVIS_CLIENT_TOKEN", "dev-token"), // dev-токен; сервер валидирует позже
+    // §6B/B2: приоритет — явный JARVIS_CLIENT_TOKEN (континьюити power-юзера) → per-install UUID
+    // (опт-ин JARVIS_CLIENT_IDENTITY) → дефолт 'dev-token' (→ DEV_USER, существующая установка цела).
+    token: readEnv("JARVIS_CLIENT_TOKEN", "") || identityStore.getOrCreateInstallId() || "dev-token",
     clientVersion: app.getVersion?.() ?? "0.1.0",
   };
 }
@@ -109,6 +116,18 @@ function createWindow(): void {
     win = null;
   });
 
+  // §6 мультимонитор: окно Джарвиса живёт на его РАБОЧЕМ мониторе (по умолч. НЕосновном), чтобы не
+  // мешать на главном экране. «Выведи на основной» (monitor_set → primary) / выбор монитора в
+  // настройках (monitor_assign) — двигают окно сюда же через хук relayout.
+  const placeWindow = (): void => {
+    if (!win) return;
+    const { width, height } = win.getBounds();
+    const { x, y } = monitors.windowPosition(width, height);
+    win.setBounds({ x, y, width, height });
+  };
+  monitors.setRelayout(placeWindow);
+  placeWindow();
+
   // Диагностика: проброс консоли рендерера в лог main (иначе ошибки/логи renderer
   // не видны нигде). Сигнатура console-message менялась между версиями Electron —
   // вытаскиваем message устойчиво. Уровни warn/error помечаем.
@@ -127,9 +146,26 @@ function createWindow(): void {
   if (process.env.JARVIS_DEVTOOLS === "1") win.webContents.openDevTools({ mode: "detach" });
 }
 
+/** §9 «не мешать»: сенсоры контекста (locked через powerMonitor) → client.context серверу. */
+let sensors: Sensors | null = null;
+function startSensors(): void {
+  if (sensors) return;
+  sensors = new Sensors();
+  sensors.on("context", (c) => transport?.sendContext(c)); // снимок + изменения → серверу
+  // Реальный сигнал блокировки экрана (Windows): powerMonitor шлёт lock/unlock.
+  try {
+    powerMonitor.on("lock-screen", () => sensors?.setLocked(true));
+    powerMonitor.on("unlock-screen", () => sensors?.setLocked(false));
+  } catch (e) {
+    log.warn("powerMonitor lock-события недоступны", { error: e instanceof Error ? e.message : String(e) });
+  }
+  sensors.start(15_000); // снимок раз в 15с + сразу при изменении (setLocked)
+}
+
 /** Поднять транспорт и связать его события с renderer-IPC. */
 function startTransport(): void {
   transport = new Transport(transportConfig(), dispatch);
+  startSensors(); // §9: контекст занятости (locked) → серверу для «не мешать»
 
   // Аудио-координатор (§3): гейтит стрим, прокидывает кадры/VAD на сервер,
   // воспроизведение и barge-in — в renderer.
@@ -155,7 +191,12 @@ function startTransport(): void {
     linkOnline = true;
     win?.webContents.send(IPC.link, { online: true });
     setState("idle");
+    if (sensors) transport?.sendContext(sensors.snapshot()); // §9: свежий контекст занятости на (ре)коннекте
     void sendEnvProfile(); // §9: отдать агенту авто-профиль окружения (браузер/приложения)
+    void sendAmbient(); // §контекст: живой снимок «что открыто и где» сразу на (ре)коннекте
+    // §15: досылаем сохранённые язык/контекст серверу (робастно к оффлайн-сейву/реконнекту).
+    const snap = settingsStore.snapshot();
+    transport?.sendSettings({ language: snap.language, context: snap.context });
   });
   transport.on("link", (l) => {
     linkOnline = l.online;
@@ -167,6 +208,8 @@ function startTransport(): void {
   });
 
   transport.on("transcript", (t) => win?.webContents.send(IPC.transcript, t));
+  transport.on("chat", (m) => win?.webContents.send(IPC.chat, m)); // §22 чат-история
+  transport.on("usage", (u) => win?.webContents.send(IPC.usage, u)); // §6B/B5 расход/лимиты → вкладка «Оплата»
   transport.on("nudge", (n) => win?.webContents.send(IPC.nudge, n));
   transport.on("confirmRequest", (r) => win?.webContents.send(IPC.confirmRequest, r));
   transport.on("display", (c) => win?.webContents.send(IPC.display, c));
@@ -176,6 +219,10 @@ function startTransport(): void {
     skillRegistry.set(s.id, { name: s.name, version: s.version, steps: s.steps });
     win?.webContents.send(IPC.skillSaved, s);
   });
+  // §3 верификация диктора: прогресс/итог записи отпечатка + список голосов → renderer (вкладка «Голоса»).
+  transport.on("voiceEnrollProgress", (p) => win?.webContents.send(IPC.voiceEnrollProgress, p));
+  transport.on("voiceEnrollDone", (d) => win?.webContents.send(IPC.voiceEnrollDone, d));
+  transport.on("voiceList", (l) => win?.webContents.send(IPC.voiceVoices, l));
   transport.on("protocolError", (e) => {
     // version_mismatch -> «требуется обновление»: показываем карточкой в renderer (§5).
     win?.webContents.send(IPC.display, {
@@ -341,6 +388,7 @@ function registerIpc(): void {
   });
   // Аудио из renderer (§3): кадры захвата + управление микрофоном.
   ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));
+  ipcMain.on(IPC.playbackActive, (_e, active: boolean) => audio?.setPlaybackActive(Boolean(active)));
   ipcMain.on(IPC.activate, () => audio?.activate());
   ipcMain.on(IPC.mute, () => audio?.mute());
   // Запись/повтор навыков демонстрацией (§8).
@@ -348,6 +396,43 @@ function registerIpc(): void {
   ipcMain.on(IPC.skillStop, () => void stopSkillRecording());
   ipcMain.on(IPC.skillCancel, () => void cancelSkillRecording());
   ipcMain.on(IPC.skillRun, (_e, id: string) => void runSavedSkill(id));
+  // §3 верификация диктора. Запись отпечатка использует ТОТ ЖЕ аудиопоток (audio.frame) — поэтому
+  // открываем гейт (activate), чтобы кадры пошли; сервер маршрутизирует их в enrollment.
+  ipcMain.on(IPC.voiceEnrollStart, (_e, name: string) => {
+    audio?.activate();
+    transport?.sendVoiceEnrollStart(name);
+  });
+  ipcMain.on(IPC.voiceEnrollCancel, () => transport?.sendVoiceEnrollCancel());
+  ipcMain.on(IPC.voiceList, () => transport?.sendVoiceList());
+  ipcMain.on(IPC.voiceRemove, (_e, name: string) => transport?.sendVoiceRemove(name));
+  // §6B/B5 вкладка «Оплата»: запрос свежего расхода/лимитов → серверу (ответ придёт usage.info).
+  ipcMain.on(IPC.requestUsage, () => transport?.requestUsage());
+
+  // §6 мультимонитор: настройка рабочего монитора Джарвиса — ЛОКАЛЬНО (main), без сервера.
+  ipcMain.on(IPC.monitorList, () => win?.webContents.send(IPC.monitorInfo, monitors.monitorList()));
+  ipcMain.on(IPC.monitorAssign, (_e, index: number | null) => {
+    monitors.setJarvisIndex(typeof index === "number" ? index : null);
+    win?.webContents.send(IPC.monitorInfo, monitors.monitorList()); // обновить UI после назначения
+  });
+
+  // Настройки (язык/контекст/ключи) — ЛОКАЛЬНО (main), safeStorage для ключей. invoke → ответ-отчёт.
+  ipcMain.handle(IPC.settingsGet, () => settingsStore.snapshot());
+  ipcMain.handle(IPC.settingsSave, (_e, patch: SettingsPatch) => {
+    const res = settingsStore.save(patch);
+    // §15: язык/контекст уходят на сервер (профиль → персона).
+    const out: ClientSettings = {};
+    if (typeof patch.language === "string") out.language = patch.language;
+    if (typeof patch.context === "string") out.context = patch.context;
+    if (out.language !== undefined || out.context !== undefined) transport?.sendSettings(out);
+    // §6B/B4: ключи из UI → серверу (шифрует в user_credentials). KeyName → каноническое имя сервиса.
+    // Локально ключи тоже остаются (safeStorage); сервер хранит per-user зашифрованно для hosted-режима.
+    const SERVICE: Record<string, string> = { anthropic: "anthropic", eleven: "elevenlabs", deepgram: "deepgram" };
+    const keys = Object.entries(patch.keys ?? {})
+      .filter(([, v]) => typeof v === "string" && v.trim())
+      .map(([k, v]) => ({ service: SERVICE[k] ?? k, value: String(v).trim() }));
+    if (keys.length) transport?.sendKeys(keys);
+    return res;
+  });
 }
 
 // ── жизненный цикл приложения ──────────────────────────────────
@@ -366,6 +451,25 @@ async function sendEnvProfile(): Promise<void> {
     if (envSummary) transport?.sendEnv(envSummary);
   } catch (e) {
     log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
+  }
+}
+
+// §контекст системы: ЖИВОЙ снимок «что открыто и на каком мониторе» — отдельно от статичного
+// окружения, обновляется периодически (отдельный таймер, НЕ на горячем sensors-такте). Так Джарвис
+// каждый ход знает, что запущено и где (фикс two-monitor слепоты), без tool-call и round-trip.
+let ambientTimer: ReturnType<typeof setInterval> | undefined;
+async function sendAmbient(): Promise<void> {
+  try {
+    const summary = await captureAmbient();
+    if (summary) transport?.sendSystem(summary);
+  } catch (e) {
+    log.warn("ambient-снимок не отправлен", e instanceof Error ? e.message : String(e));
+  }
+  if (!ambientTimer) {
+    // 12с (было 30с): контекст должен быть СВЕЖИМ — открыл вкладку/включил звук → Джарвис видит почти
+    // сразу, без уточнений. Снимок лёгкий (EnumWindows + WASAPI-пик + вкладки), фон, unref.
+    ambientTimer = setInterval(() => void sendAmbient(), 12_000);
+    ambientTimer.unref?.();
   }
 }
 

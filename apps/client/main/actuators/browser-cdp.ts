@@ -15,10 +15,10 @@ import { mkdtemp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import NodeWebSocket from "ws";
 import { createLogger } from "@jarvis/shared";
 import { resolveAutomationBrowser } from "../sensors/system-profiler.js";
 import { monitors } from "../monitors.js";
+import { type WsLike, cdpCommand, parseCdpReply, resolveWebSocketCtor, unwrapEvalResult } from "./cdp-core.js";
 
 /** Свободный TCP-порт от ОС (исключает коллизии и подключение к чужому debug-инстансу). */
 function getFreePort(): Promise<number> {
@@ -66,10 +66,8 @@ export function chromeCandidates(): string[] {
   ].filter(Boolean);
 }
 
-/** Один CDP-вызов (JSON-RPC). Чистая функция. */
-export function cdpCommand(id: number, method: string, params?: Record<string, unknown>): Record<string, unknown> {
-  return params ? { id, method, params } : { id, method };
-}
+// cdpCommand вынесён в cdp-core (общий с jarvis-browser); ре-экспорт — для существующих импортёров/тестов.
+export { cdpCommand };
 
 /** Скрипт чтения читаемого контента страницы (возвращает JSON-строку). */
 export function buildReadScript(): string {
@@ -122,13 +120,6 @@ export function buildActScript(intent: string, params?: Record<string, unknown>)
 }
 
 // ── минимальный CDP-клиент ───────────────────────────────────────
-
-interface WsLike {
-  send(data: string): void;
-  close(): void;
-  addEventListener(type: "open" | "message" | "error" | "close", cb: (ev: { data?: unknown }) => void): void;
-  readyState: number;
-}
 
 export class CdpBrowserController implements BrowserController {
   private proc?: ChildProcess;
@@ -254,7 +245,11 @@ export class CdpBrowserController implements BrowserController {
 
   /** Поллим /json до появления page-таргета с webSocketDebuggerUrl. */
   private async discoverWsUrl(): Promise<string> {
-    const deadline = Date.now() + 12_000;
+    // Chrome 136+ ИГНОРИРУЕТ --remote-debugging-port на дефолтном профиле → debug-порт не
+    // поднимется НИКОГДА. Не виснем 12с: быстрый дедлайн (env JARVIS_CDP_TIMEOUT_MS, деф 5с) →
+    // быстрый откат на shell-open. На выделенном профиле debug встаёт за ~1-2с, 5с с запасом.
+    const ms = Number.parseInt(process.env.JARVIS_CDP_TIMEOUT_MS ?? "", 10);
+    const deadline = Date.now() + (Number.isFinite(ms) && ms >= 1000 ? ms : 5_000);
     for (;;) {
       try {
         const resp = await fetch(`http://127.0.0.1:${this.port}/json`);
@@ -277,14 +272,18 @@ export class CdpBrowserController implements BrowserController {
     this.pending.clear();
     this.ws = undefined;
     this.connecting = undefined;
+    // Обрыв WS (краш вкладки/сетевой сбой) → убиваем осиротевший Chrome, иначе он остаётся жить
+    // (утечка процесса + «лишние окна» при следующем запуске).
+    try {
+      this.proc?.kill();
+    } catch {
+      /* уже мёртв */
+    }
+    this.proc = undefined;
   }
 
   private connectWs(wsUrl: string): Promise<void> {
-    // В main-процессе Electron (Node 20.x) глобального WebSocket нет — берём пакет `ws`
-    // (как транспорт). Иначе CDP молча откатывался на launch-only, и невидимый путь не работал.
-    const WS =
-      (globalThis as { WebSocket?: new (u: string) => WsLike }).WebSocket ??
-      (NodeWebSocket as unknown as new (u: string) => WsLike);
+    const WS = resolveWebSocketCtor();
     const ws = new WS(wsUrl);
     this.ws = ws;
     return new Promise<void>((resolve, reject) => {
@@ -297,9 +296,8 @@ export class CdpBrowserController implements BrowserController {
   }
 
   private onMessage(data: string): void {
-    let msg: { id?: number; result?: unknown; error?: { message?: string } };
-    try { msg = JSON.parse(data); } catch { return; }
-    if (typeof msg.id !== "number") return; // событие, не ответ
+    const msg = parseCdpReply(data);
+    if (!msg) return; // событие/не-ответ — игнорируем
     const p = this.pending.get(msg.id);
     if (!p) return;
     this.pending.delete(msg.id);
@@ -310,24 +308,27 @@ export class CdpBrowserController implements BrowserController {
   private send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
     return new Promise<unknown>((resolve, reject) => {
-      if (!this.ws) return reject(new Error("CDP: нет соединения"));
+      const ws = this.ws;
+      if (!ws || ws.readyState !== 1) return reject(new Error("CDP: нет соединения"));
       const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP: таймаут ${method}`)); }, 15_000);
       this.pending.set(id, {
         resolve: (v) => { clearTimeout(timer); resolve(v); },
         reject: (e) => { clearTimeout(timer); reject(e); },
       });
-      this.ws.send(JSON.stringify(cdpCommand(id, method, params)));
+      // ws.send в CLOSING/CLOSED бросает СИНХРОННО → иначе таймер+pending утекли бы. Ловим и чистим.
+      try {
+        ws.send(JSON.stringify(cdpCommand(id, method, params)));
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
     });
   }
 
   private async evaluate(expression: string): Promise<unknown> {
-    const r = (await this.send("Runtime.evaluate", {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    })) as { result?: { value?: unknown }; exceptionDetails?: { text?: string } };
-    if (r.exceptionDetails) throw new Error(`browser eval: ${r.exceptionDetails.text ?? "исключение"}`);
-    return r.result?.value;
+    const raw = await this.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+    return unwrapEvalResult(raw, "browser eval");
   }
 
   /** Дождаться document.readyState==='complete' (после navigate). */

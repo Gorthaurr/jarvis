@@ -30,11 +30,41 @@ export interface AppInfo {
   exe: string;
 }
 
+/** Программно-управляемый инструмент на машине (CLI/локальный API) + как его драйвить. */
+export interface ToolCap {
+  id: string;
+  name: string;
+  /** Короткая подсказка агенту: КАК управлять программно (через code_run или спец-инструмент). */
+  surface: string;
+}
+
+/** Железо и подключённые устройства машины (§ контекст системы). Статика — собирается раз при старте. */
+export interface HardwareInfo {
+  cpu?: string;
+  /** Напр. "8 ядер / 16 потоков". */
+  cores?: string;
+  /** Имена видеокарт. */
+  gpu?: string[];
+  /** VRAM основной видяхи человекочитаемо, напр. "16 ГБ" (через nvidia-smi/реестр, не врущий WMI). */
+  vram?: string;
+  motherboard?: string;
+  ramGB?: number;
+  disks?: string[];
+  /** Модели мониторов (как устройства), напр. "MSI MAG 271QP X28". */
+  monitors?: string[];
+  /** Звуковые устройства вывода. */
+  audio?: string[];
+}
+
 export interface SystemProfile {
   os: string;
   defaultBrowser?: BrowserInfo;
   browsers: BrowserInfo[];
   apps: AppInfo[];
+  /** Автоматизируемые инструменты (CLI/API), найденные на машине — арсенал «программного пути». */
+  tools: ToolCap[];
+  /** Конфигурация железа/устройств (CPU/GPU/мать/ОЗУ/диски/мониторы/звук). */
+  hardware?: HardwareInfo;
 }
 
 interface BrowserSpec {
@@ -149,6 +179,55 @@ export function detectApps(): AppInfo[] {
   return APP_SPECS.filter((a) => a.exe && existsSync(a.exe)).map((a) => ({ id: a.id, name: a.name, exe: a.exe }));
 }
 
+/**
+ * Каталог программно-управляемых инструментов. Детектим по команде на PATH ИЛИ по известному exe;
+ * `surface` — подсказка агенту, КАК драйвить (через code_run или спец-инструмент). Это и есть
+ * «большое покрытие» БЕЗ хардкода: модель видит реальный арсенал и тянется к программному пути,
+ * а не кликает по GUI. Расширять — добавляя строки сюда, а не плодя актуаторы.
+ */
+interface ToolSpec {
+  id: string;
+  name: string;
+  /** Имя команды для поиска на PATH (без расширения). */
+  cmd?: string;
+  /** Известные пути exe (если не на PATH). */
+  paths?: string[];
+  surface: string;
+}
+const TOOL_SPECS: readonly ToolSpec[] = [
+  { id: "ffmpeg", name: "FFmpeg", cmd: "ffmpeg", surface: "видео/аудио (нарезка, конверт, склейка, субтитры) — через code_run; НАДЁЖНЕЕ монтажа кликами" },
+  { id: "tesseract", name: "Tesseract OCR", cmd: "tesseract", surface: "распознать текст с картинки/скрина — через code_run (дешевле зрения для чистого текста)" },
+  { id: "yt-dlp", name: "yt-dlp", cmd: "yt-dlp", surface: "скачать видео/аудио с YouTube и сотен сайтов — через code_run" },
+  { id: "git", name: "Git", cmd: "git", surface: "git (клон/коммит/дифф) — через code_run" },
+  { id: "gh", name: "GitHub CLI", cmd: "gh", surface: "GitHub: PR/issues/репозитории — через code_run (gh ...)" },
+  { id: "docker", name: "Docker", cmd: "docker", surface: "контейнеры/образы — через code_run" },
+  { id: "ollama", name: "Ollama", cmd: "ollama", surface: "ЛОКАЛЬНЫЙ LLM ($0): HTTP http://localhost:11434/api или `ollama run` — через code_run" },
+  { id: "blender", name: "Blender", cmd: "blender", surface: "3D headless: `blender -b файл.blend -P скрипт.py` — через code_run" },
+  { id: "dotnet", name: ".NET SDK", cmd: "dotnet", surface: "сборка/запуск .NET — через code_run" },
+  { id: "psql", name: "PostgreSQL CLI", cmd: "psql", surface: "SQL к Postgres — через code_run (psql)" },
+  { id: "obs", name: "OBS Studio", paths: [join(env("ProgramFiles"), "obs-studio\\bin\\64bit\\obs64.exe")], surface: "ПРОГРАММНО через инструмент obs_request (obs-websocket) — стрим/сцены/настройки, НЕ клики" },
+];
+
+/** Команда есть на PATH? (проверяем .exe/.cmd/.bat и без расширения). Чистая — exists/pathStr инжектятся. */
+export function onPath(cmd: string, pathStr: string, exists: (p: string) => boolean): boolean {
+  const dirs = pathStr.split(";").filter(Boolean);
+  const cands = [`${cmd}.exe`, `${cmd}.cmd`, `${cmd}.bat`, cmd];
+  return dirs.some((d) => cands.some((c) => exists(join(d, c))));
+}
+
+/** Детект автоматизируемых инструментов (CLI на PATH / известные exe). exists/pathStr инжектятся для теста. */
+export function detectAutomationTools(
+  exists: (p: string) => boolean = existsSync,
+  pathStr: string = process.env.PATH ?? "",
+): ToolCap[] {
+  const found: ToolCap[] = [];
+  for (const t of TOOL_SPECS) {
+    const ok = (t.cmd && onPath(t.cmd, pathStr, exists)) || (t.paths?.some((p) => p && exists(p)) ?? false);
+    if (ok) found.push({ id: t.id, name: t.name, surface: t.surface });
+  }
+  return found;
+}
+
 /** Список установленных браузеров (любой exe из спеки присутствует). */
 export function detectBrowsers(defaultId?: string): BrowserInfo[] {
   const list: BrowserInfo[] = [];
@@ -159,13 +238,110 @@ export function detectBrowsers(defaultId?: string): BrowserInfo[] {
   return list;
 }
 
+// ── Железо/устройства (WMI/CIM, §контекст системы) ───────────────
+
+/** Запустить PowerShell-скрипт через -EncodedCommand (без проблем экранирования) и распарсить JSON-вывод. */
+export function runPsJson<T>(script: string, timeoutMs = 12000): Promise<T | null> {
+  return new Promise((resolve) => {
+    // Префикс UTF-8: имена мониторов/звука/«ГБ» кириллицей иначе бьются (cp866 → мохибейк).
+    const full = `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n${script}`;
+    const encoded = Buffer.from(full, "utf16le").toString("base64");
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+      { windowsHide: true },
+    );
+    let out = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (d: string) => {
+      out += d;
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      try {
+        resolve(JSON.parse(out.trim()) as T);
+      } catch {
+        resolve(null);
+      }
+    });
+    setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* */
+      }
+      resolve(null);
+    }, timeoutMs).unref?.();
+  });
+}
+
+/** WMI/CIM-скрипт: CPU/GPU/мать/ОЗУ/диски/мониторы/звук + точный VRAM через nvidia-smi (WMI AdapterRAM врёт >4ГБ). */
+const HARDWARE_PS = `$ErrorActionPreference='SilentlyContinue'
+$cs=Get-CimInstance Win32_ComputerSystem
+$cpu=Get-CimInstance Win32_Processor | Select-Object -First 1
+$gpu=@(Get-CimInstance Win32_VideoController | Where-Object { $_.Name -and $_.Name -notmatch 'Citrix|Remote|Basic Display|Mirror|Virtual|Parsec|DisplayLink Soft' } | ForEach-Object { $_.Name })
+$bb=Get-CimInstance Win32_BaseBoard
+$ramGB=[math]::Round($cs.TotalPhysicalMemory/1GB,0)
+$disks=@(Get-CimInstance Win32_DiskDrive | Where-Object { $_.Size } | ForEach-Object { ('{0} {1}GB' -f $_.Model.Trim(), [math]::Round($_.Size/1GB,0)) })
+$mons=@(Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorID | ForEach-Object {
+  $mfg=(($_.ManufacturerName | Where-Object { $_ -gt 0 }) | ForEach-Object { [char]$_ }) -join ''
+  $nm=(($_.UserFriendlyName | Where-Object { $_ -gt 0 }) | ForEach-Object { [char]$_ }) -join ''
+  ("$mfg $nm").Trim()
+} | Where-Object { $_ })
+$audio=@(Get-CimInstance Win32_SoundDevice | Where-Object { $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name -Unique)
+$vram=''
+$smi=& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
+if($smi){ $vram=('{0} ГБ' -f [math]::Round((($smi | Select-Object -First 1) -as [double])/1024,0)) }
+[ordered]@{ cpu=$cpu.Name.Trim(); cores=('{0} ядер / {1} потоков' -f $cpu.NumberOfCores,$cpu.NumberOfLogicalProcessors); gpu=$gpu; vram=$vram; motherboard=(('{0} {1}' -f $bb.Manufacturer,$bb.Product).Trim()); ramGB=$ramGB; disks=$disks; monitors=$mons; audio=$audio } | ConvertTo-Json -Compress -Depth 4`;
+
+/** Нормализовать в массив строк (PowerShell сериализует одиночный элемент не как массив). */
+function asArr(v: unknown): string[] | undefined {
+  if (Array.isArray(v)) return v.map(String).filter(Boolean);
+  if (typeof v === "string" && v.trim()) return [v];
+  return undefined;
+}
+
+/** Собрать конфигурацию железа/устройств (IO, через WMI/nvidia-smi). Раз при старте; ошибка → undefined. */
+export async function detectHardware(): Promise<HardwareInfo | undefined> {
+  const raw = await runPsJson<Record<string, unknown>>(HARDWARE_PS);
+  if (!raw) return undefined;
+  const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  return {
+    cpu: str(raw.cpu),
+    cores: str(raw.cores),
+    gpu: asArr(raw.gpu),
+    vram: str(raw.vram),
+    motherboard: str(raw.motherboard),
+    ramGB: num(raw.ramGB),
+    disks: asArr(raw.disks),
+    monitors: asArr(raw.monitors),
+    audio: asArr(raw.audio),
+  };
+}
+
+/** Краткая строка конфигурации железа для промпта (чистая — для теста). */
+export function formatHardwareSummary(h: HardwareInfo): string {
+  const parts: string[] = [];
+  if (h.cpu) parts.push(`CPU: ${h.cpu}${h.cores ? ` (${h.cores})` : ""}`);
+  if (h.gpu?.length) parts.push(`GPU: ${h.gpu.join(", ")}${h.vram ? ` ${h.vram}` : ""}`);
+  if (h.ramGB) parts.push(`ОЗУ: ${h.ramGB} ГБ`);
+  if (h.motherboard) parts.push(`мать: ${h.motherboard}`);
+  if (h.disks?.length) parts.push(`диски: ${h.disks.join(", ")}`);
+  if (h.monitors?.length) parts.push(`мониторы: ${h.monitors.join(", ")}`);
+  if (h.audio?.length) parts.push(`звук: ${h.audio.join(", ")}`);
+  return parts.length ? `Железо ПК: ${parts.join("; ")}.` : "";
+}
+
 /** Полный профиль окружения (для агента и браузерной автоматизации). */
 export async function buildSystemProfile(): Promise<SystemProfile> {
   const progId = await readDefaultBrowserProgId();
   const defaultId = progId ? progIdToBrowserId(progId) : undefined;
   const browsers = detectBrowsers(defaultId);
   const defaultBrowser = browsers.find((b) => b.isDefault) ?? browsers[0];
-  return { os: `${process.platform} ${process.arch}`, defaultBrowser, browsers, apps: detectApps() };
+  // Железо — параллельно (WMI медленный ~1-3с), не блокируем браузерный профиль.
+  const hardware = await detectHardware();
+  return { os: `${process.platform} ${process.arch}`, defaultBrowser, browsers, apps: detectApps(), tools: detectAutomationTools(), hardware };
 }
 
 /**
@@ -187,5 +363,19 @@ export function formatProfileSummary(p: SystemProfile): string {
   const others = p.browsers.filter((b) => !b.isDefault).map((b) => b.name);
   if (others.length) parts.push(`ещё установлены браузеры: ${others.join(", ")}`);
   if (p.apps.length) parts.push(`установленные приложения: ${p.apps.map((a) => a.name).join(", ")}`);
-  return parts.length ? `${parts.join("; ")}.` : "";
+  let summary = parts.length ? `${parts.join("; ")}.` : "";
+  // Арсенал «программного пути» (§ правило v21: API/CLI первым, GUI последним). Перечисляем КАК
+  // драйвить — чтобы модель тянулась к надёжному пути, а не кликала по интерфейсу.
+  const tools = p.tools ?? [];
+  if (tools.length) {
+    summary += `\nПрограммно доступно на этой машине (используй ЭТО, а не клики по GUI): ${tools
+      .map((t) => `${t.name} — ${t.surface}`)
+      .join("; ")}.`;
+  }
+  // Конфигурация железа/устройств — чтобы Джарвис знал, на чём работает (проц/видяха/мать/мониторы/звук).
+  if (p.hardware) {
+    const hw = formatHardwareSummary(p.hardware);
+    if (hw) summary += `\n${hw}`;
+  }
+  return summary;
 }

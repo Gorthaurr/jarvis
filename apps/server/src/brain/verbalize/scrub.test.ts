@@ -2,7 +2,34 @@
  * Тесты identity-скраба (§11): навязанная шлюзом «Kiro» не должна звучать/отображаться.
  */
 import { describe, expect, it } from "vitest";
-import { scrubIdentity, verbalize } from "./index.js";
+import { scrubIdentity, stripAudioTags, stripToolCallSyntax, verbalize } from "./index.js";
+
+describe("гигиена вывода: утёкший tool-call и аудио-теги (§21)", () => {
+  it("вырезает сырой вызов инструмента из текста (не произносим разметку)", () => {
+    const leaked = '<invoke name="telegram_send_voice"><parameter name="to">Избранное</parameter><parameter name="text">Привет</parameter></invoke>';
+    expect(stripToolCallSyntax(leaked).trim()).toBe("");
+    expect(verbalize(`Готово. ${leaked}`).toLowerCase()).not.toContain("invoke");
+    expect(verbalize(`Готово. ${leaked}`).toLowerCase()).not.toContain("parameter");
+  });
+
+  it("снимает antml-неймспейс и одиночные/незакрытые теги вызова", () => {
+    expect(stripToolCallSyntax('<invoke name="x">a</invoke>').trim()).toBe("");
+    expect(stripToolCallSyntax('хвост <parameter name="to">').trim()).toBe("хвост");
+  });
+
+  it("снимает аудио/эмоция-теги [warmly], но не трогает кириллицу и числа", () => {
+    expect(stripAudioTags("[warmly] Здравствуйте").trim()).toBe("Здравствуйте");
+    expect(stripAudioTags("[whispering] тихо")).not.toContain("[");
+    expect(stripAudioTags("счёт [1] и [что-то]")).toBe("счёт [1] и [что-то]");
+  });
+
+  it("verbalize чистит и тег эмоции, и tool-call вместе", () => {
+    const out = verbalize('[warmly] Здравствуйте, Антон. <invoke name="x"><parameter name="y">z</parameter></invoke>');
+    expect(out).toContain("Здравствуйте");
+    expect(out.toLowerCase()).not.toContain("warmly");
+    expect(out.toLowerCase()).not.toContain("invoke");
+  });
+});
 
 describe("scrubIdentity (§11)", () => {
   it("подменяет латинское имя Kiro на Джарвис", () => {

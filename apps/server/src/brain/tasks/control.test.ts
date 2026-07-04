@@ -61,9 +61,10 @@ describe("classifyTaskControl (§20)", () => {
     expect(classifyTaskControl("как там").kind).toBe("status");
     expect(classifyTaskControl("как дела с задачей").kind).toBe("status");
     expect(classifyTaskControl("на чём ты").kind).toBe("status");
-    expect(classifyTaskControl("готово").kind).toBe("status");
     expect(classifyTaskControl("что по задаче").kind).toBe("status");
     expect(classifyTaskControl("докладывай").kind).toBe("status");
+    // «готово» (закрытие/спасибо) — НЕ статус: не перехватываем, пусть идёт агенту как обычная реплика.
+    expect(classifyTaskControl("всё, готово, спасибо").kind).toBe("none");
   });
 
   it("none: обычная реплика/контент", () => {

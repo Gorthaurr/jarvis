@@ -15,11 +15,14 @@ import type { CodeLang } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 import { lintCode } from "../code-guard.js";
+import { dataDir } from "../../paths.js";
 
 const log: Logger = createLogger("dynamic-tools");
 
-const DATA_DIR = join(process.cwd(), "data");
+const DATA_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
 const STORE_PATH = join(DATA_DIR, "dynamic-tools.json");
+// §6B/B3: старые записи без userId → раздел dev (континьюити существующего dynamic-tools.json).
+const DEV_USER = "00000000-0000-0000-0000-000000000001";
 
 /** Имена-плейсхолдеры подстановки в шаблоне кода: {{param}}. */
 const PLACEHOLDER = (name: string): RegExp => new RegExp(`\\{\\{\\s*${name}\\s*\\}\\}`, "g");
@@ -37,6 +40,8 @@ export interface DynamicToolParam {
 }
 
 export interface DynamicTool {
+  /** §6B/B3: владелец инструмента — самописные тулзы партиционированы по userId (не шарятся, code-exec). */
+  userId: string;
   /** Уникальное snake_case имя (видно модели как имя инструмента). */
   name: string;
   description: string;
@@ -61,11 +66,13 @@ export interface RenderResult {
 }
 
 /**
- * Реестр самописных инструментов. Один на gateway (как профиль). Знает зарезервированные
- * имена встроенных инструментов, чтобы самописный не затенял штатный.
+ * Реестр самописных инструментов. Один на gateway. §6B/B3: ПАРТИЦИОНИРОВАН по userId — раньше тулзы
+ * хранились по имени БЕЗ владельца → самописный code-exec инструмент одного юзера был вызываем агентом
+ * другого (утечка кода между тенантами). Теперь ключ Map — `${userId}::${name}`, все методы берут userId.
+ * Знает зарезервированные имена встроенных инструментов, чтобы самописный не затенял штатный.
  */
 export class DynamicToolStore {
-  private tools = new Map<string, DynamicTool>();
+  private tools = new Map<string, DynamicTool>(); // ключ: `${userId}::${name}`
   private readonly now: () => number;
   private readonly storePath: string;
 
@@ -76,6 +83,10 @@ export class DynamicToolStore {
   ) {
     this.now = opts.now ?? (() => Date.now());
     this.storePath = opts.storePath ?? STORE_PATH;
+  }
+
+  private key(userId: string, name: string): string {
+    return `${userId}::${name.toLowerCase()}`;
   }
 
   /** Загрузить с диска (один раз на старте). Безопасно при отсутствии файла. */
@@ -95,26 +106,31 @@ export class DynamicToolStore {
     }
     // Те же гарды, что при create: валидное имя, НЕ зарезервировано, код проходит lint
     // (ужесточённый гард ретроактивно отбраковывает устаревшие/опасные шаблоны).
-    const valid = raw.filter(
-      (t) =>
-        t &&
-        NAME_RE.test(t.name) &&
-        !this.reservedNames.has(t.name) &&
-        VALID_LANGS.has(t.lang) &&
-        lintCode(t.lang, t.code).ok,
-    );
-    this.tools = new Map(valid.map((t) => [t.name, t]));
+    const valid = raw
+      .filter(
+        (t) =>
+          t &&
+          NAME_RE.test(t.name) &&
+          !this.reservedNames.has(t.name) &&
+          VALID_LANGS.has(t.lang) &&
+          lintCode(t.lang, t.code).ok,
+      )
+      .map((t) => ({ ...t, userId: t.userId ?? DEV_USER })); // континьюити: legacy без userId → dev
+    this.tools = new Map(valid.map((t) => [this.key(t.userId, t.name), t]));
     log.info("самописные инструменты загружены", { count: this.tools.size, dropped: raw.length - valid.length });
   }
 
-  /** Создать/обновить инструмент. Валидирует имя/язык/код (lint §6) перед сохранением. */
-  async create(input: {
-    name: string;
-    description: string;
-    lang: string;
-    code: string;
-    params?: DynamicToolParam[];
-  }): Promise<CreateResult> {
+  /** Создать/обновить инструмент ЭТОГО userId. Валидирует имя/язык/код (lint §6) перед сохранением. */
+  async create(
+    userId: string,
+    input: {
+      name: string;
+      description: string;
+      lang: string;
+      code: string;
+      params?: DynamicToolParam[];
+    },
+  ): Promise<CreateResult> {
     const name = String(input.name ?? "").trim().toLowerCase();
     if (!NAME_RE.test(name)) return err("имя: snake_case, 3-41 символ, начинается с буквы");
     if (this.reservedNames.has(name)) return err(`имя «${name}» занято встроенным инструментом`);
@@ -122,7 +138,11 @@ export class DynamicToolStore {
     if (!VALID_LANGS.has(lang)) return err("lang: python | node | powershell");
     const code = String(input.code ?? "");
     if (!code.trim()) return err("пустой code");
-    if (this.tools.size >= MAX_TOOLS && !this.tools.has(name)) return err("достигнут лимит самописных инструментов");
+    const k = this.key(userId, name);
+    // Лимит ПЕР-ЮЗЕР (раньше глобальный — один тенант мог исчерпать на всех).
+    if (this.list(userId).length >= MAX_TOOLS && !this.tools.has(k)) {
+      return err("достигнут лимит самописных инструментов");
+    }
 
     // Валидируем шаблон гардом (§6): самописный инструмент не должен обходить запреты.
     const lint = lintCode(lang as CodeLang, code);
@@ -133,8 +153,9 @@ export class DynamicToolStore {
       .filter((p) => p && typeof p.name === "string" && PARAM_NAME_RE.test(p.name.toLowerCase()))
       .map((p) => ({ name: p.name.toLowerCase(), description: p.description }));
 
-    const existing = this.tools.get(name);
-    this.tools.set(name, {
+    const existing = this.tools.get(k);
+    this.tools.set(k, {
+      userId,
       name,
       description,
       lang: lang as CodeLang,
@@ -144,28 +165,29 @@ export class DynamicToolStore {
       runCount: existing?.runCount ?? 0,
     });
     await this.persist();
-    log.info("самописный инструмент сохранён", { name, lang, params: params.length });
+    log.info("самописный инструмент сохранён", { userId, name, lang, params: params.length });
     return { ok: true };
   }
 
-  /** Удалить инструмент. */
-  async remove(name: string): Promise<boolean> {
-    const ok = this.tools.delete(String(name ?? "").toLowerCase());
+  /** Удалить инструмент ЭТОГО userId. */
+  async remove(userId: string, name: string): Promise<boolean> {
+    const ok = this.tools.delete(this.key(userId, String(name ?? "")));
     if (ok) await this.persist();
     return ok;
   }
 
-  has(name: string): boolean {
-    return this.tools.has(name.toLowerCase());
+  has(userId: string, name: string): boolean {
+    return this.tools.has(this.key(userId, name));
   }
 
-  list(): DynamicTool[] {
-    return [...this.tools.values()];
+  /** Инструменты ЭТОГО userId. */
+  list(userId: string): DynamicTool[] {
+    return [...this.tools.values()].filter((t) => t.userId === userId);
   }
 
-  /** Подставить аргументы в шаблон → готовый код для code.run. */
-  render(name: string, args: Record<string, unknown>): RenderResult {
-    const tool = this.tools.get(name.toLowerCase());
+  /** Подставить аргументы в шаблон ЭТОГО userId → готовый код для code.run. */
+  render(userId: string, name: string, args: Record<string, unknown>): RenderResult {
+    const tool = this.tools.get(this.key(userId, name));
     if (!tool) return { ok: false, error: `инструмент «${name}» не найден` };
     let code = tool.code;
     for (const p of tool.params) {
@@ -185,9 +207,9 @@ export class DynamicToolStore {
     return { ok: true, lang: tool.lang, code };
   }
 
-  /** Схемы инструментов для набора модели (§6): самописные становятся вызываемыми. */
-  asToolSchemas(): ToolSchema[] {
-    return this.list().map((t) => ({
+  /** Схемы инструментов ЭТОГО userId для набора модели (§6): самописные становятся вызываемыми. */
+  asToolSchemas(userId: string): ToolSchema[] {
+    return this.list(userId).map((t) => ({
       name: t.name,
       description: `[самописный] ${t.description} (lang=${t.lang})`,
       input_schema: {
@@ -214,7 +236,7 @@ export class DynamicToolStore {
   private async doPersist(): Promise<void> {
     try {
       await mkdir(dirname(this.storePath), { recursive: true });
-      const json = JSON.stringify(this.list(), null, 2);
+      const json = JSON.stringify([...this.tools.values()], null, 2); // все юзеры в один файл (поле userId)
       const tmp = `${this.storePath}.tmp`;
       await writeFile(tmp, json, "utf8");
       // Текущий файл → .bak (если есть), затем tmp → основной (атомарно для читателя).

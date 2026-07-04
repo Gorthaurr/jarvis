@@ -16,6 +16,7 @@ static void Log(string msg)
     => Console.Error.WriteLine($"[sidecar-win] {DateTime.UtcNow:HH:mm:ss.fff} {msg}");
 
 Log("Запуск. Ожидание запросов на stdin...");
+Log(InputSynthesizer.ReportDpiAwareness()); // §18 health-check: реально ли применился PerMonitorV2
 
 // Страховка от залипания зажатых клавиш (§6): отпустить всё при ЛЮБОМ завершении процесса
 // (нормальный выход, Ctrl+C, kill родителя), иначе игровая клавиша останется зажатой в ОС.
@@ -79,6 +80,9 @@ async Task HandleRequestAsync(IpcRequest req)
             // §6 — резолв контрола по роли/имени
             "ground" => HandleGround(req),
 
+            // §бесшумный-ввод — резолв контрола по КООРДИНАТАМ (для клика без курсора по точке из screen_capture)
+            "ground.at" => HandleGroundAtPoint(req),
+
             // §6 — вызов UIA-паттерна по дескриптору
             "invoke" => HandleInvoke(req),
 
@@ -132,6 +136,18 @@ object? HandleGround(IpcRequest req)
     return result;
 }
 
+// "ground.at" — резолв элемента по координатам (§бесшумный-ввод). Координаты ЛОГИЧЕСКИЕ (96dpi, как click) →
+// физические для UIA FromPoint. null → под точкой нет UIA-элемента (canvas/игра) → клиент деградирует.
+object? HandleGroundAtPoint(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<GroundAtPointArgs>(req.Args);
+    (double physX, double physY) = InputSynthesizer.LogicalToPhysical(args.X, args.Y);
+    GroundResult? result = grounder.GroundAtPoint(physX, physY);
+    if (result is null)
+        throw new InvalidOperationException($"Под точкой ({args.X},{args.Y}) нет UIA-элемента (canvas/игра?).");
+    return result;
+}
+
 // "invoke" — UIA-паттерн (§6)
 object? HandleInvoke(IpcRequest req)
 {
@@ -146,17 +162,18 @@ object? HandleClick(IpcRequest req)
     var args = ArgsHelper.Deserialize<ClickArgs>(req.Args);
     string button = args.Button ?? "left";
 
+    bool restore = args.RestoreCursor == true; // §бесшумный-ввод: вернуть курсор после физ.клика
     if (args.X.HasValue && args.Y.HasValue)
     {
         // Прямые координаты от vision-движка — ЛОГИЧЕСКИЕ (96dpi), масштабируем через DPI (§18).
-        InputSynthesizer.Click(args.X.Value, args.Y.Value, button);
+        InputSynthesizer.Click(args.X.Value, args.Y.Value, button, restore);
     }
     else if (args.Handle.HasValue)
     {
         // Fallback-клик по a11y-элементу (§6): точка клика из UIA — уже ФИЗИЧЕСКАЯ,
         // поэтому ClickPhysical (без повторного DPI-масштаба).
         (double cx, double cy) = grounder.GetClickPoint(args.Handle.Value);
-        InputSynthesizer.ClickPhysical(cx, cy, button);
+        InputSynthesizer.ClickPhysical(cx, cy, button, restore);
     }
     else
     {

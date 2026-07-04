@@ -59,6 +59,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "ui.ground",
       "app.launch",
       "app.focus",
+      "app.close",
       "browser.open",
       "browser.act",
       "browser.read",
@@ -72,11 +73,13 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "telegram.read",
       "jbrowser.open",
       "jbrowser.read",
+      "jbrowser.inspect",
       "jbrowser.act",
       "jbrowser.login",
       "order.place",
       "fs.read",
       "fs.write",
+      "fs.edit",
       "fs.append",
       "fs.list",
       "fs.delete",
@@ -91,6 +94,9 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "office.excel",
       "office.word",
       "monitor.set",
+      "monitor.list",
+      "monitor.assign",
+      "obs.request",
     ];
     for (const kind of expectedKinds) {
       const toolName = ACTUATOR_TOOL_BY_KIND[kind];
@@ -131,10 +137,14 @@ describe("@jarvis/tools — гарды §14 закодированы в опис
     expect(d).toContain("платёжн");
   });
 
-  it("code_run помечает powershell как confirm + CLM", () => {
+  it("code_run помечает powershell и требует подтверждение на необратимое", () => {
+    // persona v21: code_run — основной инструмент «рук» (FullLanguage).
+    // Модель security-модели документируется как «подтверждение ТОЛЬКО на
+    // необратимое»; реальный гард CLM/confirm живёт и тестируется в
+    // apps/server/src/brain/code-guard.ts (+ code-guard.test.ts).
     const d = TOOLS_BY_NAME["code_run"]!.description;
     expect(d).toContain("powershell");
-    expect(d.toLowerCase()).toContain("confirm");
-    expect(d).toContain("CLM");
+    expect(d.toLowerCase()).toContain("подтверждение");
+    expect(d.toLowerCase()).toContain("необратимое");
   });
 });

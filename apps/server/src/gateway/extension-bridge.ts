@@ -116,8 +116,61 @@ export class ExtensionBridge {
     });
   }
 
-  /** Удобный шорткат: отправить сообщение в Telegram через расширение. */
-  telegramSend(to: string, text: string): Promise<unknown> {
-    return this.request({ type: "telegram.send", to, text }, 45_000);
+  /** Удобный шорткат: отправить сообщение в Telegram через расширение.
+   *  variants — оригинал + транслит-варианты имени (recall, чтобы кросс-скриптовый контакт всплыл;
+   *  решение, кто настоящий, остаётся за моделью — расширение вернёт кандидатов при неоднозначности). */
+  telegramSend(to: string, text: string, variants?: string[]): Promise<unknown> {
+    return this.request({ type: "telegram.send", to, text, variants: variants ?? [] }, 45_000);
+  }
+
+  /** Отправить ГОЛОСОВОЕ в Telegram (TTS mp3 base64 → запись голосом филиппа через подмену микрофона). */
+  telegramSendVoice(to: string, audioB64: string): Promise<unknown> {
+    return this.request({ type: "telegram.send_voice", to, audioB64 }, 90_000);
+  }
+
+  /** §проактив-всё: НЕПРОЧИТАННЫЕ Telegram-чаты из УЖЕ открытой вкладки (без кражи фокуса). Нет вкладки →
+   *  {ok:true, noTab:true}. Для ambient-источника «вам написал X» — дёшево, неинвазивно, короткий таймаут. */
+  telegramUnread(): Promise<unknown> {
+    return this.request({ type: "telegram.unread" }, 8_000);
+  }
+
+  /**
+   * Открыть URL в браузере пользователя С УЧЁТОМ открытых вкладок (§): есть вкладка сервиса →
+   * фокус на неё, нет → новая. Решает «постоянно новые вкладки». Возвращает {focused|created}.
+   * Не подключено расширение — reject (вызывающий откатится на shell-open).
+   */
+  openOrFocus(url: string): Promise<unknown> {
+    return this.request({ type: "tab.openOrFocus", url }, 15_000);
+  }
+
+  /** Прочитать вкладку (по tabId из open / url-хосту / активную) в сессии пользователя. */
+  tabRead(url?: string, tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.read", url: url ?? "", tabId }, 15_000);
+  }
+
+  /** Список открытых вкладок (заголовок/URL/активна/звучит) — чтобы резолвить «какую вкладку». */
+  tabList(): Promise<unknown> {
+    return this.request({ type: "tab.list" }, 10_000);
+  }
+
+  /** §перенос логинов: выгрузить куки залогиненного Chrome пользователя (chrome.cookies — РАСШИФРОВАННЫЕ,
+   *  минуя app-bound encryption) → для импорта в невидимый браузер Джарвиса. domains — фильтр хостов (опц.). */
+  exportCookies(domains?: string[]): Promise<unknown> {
+    return this.request({ type: "cookies.export", domains: domains ?? null }, 20_000);
+  }
+
+  /** Закрыть вкладку(и): по tabId (точно) / хосту url (все этого сайта) / активную. */
+  tabClose(url?: string, tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.close", url: url ?? "", tabId }, 10_000);
+  }
+
+  /** ГЛАЗА В DOM: снимок интерактивных элементов вкладки с устойчивыми селекторами (для прицельного act). */
+  tabInspect(url?: string, query?: string, cap?: number, tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.inspect", url: url ?? "", query: query ?? "", cap, tabId }, 15_000);
+  }
+
+  /** Действие В вкладке пользователя (play/pause/next/click/type/scroll) через chrome.scripting. */
+  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.act", url, intent, params: params ?? {}, tabId }, 20_000);
   }
 }

@@ -15,12 +15,22 @@
     <div class="app">
       <!-- ── Топбар: бренд + статус связи + настройки ── -->
       <header class="topbar">
-        <div class="brand">
-          <span class="brand__mark" aria-hidden="true"></span>
-          <span class="brand__name">Jarvis</span>
-        </div>
+        <!-- Пусто слева (без синего квадрата-логотипа и надписи «Jarvis») — иконки уходят вправо. -->
+        <div class="brand" aria-hidden="true"></div>
         <div class="topbar__right">
           <span id="link" class="link link--off" title="связь с сервером">offline</span>
+          <button id="muteBtn" class="icon-btn" type="button" aria-label="звук" title="Выключить звук (Джарвис слышит и делает, но молча)">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M11 5 6 9H3v6h3l5 4V5z"/>
+              <path class="muteBtn__waves" d="M15.5 8.5a5 5 0 0 1 0 7M18.5 6a8 8 0 0 1 0 12"/>
+              <path class="muteBtn__slash" d="M3 3l18 18" stroke="var(--danger)" />
+            </svg>
+          </button>
+          <button id="chatBtn" class="icon-btn" type="button" aria-label="чат" title="Режим чата (печатать Джарвису)">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 11.5a8.5 8.5 0 0 1-12.5 7.5L3 21l1.5-5.5A8.5 8.5 0 1 1 21 11.5z"/>
+            </svg>
+          </button>
           <button id="settingsBtn" class="icon-btn" type="button" aria-label="настройки" title="Настройки">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
               <circle cx="12" cy="12" r="3.1"/>
@@ -30,10 +40,11 @@
         </div>
       </header>
 
-      <!-- ── Ambient-экран: центральный индикатор + диалог + статус снизу ── -->
+      <!-- ── Главный экран (дизайн «Премиум-минимал»): мягкое гало + подпись состояния + живая
+           волна голоса (БЕЗ жёсткого круга-орба), снизу — ответ/задача и строка состояния. -->
       <main class="stage">
-        <!-- Центральный ПАССИВНЫЙ индикатор состояния (геометрия Amnezia ConnectButton).
-             Это визуализация слушаю/думаю/говорю, НЕ кнопка: pointer-events:none, без клика. -->
+        <!-- Центральный индикатор: гало (мягкое свечение) + подпись + волна. Кольцо-круг скрыто
+             в CSS (.hero__ring{display:none}) — остаётся гало+волна. Дуга (.hero__arc) = спиннер «думаю». -->
         <div id="hero" class="hero hero--listening" aria-hidden="true">
           <div class="hero__viz">
             <svg class="hero__rings" viewBox="0 0 190 190" aria-hidden="true">
@@ -42,38 +53,45 @@
             </svg>
             <span id="heroLabel" class="hero__label">Слушаю</span>
           </div>
-          <!-- Живой эквалайзер голоса (CSS-анимация, столбики строит renderer.ts) -->
           <div id="wave" class="hero__wave" aria-hidden="true"></div>
         </div>
 
-        <!-- Реплики Джарвиса (ui.display, §21) -->
+        <!-- Ответ Джарвиса / карточки ui.display (§21). -->
         <section id="cards" class="cards" aria-label="диалог"></section>
 
-        <!-- Панель прогресса задачи (§20) -->
-        <section id="taskPanel" class="task task--hidden" aria-live="polite">
-          <div class="task__head">
-            <span id="taskState" class="task__state">—</span>
-            <span id="taskSummary" class="task__summary"></span>
-          </div>
-          <div class="task__bar" role="progressbar">
-            <div id="taskBarFill" class="task__bar-fill"></div>
-          </div>
-          <div class="task__actions">
-            <button id="taskCancelBtn" class="btn btn--deny btn--sm" type="button">Стоп</button>
-            <button id="taskPauseBtn" class="btn btn--ghost btn--sm" type="button">Пауза</button>
-            <button id="taskResumeBtn" class="btn btn--ok btn--sm task--hidden" type="button">
-              Продолжить
-            </button>
-          </div>
-        </section>
+        <!-- Док задач (§20): чипы активных задач — В ПОТОКЕ над строкой состояния (не плавают). -->
+        <section id="taskDock" class="taskdock" aria-live="polite" aria-label="задачи"></section>
 
-        <!-- Тонкий статус снизу: состояние + что услышал (id обязателен — renderer.ts $("statusbar")) -->
+        <!-- Нижняя строка состояния: точка-индикатор + статус + что услышал. -->
         <div id="statusbar" class="statusbar statusbar--listening">
           <span class="statusbar__dot"></span>
           <span id="stateLabel" class="statusbar__text">слушаю</span>
           <span id="transcript" class="statusbar__heard"></span>
         </div>
       </main>
+
+      <!-- ── Режим чата (§22): печатать Джарвису, ответы текстом, без голоса ── -->
+      <section id="chatView" class="chatview chatview--hidden" aria-label="чат">
+        <header class="chatview__head">
+          <button id="chatBack" class="icon-btn" type="button" aria-label="выйти из чата" title="Выйти из чата (к голосу)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 18l-6-6 6-6"/>
+            </svg>
+          </button>
+          <span class="chatview__title">Чат с Джарвисом</span>
+        </header>
+        <div id="chatLog" class="chatlog" aria-live="polite">
+          <div class="chatlog__empty">Напишите Джарвису — он ответит текстом и сделает, что нужно.</div>
+        </div>
+        <form id="chatForm" class="composer">
+          <input id="chatInput" class="composer__input" type="text" placeholder="Сообщение Джарвису…" autocomplete="off" />
+          <button id="chatSend" class="composer__send" type="submit" aria-label="отправить">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+            </svg>
+          </button>
+        </form>
+      </section>
     </div>
 
     <!-- ── Настройки (ключи / устройства / контекст) ── -->
@@ -91,6 +109,7 @@
       <div class="settings__tabs" role="tablist">
         <button class="settab settab--active" type="button" data-tab="general">Общее</button>
         <button class="settab" type="button" data-tab="skills">Навыки</button>
+        <button class="settab" type="button" data-tab="voices">Голоса</button>
         <button class="settab" type="button" data-tab="keys">Ключи</button>
         <button class="settab" type="button" data-tab="billing">Оплата</button>
       </div>
@@ -107,6 +126,14 @@
             </select>
           </section>
           <section class="setgroup">
+            <h3 class="setgroup__title">Громкость Джарвиса</h3>
+            <p class="setgroup__hint">Громкость голоса Джарвиса при озвучке ответов.</p>
+            <div class="range-row">
+              <input id="ttsVolume" class="range-input" type="range" min="0" max="100" step="5" value="100" aria-label="громкость голоса Джарвиса" />
+              <span id="ttsVolumeVal" class="range-row__val">100%</span>
+            </div>
+          </section>
+          <section class="setgroup">
             <h3 class="setgroup__title">Контекст</h3>
             <p class="setgroup__hint">Что Джарвису знать о вас — стиль, привычки, как обращаться.</p>
             <textarea id="contextInput" class="text-area" rows="4" placeholder="напр. «Зовут Антон. Обращаться на ты. Зал пн/ср/пт.»"></textarea>
@@ -119,6 +146,13 @@
                 <span class="device__name">Этот компьютер</span>
                 <span class="device__tag">desktop</span>
               </li>
+            </ul>
+          </section>
+          <section class="setgroup">
+            <h3 class="setgroup__title">Мониторы</h3>
+            <p class="setgroup__hint">Рабочий монитор Джарвиса — туда он открывает свои окна, чтобы не мешать вам на основном. Можно сказать голосом «работай на втором мониторе» или выбрать здесь.</p>
+            <ul id="monitorList" class="monitor-list" aria-label="мониторы">
+              <li class="skill-list__empty">Загрузка мониторов…</li>
             </ul>
           </section>
         </div>
@@ -136,6 +170,27 @@
             </button>
             <ul id="skillList" class="skill-list" aria-label="записанные навыки">
               <li class="skill-list__empty">Пока нет записанных навыков.</li>
+            </ul>
+          </section>
+        </div>
+
+        <!-- ── Голоса: верификация диктора (§3) — Джарвис реагирует только на свои голоса ── -->
+        <div class="settab-panel settab-panel--hidden" data-panel="voices">
+          <section class="setgroup">
+            <p class="setgroup__hint">Джарвис будет отвечать ТОЛЬКО на записанные голоса — музыку, видео и чужих игнорирует. Запишите свой голос: назовите имя и говорите ВНЯТНО (не шёпотом), пока шкала не заполнится. Если слишком тихо — запись не сохранится (скажет «не удалось»).</p>
+            <div class="field">
+              <label class="field__label" for="voiceName">Имя голоса</label>
+              <input id="voiceName" class="text-input" type="text" placeholder="напр. Антон" />
+            </div>
+            <button id="voiceEnrollBtn" class="btn btn--accent btn--wide" type="button">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
+                <path d="M12 4v8m0 0a3 3 0 0 0 3-3V7a3 3 0 0 0-6 0v2a3 3 0 0 0 3 3Zm-6 0a6 6 0 0 0 12 0M12 16v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+              Записать голос
+            </button>
+            <div id="voiceEnrollStatus" class="setgroup__hint" aria-live="polite"></div>
+            <ul id="voiceList" class="skill-list" aria-label="записанные голоса">
+              <li class="skill-list__empty">Пока нет записанных голосов — Джарвис слышит всех.</li>
             </ul>
           </section>
         </div>
@@ -183,11 +238,11 @@
     </aside>
 
     <!-- ── Модалка подтверждения send/order (§14) с полем revision ── -->
-    <div id="confirmOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">
+    <div id="confirmOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
       <div class="modal">
         <div class="modal__head">
           <span id="confirmKind" class="modal__kind"></span>
-          <h3 class="modal__title">Подтверждение</h3>
+          <h3 id="confirmTitle" class="modal__title">Подтверждение</h3>
         </div>
         <div id="confirmSummary" class="modal__summary"></div>
         <div class="field">
@@ -208,11 +263,11 @@
     </div>
 
     <!-- ── Запись навыка демонстрацией (§8) ── -->
-    <div id="skillOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true">
+    <div id="skillOverlay" class="overlay overlay--hidden" role="dialog" aria-modal="true" aria-labelledby="skillTitle">
       <div class="modal">
         <div class="modal__head">
           <span class="modal__kind">навык</span>
-          <h3 class="modal__title">Сделать скилл</h3>
+          <h3 id="skillTitle" class="modal__title">Сделать скилл</h3>
         </div>
 
         <!-- Шаг 1: имя + старт -->

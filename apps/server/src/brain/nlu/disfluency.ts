@@ -58,9 +58,17 @@ function mergeStutters(text: string): string {
       // Немедленный дубль слова — оставляем один.
       if (a.length > 0 && a === b) continue;
       // Обрывок-префикс: дропаем обрывок, оставляем полное слово.
-      const endsWithDash = /-+$/u.test(cur);
+      // Дефис-маркер обрыва считаем в конце токена ДАЖE при прилегающей пунктуации
+      // («теле-,» / «теле-» — это обрыв; «что-то», «по-русски» — нет, дефис внутри).
+      const endsWithDash = /-+["»'.,!?:;\s]*$/u.test(cur);
       const isPrefix = a.length >= 1 && a.length < b.length && b.startsWith(a);
-      if (isPrefix && (endsWithDash ? a.length >= 2 : a.length >= 4 && !STUTTER_STOPLIST.has(a))) continue;
+      // С явным дефисом-обрывком — снисходительны (от 2 символов). БЕЗ дефиса дополнительно
+      // требуем БЛИЗОСТЬ длин (хвост ≤2 символа): «откр открой» — заикание, а «план
+      // планировщик»/«файл файлы» — РАЗНЫЕ слова, осмысленный префикс не съедаем.
+      const merge = endsWithDash
+        ? a.length >= 2
+        : a.length >= 4 && !STUTTER_STOPLIST.has(a) && b.length - a.length <= 2;
+      if (isPrefix && merge) continue;
     }
     out.push(cur);
   }

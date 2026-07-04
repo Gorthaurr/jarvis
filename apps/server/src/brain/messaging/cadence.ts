@@ -52,6 +52,7 @@ export interface CadenceDecision {
 
 interface Attempt {
   userId: string;
+  channel: string;
   recipient: string;
   ts: number;
 }
@@ -65,7 +66,11 @@ export class CadenceGuard {
 
   check(input: CadenceCheckInput): CadenceDecision {
     const t = this.now();
-    const recent = this.history.filter((a) => a.userId === input.userId && t - a.ts <= this.cfg.windowMs);
+    // Учёт ПО КАНАЛУ: лимиты/анти-веер/анти-burst не должны конфлюентить TG и VK (раньше channel
+    // игнорировался → отправка в TG съедала лимит VK тому же адресату).
+    const recent = this.history.filter(
+      (a) => a.userId === input.userId && a.channel === input.channel && t - a.ts <= this.cfg.windowMs,
+    );
 
     const toRecipient = recent.filter((a) => a.recipient === input.recipient);
     if (toRecipient.length >= this.cfg.maxPerRecipient) {
@@ -93,8 +98,15 @@ export class CadenceGuard {
   }
 
   /** Зафиксировать факт отправки (после успешной доставки). */
-  record(userId: string, recipient: string): void {
-    this.history.push({ userId, recipient, ts: this.now() });
+  record(userId: string, channel: string, recipient: string): void {
+    const t = this.now();
+    this.history.push({ userId, channel, recipient, ts: t });
+    // Вытесняем записи старше окна учёта: иначе на долгоживущем процессе массив растёт
+    // неограниченно (утечка памяти + O(n)-деградация check). История по возрастанию ts.
+    const cutoff = t - this.cfg.windowMs;
+    let drop = 0;
+    while (drop < this.history.length && this.history[drop]!.ts < cutoff) drop += 1;
+    if (drop > 0) this.history.splice(0, drop);
   }
 
   private deny(reason: CadenceDecision["reason"], neverMessaged: boolean): CadenceDecision {

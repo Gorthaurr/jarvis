@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   appendFile,
   deleteEntry,
+  editFile,
   expandPath,
   listDir,
   makeDir,
@@ -105,5 +106,57 @@ describe("fs actuator (§6) — CRUD на файлах", () => {
   it("expandPath раскрывает переменные окружения", () => {
     process.env.JARVIS_TEST_DIR = root;
     expect(expandPath("%JARVIS_TEST_DIR%")).toBe(root);
+  });
+});
+
+describe("fs.editFile — точечная правка (§6, для кодинга)", () => {
+  const mk = async (content: string): Promise<string> => {
+    const p = join(root, `edit-${Math.random().toString(36).slice(2)}.txt`);
+    await writeFile(p, content);
+    return p;
+  };
+
+  it("заменяет уникальный фрагмент, остальное не трогает", async () => {
+    const p = await mk("const x = 1;\nconst y = 2;\n");
+    const r = await editFile(p, "const y = 2;", "const y = 42;");
+    expect(r.replacements).toBe(1);
+    expect((await readFile(p)).content).toBe("const x = 1;\nconst y = 42;\n");
+  });
+
+  it("фрагмент не найден → ошибка (не молчаливый no-op)", async () => {
+    const p = await mk("aaa");
+    await expect(editFile(p, "bbb", "ccc")).rejects.toThrow(/не найден/);
+  });
+
+  it("неоднозначный фрагмент без replaceAll → ошибка, файл не тронут", async () => {
+    const p = await mk("foo foo foo");
+    await expect(editFile(p, "foo", "bar")).rejects.toThrow(/встречается 3 раз/);
+    expect((await readFile(p)).content).toBe("foo foo foo");
+  });
+
+  it("replaceAll заменяет все вхождения", async () => {
+    const p = await mk("foo foo foo");
+    const r = await editFile(p, "foo", "bar", true);
+    expect(r.replacements).toBe(3);
+    expect((await readFile(p)).content).toBe("bar bar bar");
+  });
+
+  it("new с $-паттернами вставляется БУКВАЛЬНО", async () => {
+    const p = await mk("price = OLD");
+    await editFile(p, "OLD", "$1 $& ${x}");
+    expect((await readFile(p)).content).toBe("price = $1 $& ${x}");
+  });
+
+  it("old === new → ошибка", async () => {
+    const p = await mk("z");
+    await expect(editFile(p, "z", "z")).rejects.toThrow(/одинаков/);
+  });
+
+  // § рельсы самомодификации в действии через актуатор fs.
+  it("запись в node_modules — отклоняется guard'ом (самосохранность)", async () => {
+    await expect(writeFile(join(root, "node_modules", "x.js"), "hack")).rejects.toThrow(/самосохранн/i);
+  });
+  it("чтение .env — отклоняется guard'ом (секрет §0)", async () => {
+    await expect(readFile(join(root, ".env"))).rejects.toThrow(/секрет/i);
   });
 });

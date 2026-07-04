@@ -60,11 +60,33 @@ describe("parseDeepgramMessage (§10)", () => {
     expect(url).toContain("interim_results=true");
   });
 
-  it("URL: nova-3 + keyterm-подсказки (имя/сервисы) для русской речи", () => {
+  it("URL: keyterm по умолчанию ВЫКЛ (подозрение №1 «deepgram молчит на стриме», §10)", () => {
     const url = buildDeepgramUrl({ sampleRate: 16000, language: "ru" });
     expect(url).toContain("model=nova-3");
-    expect(decodeURIComponent(url)).toContain("keyterm=Джарвис");
     expect(url).toContain("smart_format=true");
+    expect(url).not.toContain("keyterm"); // по умолчанию keyterm НЕ шлём
+  });
+
+  it("URL: keyterm включается флагом DEEPGRAM_KEYTERM=1 (только nova-3)", () => {
+    const prev = process.env.DEEPGRAM_KEYTERM;
+    process.env.DEEPGRAM_KEYTERM = "1";
+    try {
+      expect(decodeURIComponent(buildDeepgramUrl({ sampleRate: 16000, language: "ru" }))).toContain("keyterm=Джарвис");
+      // на nova-2 keyterm НЕ добавляем даже с флагом (валит WS-хендшейк)
+      const prevM = process.env.DEEPGRAM_MODEL;
+      process.env.DEEPGRAM_MODEL = "nova-2";
+      try {
+        const url = buildDeepgramUrl({ sampleRate: 16000, language: "ru" });
+        expect(url).toContain("model=nova-2");
+        expect(url).not.toContain("keyterm");
+      } finally {
+        if (prevM === undefined) delete process.env.DEEPGRAM_MODEL;
+        else process.env.DEEPGRAM_MODEL = prevM;
+      }
+    } finally {
+      if (prev === undefined) delete process.env.DEEPGRAM_KEYTERM;
+      else process.env.DEEPGRAM_KEYTERM = prev;
+    }
   });
 });
 

@@ -42,3 +42,6 @@ infra/pgdata/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Локальные ML-модели (качаются отдельно, не в git)
+apps/server/models/

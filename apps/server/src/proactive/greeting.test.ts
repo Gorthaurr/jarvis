@@ -24,26 +24,27 @@ describe("buildGreeting (§11 контекстное приветствие)", (
     expect(llm.requests).toHaveLength(0); // без имени модель не трогаем
   });
 
-  it("mock-LLM не live → детерминированный фолбэк по времени+имени", async () => {
+  it("mock-LLM не live → детерминированный фолбэк по времени, обращение «сэр» (НЕ по имени)", async () => {
     const llm = new MockLlmProvider(); // live=false
     const g = await buildGreeting({ llm, episodic: epis(), models }, "u1", { name: "Антон" });
-    expect(g).toContain("Антон");
+    expect(g).toContain("сэр"); // дворецкий: «сэр», а не имя
+    expect(g).not.toContain("Антон"); // по имени НЕ окликает
     expect(g).toMatch(/Доброе утро|Добрый день|Добрый вечер|Доброй ночи/);
     expect(llm.requests).toHaveLength(0);
   });
 
-  it("живой мозг + имя → контекстный опенер от модели (с учётом фактов/памяти)", async () => {
+  it("живой мозг + имя → опенер из КУРИРУЕМЫХ фактов; сырые эпизоды НЕ тянутся (чистый старт)", async () => {
     // live-провайдер, отдающий заранее заданную фразу.
     const llm = new MockLlmProvider([{ text: "Доброе утро, Антон. Вернёмся к дизайну?" }]);
     (llm as { live: boolean }).live = true; // имитируем живой мозг (по умолчанию mock — false)
     const memory = epis();
+    // Авто-залогированный сырой эпизод НЕ должен всплывать в приветствии (источник «странных» воспоминаний).
     await memory.write({ userId: "u1", kind: "event", text: "настраивали дизайн интерфейса", ts: 1 });
     const g = await buildGreeting({ llm, episodic: memory, models }, "u1", { name: "Антон", facts: ["зал пн/ср/пт"] });
     expect(g).toBe("Доброе утро, Антон. Вернёмся к дизайну?");
     expect(llm.requests).toHaveLength(1);
-    // в контекст для модели вшиты факты и недавняя память.
     const userMsg = String(llm.requests[0]?.messages[0]?.content ?? "");
-    expect(userMsg).toContain("зал пн/ср/пт");
-    expect(userMsg).toContain("настраивали дизайн");
+    expect(userMsg).toContain("зал пн/ср/пт"); // курируемые факты профиля — да
+    expect(userMsg).not.toContain("настраивали дизайн"); // сырые эпизоды памяти — НЕТ
   });
 });

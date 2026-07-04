@@ -9,9 +9,10 @@
  * (sidecar-client, UIAutomation+SendInput); code.run (code-runner); skill.execute
  * (skill-runner); message.send (userbot); order.place (browser). Ввод/UIA требуют
  * запущенного сайдкара — если он не поднят, актуатор честно вернёт runtime-ошибку.
- * НЕ реализованы: screen.capture (M3), demo.record как ActionCommand (M4 — запись
- * навыка инициируется отдельным путём, не через dispatch).
+ * screen.capture (§ зрение) — Electron desktopCapturer, см. screen.ts. НЕ реализованы:
+ * demo.record как ActionCommand (M4 — запись навыка инициируется отдельным путём, не через dispatch).
  */
+import { powerMonitor } from "electron";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
 import * as apps from "./apps.js";
@@ -20,15 +21,50 @@ import * as ground from "./ground.js";
 import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
 import * as fs from "./fs.js";
+import { captureScreen } from "./screen.js";
 import * as system from "./system.js";
 import * as office from "./office.js";
+import * as obs from "./obs.js";
 import { outcomeToActionResult, runSkill } from "../skill-runner/index.js";
 import { createClientActuator } from "../skill-runner/client-actuator.js";
 import * as messaging from "./messaging.js";
 import { jarvisBrowser } from "./jarvis-browser.js";
+import { isUserActive } from "./user-presence.js";
 import { monitors } from "../monitors.js";
 
 const log = createLogger("actuators");
+
+/**
+ * НЕ МЕШАТЬ ПОЛЬЗОВАТЕЛЮ (§): инъекция физического ввода (мышь/клавиатура через SendInput) уводит
+ * курсор и шлёт нажатия в активное окно — если пользователь СЕЙЧАС играет/работает, это сбивает его.
+ * Правило: пользователь простаивает (не вводил ничего N сек) → действуем; пользователь активен → НЕ
+ * лезем, честно сообщаем (модель озвучит «вижу, вы заняты — не хочу мешать»). Сигнал — системное время
+ * простоя (Electron powerMonitor.getSystemIdleTime, секунды с последнего ввода ЛЮБОГО источника).
+ */
+const USER_ACTIVE_THRESHOLD_MS = 4000;
+/** Ввод САМОГО Джарвиса (SendInput) тоже сбрасывает системный idle — не считаем его «активностью юзера». */
+const JARVIS_INPUT_TOLERANCE_MS = 900;
+/** Когда Джарвис последний раз сам инжектил ввод (для отсечки собственного ввода из детекта активности). */
+let lastJarvisInputAt = 0;
+/** Команды, которые ФИЗИЧЕСКИ инжектят ввод в сессию пользователя (в отличие от UIA-invoke/CDP). */
+const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key"]);
+
+/** Активен ли пользователь ПРЯМО СЕЙЧАС (недавно вводил сам, а не Джарвис). Логика — в user-presence. */
+function userActiveNow(): boolean {
+  let idleMs: number;
+  try {
+    idleMs = Math.round(powerMonitor.getSystemIdleTime() * 1000);
+  } catch {
+    return false; // нет сигнала простоя — не блокируем (fail-open)
+  }
+  return isUserActive({
+    idleMs,
+    lastJarvisInputAt,
+    now: Date.now(),
+    thresholdMs: USER_ACTIVE_THRESHOLD_MS,
+    toleranceMs: JARVIS_INPUT_TOLERANCE_MS,
+  });
+}
 
 /** Собрать успешный результат с замером длительности. */
 function okResult(commandId: string, startedAt: number, data?: unknown): ActionResult {
@@ -59,6 +95,31 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
   log.info(`dispatch ${cmd.kind} (commandId=${commandId})`);
 
   try {
+    // §: НЕ МЕШАТЬ активному пользователю — но ТОЛЬКО когда действие ПРОАКТИВНОЕ (Джарвис сам затеял).
+    // ЗАПРОШЕННЫЙ физ-ввод (юзер сам попросил настроить/кликнуть) НЕ блокируем: он в курсе, мешать нечему
+    // (фикс «дал сложную задачу — а он отказался: вы активны в браузере»). Глушим лишь `proactive===true`.
+    const isProactive = cmd.origin === "proactive" || cmd.proactive === true; // §бесшумный-ввод: канон — origin
+    if (isProactive && PHYSICAL_INPUT_KINDS.has(cmd.kind) && userActiveNow()) {
+      const idleS = (() => {
+        try {
+          return powerMonitor.getSystemIdleTime().toFixed(1);
+        } catch {
+          return "?";
+        }
+      })();
+      log.info(`physical-input «${cmd.kind}» отложен: пользователь активен (idle ${idleS}s)`);
+      return errResult(
+        commandId,
+        startedAt,
+        "denied",
+        `USER_BUSY: пользователь сам за вводом (~${idleS}с назад), физическую мышь/клавиатуру сейчас не трогаю. ` +
+          `НЕ сдавайся и НЕ перекладывай на пользователя. Если это ВЕБ — сделай через browser_open/browser_act ` +
+          `(они работают в его вкладках и НЕ трогают мышь/клаву, мешать не будут). Если нативное окно/игра — ` +
+          `повтори через пару секунд или зайди иначе (code_run и т.п.). ЗАПРЕЩЕНО говорить «сделайте сами», ` +
+          `«нажмите Ctrl+…», «не умею» — работу с себя не снимай.`,
+      );
+    }
+
     switch (cmd.kind) {
       // ── РЕАЛЬНО в M0 ──────────────────────────────────────────
       case "app.launch": {
@@ -67,9 +128,44 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
       case "app.focus": {
         const out = await apps.focusApp(cmd.app);
+        // ЧЕСТНОСТЬ (баг из живого прогона): focused===false → приложение не запущено / окно не вышло
+        // на передний план. НЕ возвращаем ok, иначе модель соврёт «переключил» на несуществующее.
+        if (!out.focused) {
+          return errResult(
+            commandId,
+            startedAt,
+            "not_found",
+            `не сфокусировал «${cmd.app}»: приложение не запущено или окно не вышло на передний план. Запусти его (app_launch) или проверь имя.`,
+          );
+        }
+        return okResult(commandId, startedAt, out);
+      }
+      case "app.close": {
+        // §6 БЕЗОПАСНОЕ закрытие по процессу (НЕ Alt+F4): self-exclusion внутри closeApp
+        // не даст закрыть сам Джарвис/критический процесс.
+        const out = await apps.closeApp(cmd.app, cmd.force ?? false);
+        // ЧЕСТНОСТЬ (баг из живого прогона): closed===0 → НИЧЕГО не закрыли (процесс не найден/не
+        // поддался graceful-закрытию). НЕ возвращаем ok, иначе модель соврёт «закрыл». Пусть увидит
+        // провал и зайдёт иначе (force=true / другое имя процесса / проверка глазами).
+        if (out.closed === 0) {
+          return errResult(
+            commandId,
+            startedAt,
+            "not_found",
+            `не закрыл «${cmd.app}»: подходящий запущенный процесс не найден или не закрылся штатно. ` +
+              `Проверь имя процесса или повтори с force=true (жёсткое закрытие).`,
+          );
+        }
         return okResult(commandId, startedAt, out);
       }
       case "browser.open": {
+        // inDefault (консьерж «просто открой/включи»): открыть в ДЕФОЛТНОМ (залогиненном) браузере
+        // пользователя через shell — его сессия/логины, мгновенно, без CDP-инстанса и без 12с
+        // singleton-лага, физическую мышь НЕ трогаем. Управление (browser.act) тут не нужно.
+        if (cmd.inDefault) {
+          const out = await apps.launchApp(cmd.url);
+          return okResult(commandId, startedAt, { ...out, url: cmd.url, controlled: false, inDefault: true });
+        }
         // Управляемый браузер (CDP) — чтобы дальше работали browser.act/read на этой же
         // странице. Нет Chrome / сбой CDP → мягкий откат на запуск дефолтного браузера.
         try {
@@ -85,13 +181,20 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       // ── СТАБЫ (бросают NotImplementedError) ──────────────────
       case "input.type":
         await input.typeText(cmd.text);
+        lastJarvisInputAt = Date.now(); // наш ввод сбросит системный idle — пометим, чтобы не счесть «юзер активен»
         return okResult(commandId, startedAt);
       case "input.key":
         await input.pressKey(cmd.combo, cmd.mode, cmd.scancode);
+        lastJarvisInputAt = Date.now();
         return okResult(commandId, startedAt);
-      case "input.click":
-        await input.click(cmd.target);
-        return okResult(commandId, startedAt);
+      case "input.click": {
+        // §бесшумный-ввод: по умолчанию silent (без курсора); физ.клик-фолбэк возвращает курсор, ЕСЛИ юзер
+        // сейчас НЕ двигает мышь сам (иначе не дёргаем — оставляем курсор там, где он у него).
+        // Разрешённые экранные координаты возвращаем в data — сервер компилирует из них реплей-макрос (§8).
+        const clicked = await input.click(cmd.target, cmd.method ?? "silent", !userActiveNow());
+        lastJarvisInputAt = Date.now();
+        return okResult(commandId, startedAt, clicked);
+      }
       case "ui.invoke":
         await ground.invoke(cmd.target, cmd.pattern, cmd.value);
         return okResult(commandId, startedAt);
@@ -108,6 +211,18 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
       case "code.run": {
         const r = await codeRunner.run(cmd.lang, cmd.code);
+        // ЧЕСТНОСТЬ (ревью C1): ненулевой exitCode = скрипт УПАЛ (исключение / sys.exit(1) / таймаут).
+        // Раньше всегда okResult → модель видела «успех» и врала «готово, результат N», а exitCode/stderr
+        // прятались в JSON. Теперь провал явный: модель видит ошибку и заходит иначе.
+        if (r.exitCode !== 0) {
+          return errResult(
+            commandId,
+            startedAt,
+            "runtime",
+            `код завершился с кодом ${r.exitCode}${r.exitCode === -1 ? " (таймаут/прервано)" : ""}. ` +
+              `stderr: ${(r.stderr || "").slice(0, 500) || "(пусто)"}${r.stdout ? ` | stdout: ${r.stdout.slice(0, 300)}` : ""}`,
+          );
+        }
         return okResult(commandId, startedAt, r);
       }
 
@@ -121,12 +236,16 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           params: cmd.params,
           cancel,
           actuator: createClientActuator(),
-          // escalate на needs_llm/exhausted — клиент↔сервер round-trip (TODO M4+): пока no-op.
+          // escalate (needs_llm: сочинить значение шага по месту; exhausted: починка) — клиент↔сервер
+          // round-trip ещё не подключён (TODO M4+). Пока хук не передаётся → раннер честно ВАЛИТ
+          // needsLlm-шаг (не исполняет вслепую с незаполненным плейсхолдером). Детерминированные шаги
+          // (в т.ч. со слотами, заполненными сервером в cmd.params) исполняются как прежде, $0/без LLM.
         });
         return outcomeToActionResult(commandId, outcome, Date.now() - startedAt);
       }
       case "screen.capture":
-        return notImplemented(commandId, startedAt, "M3");
+        // Зрение (§): снять активный монитор (под курсором) / выбранный → base64 PNG в ActionResult.data.
+        return okResult(commandId, startedAt, await captureScreen(cmd.monitor));
       case "context.read": {
         // Дейксис (§19): selection/active_window через сайдкар (TextPattern); screen — vision (позже).
         const text = await ground.readContext(cmd.scope);
@@ -141,12 +260,12 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
       case "telegram.send": {
         // НЕВИДИМАЯ отправка в Telegram через браузер Джарвиса (off-screen Chrome + CDP, §6).
-        // НЕ MTProto/userbot (см. message.send) — реальный webK в скрытом окне.
-        const out = await jarvisBrowser().telegramSend(cmd.to, cmd.text);
+        // НЕ MTProto/userbot (см. message.send) — реальный webK в скрытом окне. hint — опытная память.
+        const out = await jarvisBrowser().telegramSend(cmd.to, cmd.text, { preferredTitle: cmd.preferredTitle, hintPeerId: cmd.hintPeerId });
         return okResult(commandId, startedAt, out);
       }
       case "telegram.read": {
-        const out = await jarvisBrowser().telegramRead(cmd.to, cmd.count);
+        const out = await jarvisBrowser().telegramRead(cmd.to, cmd.count, { preferredTitle: cmd.preferredTitle, hintPeerId: cmd.hintPeerId });
         return okResult(commandId, startedAt, out);
       }
       // «Браузер Джарвиса» (§6): общие невидимые примитивы над его залогиненным профилем.
@@ -156,6 +275,10 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
       case "jbrowser.read": {
         const out = await jarvisBrowser().read();
+        return okResult(commandId, startedAt, out);
+      }
+      case "jbrowser.inspect": {
+        const out = await jarvisBrowser().inspect(cmd.query ?? "", cmd.cap ?? 60);
         return okResult(commandId, startedAt, out);
       }
       case "jbrowser.act": {
@@ -168,6 +291,11 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         await jarvisBrowser().openLogin(cmd.url);
         return okResult(commandId, startedAt, { opened: cmd.url });
       }
+      case "jbrowser.import_cookies": {
+        // §перенос логинов: куки из расширения (расшифрованные, минуя ABE) → CDP setCookie в браузер Джарвиса.
+        const out = await jarvisBrowser().importCookies(cmd.cookies as unknown as Parameters<ReturnType<typeof jarvisBrowser>["importCookies"]>[0]);
+        return okResult(commandId, startedAt, out);
+      }
       case "order.place": {
         // Гарды §14 пройдены на сервере; здесь — browser-автоматизация без ввода карты (§0).
         const out = await browser.placeOrder({ vendor: cmd.vendor, items: cmd.items, total: cmd.total });
@@ -179,6 +307,8 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         return okResult(commandId, startedAt, await fs.readFile(cmd.path, cmd.maxBytes));
       case "fs.write":
         return okResult(commandId, startedAt, await fs.writeFile(cmd.path, cmd.content, cmd.createDirs));
+      case "fs.edit":
+        return okResult(commandId, startedAt, await fs.editFile(cmd.path, cmd.old, cmd.new, cmd.replaceAll));
       case "fs.append":
         return okResult(commandId, startedAt, await fs.appendFile(cmd.path, cmd.content));
       case "fs.list":
@@ -199,6 +329,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       case "system.media":
       case "system.volume":
       case "system.clipboard":
+      case "system.layout":
         return okResult(commandId, startedAt, await system.runSystem(cmd));
 
       // ── Office как живые приложения (§6): Word/Excel через COM ──
@@ -207,10 +338,26 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       case "office.word":
         return okResult(commandId, startedAt, await office.runWord(cmd));
 
+      // ── OBS Studio через obs-websocket v5 (§): программное управление вместо кликов ──
+      case "obs.request":
+        return okResult(commandId, startedAt, await obs.request(cmd.requestType, cmd.requestData));
+
       // ── Мультимонитор (§6): куда уводить видимую активность Джарвиса ──
       case "monitor.set": {
         monitors.setTarget(cmd.target);
         return okResult(commandId, startedAt, { target: cmd.target, summary: monitors.summary() });
+      }
+      case "monitor.list": {
+        return okResult(commandId, startedAt, monitors.monitorList());
+      }
+      case "monitor.assign": {
+        const list = monitors.monitorList();
+        if (cmd.index !== null && (cmd.index < 0 || cmd.index >= list.monitors.length)) {
+          // честный провал: индекс вне диапазона (а не молчаливое игнорирование)
+          throw new Error(`нет монитора с номером ${cmd.index + 1} — всего мониторов ${list.monitors.length}`);
+        }
+        monitors.setJarvisIndex(cmd.index);
+        return okResult(commandId, startedAt, monitors.monitorList());
       }
 
       default: {

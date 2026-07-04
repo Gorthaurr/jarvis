@@ -44,7 +44,8 @@ export async function placeOrder(order: { vendor: string; items: unknown[]; tota
   if (/\b\d{13,19}\b/.test(blob.replace(/[\s-]/g, "")) || /\b(cvv|cvc|pan|card_?number)\b/i.test(blob)) {
     throw new Error("красная линия карты (§0): заказ содержит платёжные данные — отказ");
   }
-  log.warn(`order.place в «${order.vendor}» на ${order.total} — browser-автоматизация stub (M7)`);
-  // TODO(M7): реальная сборка корзины и доведение до чекаута без ввода карты.
-  return { orderId: `stub-order-${order.vendor}` };
+  // ЧЕСТНОСТЬ (§): НЕ возвращаем фейковый успех. order.place вне набора модели (EXCLUDED_TOOLS);
+  // пока реальной сборки корзины/чекаута нет — честный провал, а не ложный orderId. TODO(M7): реализовать.
+  log.warn(`order.place в «${order.vendor}» на ${order.total} — не реализовано (M7)`);
+  throw new Error("order.place не реализован (M7): реальная сборка корзины/чекаут ещё не сделаны");
 }

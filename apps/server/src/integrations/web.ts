@@ -29,6 +29,10 @@ export interface IWebProvider {
 }
 
 const BRAVE_URL = "https://api.search.brave.com/res/v1/web/search";
+/** Keyless-фолбэк поиска (§12): DuckDuckGo Lite — работает БЕЗ ключа (нужна лишь сеть). */
+const DDG_LITE_URL = "https://lite.duckduckgo.com/lite/";
+const SEARCH_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 /** Таймаут сетевых вызовов мозга (§12): не вешать голосовой ответ на медленном сайте. */
 const WEB_TIMEOUT_MS = 8_000;
@@ -113,6 +117,35 @@ export function parseBraveResults(json: unknown, limit = 5): SearchHit[] {
   return hits;
 }
 
+/**
+ * Разобрать выдачу DuckDuckGo Lite в SearchHit[] (чистая функция, тестируется без сети).
+ * Реальный URL лежит в параметре `uddg=<urlencoded>` редирект-ссылки; сниппет — в соседней ячейке.
+ */
+export function parseDuckDuckGoLite(html: string, limit = 5): SearchHit[] {
+  const links: { url: string; title: string }[] = [];
+  const linkRe = /<a[^>]+href="([^"]*uddg=[^"]+)"[^>]*class=['"]result-link['"][^>]*>([\s\S]*?)<\/a>/gi;
+  for (let m = linkRe.exec(html); m !== null; m = linkRe.exec(html)) {
+    const uddg = /[?&]uddg=([^&"]+)/.exec(m[1]!);
+    if (!uddg) continue;
+    let url: string;
+    try {
+      url = decodeURIComponent(uddg[1]!);
+    } catch {
+      continue;
+    }
+    if (!/^https?:\/\//i.test(url)) continue;
+    links.push({ url, title: stripHtml(m[2]!) });
+  }
+  const snippets: string[] = [];
+  const snipRe = /<td[^>]*class=['"]result-snippet['"][^>]*>([\s\S]*?)<\/td>/gi;
+  for (let m = snipRe.exec(html); m !== null; m = snipRe.exec(html)) snippets.push(stripHtml(m[1]!));
+  const hits: SearchHit[] = [];
+  for (let i = 0; i < links.length && hits.length < limit; i += 1) {
+    hits.push({ title: links[i]!.title, url: links[i]!.url, snippet: snippets[i] ?? "" });
+  }
+  return hits;
+}
+
 /** Грубое извлечение читаемого текста из HTML (чистая функция). */
 export function extractReadable(html: string, url = ""): FetchedPage {
   const title = (/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? "").trim();
@@ -146,14 +179,23 @@ function decodeEntities(s: string): string {
 }
 
 export class WebProvider implements IWebProvider {
-  readonly live: boolean;
+  /** Поиск доступен ВСЕГДА: с ключом — Brave, без ключа — keyless DuckDuckGo (нужна лишь сеть). */
+  readonly live = true;
   constructor(private readonly braveApiKey: string | undefined) {
-    this.live = Boolean(braveApiKey);
-    if (!this.live) log.warn("BRAVE_SEARCH_API_KEY не задан — web.search в стаб-режиме ([])");
+    log.info("web.search", { provider: braveApiKey ? "brave (+ddg-фолбэк)" : "duckduckgo (keyless)" });
   }
 
+  /** §12: с ключом — Brave (приоритет, лучше качество); пусто/сбой/без ключа — keyless DuckDuckGo. */
   async search(queryText: string, limit = 5): Promise<SearchHit[]> {
-    if (!this.live) return [];
+    if (this.braveApiKey) {
+      const brave = await this.searchBrave(queryText, limit);
+      if (brave.length > 0) return brave; // Brave дал результат — отдаём его
+      // Brave пусто/протух/лимит → не молчим, идём в keyless-фолбэк
+    }
+    return this.searchDuckDuckGo(queryText, limit);
+  }
+
+  private async searchBrave(queryText: string, limit: number): Promise<SearchHit[]> {
     try {
       const url = `${BRAVE_URL}?q=${encodeURIComponent(queryText)}&count=${limit}`;
       const resp = await fetch(url, {
@@ -161,14 +203,30 @@ export class WebProvider implements IWebProvider {
         signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
       });
       if (!resp.ok) {
-        // 401/403 — ключ протух (провайдер сломан), 429 — лимит, 5xx — сбой.
-        // Логируем класс ошибки явно, чтобы пустой результат не путали с «ничего не найдено».
-        log.warn("Brave search не ок", { status: resp.status, kind: resp.status === 429 ? "rate_limit" : resp.status >= 500 ? "server" : "auth_or_client" });
+        log.warn("Brave search не ок (→ DDG-фолбэк)", { status: resp.status });
         return [];
       }
       return parseBraveResults(await resp.json(), limit);
     } catch (e) {
-      log.warn("web.search ошибка", e instanceof Error ? e.message : String(e));
+      log.warn("Brave search ошибка (→ DDG-фолбэк)", e instanceof Error ? e.message : String(e));
+      return [];
+    }
+  }
+
+  /** Keyless-поиск через DuckDuckGo Lite (HTML). Без ключа, нужна лишь сеть. */
+  private async searchDuckDuckGo(queryText: string, limit: number): Promise<SearchHit[]> {
+    try {
+      const resp = await fetch(`${DDG_LITE_URL}?q=${encodeURIComponent(queryText)}`, {
+        headers: { "User-Agent": SEARCH_UA, Accept: "text/html" },
+        signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+      });
+      if (!resp.ok) {
+        log.warn("DuckDuckGo не ок", { status: resp.status });
+        return [];
+      }
+      return parseDuckDuckGoLite(await readCappedText(resp, MAX_HTML_BYTES), limit);
+    } catch (e) {
+      log.warn("DuckDuckGo ошибка", e instanceof Error ? e.message : String(e));
       return [];
     }
   }

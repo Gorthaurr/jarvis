@@ -22,13 +22,25 @@ export interface TurnConfig {
   completeThreshold: number;
 }
 
+/** env-целое с клампом (тюнинг эндпоинта без перекомпиляции). */
+function envInt(name: string, def: number, lo: number, hi: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : def;
+}
+
 export const DEFAULT_TURN_CONFIG: TurnConfig = {
-  // §10: компромисс. 900мс ощущались как тормоз, но 550 резали фразы на полуслове:
-  // Whisper utterance-based (interim-текста нет), эндпоинт держится только на таймере,
-  // поэтому слишком короткая пауза финализирует почти пустой буфер. 800 — баланс.
-  maxSilenceMs: 800,
-  minSilenceMs: 200,
-  completeThreshold: 0.6,
+  // §10 СКОРОСТЬ: «мёртвое время» эндпоинта (пауза после речи до старта Opus) — прямой вклад в
+  // ощущаемую задержку. ЖЁСТКИЙ потолок тишины финализирует независимо от семантики; на Deepgram
+  // есть interim, поэтому семантический эндпоинт срабатывает РАНЬШЕ потолка на завершённой фразе
+  // (tick() от minSilenceMs). Понижено 800→650 / 200→120 ради отзывчивости (TRAILING_INCOMPLETE
+  // ловит «висящие» союзы → их не рубим до потолка). Тюнится env, если режет на полуслове — поднять.
+  // 650/120 РЕЗАЛО на полуслове (юзер: «не дослушивает») — подняли обратно патиентнее: 850мс
+  // жёсткий потолок, 280мс до семантической проверки, порог 0.75 (рано финализируем только при
+  // явно завершённой фразе/терминальной пунктуации). Срезать «мёртвое время» лучше не здесь, а
+  // персоной (меньше слов) — обрыв речи хуже лишних мс.
+  maxSilenceMs: envInt("JARVIS_TURN_MAX_SILENCE_MS", 850, 300, 1500),
+  minSilenceMs: envInt("JARVIS_TURN_MIN_SILENCE_MS", 280, 50, 600),
+  completeThreshold: envInt("JARVIS_TURN_COMPLETE_PCT", 75, 30, 95) / 100,
 };
 
 /** Незавершающие хвосты RU — после них пауза почти наверняка временная. */
@@ -92,6 +104,15 @@ export class TurnDetector {
     private readonly config: TurnConfig = DEFAULT_TURN_CONFIG,
     private readonly now: () => number = () => Date.now(),
   ) {}
+
+  /** Минимум тишины перед семантической проверкой (мс) — для расписания опроса в пайплайне. */
+  get minSilenceMs(): number {
+    return this.config.minSilenceMs;
+  }
+  /** Жёсткий потолок тишины (мс) — после него эндпоинт безусловен. */
+  get maxSilenceMs(): number {
+    return this.config.maxSilenceMs;
+  }
 
   /** Обновить накопленную гипотезу (interim-результат STT, §10). */
   onInterim(text: string): void {

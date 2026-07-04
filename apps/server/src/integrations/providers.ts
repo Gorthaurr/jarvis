@@ -10,6 +10,7 @@ import { DeepgramSttProvider } from "./deepgram.js";
 import { ElevenLabsTtsProvider } from "./elevenlabs.js";
 import { type ISttProvider, type ITtsProvider, MockSttProvider, MockTtsProvider } from "./voice-providers.js";
 import { WhisperSttProvider } from "./whisper-stt.js";
+import { YandexTtsProvider } from "./yandex-tts.js";
 
 const log: Logger = createLogger("voice:providers");
 
@@ -39,6 +40,16 @@ export function createSttProvider(cfg: {
 }
 
 export function createTtsProvider(cfg: { elevenLabsApiKey?: string; voiceId?: string }): ITtsProvider {
+  // Русско-нативный Yandex (правильные ударения) — если выбран TTS_PROVIDER=yandex и есть ключ.
+  if ((process.env.TTS_PROVIDER || "").toLowerCase() === "yandex" && process.env.YANDEX_API_KEY) {
+    const p = new YandexTtsProvider({
+      apiKey: process.env.YANDEX_API_KEY,
+      folderId: process.env.YANDEX_FOLDER_ID,
+      voiceId: process.env.YANDEX_VOICE,
+    });
+    log.info("TTS провайдер", { provider: "yandex", live: p.live, voice: process.env.YANDEX_VOICE || "filipp" });
+    return p;
+  }
   if (cfg.elevenLabsApiKey && cfg.voiceId) {
     const p = new ElevenLabsTtsProvider({ apiKey: cfg.elevenLabsApiKey, voiceId: cfg.voiceId });
     log.info("TTS провайдер", { provider: "elevenlabs", live: p.live });

@@ -22,6 +22,7 @@
  *            ЭСКАЛИРУЕТ такие реплики на Haiku-классификатор для уточнения, а не
  *            действует вслепую (§20).
  */
+import { foldText } from "@jarvis/shared";
 import type { TaskControlKind } from "./task.js";
 
 /** Решение классификатора управления задачей (§20). */
@@ -35,30 +36,14 @@ export interface TaskControlDecision {
 }
 
 /**
- * Нормализация входа: нижний регистр, снятие пунктуации (кроме внутренних
- * дефисов как пробелов), схлопывание пробелов, ё→е для устойчивости совпадений.
- * Возвращает строку с ведущим/замыкающим пробелом — так каждое слово окружено
- * пробелами и проверка границ через " слово " работает и для кириллицы.
+ * Нормализация входа для матча по словам — единый `foldText` из @jarvis/shared (`pad:true` окаймляет
+ * пробелами, чтобы проверка границ " слово " работала для кириллицы). Снят дубль с tasks/scope.
  */
-function normalize(text: string): string {
-  const cleaned = text
-    .toLowerCase()
-    .replace(/ё/g, "е")
-    // всё, что не буква/цифра — в пробел (кириллица + латиница + цифры).
-    .replace(/[^a-z0-9а-я]+/giu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.length > 0 ? ` ${cleaned} ` : "";
-}
+const normalize = (text: string): string => foldText(text, { pad: true });
 
 /** Есть ли слово (целиком, по границам) в нормализованной строке с пробелами. */
 function hasWord(norm: string, word: string): boolean {
   return norm.includes(` ${word} `);
-}
-
-/** Есть ли фраза (как подстрока) в нормализованной строке. */
-function hasPhrase(norm: string, phrase: string): boolean {
-  return norm.includes(phrase);
 }
 
 /** Есть ли в строке слово с одной из приставок-основ (для словоформ). */
@@ -66,8 +51,12 @@ function hasStem(norm: string, stems: readonly string[]): boolean {
   return stems.some((stem) => norm.includes(` ${stem}`));
 }
 
-/** Основы слов «задача/работа/дело» — сигнал, что речь про САМУ задачу (cancel). */
-const TASK_STEMS = ["задач", "работ", "дел", "это", "этим", "больше"] as const;
+/**
+ * Основы слов про САМУ задачу (сигнал cancel vs stop_tts). ТОЛЬКО предметные основы: общеязыковые
+ * «это/этим/больше/дел» убраны — они матчили почти всё («это лишнее», «больше не говори»,
+ * «делаешь») и массово демотировали ясный «стоп» в low-confidence.
+ */
+const TASK_STEMS = ["задач", "работ", "процесс"] as const;
 
 /** stop_tts: оборвать ТОЛЬКО озвучку, задача живёт (§20). */
 const STOP_TTS_WORDS = ["стоп", "стой", "заткнись", "тихо", "тише", "помолчи", "замолчи"] as const;
@@ -87,8 +76,10 @@ const PAUSE_PHRASES = ["потом доделаешь", "потом додела
 /** resume: возобновить с текущего шага (§20). */
 const RESUME_WORDS = ["продолжи", "продолжай", "продолжить", "дальше", "доделай", "доделаешь", "возобнови", "возобновить"] as const;
 
-/** status: отчёт о текущем прогрессе (§20). */
-const STATUS_WORDS = ["докладывай", "доложи", "готово"] as const;
+/** status: отчёт о текущем прогрессе (§20). «готово» УБРАНО — это закрытие/подтверждение («всё,
+ *  готово, спасибо»), а не запрос статуса → перехват выдавал отчёт о прогрессе невпопад. Вопрос
+ *  «готово?» всё равно ловится фразами/агентом. */
+const STATUS_WORDS = ["докладывай", "доложи"] as const;
 /** status фразы. */
 const STATUS_PHRASES = ["что делаешь", "что ты делаешь", "как там", "как дела с задачей", "на чем ты", "что по задаче", "чем занят", "чем занимаешься", "как продвигается", "как успехи"] as const;
 
@@ -111,30 +102,26 @@ export function classifyTaskControl(text: string): TaskControlDecision {
 
   const aboutTask = hasStem(norm, TASK_STEMS);
 
-  // 2a) Однозначные cancel-фразы (специфичнее одиночных слов) — проверяем первыми.
+  // norm окаймлён пробелами с обеих сторон → ` фраза ` ловит фразу как ПОЛНЫЕ слова в любом месте
+  // (включая начало/конец). Прежние односторонние варианты матчили префикс: «не надо больше» ловило
+  // «не надо большего внимания» → ложный cancel. Теперь строго по границам слов.
   for (const phrase of CANCEL_PHRASES) {
-    if (hasPhrase(norm, ` ${phrase} `) || hasPhrase(norm, `${phrase} `) || norm.includes(` ${phrase}`)) {
+    if (norm.includes(` ${phrase} `)) {
       return { kind: "cancel", confidence: "high", reason: `cancel-фраза «${phrase}» — прервать задачу (§20)` };
     }
   }
-
-  // 2b) Однозначные stop_tts-фразы.
   for (const phrase of STOP_TTS_PHRASES) {
-    if (norm.includes(` ${phrase}`) || norm.includes(`${phrase} `)) {
+    if (norm.includes(` ${phrase} `)) {
       return { kind: "stop_tts", confidence: "high", reason: `stop_tts-фраза «${phrase}» — оборвать только озвучку (§20)` };
     }
   }
-
-  // 2c) Однозначные pause-фразы.
   for (const phrase of PAUSE_PHRASES) {
-    if (norm.includes(` ${phrase}`) || norm.includes(`${phrase} `)) {
+    if (norm.includes(` ${phrase} `)) {
       return { kind: "pause", confidence: "high", reason: `pause-фраза «${phrase}» — приостановить задачу (§20)` };
     }
   }
-
-  // 2d) Однозначные status-фразы.
   for (const phrase of STATUS_PHRASES) {
-    if (norm.includes(` ${phrase}`) || norm.includes(`${phrase} `)) {
+    if (norm.includes(` ${phrase} `)) {
       return { kind: "status", confidence: "high", reason: `status-фраза «${phrase}» — отчёт о прогрессе (§20)` };
     }
   }

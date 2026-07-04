@@ -6,7 +6,8 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { TaskManager } from "../brain/tasks/manager.js";
-import { handleControlUtterance, handleTakeover, handleTaskControl, type SessionContext } from "./router-ws.js";
+import { type SessionContext } from "./router-ws.js";
+import { handleControlUtterance, handleTakeover, handleTaskControl } from "./task-control.js";
 
 interface SentEnvelope {
   type: string;
@@ -19,12 +20,13 @@ function fakeCtx(tasks: TaskManager) {
     sent.push({ type, payload: payload as Record<string, unknown> });
   });
   const onVadEvent = vi.fn();
+  const speakQueued = vi.fn();
   const ctx = {
     session: { sessionId: "s1", userId: "u1", send },
-    voice: { onVadEvent, clearPendingSpeech: vi.fn() },
+    voice: { onVadEvent, clearPendingSpeech: vi.fn(), speakQueued },
     agentDeps: { tasks },
   } as unknown as SessionContext;
-  return { ctx, sent, onVadEvent };
+  return { ctx, sent, onVadEvent, speakQueued };
 }
 
 describe("router task control (§20)", () => {
@@ -92,6 +94,37 @@ describe("router task control (§20)", () => {
     handleTaskControl(ctx, "cancel", t.taskId);
     expect(tasks.get(t.taskId)?.state).toBe("cancelled");
     expect(sent.some((e) => e.type === "task.status" && e.payload.state === "cancelled")).toBe(true);
+  });
+
+  it("ack отмены ОЗВУЧИВАЕТСЯ (и голосовая, и UI): тишина после «прекрати…» — живой баг 2026-07-03", () => {
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });
+    const { ctx, speakQueued } = fakeCtx(tasks);
+
+    handleTaskControl(ctx, "cancel", t.taskId, "ui"); // UI-стоп раньше был полностью немым
+    expect(speakQueued).toHaveBeenCalledTimes(1);
+    expect(String(speakQueued.mock.calls[0]?.[0])).toContain("Остановил");
+
+    const tasks2 = new TaskManager();
+    tasks2.create({ userId: "u1", sessionId: "s1", goal: "g2" });
+    const second = fakeCtx(tasks2);
+    expect(handleControlUtterance(second.ctx, "отмени")).toBe(true); // голосовой путь
+    expect(second.speakQueued).toHaveBeenCalledTimes(1);
+    expect(String(second.speakQueued.mock.calls[0]?.[0])).toContain("Остановил");
+  });
+
+  it("статус: голосовое «что делаешь» озвучивается, UI-статус — только текстом (панель и так видит)", () => {
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "таблица расходов" });
+    const voicePath = fakeCtx(tasks);
+    expect(handleControlUtterance(voicePath.ctx, "что делаешь")).toBe(true);
+    expect(voicePath.speakQueued).toHaveBeenCalledTimes(1);
+    expect(String(voicePath.speakQueued.mock.calls[0]?.[0])).toContain("таблица расходов");
+
+    const uiPath = fakeCtx(tasks);
+    handleTaskControl(uiPath.ctx, "status", t.taskId, "ui");
+    expect(uiPath.speakQueued).not.toHaveBeenCalled();
+    expect(uiPath.sent.some((e) => e.type === "transcript")).toBe(true);
   });
 
   it("pause/resume из UI меняют состояние задачи (§20)", () => {

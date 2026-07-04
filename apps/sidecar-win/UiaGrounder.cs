@@ -58,6 +58,43 @@ public sealed class UiaGrounder : IDisposable
         return RegisterElement(found);
     }
 
+    /// <summary>
+    /// §бесшумный-ввод: элемент под ФИЗИЧЕСКОЙ точкой (из screen_capture) → ближайший actionable-предок → handle.
+    /// Последующий ui.invoke по этому handle кликает БЕЗ движения курсора. null — под точкой нет UIA-элемента
+    /// (canvas/игра) → вызывающий деградирует на оконное сообщение / физ.клик. Для бесшумного клика «по пикселям».
+    /// </summary>
+    public GroundResult? GroundAtPoint(double physX, double physY)
+    {
+        AutomationElement? el;
+        try { el = AutomationElement.FromPoint(new System.Windows.Point(physX, physY)); }
+        catch { return null; }
+        if (el is null) return null;
+        el = ClimbToActionable(el) ?? el; // предок с Invoke/Toggle/SelectionItem — цель клика (сам пиксель мог попасть в текст/иконку внутри кнопки)
+        return RegisterElement(el);
+    }
+
+    /// <summary>Подняться по ControlView до предка с Invoke/Toggle/SelectionItem (или до окна/лимита глубины).</summary>
+    private static AutomationElement? ClimbToActionable(AutomationElement el)
+    {
+        TreeWalker walker = TreeWalker.ControlViewWalker;
+        AutomationElement? cur = el;
+        for (int depth = 0; depth < MaxSearchDepth && cur is not null; depth++)
+        {
+            if (IsActionable(cur)) return cur;
+            if (cur.Current.ControlType == ControlType.Window) break; // выше окна не лезем
+            cur = walker.GetParent(cur);
+        }
+        return null;
+    }
+
+    /// <summary>Есть ли у элемента паттерн, которым его можно «нажать» без курсора.</summary>
+    private static bool IsActionable(AutomationElement el)
+    {
+        return el.TryGetCurrentPattern(InvokePattern.Pattern, out _)
+            || el.TryGetCurrentPattern(TogglePattern.Pattern, out _)
+            || el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
+    }
+
     /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.</summary>
     private GroundResult RegisterElement(AutomationElement el)
     {

@@ -31,14 +31,16 @@ const text =
   "Встреча назначена на восемь двадцать, бюджет — полторы тысячи рублей.";
 
 const model = "eleven_multilingual_v2";
-const settings = { stability: 0.6, similarity_boost: 0.8, style: 0.0, use_speaker_boost: true, speed: 0.95 };
+// Новые «живые» настройки (ресёрч 2026): ниже stability + лёгкий style = человечнее.
+const settings = { stability: 0.4, similarity_boost: 0.8, style: 0.1, use_speaker_boost: true, speed: 0.95 };
 
-// name -> voiceId. Текущий Daniel + русско-нативные кандидаты + британский George.
+// name -> voiceId. Все 4 РУССКО-НАТИВНЫХ кандидата + Daniel (британец) для контраста акцента.
 const voices = {
-  "daniel-current-uk": "onwK4e9ZLuTAKqWW03F9",
-  "alan-ru-native": "zWSsRd3J6WyZFl12aGMB",
-  "ivan-ru-native": "1qd9R09Ljlx9V1Ok0t5S",
-  "george-uk-warm": "JBFqnCBsd6RMkjVDRZzb",
+  "daniel-uk-current": "onwK4e9ZLuTAKqWW03F9",
+  "ivan-ru": "1qd9R09Ljlx9V1Ok0t5S",
+  "maxim-ru": "HcaxAsrhw4ByUo4CBCBN",
+  "alan-ru": "zWSsRd3J6WyZFl12aGMB",
+  "igor-ru": "rUOpAdbAl56KxO00wR5D",
 };
 
 console.log(`model=${model}, ${text.length} симв., voice_settings=${JSON.stringify(settings)} (ключ скрыт)`);

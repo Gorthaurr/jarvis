@@ -22,26 +22,48 @@ import {
 } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ServerConfig } from "../config.js";
-import { SpendGuard } from "../billing/index.js";
+import { SpendGuards } from "../billing/index.js";
+import { metrics } from "../obs/metrics.js";
+import { type FileLogSink, initFileLog } from "../obs/file-log.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
-import { TaskManager } from "../brain/tasks/manager.js";
+import { flushTaskStores, loadTaskManager } from "../brain/tasks/task-store.js";
+import { flushResolutionStores, loadResolutionMemory } from "../memory/resolution-memory.js";
 import { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { ButlerAcks } from "../brain/persona/acks.js";
-import { buildSystemPrompt } from "../brain/persona/index.js";
+import { McpManager } from "../brain/mcp/manager.js";
+import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
 import { getProfile, loadProfile } from "../brain/profile.js";
+import { ReminderService } from "../proactive/reminders/service.js";
+import { createWatchChecker } from "../proactive/watch/checker.js";
+import { WatchService } from "../proactive/watch/service.js";
+import { AmbientEngine } from "../proactive/ambient/engine.js";
+import { AmbientSeenStore } from "../proactive/ambient/store.js";
+import { ObligationStore, createObligationsSource } from "../proactive/ambient/obligations.js";
+import { createTelegramSource } from "../proactive/ambient/telegram-source.js";
+import { VoiceProfileStore } from "../voice/speaker/store.js";
+import { createSpeakerVerifier } from "../voice/speaker/sherpa-verifier.js";
+import { createSpeakerVerifierSidecar } from "../voice/speaker/verifier-sidecar.js";
+import { loadConsent } from "../brain/consent.js";
 import {
   CachingEmbeddingProvider,
-  HashEmbeddingProvider,
   OpenAiEmbeddingProvider,
 } from "../integrations/openai-embeddings.js";
+import { LocalEmbeddingProvider } from "../integrations/local-embeddings.js";
+import { SemanticResponseCache } from "../brain/response-cache.js";
 import { createSttProvider, createTtsProvider } from "../integrations/providers.js";
 import { CachingTtsProvider } from "../integrations/tts-cache.js";
+import { FillerCache } from "../voice/filler-cache.js";
 import { CachingWebProvider, WebProvider } from "../integrations/web.js";
+import { AutoPredictor, MarketDataProvider, TradeExpert, TradingService, autoPredictorConfigFromEnv, loadPredictionStore, makeTinkoffProvider } from "../brain/trading/index.js";
+import { KnowledgeBase } from "../brain/knowledge/index.js";
 import { createEpisodicMemory } from "../memory/episodic.js";
-import { createSkillProvider } from "../memory/skills.js";
+import { SHARED_USER_ID, type SkillDistiller, createSkillProvider, seedSharedSkills } from "../memory/skills.js";
+import { SHARED_SKILL_SEED } from "../seed/shared-skills.js";
+import { ensureUser } from "../db/users.js";
 import { forgetClientContext } from "../proactive/salience.js";
+import { DEV_USER, resolveAndProvision } from "./identity.js";
+import { isLoopbackHost, resolveBindHost } from "./bind.js";
 import { buildGreeting } from "../proactive/greeting.js";
 import { ExtensionBridge, type ExtSocket } from "./extension-bridge.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -52,6 +74,7 @@ import {
   type VoiceProviders,
   dispatch,
   makeSessionContext,
+  onDevText,
   pushSavedSkills,
 } from "./router-ws.js";
 import type { Session, SessionSocket } from "./session.js";
@@ -66,10 +89,24 @@ export interface Gateway {
   close(): Promise<void>;
 }
 
+/** Process-level backstop ставим ОДИН раз (даже если createGateway вызовут повторно). */
+let gatewayBackstopInstalled = false;
+
 export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const log: Logger = logger.child("gateway");
+  // BACKSTOP устойчивости: неперехваченное исключение/реджект НЕ должно класть весь сервер
+  // (форензика логов: uncaughtException рушил процесс → шторм ECONNREFUSED у клиента, потеря всех
+  // сессий). Для личного always-on ассистента деградированная сессия лучше мёртвого сервера: логируем
+  // громко и продолжаем. (Падение конкретного соединения уже изолировано try/catch в onConnection.)
+  if (!gatewayBackstopInstalled) {
+    gatewayBackstopInstalled = true;
+    process.on("uncaughtException", (e) => log.error("uncaughtException (сервер выжил, backstop)", e instanceof Error ? `${e.message}\n${e.stack}` : String(e)));
+    process.on("unhandledRejection", (e) => log.error("unhandledRejection (backstop)", e instanceof Error ? e.message : String(e)));
+  }
   const app = Fastify({ logger: false });
   const registry = new SessionRegistry();
+  // Наблюдаемость (аудит 2026-07-02): файловый лог поднимается в listen(), закрывается в close().
+  let fileLog: FileLogSink | null = null;
 
   // Голосовые провайдеры — один раз на gateway (§10). Без ключей — mock-режим.
   // TTS оборачиваем кешем (§15): повторяющиеся фразы не синтезируем заново.
@@ -79,6 +116,15 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       voiceId: config.elevenLabsVoiceId,
     }),
   );
+  // §10 realtime: прекеш-филлеры «Секунду, сэр.» — маскируют пол латентности Opus. Греем в
+  // фоне (не блокируем старт): первые секунды до прогрева филлеров нет, голос работает как
+  // прежде. Выключатель JARVIS_VOICE_FILLER=0 → не греем и не играем.
+  const filler = new FillerCache();
+  if (process.env.JARVIS_VOICE_FILLER === "1") {
+    void filler
+      .warmup(tts, { voiceId: config.elevenLabsVoiceId })
+      .catch((e) => log.warn("прогрев филлеров не удался", { error: e instanceof Error ? e.message : String(e) }));
+  }
   const providers: VoiceProviders = {
     stt: createSttProvider({
       deepgramApiKey: config.deepgramApiKey,
@@ -87,22 +133,28 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     }),
     tts,
     voiceId: config.elevenLabsVoiceId,
+    filler,
   };
 
   // Мозговые провайдеры — один раз на gateway (§7, §8, §12, §14).
   // Эмбеддер: OpenAI при наличии ключа, иначе детерминированный hash; поверх — кеш (§15).
-  // ВАЖНО: размерность hash-фоллбэка должна совпадать с колонкой episodic_memory.embedding
-  // (VECTOR(1536), §13). Иначе при DATABASE_URL без OPENAI_API_KEY все INSERT'ы вектора
-  // молча отклоняются Postgres (dim mismatch) → эпизодическая память «немая».
+  // Эмбеддинги (§1): дефолт — ЛОКАЛЬНАЯ e5-small (реальные векторы, без ключа/облака/GPU; раньше тут
+  // был HashEmbeddingProvider = мусорные векторы → память «вспоминала» случайное). OpenAI — опт-ин при
+  // наличии ключа (с dimensions=dim, чтобы совпадать с каноном). ВАЖНО: размерность провайдера ОБЯЗАНА
+  // совпадать с колонкой episodic_memory.embedding (VECTOR(384) после миграции 0005) — иначе Postgres
+  // молча отклоняет INSERT'ы вектора (dim mismatch) → память «немая». Канон dim = config.embeddingDim (384).
   const baseEmbedder = config.openaiApiKey
     ? new OpenAiEmbeddingProvider({
         apiKey: config.openaiApiKey,
         model: config.embeddingModel,
         dim: config.embeddingDim,
       })
-    : new HashEmbeddingProvider(config.embeddingDim);
+    : new LocalEmbeddingProvider();
   const embedder = new CachingEmbeddingProvider(baseEmbedder);
   const web = new CachingWebProvider(new WebProvider(config.braveApiKey));
+  const tinkoff = makeTinkoffProvider(); // §трейдинг: РЕАЛЬНЫЙ Тинькофф (read-only) при TINKOFF_INVEST_TOKEN
+  const market = new TradingService(new MarketDataProvider(tinkoff), loadPredictionStore(), tinkoff); // данные+анализ+прогнозы+портфель
+  const knowledge = new KnowledgeBase(); // §экспертность: база знаний по доменам (свериться перед экспертной задачей)
   // §7: мозг — ТОЛЬКО облачный Opus (Anthropic). Концепция: ничего локального (тонкий
   // клиент, должен идти и на телефоне). Никаких резервных/локальных моделей. Сбой Opus →
   // честный стаб «Связь прервалась, сэр».
@@ -115,34 +167,117 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // Рехидратация с диска — в listen() ДО приёма соединений (чтобы ранние сессии видели
   // выученные инструменты), не fire-and-forget.
   const dynamicTools = new DynamicToolStore(new Set(Object.keys(TOOLS_BY_NAME)));
-  // §11/§20: дворецкие подтверждения голосом персоны. Пул генерится один раз (warm в
-  // listen), ack отдаётся мгновенно из готового пула — задержки на модель в момент задачи нет.
-  const acks = new ButlerAcks({
-    llm: anthropicLlm,
-    model: config.models.haiku,
-    persona: buildSystemPrompt().staticPrefix,
-  });
+  // § MCP-host: подключение MCP-серверов из mcp.json. Инструменты — холодные (каталог §15). Создаём
+  // тут; connectAll() запускаем в listen БЕЗ await (fire-and-forget) — зависший сервер не должен мешать boot.
+  const mcp = new McpManager(new Set(Object.keys(TOOLS_BY_NAME)), loadMcpConfig(), log.child("mcp"));
   // Мост к браузерному расширению «Jarvis Web Hands» (§6): невидимые действия в браузере
   // пользователя на его логинах (фоновые вкладки). Один на gateway.
   const extBridge = new ExtensionBridge(log.child("ext"));
+  // §8 МУЛЬТИ-ДЕМО ДИСТИЛЛЯЦИЯ навыка (идея BrowserBC): при 2-м+ показе одной capability сильный тир (Opus)
+  // сводит показы в ОДНУ обобщённую устойчивую процедуру (вместо «как сделал последний раз»). Срабатывает РЕДКО
+  // (только на повторном обучении), расход мал. Выкл — env JARVIS_SKILL_DISTILL=0.
+  const skillDistiller: SkillDistiller | undefined =
+    process.env.JARVIS_SKILL_DISTILL === "0"
+      ? undefined
+      : async ({ name, when, demonstrations }) => {
+          const demos = demonstrations.map((d, i) => `### Показ ${i + 1} (когда: ${d.when})\n${d.procedure}`).join("\n\n");
+          const system = [
+            "Ты дистиллируешь навык-процедуру из НЕСКОЛЬКИХ показов одной и той же задачи (поведенческое клонирование).",
+            "Выдай ОДНУ обобщённую устойчивую процедуру (markdown, шаги по пунктам), которая:",
+            "- берёт ОБЩИЕ существенные шаги, отбрасывает случайные частности конкретного показа;",
+            "- переменные части (имена/тексты/цели) выноси в {{slot}}-плейсхолдеры;",
+            "- добавь грабли/нюансы и в КОНЦЕ шаг ВЕРИФИКАЦИИ исхода (не считать сделанным без проверки);",
+            "- без преамбул и пояснений — ТОЛЬКО тело процедуры.",
+          ].join("\n");
+          const user = `Навык: «${name}». Когда применять: ${when}.\n\nПОКАЗЫ:\n${demos}\n\nВыдай одну обобщённую процедуру.`;
+          try {
+            const resp = await anthropicLlm.complete({
+              tier: "fable",
+              model: config.models.fable,
+              systemStatic: system,
+              messages: [{ role: "user", content: user }],
+              maxTokens: 1500,
+              cachePrefix: false,
+            });
+            return resp.stubbed ? null : resp.text.trim() || null;
+          } catch {
+            return null;
+          }
+        };
+  // §проактив-всё: AMBIENT-осведомлённость — Джарвис САМ следит за источниками жизни владельца (счета по
+  // датам; непрочитанные Telegram из уже-открытой вкладки, неинвазивно) и проактивно сообщает важное.
+  // ДЁШЕВО: источники отдают готовые фразы, движок дедуплицирует + фильтрует по салиентности + проговаривает
+  // тем же каналом, что напоминания (0 токенов на тик — token-эконом как качество). Старт в listen.
+  const obligationStore = new ObligationStore();
+  const ambientEngine = new AmbientEngine([
+    createObligationsSource(obligationStore),
+    createTelegramSource(extBridge, DEV_USER, { enabled: () => process.env.JARVIS_AMBIENT_TELEGRAM !== "0" }),
+  ]);
   const brain: BrainProviders = {
     llm: anthropicLlm,
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
+    responseCache: new SemanticResponseCache(embedder), // §15 семантический кэш чисто-вербальных ответов
     web,
-    spend: new SpendGuard({ spendCap: config.defaultSpendCap }),
+    market, // §трейдинг (слой 1): рыночные данные + технический анализ (только чтение, без денег)
+    knowledge, // §экспертность: база знаний по доменам (knowledge_consult перед экспертной задачей)
+    spend: new SpendGuards({ spendCap: config.defaultSpendCap }), // §6B/B5: реестр гвардов по userId
     models: config.models,
-    tasks: new TaskManager(), // общий реестр долгих задач на gateway (§20)
+    tierThinking: config.tierThinking,
+    tasks: loadTaskManager(), // §20: реестр долгих задач, ПЕРЕЖИВАЕТ рестарт (диск-персист §5) — для «сделал?»
     warmth: new SessionWarmth(), // §15: кешируем префикс только в тёплых сессиях
     dynamicTools, // §8+ самописные инструменты
-    skills: createSkillProvider(), // §8 выученные показом навыки
-    acks, // §11 дворецкие подтверждения (прегенерация голосом персоны)
+    skills: createSkillProvider(embedder, skillDistiller), // §8 навыки; recall СЕМАНТИЧЕСКИЙ (e5); мульти-демо дистилляция (BrowserBC)
     extBridge, // §6 руки в браузере (невидимая отправка в Telegram)
+    reminders: new ReminderService(), // §9 durable-напоминания + проактивная озвучка (старт в listen)
+    // §долгие-задачи: durable НАБЛЮДЕНИЕ/мониторинг — recurring-проверка условия (LLM+web на дешёвом тире)
+    // + проактивная озвучка при срабатывании (старт в listen). Закрывает гэп «следи за X, скажи когда Y».
+    watch: new WatchService(createWatchChecker({ llm: anthropicLlm, web, model: config.models.sonnet, tier: "sonnet" })),
+    obligations: obligationStore, // §проактив-всё: счета/обязательства (инструменты + ambient-источник)
+    ambient: ambientEngine, // §проактив-всё: движок проактивной осведомлённости (старт в listen)
+    resolutionMemory: loadResolutionMemory(), // §: опытная память резолва получателей (скорость), переживает рестарт
+    mcp, // § MCP-host: инструменты подключённых MCP-серверов (опционально, по mcp.json)
   };
 
-  // Продакшен-sweep реестра задач (§20): без периодической чистки терминальные задачи
-  // копятся в памяти gateway бесконечно. Снимается в close().
-  const taskSweep = setInterval(() => brain.tasks.sweep(Date.now()), 5 * 60_000);
+  // §7/COGS-guard: ВСЕ тиры схлопнуты в одну модель (типовой footgun — TIER1/2/3_MODEL в .env на один
+  // id, напр. всё на opus) → эскалация §7 мертва И каждый ход платится по дорогой ставке (см. юнит-
+  // экономику). Честно предупреждаем на boot. Универсально: сравниваем id, не привязываясь к модели.
+  if (config.models.haiku === config.models.sonnet && config.models.sonnet === config.models.fable) {
+    log.warn("§7/COGS: все тиры используют ОДНУ модель — эскалация отключена, каждый ход по дорогой ставке", {
+      model: config.models.haiku,
+      fix: "развести TIER1_MODEL=claude-sonnet-4-6 / TIER2_MODEL=claude-sonnet-4-6 / TIER3_MODEL=claude-opus-4-8 (Haiku не используем)",
+    });
+  }
+
+  // Продакшен-sweep реестра задач (§20): без периодической чистки терминальные задачи копятся в
+  // памяти gateway бесконечно. Retention увеличен с 10 мин до 6 ч (env JARVIS_TASK_RETENTION_MS),
+  // чтобы «сделал?» работал и спустя час/деплой-рестарт (sweep клиенту ничего не шлёт — чипами
+  // управляет renderer сам, так что долгий retention копит лишь сервер-память, UI не засоряет).
+  // parseInt(env ?? "") → NaN на пустом/незаданном/пробельном (а Number("")===0 ловушка: схлопнул бы
+  // retention до 60с и вычистил задачи через минуту). Зеркалит парсинг JARVIS_TASK_MAX_MS.
+  const parsedRetention = Number.parseInt(process.env.JARVIS_TASK_RETENTION_MS ?? "", 10);
+  const taskRetentionMs = Number.isFinite(parsedRetention)
+    ? Math.min(7 * 24 * 60 * 60_000, Math.max(60_000, parsedRetention))
+    : 6 * 60 * 60_000;
+  const taskSweep = setInterval(() => brain.tasks.sweep(Date.now(), taskRetentionMs), 5 * 60_000);
   taskSweep.unref?.();
+
+  // §трейдинг: АВТО-ПРЕДИКТОР — фоновый цикл прогнозов ТОЛЬКО по историческому перевесу, чтобы набрать
+  // выборку за ЧАСЫ (env JARVIS_AUTO_PREDICT=1). Правило-базный пред-скрин → не жжёт Anthropic-кредиты.
+  // СЛОЙ 2 (env JARVIS_AUTO_PREDICT_EXPERT=1, по умолчанию ВЫКЛ): отобранные скрином сетапы эскалируются
+  // LLM-ЭКСПЕРТУ (Opus/fable-тир) — сверка с базой знаний → стоп+тейк по R:R. Бьёт РЕДКО (только по
+  // кандидатам) → расход ограничен; включать осознанно (автономные LLM-вызовы).
+  const autoPredCfg = autoPredictorConfigFromEnv(DEV_USER);
+  const expertBudgetUsd = (() => {
+    const n = Number.parseFloat(process.env.JARVIS_AUTO_PREDICT_EXPERT_BUDGET_USD ?? "");
+    return Number.isFinite(n) && n > 0 ? n : undefined; // жёсткий потолок трат эксперта (USD); нет → без лимита
+  })();
+  const tradeExpert =
+    process.env.JARVIS_AUTO_PREDICT_EXPERT === "1"
+      ? new TradeExpert(anthropicLlm, knowledge, { model: config.models.fable, tier: "fable", budgetUsd: expertBudgetUsd })
+      : undefined;
+  const autoPredictor = autoPredCfg ? new AutoPredictor(market, autoPredCfg, tradeExpert) : null;
+  autoPredictor?.start();
+  if (tradeExpert) log.info("§трейдинг: LLM-эксперт в петле прогноза ВКЛ", { model: config.models.fable, budgetUsd: expertBudgetUsd ?? "без лимита" });
 
   // Регистрация плагина WebSocket до объявления маршрутов.
   void app.register(fastifyWebsocket);
@@ -154,8 +289,22 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       onConnection(socket, config, registry, providers, brain, log);
     });
     // Канал расширения (Chrome). Своя WS, отдельно от клиентского /ws (другой протокол).
-    instance.get("/ext", { websocket: true }, (connection) => {
+    instance.get("/ext", { websocket: true }, (connection, request) => {
       const ws = connection as unknown as RawWs;
+      // §sec (H13): /ext = «руки браузера» (telegram.send, чтение залогиненных вкладок). Раньше
+      // принимали ЛЮБОЕ соединение → вредоносная веб-страница открывала ws://…/ext и перехватывала
+      // канал. Теперь пускаем ТОЛЬКО расширение (Origin chrome-extension://) ИЛИ локальный клиент без
+      // Origin (тесты/нативный). Веб-страница (http/https Origin) → отклоняем.
+      const origin = String((request as { headers?: Record<string, unknown> })?.headers?.origin ?? "").toLowerCase();
+      if (origin && !origin.startsWith("chrome-extension://")) {
+        log.warn("§sec: /ext соединение отклонено по Origin (не расширение)", { origin });
+        try {
+          ws.close();
+        } catch {
+          /* уже закрыт */
+        }
+        return;
+      }
       const sock: ExtSocket = { send: (d) => ws.send(d), close: () => ws.close() };
       extBridge.attach(sock);
       ws.on("message", (raw: unknown) => extBridge.handleMessage(rawToText(raw)));
@@ -164,8 +313,25 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     });
   });
 
+  // §sec (H9/M12): DEV/EXT HTTP-роуты исполняют РЕАЛЬНЫЕ действия (ActionCommand в актуаторы минуя §14,
+  // отправка Telegram, инъекция в агента, VAD). Раньше — без всякой аутентификации → любой локальный
+  // процесс (а при ALLOW_REMOTE — весь LAN) исполнял команды на ПК, обходя WS-auth. Теперь: весь блок
+  // ТОЛЬКО при JARVIS_DEV_HTTP=1 (деф ВЫКЛ → 404 в обычном прогоне), + loopback-only, + опц. токен
+  // JARVIS_DEV_TOKEN (заголовок x-jarvis-dev-token). Расширение работает через /ext WS (выше), не эти роуты.
+  const devHttpOn = process.env.JARVIS_DEV_HTTP === "1";
+  const devToken = (process.env.JARVIS_DEV_TOKEN ?? "").trim();
+  const devPre = async (req: { ip?: string; headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): Promise<unknown> => {
+    const ip = String(req.ip ?? "").replace(/^::ffff:/, "");
+    if (!isLoopbackHost(ip)) return reply.code(403).send({ ok: false, error: "dev-роуты доступны только с loopback" });
+    if (devToken && String(req.headers["x-jarvis-dev-token"] ?? "") !== devToken)
+      return reply.code(403).send({ ok: false, error: "неверный dev-токен" });
+    return undefined;
+  };
+  if (devHttpOn) {
+    log.warn("§sec: DEV/EXT HTTP-роуты ВКЛЮЧЕНЫ (JARVIS_DEV_HTTP=1) — loopback-only" + (devToken ? " + токен" : " БЕЗ токена (задай JARVIS_DEV_TOKEN)"));
+
   // DEV-триггер для проверки руки в браузере: POST /ext/telegram {to,text}.
-  app.post("/ext/telegram", async (req) => {
+  app.post("/ext/telegram", { preHandler: devPre }, async (req) => {
     const body = (req.body ?? {}) as { to?: string; text?: string };
     if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
     try {
@@ -176,9 +342,44 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     }
   });
 
+  // DEV-триггер для проверки ОТПРАВКИ ФАЙЛА (аудио): POST /ext/telegram_file {to, audioB64}.
+  app.post("/ext/telegram_file", { preHandler: devPre }, async (req) => {
+    const body = (req.body ?? {}) as { to?: string; audioB64?: string };
+    if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
+    try {
+      const data = await extBridge.telegramSendVoice(String(body.to ?? ""), String(body.audioB64 ?? ""));
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // DEV-триггер: список открытых вкладок (browser_tabs end-to-end без модели). GET /ext/tabs.
+  app.get("/ext/tabs", { preHandler: devPre }, async () => {
+    if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
+    try {
+      const data = await extBridge.tabList();
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // DEV-диагностика резолва получателя: структура результатов поиска (диалоги vs глобальный/каналы).
+  app.post("/ext/tgdiag", { preHandler: devPre }, async (req) => {
+    const body = (req.body ?? {}) as { query?: string };
+    if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
+    try {
+      const data = await extBridge.request({ type: "telegram.diag", query: String(body.query ?? "") }, 30_000);
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
   // DEV-триггер: перечитать распакованное расширение с диска (chrome.runtime.reload),
   // чтобы подхватить правки background.js без ручного ↻ в chrome://extensions.
-  app.post("/ext/reload", async () => {
+  app.post("/ext/reload", { preHandler: devPre }, async () => {
     if (!extBridge.connected) return { ok: false, error: "расширение не подключено" };
     try {
       const data = await extBridge.request({ type: "reload" }, 5_000);
@@ -187,6 +388,53 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
+
+  // DEV-триггер: послать РЕАЛЬНЫЙ ActionCommand в подключённый клиент и вернуть НАСТОЯЩИЙ результат
+  // (для прямого теста клиентских актуаторов fs/clipboard/app/screen — текст-драйвер их фейкает).
+  // POST /dev/action {kind, ...поля команды}. Берёт последнюю (свежую) клиентскую сессию.
+  app.post("/dev/action", { preHandler: devPre }, async (req) => {
+    const cmd = (req.body ?? {}) as { kind?: string } & Record<string, unknown>;
+    if (!cmd.kind) return { ok: false, error: "нужен kind" };
+    const sessions = registry.all();
+    if (!sessions.length) return { ok: false, error: "нет подключённых сессий (Electron-клиент не запущен?)" };
+    const session = sessions[sessions.length - 1];
+    if (!session) return { ok: false, error: "нет сессии" };
+    try {
+      const result = await session.sendAction(cmd as unknown as Parameters<typeof session.sendAction>[0], 30_000);
+      return { ok: result.ok, data: result.data, error: result.error?.message ?? result.error };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  // DEV: ПОЛНЫЙ цикл как при голосе — инъекция текста в сессию ЖИВОГО клиента: команда идёт через
+  // агента, а action.command'ы исполняются НАСТОЯЩИМИ актуаторами клиента (не фейк текст-драйвера).
+  // Берёт последнюю клиентскую сессию. Ответы агента → в лог (server.out.log «Джарвис →») + клиенту.
+  app.post("/dev/say", { preHandler: devPre }, async (req) => {
+    const body = (req.body ?? {}) as { text?: string };
+    const text = String(body.text ?? "").trim();
+    if (!text) return { ok: false, error: "нужен text" };
+    const ids = registry.all().map((s) => s.sessionId);
+    let ctx: SessionContext | undefined;
+    for (let i = ids.length - 1; i >= 0; i -= 1) { const c = liveCtxs.get(ids[i]!); if (c) { ctx = c; break; } }
+    if (!ctx) return { ok: false, error: "нет живой клиентской сессии (Electron-клиент не запущен?)" };
+    void onDevText(ctx, { text }).catch((e) => log.error("/dev/say onDevText", e instanceof Error ? e.message : String(e)));
+    return { ok: true, sessionId: ctx.session.sessionId, note: "ответ агента в server.out.log и у клиента" };
+  });
+
+  // DEV: инъекция VAD-события в живую сессию (тест barge-in программно, без живого голоса).
+  // POST /dev/vad {state:"barge_in"|"speech_start"|"speech_end"} — зовёт ctx.voice.onVadEvent.
+  app.post("/dev/vad", { preHandler: devPre }, async (req) => {
+    const state = String((req.body as { state?: string })?.state ?? "").trim();
+    if (!["barge_in", "speech_start", "speech_end"].includes(state)) return { ok: false, error: "state: barge_in|speech_start|speech_end" };
+    const ids = registry.all().map((s) => s.sessionId);
+    let ctx: SessionContext | undefined;
+    for (let i = ids.length - 1; i >= 0; i -= 1) { const c = liveCtxs.get(ids[i]!); if (c) { ctx = c; break; } }
+    if (!ctx) return { ok: false, error: "нет живой клиентской сессии" };
+    ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end");
+    return { ok: true, sessionId: ctx.session.sessionId, injected: state };
+  });
+  } // end if (devHttpOn) — §sec gate for DEV/EXT HTTP routes
 
   // health-чек + метрики кеша (§15): hit/miss по эмбеддингам/web/TTS — для замера
   // эффективности кеширования платных вызовов.
@@ -200,21 +448,108 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     },
   }));
 
+  // ПРОД-ТЕЛЕМЕТРИЯ агента (obs/metrics): токены по типам, стоимость в USD, латентность p50/p95/avg,
+  // error-rate, cache hit-rate, токенов/запрос — агрегаты по окну последних задач. Для дашборда/алертов.
+  app.get("/stats", async () => metrics.snapshot());
+
+  // COGS-ДАШБОРД (юнит-экономика): окно телеметрии — стоимость по ФАКТИЧЕСКИМ моделям (costByModel),
+  // cache hit-rate, cold-write токены, латентность — ПЛЮС накопленный расход per-user из SpendGuard.
+  // Заменяет «оценки» юнит-экономики реальными числами для калибровки тарифов/потолков (§14).
+  app.get("/cogs", async () => ({
+    window: metrics.snapshot(),
+    users: brain.spend.allSnapshots(),
+  }));
+
   return {
     app,
     registry,
     async listen() {
-      await loadProfile(); // §8/§11: помним имя/факты пользователя между запусками
+      // Наблюдаемость (аудит 2026-07-02): durable файловый лог + JSONL-метрики в dataDir/logs/ —
+      // раньше сервер писал ТОЛЬКО в консоль, история после закрытия/деплоя терялась (аудит был слеп).
+      // Поднимаем ПЕРВЫМ, чтобы в файл попал и сам boot. Выключатель JARVIS_FILE_LOG=0.
+      fileLog = initFileLog();
+      metrics.enableJsonl();
+      // §6B/B3: профиль теперь партиционирован по userId и грузится per-session в handshake
+      // (loadProfile(userId)), а не один глобальный на boot.
+      await loadConsent(); // §14: помним согласия на отправку (Кате можно) между сессиями
       await dynamicTools.load(); // §8+: выученные инструменты доступны с первой сессии
-      void acks.warm(); // §11: прегенерим пул дворецких фраз в фоне (сбой — остаёмся на seed)
-      await app.listen({ port: config.port, host: config.host });
-      log.info("gateway слушает", { host: config.host, port: config.port });
+      // §6B/B5: траты периода теперь гидрируются per-user в handshake (brain.spend.hydrate(userId)),
+      // а не одним глобальным гвардом на boot (тот не имел userId → persist usage_quota был мёртв).
+      await brain.reminders.start(); // §9: поднять напоминания с диска, завести таймер, догнать просроченные
+      await brain.watch?.start(); // §долгие-задачи: поднять наблюдения с диска, завести recurring-таймер проверок
+      await obligationStore.load(); // §проактив-всё: поднять обязательства/счета с диска
+      await brain.ambient?.start(); // §проактив-всё: запустить ambient-движок (счета по датам + Telegram-непрочитанные)
+      // §3 верификация диктора: движок отпечатка (keyless ONNX, sherpa-onnx-node) поднимаем по
+      // умолчанию (флаг JARVIS_SPEAKER_GATE — теперь KILL-SWITCH: `=0` ВЫКЛ; иначе ВКЛ). Раньше
+      // требовался ЯВНЫЙ `=1`, и тогда движок не создавался → кнопка «Записать голос» в настройках
+      // молча падала (enroll нужен ctx.speakerVerifier), а UI врал «мало речи?». Причина прежнего
+      // строгого opt-in — конфликт sherpa-onnx-node ↔ onnxruntime-node (эмбеддер e5) в ОДНОМ процессе
+      // на Windows — УЖЕ РЕШЁН speaker-САЙДКАРОМ (sherpa в дочернем процессе, изолирован; e5 в главном
+      // жив). Так что строгий `=1` устарел и противоречил `router-ws makeSessionContext` (там гейт
+      // активен при `!== "0"`, «enrollment сам включает фильтрацию»). Согласуем: движок ВКЛ при `!=="0"`.
+      // ⚠️ Создание движка ≠ фильтрация: пока НЕТ ни одного записанного голоса, `speakerGateActive()`
+      // (profiles>0) ложен → реагируем на всех, как раньше; фильтрация включается ПОСЛЕ первой записи.
+      // `JARVIS_SPEAKER_SIDECAR=0` → in-process (Linux/без конфликта). Любой сбой сайдкара → Mock
+      // (ready=false → enroll честно падает, гейт не запирает владельца), boot цел.
+      if (process.env.JARVIS_SPEAKER_GATE !== "0") {
+        try {
+          const store = new VoiceProfileStore();
+          await store.load();
+          providers.speakerStore = store;
+          providers.speakerVerifier =
+            process.env.JARVIS_SPEAKER_SIDECAR === "0" ? await createSpeakerVerifier() : await createSpeakerVerifierSidecar();
+          log.info("верификация диктора (движок поднят; фильтрация — после первой записи голоса)", {
+            ready: providers.speakerVerifier.ready,
+            voices: store.total,
+            mode: process.env.JARVIS_SPEAKER_SIDECAR === "0" ? "in-process" : "sidecar",
+          });
+        } catch (e) {
+          log.warn("верификация диктора не поднялась", { error: e instanceof Error ? e.message : String(e) });
+        }
+      } else {
+        log.info("верификация диктора ВЫКЛ (kill-switch JARVIS_SPEAKER_GATE=0)");
+      }
+      void mcp.connectAll(); // § MCP: подключаем серверы В ФОНЕ — зависший/долгий npx не должен держать boot
+      // P1.3 ПРОГРЕВ ЭМБЕДДЕРА: e5-модель грузится ЛЕНИВО при первом embed(); на голосовом пути retrieval
+      // идёт под жёстким IO-таймаутом (~350мс) → холодная первая загрузка не успевает → факты [] («будто
+      // без памяти в начале разговора»). Один фоновый embed прогревает пайплайн заранее (не блокирует boot).
+      void embedder
+        .embed("warmup", "query")
+        .then((v) => log.info("эмбеддер прогрет на старте", { ready: Array.isArray(v) && v.length > 0 }))
+        .catch((e) => log.warn("прогрев эмбеддера пропущен", e instanceof Error ? e.message : String(e)));
+      // §память: досчитать эмбеддинги осиротевших фактов (embedding=NULL — писались, пока эмбеддер был
+      // мёртв на Windows-CPU) → вернуть их в семантический поиск. В фоне, идемпотентно, не блокирует boot.
+      void brain.episodic
+        .backfillMissingEmbeddings?.(2000)
+        ?.then((r) => {
+          if (r.fixed > 0) log.info("эпизодическая память: восстановлено эмбеддингов на старте", r);
+        })
+        .catch((e) => log.warn("бэкилл эмбеддингов пропущен", e instanceof Error ? e.message : String(e)));
+      // §мультитенант: общая библиотека навыков — провижн псевдо-юзера (FK) + идемпотентный сид
+      // курируемых процедур (видны всем через recall). Best-effort, не блокирует boot и не валит его.
+      void ensureUser(SHARED_USER_ID)
+        .then(() => seedSharedSkills(SHARED_SKILL_SEED))
+        .catch((e) => log.warn("общая библиотека навыков: сид пропущен", e instanceof Error ? e.message : String(e)));
+      const bindHost = resolveBindHost(config, log);
+      await app.listen({ port: config.port, host: bindHost });
+      log.info("gateway слушает", { host: bindHost, port: config.port });
     },
     async close() {
       clearInterval(taskSweep);
+      autoPredictor?.stop(); // §трейдинг: остановить авто-предиктор
+      brain.watch?.stop(); // §долгие-задачи: остановить таймер наблюдений
+      brain.ambient?.stop(); // §проактив-всё: остановить ambient-движок
+      flushTaskStores(); // §5/§20: дописать отложенный снимок реестра, чтобы «сделал?» пережил graceful-рестарт
+      flushResolutionStores(); // §: дописать опытную память резолвов перед выходом
+      // §14: дописать последний best-effort персист потраченного (раньше drain() не дожидались →
+      // usage_quota терялся при graceful-рестарте). Bounded 2с — зависшая БД не должна держать выход.
+      await Promise.race([brain.spend.drainAll().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
+      void mcp.dispose(); // § закрыть MCP-клиенты (stdio-child)
       registry.teardownAll();
       await app.close();
       log.info("gateway остановлен");
+      metrics.disableJsonl();
+      fileLog?.dispose(); // дослать хвост лог-буфера на диск перед выходом (наблюдаемость)
     },
   };
 }
@@ -229,6 +564,10 @@ interface RawWs {
   readyState: number;
 }
 
+/** §dev: ctx ЖИВЫХ клиентских соединений (для /dev/say — инъекция команды в сессию реального клиента,
+ *  чтобы действия исполнялись по-настоящему его актуаторами, как при голосе). */
+const liveCtxs = new Map<string, SessionContext>();
+
 /** Обработать новое соединение: handshake → сессия → heartbeat → router. */
 function onConnection(
   ws: RawWs,
@@ -240,6 +579,11 @@ function onConnection(
 ): void {
   let ctx: SessionContext | null = null;
   let handshakeDone = false;
+  // Single-flight (§6B): handshake стал async (валидация/провижн БД). Латч не даёт второму hello /
+  // гонке reconnect запустить ВТОРОЙ doHandshake (двойной провижн / двойная сессия). Ставится
+  // СИНХРОННО до любого await — между hello и резолвом промиса handshakeDone ещё false, поэтому любой
+  // промежуточный кадр падает в ту же ignore-ветку, что и сегодня (буфер не нужен, семантика та же).
+  let handshakeStarted = false;
 
   // Адаптер RawWs → SessionSocket (минимальный контракт Session).
   const sock: SessionSocket = {
@@ -267,15 +611,28 @@ function onConnection(
       return;
     }
 
-    // До handshake принимаем только client.hello.
+    // До handshake принимаем только client.hello (и только ОДИН — single-flight латч).
     if (!handshakeDone) {
-      if (env.type !== "client.hello") {
+      if (env.type !== "client.hello" || handshakeStarted) {
         log.warn("кадр до handshake — игнор", { type: env.type });
         return;
       }
-      clearTimeout(handshakeTimer);
-      ctx = doHandshake(env as Envelope<Hello>, sock, ws, config, registry, providers, brain, log);
-      handshakeDone = ctx !== null;
+      handshakeStarted = true; // СИНХРОННО, до await
+      clearTimeout(handshakeTimer); // СИНХРОННО, до await — медленный async-handshake не уронит 5с-таймаут в двойной close
+      // Инициализация сессии в .catch: ошибка здесь (напр. сбой регистрации канала) НЕ должна
+      // всплывать в uncaughtException и КЛАСТЬ ВЕСЬ СЕРВЕР (форензика логов: uncaughtException
+      // 'registerSpeaker' рушил процесс → шторм ECONNREFUSED на клиенте). Падает только ЭТО соединение.
+      void doHandshake(env as Envelope<Hello>, sock, ws, config, registry, providers, brain, log)
+        .then((c) => {
+          ctx = c;
+          handshakeDone = c !== null; // null (version_mismatch/unauthorized/internal) → сокет уже закрыт в doHandshake
+          if (c) liveCtxs.set(c.session.sessionId, c); // §dev /dev/say
+        })
+        .catch((e: unknown) => {
+          log.error("ошибка handshake/инициализации сессии — закрываю соединение", e instanceof Error ? e.message : String(e));
+          sendError(ws, { code: "internal", message: "ошибка инициализации сессии" });
+          ws.close(1011, "session_init_failed");
+        });
       return;
     }
 
@@ -288,18 +645,25 @@ function onConnection(
 
   ws.on("close", () => {
     clearTimeout(handshakeTimer);
-    if (ctx) {
-      ctx.heartbeat.stop();
-      ctx.voice.dispose();
-      ctx.disposeAgent(); // §20: пометить сессию закрытой + снять незавершённые фоновые задачи
-      forgetClientContext(ctx.session.sessionId);
-      brain.warmth.forget(ctx.session.sessionId); // §15: не копим тёплость мёртвых сессий
-      // Сессию НЕ удаляем сразу: оставляем для resume (§5). teardown по close
-      // оставляем реестру/GC — здесь только heartbeat и in-flight отклоним через teardown
-      // при превышении окна resume. Для M0 — снимаем сразу.
-      registry.remove(ctx.session.sessionId);
-      log.info("соединение закрыто", { sessionId: ctx.session.sessionId });
+    if (!ctx) return;
+    // Heartbeat ЭТОГО соединения глушим всегда (иначе при resume на одну Session работали бы ДВА
+    // heartbeat-а — старый добивал бы живой сокет ложным onDead).
+    ctx.heartbeat.stop();
+    ctx.voice.dispose(); // голосовой контур — per-connection, освобождаем в любом случае
+    // RESUME-ГОНКА: если сессию уже забрало более новое соединение (rebind), это закрытие СТАРОГО
+    // сокета — НЕ трогаем сессию/фоновые задачи/реестр (ими владеет новое соединение).
+    if (!ctx.session.isBoundTo(sock)) {
+      log.info("закрыт старый сокет после resume — сессия жива на новом", { sessionId: ctx.session.sessionId });
+      return;
     }
+    ctx.disposeAgent(); // §20: снять незавершённые фоновые задачи этого соединения (агент-деп — per-conn)
+    liveCtxs.delete(ctx.session.sessionId); // §dev /dev/say
+    forgetClientContext(ctx.session.sessionId);
+    brain.warmth.forget(ctx.session.sessionId); // §15: не копим тёплость мёртвых сессий
+    // §5 RESUME: НЕ убиваем сессию сразу — держим грейс-окно. Reconnect (блип сети/перезапуск клиента в
+    // пределах окна) восстановит ИСТОРИЮ ДИАЛОГА (память скоуплена на Session). Не вернулся → авто-remove.
+    registry.scheduleRemove(ctx.session.sessionId);
+    log.info("соединение закрыто (сессия в resume-окне)", { sessionId: ctx.session.sessionId });
   });
 
   ws.on("error", (err: Error) => {
@@ -308,7 +672,7 @@ function onConnection(
 }
 
 /** Выполнить handshake и поднять сессию (§5). Возвращает контекст или null. */
-function doHandshake(
+async function doHandshake(
   env: Envelope<Hello>,
   sock: SessionSocket,
   ws: RawWs,
@@ -317,7 +681,7 @@ function doHandshake(
   providers: VoiceProviders,
   brain: BrainProviders,
   log: Logger,
-): SessionContext | null {
+): Promise<SessionContext | null> {
   const hello = env.payload;
 
   // §5: несовпадение мажора протокола → ошибка + закрыть.
@@ -334,10 +698,24 @@ function doHandshake(
     return null;
   }
 
-  // M0: аутентификация по token — заглушка (один пользователь, §0).
-  // TODO(§13): валидировать token, извлечь userId. Пока — seed dev-юзер (UUID,
-  // иначе запросы к episodic_memory.user_id::uuid падают).
-  const userId = "00000000-0000-0000-0000-000000000001";
+  // §13/Фаза 6B: userId из токена (identity.ts) + lazy-provision строки users ДО createOrResume —
+  // иначе per-user INSERT в сессии молча падает на FK (Hazard 1). На дефолтном loopback это ПАРТИЦИЯ
+  // (токен = ключ раздела), не auth; реальная сверка по auth_tokens дремлет за JARVIS_AUTH_STRICT.
+  const userId = await resolveAndProvision(hello.token);
+  if (userId === null) {
+    // Срабатывает ТОЛЬКО в strict-режиме (LAN/hosted) при отклонённом токене — на дефолте недостижимо.
+    log.warn("unauthorized — токен отклонён (strict)");
+    sendError(ws, { code: "unauthorized", message: "token rejected" });
+    ws.close(4003, "unauthorized");
+    return null;
+  }
+
+  // §6B/B3: грузим РАЗДЕЛ профиля этого userId в кеш ДО makeSessionContext/онбординга — иначе
+  // getProfile(userId) вернёт пусто (профиль партиционирован по userId, не глобальный синглтон).
+  await loadProfile(userId);
+  // §6B/B5: гидрируем траты периода ЭТОГО юзера из usage_quota ДО первого check (рестарт не обнуляет
+  // месячный потолок). Идемпотентно; без БД/userId — no-op (best-effort).
+  await brain.spend.hydrate(userId);
 
   const { session, resumed } = registry.createOrResume(userId, sock, hello.resumeSessionId);
 
@@ -372,7 +750,7 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
   const t = setTimeout(() => {
     // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript — иначе на
     // каждое переподключение копится карточка-спам (НЕ чат-бот, §концепт). Контекст — best-effort.
-    const p = getProfile();
+    const p = getProfile(session.userId);
     void buildGreeting(
       { llm: brain.llm, episodic: brain.episodic, models: brain.models },
       session.userId,

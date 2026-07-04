@@ -9,16 +9,28 @@
 import { type CacheStats, TtlCache } from "@jarvis/shared";
 import type { ITtsProvider, TtsChunk, TtsOpts, TtsStream } from "./voice-providers.js";
 
-/** id модели TTS включаем в ключ: смена ELEVENLABS_MODEL не должна отдавать старый голос. */
-const TTS_MODEL_TAG = process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2";
+/**
+ * Тег движка/модели/голоса в ключе: смена провайдера (ELEVENLABS→YANDEX), модели или
+ * яндекс-голоса НЕ должна отдавать старое закешированное аудио другого движка.
+ */
+const TTS_MODEL_TAG = [
+  (process.env.TTS_PROVIDER || "elevenlabs").toLowerCase(),
+  process.env.ELEVENLABS_MODEL || "eleven_multilingual_v2",
+  process.env.YANDEX_VOICE || "",
+].join("/");
 
 /**
  * Ключ кеша TTS. Длина-префиксы у voiceId/model исключают коллизию через двоеточие
- * (напр. пустой voiceId + текст «X:…» против voiceId «X» + текст «…»).
+ * (напр. пустой voiceId + текст «X:…» против voiceId «X» + текст «…»). Подача режима-маски
+ * (§11: speed/stability/style) РЕАЛЬНО меняет аудиобайты у обоих провайдеров → входит в ключ,
+ * иначе одна фраза в спокойном режиме отдавалась бы из кеша вместо энергичного, и наоборот.
  */
-function cacheKey(voiceId: string | undefined, text: string): string {
-  const v = voiceId ?? "";
-  return `${v.length}:${v}|${TTS_MODEL_TAG.length}:${TTS_MODEL_TAG}|${text}`;
+function cacheKey(opts: TtsOpts | undefined, text: string): string {
+  const v = opts?.voiceId ?? "";
+  // emotion (§21 «говори зло/радостно») МЕНЯЕТ роль голоса/аудиобайты у Yandex — без неё одна фраза в
+  // злой подаче отдавалась бы из кеша спокойной (и наоборот). Поэтому входит в дискриминатор.
+  const d = `${opts?.speed ?? ""},${opts?.stability ?? ""},${opts?.style ?? ""},${opts?.emotion ?? ""}`;
+  return `${v.length}:${v}|${TTS_MODEL_TAG.length}:${TTS_MODEL_TAG}|${d.length}:${d}|${text}`;
 }
 
 /** Проигрыватель заранее закешированных чанков — без вызова API. */
@@ -115,7 +127,7 @@ export class CachingTtsProvider implements ITtsProvider {
   }
 
   synthesize(text: string, opts?: TtsOpts): TtsStream {
-    const key = cacheKey(opts?.voiceId, text);
+    const key = cacheKey(opts, text);
     const cached = this.cache.get(key);
     if (cached) return new ReplayTtsStream(cached);
     return new CollectingTtsStream(this.inner.synthesize(text, opts), (chunks) =>

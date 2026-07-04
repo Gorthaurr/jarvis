@@ -9,12 +9,11 @@
   -->
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
-      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
-        PerMonitorV2
-      </dpiAwareness>
-      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
-        true/PM
-      </dpiAware>
+      <!-- Значения СТРОГО в одну строку без пробелов/переносов: парсер манифеста чувствителен к
+           whitespace в текстовом узле — "\n  PerMonitorV2\n" мог не распознаться → процесс тихо
+           оставался DPI-unaware, и координаты кликов мазали на масштабе 125/150%. -->
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2,PerMonitor</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
     </windowsSettings>
   </application>
 

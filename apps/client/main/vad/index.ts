@@ -27,11 +27,19 @@ export interface EnergyVadConfig {
   threshold: number;
   /** Сколько подряд «тихих» кадров до speech_end (hangover). */
   hangoverFrames: number;
+  /**
+   * Сколько подряд «громких» кадров нужно ДО speech_start (онсет-дебаунс, §10). Без него
+   * энергетический VAD дребезжал на одиночных щелчках/шуме — десятки speech_start/end подряд
+   * флудили turn-detector и сбивали окно прослушивания (видно в client.out.log). N кадров
+   * устойчивой энергии = реальная речь, не пик. Реплики онсетятся за >60мс, так что не режем.
+   */
+  onsetFrames: number;
 }
 
 export const DEFAULT_VAD_CONFIG: EnergyVadConfig = {
   threshold: 700,
   hangoverFrames: 12, // ~240 мс при кадрах 20 мс
+  onsetFrames: 3, // ~60 мс устойчивой энергии до speech_start (анти-дребезг)
 };
 
 /** RMS-энергия кадра PCM16. */
@@ -49,6 +57,8 @@ export function rms(pcm: Int16Array): number {
 export class EnergyVad implements IVad {
   private _speaking = false;
   private silence = 0;
+  /** Счётчик подряд «громких» кадров для онсет-дебаунса (см. onsetFrames). */
+  private voiced = 0;
 
   constructor(private readonly config: EnergyVadConfig = DEFAULT_VAD_CONFIG) {}
 
@@ -61,12 +71,19 @@ export class EnergyVad implements IVad {
     if (energy >= this.config.threshold) {
       this.silence = 0;
       if (!this._speaking) {
-        this._speaking = true;
-        return "speech_start";
+        // Онсет-дебаунс: speech_start только после onsetFrames подряд громких кадров —
+        // одиночный щелчок/шум не будит цикл (анти-дребезг, иначе флуд speech_start/end).
+        this.voiced += 1;
+        if (this.voiced >= this.config.onsetFrames) {
+          this._speaking = true;
+          this.voiced = 0;
+          return "speech_start";
+        }
       }
       return null;
     }
-    // тихий кадр
+    // тихий кадр — прерывает накопление онсета (нужны именно ПОДРЯД идущие громкие кадры)
+    this.voiced = 0;
     if (this._speaking) {
       this.silence += 1;
       if (this.silence >= this.config.hangoverFrames) {
@@ -81,6 +98,7 @@ export class EnergyVad implements IVad {
   reset(): void {
     this._speaking = false;
     this.silence = 0;
+    this.voiced = 0;
   }
 }
 

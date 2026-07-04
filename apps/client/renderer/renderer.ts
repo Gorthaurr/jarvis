@@ -11,12 +11,19 @@ import type {
   ClientState,
   Transcript,
   ProactiveNudge,
-  ConfirmRequest,
   DisplayCard,
-  TaskStatus,
+  ChatMessage,
 } from "@jarvis/protocol";
-import type { JarvisBridge, LinkState, SpeakChunkPayload } from "../main/ipc-contract.js";
+import type { JarvisBridge, LinkState, SpeakChunkPayload, KeyName, SettingsPatch } from "../main/ipc-contract.js";
 import { AudioCapture, AudioPlayback } from "./audio.js";
+import { $ } from "./dom.js";
+import { buildWave } from "./wave.js";
+import { initBillingPanel } from "./billing-panel.js";
+import { initMonitorPanel } from "./monitor-panel.js";
+import { initTaskPanel } from "./task-panel.js";
+import { denyConfirm, initConfirmDialog, isConfirmOpen } from "./confirm-dialog.js";
+import { cancelSkillModal, initSkillRecorder, isSkillOpen } from "./skill-recorder.js";
+import { initVoiceEnrollment } from "./voice-enroll.js";
 
 // window.jarvis выставлен preload (contextBridge).
 declare global {
@@ -28,45 +35,15 @@ declare global {
 const jarvis = window.jarvis;
 
 // ── DOM-ссылки ─────────────────────────────────────────────────
-const $ = <T extends HTMLElement>(id: string): T => {
-  const el = document.getElementById(id);
-  if (!el) throw new Error(`нет элемента #${id}`);
-  return el as T;
-};
-
 const statusbar = $("statusbar");
 const stateLabel = $("stateLabel");
 const transcriptEl = $("transcript");
 const linkEl = $("link");
 const cards = $("cards");
 
-// Центральный пассивный индикатор состояния (Amnezia-стиль). Зеркалит то же
-// состояние, что и statusbar (idle/listening/thinking/speaking).
+// Центральный индикатор состояния (дизайн «Премиум-минимал»): гало + подпись + волна.
 const hero = $("hero");
 const heroLabel = $("heroLabel");
-
-// панель задачи (§20)
-const taskPanel = $("taskPanel");
-const taskStateEl = $("taskState");
-const taskSummaryEl = $("taskSummary");
-const taskBarFill = $("taskBarFill");
-const taskCancelBtn = $<HTMLButtonElement>("taskCancelBtn");
-const taskPauseBtn = $<HTMLButtonElement>("taskPauseBtn");
-const taskResumeBtn = $<HTMLButtonElement>("taskResumeBtn");
-
-/** taskId активной задачи — для адресной отправки task.control (§20). */
-let activeTaskId: string | null = null;
-
-// модалка confirm
-const confirmOverlay = $("confirmOverlay");
-const confirmKind = $("confirmKind");
-const confirmSummary = $("confirmSummary");
-const revisionInput = $<HTMLInputElement>("revisionInput");
-const approveBtn = $<HTMLButtonElement>("approveBtn");
-const reviseBtn = $<HTMLButtonElement>("reviseBtn");
-const denyBtn = $<HTMLButtonElement>("denyBtn");
-
-let activeConfirm: ConfirmRequest | null = null;
 
 // ── состояние / орб ────────────────────────────────────────────
 const STATE_RU: Record<ClientState, string> = {
@@ -80,7 +57,7 @@ function setOrbState(state: ClientState): void {
   currentState = state;
   statusbar.className = `statusbar statusbar--${state}`;
   stateLabel.textContent = STATE_RU[state] ?? state;
-  // Центральный индикатор — та же машина состояний (§3, пассивный, без клика).
+  // Центральный индикатор — та же машина состояний (гало/подпись/волна; кольцо скрыто в CSS).
   hero.className = `hero hero--${state}`;
   heroLabel.textContent = STATE_RU[state] ?? state;
 }
@@ -91,8 +68,8 @@ function setLink(link: LinkState): void {
 }
 
 // ── карточки ui.display (§21) ──────────────────────────────────
-// Ambient-ассистент, НЕ чат-лог: НЕ копим карточки (раньше приветствие плодило
-// дубли на каждом переподключении). Показываем только последнюю и убираем её.
+// Дизайн «Премиум-минимал»: ambient-ассистент, НЕ чат-лог — показываем последний ответ под индикатором
+// и убираем (эфемерно), чтобы экран оставался чистым (фокус на состоянии/голосе).
 let cardTimer: ReturnType<typeof setTimeout> | null = null;
 function clearCards(): void {
   cards.innerHTML = "";
@@ -113,118 +90,19 @@ function addCard(card: DisplayCard): void {
   }
   const body = document.createElement("div");
   body.className = "card__body";
-  // markdown показываем как текст (рендер MD — позже); textContent защищает от инъекций.
-  body.textContent = card.markdown;
+  body.textContent = card.markdown; // textContent — защита от инъекций
   el.appendChild(body);
   cards.appendChild(el);
-  cardTimer = setTimeout(clearCards, 12_000); // эфемерно
+  cardTimer = setTimeout(clearCards, 14_000); // эфемерно
 }
 
-// ── панель задачи (§20) ────────────────────────────────────────
-const TASK_STATE_RU: Record<TaskStatus["state"], string> = {
-  queued: "в очереди",
-  running: "выполняю",
-  paused: "на паузе",
-  waiting_confirm: "жду подтверждения",
-  done: "готово",
-  failed: "ошибка",
-  cancelled: "отменено",
-};
-
-const TERMINAL_STATES: ReadonlySet<TaskStatus["state"]> = new Set(["done", "failed", "cancelled"]);
-let taskHideTimer: ReturnType<typeof setTimeout> | null = null;
-
-/** Отрисовать прогресс/состояние задачи и доступные кнопки управления (§20). */
-function renderTaskStatus(s: TaskStatus): void {
-  activeTaskId = s.taskId;
-  if (taskHideTimer) {
-    clearTimeout(taskHideTimer);
-    taskHideTimer = null;
-  }
-
-  taskPanel.classList.remove("task--hidden");
-  taskPanel.className = `task task--${s.state}`;
-  taskStateEl.textContent = TASK_STATE_RU[s.state] ?? s.state;
-  taskSummaryEl.textContent = s.summary ?? "";
-
-  // Прогресс-бар: доля при известном total, иначе «неопределённый» (бегунок).
-  if (s.stepsTotal && s.stepsTotal > 0) {
-    const pct = Math.min(100, Math.round(((s.stepsDone ?? 0) / s.stepsTotal) * 100));
-    taskBarFill.style.width = `${pct}%`;
-    taskBarFill.classList.remove("task__bar-fill--indeterminate");
-  } else {
-    taskBarFill.style.width = "100%";
-    taskBarFill.classList.add("task__bar-fill--indeterminate");
-  }
-
-  const terminal = TERMINAL_STATES.has(s.state);
-  const paused = s.state === "paused";
-  // На паузе предлагаем «Продолжить» вместо «Пауза»; в терминале прячем управление.
-  taskCancelBtn.classList.toggle("task--hidden", terminal);
-  taskPauseBtn.classList.toggle("task--hidden", terminal || paused);
-  taskResumeBtn.classList.toggle("task--hidden", terminal || !paused);
-
-  if (terminal) {
-    activeTaskId = null;
-    taskBarFill.classList.remove("task__bar-fill--indeterminate");
-    // Показать итог несколько секунд, затем убрать панель.
-    taskHideTimer = setTimeout(() => taskPanel.classList.add("task--hidden"), 4000);
-  }
-}
-
-taskCancelBtn.addEventListener("click", () =>
-  jarvis.sendTaskControl("cancel", activeTaskId ?? undefined),
-);
-taskPauseBtn.addEventListener("click", () =>
-  jarvis.sendTaskControl("pause", activeTaskId ?? undefined),
-);
-taskResumeBtn.addEventListener("click", () =>
-  jarvis.sendTaskControl("resume", activeTaskId ?? undefined),
-);
-
-// ── модалка подтверждения (§14) ────────────────────────────────
-function openConfirm(req: ConfirmRequest): void {
-  activeConfirm = req;
-  confirmKind.textContent = req.kind; // send | order | irreversible
-  confirmSummary.textContent = req.summary;
-  revisionInput.value = "";
-  confirmOverlay.classList.remove("overlay--hidden");
-}
-
-function closeConfirm(): void {
-  activeConfirm = null;
-  confirmOverlay.classList.add("overlay--hidden");
-}
-
-approveBtn.addEventListener("click", () => {
-  if (!activeConfirm) return;
-  jarvis.sendConfirmResult({ requestId: activeConfirm.requestId, approved: true });
-  closeConfirm();
-});
-
-reviseBtn.addEventListener("click", () => {
-  // §14 revise-петля: approved:false + revision -> сервер перегенерирует и пришлёт новый confirm.
-  if (!activeConfirm) return;
-  const revision = revisionInput.value.trim();
-  jarvis.sendConfirmResult({
-    requestId: activeConfirm.requestId,
-    approved: false,
-    revision: revision || undefined,
-  });
-  closeConfirm();
-});
-
-denyBtn.addEventListener("click", () => {
-  if (!activeConfirm) return;
-  jarvis.sendConfirmResult({ requestId: activeConfirm.requestId, approved: false });
-  closeConfirm();
-});
+initConfirmDialog(jarvis); // §14 модалка подтверждения — кнопки + клик по фону + onConfirmRequest внутри
 
 // ── подписки на события main ──────────────────────────────────
 jarvis.onState((s: ClientState) => setOrbState(s));
 jarvis.onLink((l: LinkState) => {
   setLink(l);
-  if (l.online) clearCards(); // на (пере)подключении убрать накопившиеся карточки
+  if (l.online) clearCards(); // на (пере)подключении убираем устаревшую карточку
 });
 jarvis.onTranscript((t: Transcript) => {
   transcriptEl.textContent = t.text;
@@ -233,17 +111,96 @@ jarvis.onNudge((n: ProactiveNudge) => {
   // Проактивная подсказка (§9): показываем карточкой (в проде ещё и проговаривается, если не истекла).
   if (Date.now() <= n.expiresAt) addCard({ title: "Подсказка", markdown: n.text });
 });
-jarvis.onConfirmRequest((r: ConfirmRequest) => openConfirm(r));
 jarvis.onDisplay((c: DisplayCard) => addCard(c));
-jarvis.onTaskStatus((s: TaskStatus) => renderTaskStatus(s));
+initTaskPanel(jarvis); // §20 док задач — подписка onTaskStatus + чипы внутри
 
 // ── аудио (§3, §10): захват/воспроизведение в renderer (WebRTC AEC) ────────────
-const playback = new AudioPlayback();
+// onActive → main: пока звук РЕАЛЬНО играет, перебивание (§10) остаётся включённым и в «хвосте»
+// очереди (сервер уходит из speaking по концу синтеза, а плеер ещё доигрывает фразы).
+const playback = new AudioPlayback(undefined, (active) => jarvis.setPlaybackActive(active));
 let capture: AudioCapture | null = null;
 
-jarvis.onSpeakChunk((c: SpeakChunkPayload) => playback.enqueue(c));
+// §22 mute озвучки: при выключенном звуке аудио-чанки НЕ проигрываем (Джарвис слышит и делает, но молча).
+jarvis.onSpeakChunk((c: SpeakChunkPayload) => {
+  if (!outputMuted) playback.enqueue(c);
+});
 jarvis.onBargeIn(() => playback.stop());
 jarvis.onMicState((open: boolean) => statusbar.classList.toggle("statusbar--mic", open));
+
+// ── §22 mute озвучки + режим чата ─────────────────────────────
+const muteBtn = $("muteBtn");
+const chatBtn = $("chatBtn");
+const chatView = $("chatView");
+const chatLog = $("chatLog");
+const chatForm = $<HTMLFormElement>("chatForm");
+const chatInput = $<HTMLInputElement>("chatInput");
+
+let outputMuted = localStorage.getItem("jarvis.muted") === "1";
+function applyMute(): void {
+  muteBtn.classList.toggle("icon-btn--danger", outputMuted);
+  muteBtn.title = outputMuted
+    ? "Звук выключен — Джарвис слышит и делает, но молчит (нажмите, чтобы включить)"
+    : "Выключить звук (Джарвис слышит и делает, но молча)";
+  if (outputMuted) playback.stop(); // оборвать текущую озвучку
+}
+applyMute();
+muteBtn.addEventListener("click", () => {
+  outputMuted = !outputMuted;
+  localStorage.setItem("jarvis.muted", outputMuted ? "1" : "0");
+  applyMute();
+});
+
+let chatMode = false;
+function setChatMode(on: boolean): void {
+  chatMode = on;
+  document.body.classList.toggle("chat-active", on);
+  chatView.classList.toggle("chatview--hidden", !on);
+  chatBtn.classList.toggle("icon-btn--active", on);
+  if (on) chatInput.focus();
+}
+chatBtn.addEventListener("click", () => setChatMode(!chatMode));
+// Явный выход из чата (кнопка «‹» в шапке) — раньше выйти было нечем (чат накрывал топбар).
+$("chatBack").addEventListener("click", () => setChatMode(false));
+
+// ── громкость голоса Джарвиса (ползунок в настройках) ──
+const ttsVolume = $<HTMLInputElement>("ttsVolume");
+const ttsVolumeVal = $("ttsVolumeVal");
+function applyTtsVolume(pct: number): void {
+  const v = Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 100));
+  playback.setVolume(v / 100);
+  ttsVolume.value = String(v);
+  ttsVolumeVal.textContent = `${v}%`;
+}
+applyTtsVolume(Number.parseInt(localStorage.getItem("jarvis.ttsVolume") ?? "100", 10));
+ttsVolume.addEventListener("input", () => {
+  const v = Number.parseInt(ttsVolume.value, 10) || 0;
+  localStorage.setItem("jarvis.ttsVolume", String(v));
+  applyTtsVolume(v);
+});
+
+chatForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  jarvis.submitText(text); // dev.text путь — ответ текстом, без голоса
+  chatInput.value = "";
+  // пузырёк пользователя придёт назад через onChat (сервер шлёт role:user)
+});
+
+function chatBubble(role: "user" | "assistant", text: string): void {
+  chatLog.querySelector(".chatlog__empty")?.remove();
+  const b = document.createElement("div");
+  b.className = `bubble bubble--${role}`;
+  b.textContent = text;
+  chatLog.appendChild(b);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+jarvis.onChat((m: ChatMessage) => {
+  chatBubble(m.role, m.text); // лента в режиме чата (overlay с вводом)
+  // mute + НЕ в чат-режиме: ответ Джарвиса показываем карточкой под индикатором (текст-фидбэк §22).
+  if (m.role === "assistant" && outputMuted && !chatMode) addCard({ title: "Джарвис", markdown: m.text });
+});
 
 /** Поднять захват (один раз). Кадры PCM уходят в main, где гейтятся (§0.6). */
 async function ensureCapture(): Promise<void> {
@@ -254,6 +211,9 @@ async function ensureCapture(): Promise<void> {
   } catch (e) {
     // НЕ глотаем: раньше тихий catch скрывал отказ микрофона → Джарвис «не слышал»
     // без единого следа. Логируем и показываем явный статус пользователю.
+    // H18: при ЧАСТИЧНОМ провале start() (getUserMedia успел, ворклет — нет) MediaStream
+    // оставался захваченным — микрофон «занят» до перезапуска. Добиваем перед сбросом ссылки.
+    await capture.stop().catch(() => {});
     capture = null;
     console.error("микрофон недоступен:", e);
     transcriptEl.textContent = "Нет доступа к микрофону — проверьте разрешение в Windows.";
@@ -268,12 +228,80 @@ const settingsBtn = $("settingsBtn");
 const settingsPanel = $("settingsPanel");
 const settingsClose = $("settingsClose");
 const settingsSave = $<HTMLButtonElement>("settingsSave");
+const langSelect = $<HTMLSelectElement>("langSelect");
+const contextInput = $<HTMLTextAreaElement>("contextInput");
+const keyAnthropic = $<HTMLInputElement>("keyAnthropic");
+const keyEleven = $<HTMLInputElement>("keyEleven");
+const keyDeepgram = $<HTMLInputElement>("keyDeepgram");
 
-settingsBtn.addEventListener("click", () => settingsPanel.classList.remove("settings--hidden"));
+// Поле ключа + его плейсхолдер «по умолчанию» (когда ключ ещё не задан).
+const KEY_FIELDS: ReadonlyArray<{ input: HTMLInputElement; name: KeyName; ph: string }> = [
+  { input: keyAnthropic, name: "anthropic", ph: "sk-…" },
+  { input: keyEleven, name: "eleven", ph: "voiceId Джарвиса" },
+  { input: keyDeepgram, name: "deepgram", ph: "резерв STT" },
+];
+
+/**
+ * Подтянуть сохранённые настройки в форму. Секреты ключей в renderer НЕ возвращаются:
+ * поля остаются пустыми, а плейсхолдер сообщает, что ключ уже сохранён.
+ */
+async function loadSettings(): Promise<void> {
+  try {
+    const s = await jarvis.getSettings();
+    langSelect.value = s.language || "ru";
+    contextInput.value = s.context || "";
+    for (const f of KEY_FIELDS) {
+      f.input.value = "";
+      f.input.placeholder = s.keys[f.name] ? "сохранён — введите новый, чтобы заменить" : f.ph;
+    }
+  } catch (e) {
+    console.error("настройки не загрузились:", e);
+  }
+}
+
+settingsBtn.addEventListener("click", () => {
+  settingsPanel.classList.remove("settings--hidden");
+  void loadSettings(); // предзаполнить форму сохранёнными значениями
+  jarvis.listMonitors(); // §6 подтянуть актуальные мониторы при открытии настроек
+});
 settingsClose.addEventListener("click", () => settingsPanel.classList.add("settings--hidden"));
+
+// Сохранение настроек: реальный персист через main (safeStorage для ключей) + ЧЕСТНЫЙ фидбэк —
+// никакого ложного «Готово»: текст кнопки отражает, что именно записано.
+let saveResetTimer: ReturnType<typeof setTimeout> | null = null;
 settingsSave.addEventListener("click", () => {
-  // TODO: персист ключей/контекста через preload → Electron safeStorage (§12/§13).
-  settingsPanel.classList.add("settings--hidden");
+  if (saveResetTimer) {
+    clearTimeout(saveResetTimer);
+    saveResetTimer = null;
+  }
+  settingsSave.disabled = true;
+  const keys: NonNullable<SettingsPatch["keys"]> = {};
+  for (const f of KEY_FIELDS) {
+    const v = f.input.value.trim();
+    if (v) keys[f.name] = v; // пусто = не трогаем сохранённый ключ
+  }
+  jarvis
+    .saveSettings({ language: langSelect.value, context: contextInput.value.trim(), keys })
+    .then((res) => {
+      if (!res.ok) {
+        settingsSave.textContent = "Не удалось сохранить";
+        settingsSave.disabled = false;
+        return;
+      }
+      settingsSave.textContent = res.keysSkipped
+        ? "Сохранено (ключи: нет шифрования ОС)"
+        : "Сохранено ✓";
+      saveResetTimer = setTimeout(() => {
+        settingsSave.textContent = "Сохранить";
+        settingsSave.disabled = false;
+        settingsPanel.classList.add("settings--hidden");
+      }, 1100);
+    })
+    .catch((e) => {
+      console.error("сохранение настроек упало:", e);
+      settingsSave.textContent = "Ошибка сохранения";
+      settingsSave.disabled = false;
+    });
 });
 
 // Вкладки настроек (Общее/Навыки/Ключи/Оплата): активная вкладка + показ её панели.
@@ -284,145 +312,35 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>(".settab")) {
     for (const p of document.querySelectorAll<HTMLElement>(".settab-panel")) {
       p.classList.toggle("settab-panel--hidden", p.dataset.panel !== name);
     }
+    // §6B/B5: при открытии вкладки «Оплата» запрашиваем свежий расход/лимиты у сервера.
+    if (name === "billing") jarvis.requestUsage();
   });
 }
 
+initBillingPanel(jarvis); // §6B/B5 «Оплата» — onUsage + кнопка управления внутри
+
 // ── запись навыка демонстрацией (§8) ───────────────────────────
-const makeSkillBtn = $<HTMLButtonElement>("makeSkillBtn");
-const skillOverlay = $("skillOverlay");
-const skillSetup = $("skillSetup");
-const skillRecording = $("skillRecording");
-const skillName = $<HTMLInputElement>("skillName");
-const skillCountEl = $("skillCount");
-const skillLastEl = $("skillLast");
-const skillStartBtn = $<HTMLButtonElement>("skillStartBtn");
-const skillDoneBtn = $<HTMLButtonElement>("skillDoneBtn");
-const skillCancelBtn = $<HTMLButtonElement>("skillCancelBtn");
-const skillList = $("skillList");
+initSkillRecorder(jarvis, () => settingsPanel.classList.add("settings--hidden")); // модалка + список + onSkill* внутри
 
-let recording = false;
-
-/** Сбросить модалку записи в исходный (до старта) вид. */
-function resetSkillModal(): void {
-  recording = false;
-  skillSetup.classList.remove("overlay--hidden");
-  skillRecording.classList.add("overlay--hidden");
-  skillStartBtn.classList.remove("overlay--hidden");
-  skillDoneBtn.classList.add("overlay--hidden");
-  skillCountEl.textContent = "0";
-  skillLastEl.textContent = "";
-}
-
-function openSkillModal(): void {
-  resetSkillModal();
-  skillName.value = "";
-  settingsPanel.classList.add("settings--hidden"); // не перекрывать модалкой
-  skillOverlay.classList.remove("overlay--hidden");
-}
-
-function closeSkillModal(): void {
-  skillOverlay.classList.add("overlay--hidden");
-  resetSkillModal();
-}
-
-makeSkillBtn.addEventListener("click", openSkillModal);
-
-skillStartBtn.addEventListener("click", () => {
-  // Сворачиваем окно Джарвиса, чтобы пользователь показывал задачу в своих приложениях.
-  jarvis.startSkill(skillName.value);
-});
-
-skillDoneBtn.addEventListener("click", () => {
-  jarvis.stopSkill();
-  closeSkillModal();
-});
-
-skillCancelBtn.addEventListener("click", () => {
-  if (recording) jarvis.cancelSkill();
-  closeSkillModal();
-});
-
-// Состояние записи из main: переключаем вид и обновляем счётчик.
-jarvis.onSkillState((s) => {
-  if (s.unavailable) {
-    skillLastEl.textContent = "Запись недоступна — не запущен системный модуль (sidecar).";
-    return;
+// ── ESC закрывает верхний слой (a11y): сначала модалки, затем панель настроек ──
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (isConfirmOpen()) {
+    denyConfirm(); // ESC на подтверждении = отклонить (безопасно)
+  } else if (isSkillOpen()) {
+    cancelSkillModal();
+  } else if (!settingsPanel.classList.contains("settings--hidden")) {
+    settingsClose.click();
   }
-  recording = s.recording;
-  if (s.recording) {
-    skillSetup.classList.add("overlay--hidden");
-    skillRecording.classList.remove("overlay--hidden");
-    skillStartBtn.classList.add("overlay--hidden");
-    skillDoneBtn.classList.remove("overlay--hidden");
-  }
-  skillCountEl.textContent = String(s.count);
-  if (s.last) skillLastEl.textContent = s.last;
 });
 
-// Навык записан/прислан сервером — добавляем строку с кнопкой повтора.
-jarvis.onSkillSaved((s) => {
-  const empty = skillList.querySelector(".skill-list__empty");
-  if (empty) empty.remove();
-  // не дублируем при повторной записи того же id
-  const existing = skillList.querySelector(`[data-skill-id="${s.id}"]`);
-  existing?.remove();
+// ── верификация диктора (§3): запись голосовых отпечатков ──────
+initVoiceEnrollment(jarvis); // §3 запись голоса — кнопка + прогресс + список голосов внутри
 
-  const li = document.createElement("li");
-  li.className = "skill";
-  li.dataset.skillId = s.id;
+// ── Мониторы (§6 мультимонитор): ручной выбор рабочего монитора Джарвиса ──
+initMonitorPanel(jarvis); // фабрика строк + onMonitors + listMonitors внутри
 
-  const meta = document.createElement("div");
-  meta.className = "skill__meta";
-  const nameEl = document.createElement("span");
-  nameEl.className = "skill__name";
-  nameEl.textContent = s.name;
-  const sub = document.createElement("span");
-  sub.className = "skill__sub";
-  sub.textContent = `${s.steps.length} шагов${s.needsReview ? " · нужно ревью" : ""}`;
-  meta.appendChild(nameEl);
-  meta.appendChild(sub);
-
-  const play = document.createElement("button");
-  play.className = "btn btn--ok btn--sm";
-  play.type = "button";
-  play.textContent = "▶ Повторить";
-  play.addEventListener("click", () => jarvis.runSkill(s.id));
-
-  li.appendChild(meta);
-  li.appendChild(play);
-  skillList.appendChild(li);
-});
-
-// ── живой эквалайзер голоса (CSS-анимация, как в макете «Премиум-минимал») ──
-// Столбики пульсируют независимо (keyframes eq) — «живые» ВСЕГДА, не зависят от микрофона
-// (так в дизайне). Параметры 1:1 с макетом: огибающая sin по ширине/высоте, разные фазы.
-function buildWave(): void {
-  const el = document.getElementById("wave");
-  if (!el) return;
-  el.replaceChildren();
-  const N = 26;
-  const W_MIN = 2.5;
-  const W_MAX = 4;
-  const MAX_H = 56;
-  const GLOW = 9;
-  for (let i = 0; i < N; i += 1) {
-    const t = (i + 0.5) / N;
-    const env = 0.24 + 0.76 * Math.sin(t * Math.PI);
-    const h = Math.max(5, env * MAX_H);
-    const w = W_MIN + (W_MAX - W_MIN) * Math.sin(t * Math.PI);
-    const dur = (0.62 + (i % 6) * 0.12).toFixed(2);
-    const delay = (-(i * 0.097) % 1.4).toFixed(2);
-    const bar = document.createElement("span");
-    bar.className = "hero__bar";
-    bar.style.cssText =
-      `width:${w.toFixed(1)}px;height:${h.toFixed(1)}px;` +
-      `box-shadow:0 0 ${GLOW}px var(--accent);` +
-      `animation:eq ${dur}s ease-in-out ${delay}s infinite`;
-    el.appendChild(bar);
-  }
-}
-
-// инициализация — ambient (§3): Джарвис слушает СРАЗУ с запуска, без клика по орбу.
+// инициализация — ambient (§3): Джарвис слушает СРАЗУ с запуска. Центр — гало+волна, состояние снизу.
 setLink({ online: false });
 setOrbState("listening");
 buildWave();

@@ -14,8 +14,8 @@
  * сортировки были детерминированы и не зависели от системного времени.
  */
 import { newId } from "@jarvis/protocol";
-import type { Task, TaskState } from "./task.js";
-import { isActiveState, isTerminalState } from "./task.js";
+import type { PersistedTask, Task, TaskState } from "./task.js";
+import { deriveTaskTitle, isActiveState, isSubstantiveTask, isTerminalState } from "./task.js";
 
 /** Параметры создания задачи (§20): кто, в какой сессии, что просили. */
 export interface CreateTaskOpts {
@@ -40,10 +40,21 @@ export class TaskManager {
   private readonly tasks = new Map<string, Task>();
 
   /**
+   * Колбэк на любое ИЗМЕНЕНИЕ реестра (для персиста на диск §5) — дебаунсит вызывающий
+   * (см. task-store). Зеркалит WorkingMemory.onChange. Не дёргается на чтениях (get/list/active).
+   */
+  private onChange?: () => void;
+
+  /**
    * @param now источник unix-ms времени. По умолчанию системные часы; тесты
    *   ВСЕГДА передают свою функцию для детерминизма.
    */
   constructor(private readonly now: () => number = () => Date.now()) {}
+
+  /** Назначить колбэк персиста (вызывается после каждой мутации жизненного цикла). */
+  setOnChange(cb: () => void): void {
+    this.onChange = cb;
+  }
 
   /**
    * Создать задачу в состоянии "running" (§20): прогресс 0, свежий cancel-флаг
@@ -55,14 +66,31 @@ export class TaskManager {
       userId: opts.userId,
       sessionId: opts.sessionId,
       goal: opts.goal,
+      title: deriveTaskTitle(opts.goal),
       state: "running",
       stepsDone: 0,
       stepsTotal: opts.stepsTotal,
       startedAt: this.now(),
       cancel: { cancelled: false },
+      steer: { pending: [] },
     };
     this.tasks.set(task.taskId, task);
+    this.onChange?.();
     return task;
+  }
+
+  /**
+   * Правка на ходу (§20): добавить указание пользователя в очередь активной задачи. Петля сольёт его
+   * перед очередным шагом и впрыснет в диалог LLM (см. agent-loop). Возвращает true, если задача жива
+   * (можно рулить); false — терминальная/не найдена (тогда вызывающий трактует реплику как новую).
+   */
+  steer(taskId: string, text: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || !isActiveState(task.state)) return false;
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    task.steer.pending.push(trimmed);
+    return true;
   }
 
   /** Задача по id (или undefined, если нет/была вычищена sweep). */
@@ -79,7 +107,9 @@ export class TaskManager {
     for (const task of this.tasks.values()) {
       if (task.sessionId !== sessionId) continue;
       if (!isActiveState(task.state)) continue;
-      if (!best || task.startedAt > best.startedAt) best = task;
+      // `>=`: при равном startedAt (быстрый fan-out / замороженные часы в тестах) побеждает
+      // ПОЗЖЕ вставленная (Map хранит порядок вставки) — команда без taskId уходит свежайшей задаче.
+      if (!best || task.startedAt >= best.startedAt) best = task;
     }
     return best;
   }
@@ -99,8 +129,11 @@ export class TaskManager {
   progress(taskId: string, stepsDone: number, stepsTotal?: number): Task | undefined {
     const task = this.tasks.get(taskId);
     if (!task || isTerminalState(task.state)) return undefined;
-    task.stepsDone = stepsDone;
-    if (stepsTotal !== undefined) task.stepsTotal = stepsTotal;
+    if (stepsTotal !== undefined) task.stepsTotal = Number.isFinite(stepsTotal) ? Math.max(0, stepsTotal) : task.stepsTotal;
+    // Кламп прогресса: не уходим в минус и не за известный total (иначе чип-прогресс прыгает >100%/назад).
+    const safe = Number.isFinite(stepsDone) ? Math.max(0, stepsDone) : task.stepsDone;
+    task.stepsDone = task.stepsTotal !== undefined ? Math.min(safe, task.stepsTotal) : safe;
+    this.onChange?.();
     return task;
   }
 
@@ -115,6 +148,7 @@ export class TaskManager {
     task.cancel.cancelled = true;
     task.state = "cancelled";
     task.finishedAt = this.now();
+    this.onChange?.();
     return true;
   }
 
@@ -133,6 +167,7 @@ export class TaskManager {
       task.finishedAt = this.now();
       cancelled.push(task);
     }
+    if (cancelled.length > 0) this.onChange?.();
     return cancelled;
   }
 
@@ -142,6 +177,7 @@ export class TaskManager {
     if (!task) return false;
     if (task.state !== "running" && task.state !== "queued") return false;
     task.state = "paused";
+    this.onChange?.();
     return true;
   }
 
@@ -150,6 +186,7 @@ export class TaskManager {
     const task = this.tasks.get(taskId);
     if (!task || task.state !== "paused") return false;
     task.state = "running";
+    this.onChange?.();
     return true;
   }
 
@@ -163,6 +200,7 @@ export class TaskManager {
     task.state = "done";
     task.finishedAt = this.now();
     if (summary !== undefined) task.resultSummary = summary;
+    this.onChange?.();
     return task;
   }
 
@@ -176,6 +214,7 @@ export class TaskManager {
     task.state = "failed";
     task.finishedAt = this.now();
     task.lastError = error;
+    this.onChange?.();
     return task;
   }
 
@@ -194,6 +233,81 @@ export class TaskManager {
         removed += 1;
       }
     }
+    if (removed > 0) this.onChange?.();
     return removed;
+  }
+
+  /**
+   * §20: терминальные СОДЕРЖАТЕЛЬНЫЕ задачи пользователя для «осознания» — отвечать на «сделал?»/«что
+   * делал?» из ДОЛГОВЕЧНОГО реестра, а не из хрупкого окна реплик (которое вытесняется и стирается
+   * рестартом). Пустая болтовня (stepsDone=0) ОТСЕКАЕТСЯ (isSubstantiveTask) — иначе история засоряется
+   * «✓ Привет» и раздувается хвост промпта. Свежие первыми (finishedAt desc), не старше maxAgeMs, не
+   * больше limit. Чистая выборка (без мутаций).
+   */
+  recentTerminal(userId: string, opts: { limit?: number; maxAgeMs?: number; now?: number } = {}): Task[] {
+    const { limit = 5, maxAgeMs = Number.POSITIVE_INFINITY, now = this.now() } = opts;
+    return [...this.tasks.values()]
+      .filter((t) => t.userId === userId && isTerminalState(t.state) && isSubstantiveTask(t))
+      .filter((t) => now - (t.finishedAt ?? t.startedAt) <= maxAgeMs)
+      .sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt))
+      .slice(0, Math.max(0, limit));
+  }
+
+  /**
+   * §20 «осознание»: АКТИВНЫЕ задачи пользователя (running/queued/paused) — чтобы на «что делаешь?»/
+   * «сделал?» во время фоновой работы Джарвис честно сказал «ещё считаю», а не «ничего не делаю»
+   * (баг: фоновая задача в полёте не попадала в контекст). excludeId — таск ТЕКУЩЕГО хода (не он сам).
+   * Свежие первыми. Чистая выборка.
+   */
+  activeForUser(userId: string, excludeId?: string): Task[] {
+    return [...this.tasks.values()]
+      .filter((t) => t.userId === userId && isActiveState(t.state) && t.taskId !== excludeId)
+      .sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /**
+   * Сериализовать реестр для персиста на диск (§5): снимок задач БЕЗ рантайм-флага `cancel`
+   * (живой объект отмены имеет смысл только в текущем процессе). Зеркалит WorkingMemory.toJSON.
+   */
+  toJSON(): { tasks: PersistedTask[] } {
+    const tasks: PersistedTask[] = [];
+    for (const t of this.tasks.values()) {
+      const { cancel, ...rest } = t;
+      tasks.push(rest);
+    }
+    return { tasks };
+  }
+
+  /**
+   * Восстановить реестр из персиста (§5). КЛЮЧЕВАЯ ЧЕСТНОСТЬ: задача, бывшая НЕ-терминальной на
+   * момент снимка (running/queued/paused/waiting_confirm), пережить рестарт процесса НЕ может —
+   * петля агента, что её исполняла, умерла. Поэтому такие задачи помечаем "failed"
+   * («прервано перезапуском»), а НЕ воскрешаем как живые (иначе Джарвис соврёт «всё ещё делаю»).
+   * Терминальные (done/failed/cancelled) переносятся как есть — это и есть память «что я сделал».
+   * НЕ дёргает onChange (как WorkingMemory.restore).
+   */
+  restore(data: { tasks?: PersistedTask[] } | null | undefined, now: number = this.now()): void {
+    if (!data || !Array.isArray(data.tasks)) return;
+    for (const p of data.tasks) {
+      if (!p || typeof p.taskId !== "string") continue;
+      const interrupted = !isTerminalState(p.state);
+      // Защита от битого/правленного снимка: нечисловые времена → конечные значения, иначе NaN
+      // отравил бы сортировку recentTerminal и дал бы «NaN дн назад» в промпте (честность «сделал?»).
+      const startedAt = Number.isFinite(p.startedAt) ? p.startedAt : now;
+      const finite = Number.isFinite(p.finishedAt) ? (p.finishedAt as number) : undefined;
+      const task: Task = {
+        ...p,
+        startedAt,
+        // Прерванной задаче сохраняем её РЕАЛЬНОЕ последнее время (finishedAt→startedAt), а НЕ «now»:
+        // иначе все восстановленные провалы слиплись бы на момент рестарта и вытеснили реальные успехи
+        // из топ-N recentTerminal (а время «провалился» было бы датировано позже, чем он жил).
+        state: interrupted ? "failed" : p.state,
+        finishedAt: interrupted ? (finite ?? startedAt) : finite,
+        lastError: interrupted ? (p.lastError ?? "прервано перезапуском сервера") : p.lastError,
+        cancel: { cancelled: isTerminalState(p.state) ? p.state === "cancelled" : true },
+        steer: { pending: [] }, // правки на ходу — рантайм-канал, на восстановлении пустой
+      };
+      this.tasks.set(task.taskId, task);
+    }
   }
 }

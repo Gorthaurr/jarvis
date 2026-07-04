@@ -17,6 +17,9 @@ import {
   type AudioFrame,
   type ClientContext,
   type ClientEnv,
+  type ClientSystem,
+  type ClientKeys,
+  type ClientSettings,
   type ClientStateMsg,
   type ConfirmResult,
   type DemoSave,
@@ -26,33 +29,46 @@ import {
   type SkillSaved,
   type Takeover,
   type TaskControl,
-  type TaskStatus,
   type VadEvent,
 } from "@jarvis/protocol";
-import { AsyncMutex, type Logger, Semaphore, type Tier, createLogger } from "@jarvis/shared";
+import { AsyncMutex, type Logger, Semaphore, type ThinkingEffort, type Tier, createLogger, envInt } from "@jarvis/shared";
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
-import type { ButlerAcks } from "../brain/persona/acks.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile } from "../brain/profile.js";
-import type { SpendGuard } from "../billing/index.js";
+import { getProfile, setLanguage, setContext } from "../brain/profile.js";
+import { DEFAULT_LIMITS, type SpendGuard, type SpendGuards } from "../billing/index.js";
+import { setCredential } from "../db/credentials.js";
 import type { ILlmProvider } from "../integrations/llm.js";
 import type { EpisodicMemory } from "../memory/episodic.js";
+import type { SemanticResponseCache } from "../brain/response-cache.js";
 import type { IWebProvider } from "../integrations/web.js";
 import type { ISttProvider, ITtsProvider, TtsChunk } from "../integrations/voice-providers.js";
+import { isEmotion } from "../integrations/tts-emotion.js";
+import type { ReminderService } from "../proactive/reminders/service.js";
+import type { WatchService } from "../proactive/watch/service.js";
+import type { AmbientEngine } from "../proactive/ambient/engine.js";
+import type { ObligationStore } from "../proactive/ambient/obligations.js";
+import type { ResolutionMemory } from "../memory/resolution-memory.js";
+import { verbalize } from "../brain/verbalize/index.js";
 import { WorkingMemory } from "../memory/working.js";
+import { loadWorkingMemory } from "../memory/working-store.js";
+import type { McpManager } from "../brain/mcp/manager.js";
 import { noteClientContext } from "../proactive/salience.js";
 import { TaskManager } from "../brain/tasks/manager.js";
-import { classifyTaskControl } from "../brain/tasks/control.js";
-import { statusReport } from "../brain/tasks/narrate.js";
+import type { TradingService } from "../brain/trading/index.js";
+import type { KnowledgeBase } from "../brain/knowledge/index.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
 import { type SkillProvider, hasGuardSteps, isLearnedMd, listSkills } from "../memory/skills.js";
-import type { Task } from "../brain/tasks/task.js";
-import { type VoicePipeline, createVoicePipeline } from "../voice/index.js";
+import { type ReplySink, type VoicePipeline, createVoicePipeline } from "../voice/index.js";
+import type { FillerCache } from "../voice/filler-cache.js";
+import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
+import type { VoiceProfileStore } from "../voice/speaker/store.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { ExtensionBridge } from "./extension-bridge.js";
 import type { Session } from "./session.js";
+import { handleControlUtterance, handleTaskControl, handleTakeover } from "./task-control.js";
+import { feedEnroll, sendVoiceList, startVoiceEnroll } from "./voice-enroll.js";
 
 const log: Logger = createLogger("router-ws");
 
@@ -61,15 +77,25 @@ export interface VoiceProviders {
   stt: ISttProvider;
   tts: ITtsProvider;
   voiceId?: string;
+  /** Прекеш-филлеры (§10 realtime): «Секунду, сэр.» маскирует пол латентности Opus. */
+  filler?: FillerCache;
+  /** §3 верификация диктора: движок + хранилище голосов (общие на gateway). undefined → гейт выкл. */
+  speakerVerifier?: ISpeakerVerifier;
+  speakerStore?: VoiceProfileStore;
 }
 
 /** Мозговые провайдеры, общие на gateway (§7, §8, §12, §14). */
 export interface BrainProviders {
   llm: ILlmProvider;
   episodic: EpisodicMemory;
+  /** §15 семантический кэш чисто-вербальных ответов — общий на gateway (scoped по userId внутри). */
+  responseCache: SemanticResponseCache;
   web: IWebProvider;
-  spend: SpendGuard;
+  /** §6B/B5: реестр SpendGuard по userId (per-tenant траты + живой persist usage_quota). */
+  spend: SpendGuards;
   models: Record<Exclude<Tier, "tier0">, string>;
+  /** «Эффорт» рассуждения (thinking) по тиру (§7). */
+  tierThinking: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
   /** Реестр долгих задач (§20) — общий на gateway: голос/UI управляют активной задачей. */
   tasks: TaskManager;
   /** Тёплость сессий для §15-кеширования — общая на gateway. */
@@ -78,16 +104,33 @@ export interface BrainProviders {
   dynamicTools: DynamicToolStore;
   /** Провайдер выученных показом навыков (§8) — общий на gateway. */
   skills: SkillProvider;
-  /** Пул дворецких подтверждений голосом персоны (§11) — общий на gateway (прегенерация одна). */
-  acks: ButlerAcks;
+  /** §трейдинг (слой 1): рыночные данные + анализ (только чтение) — общий на gateway. Опционален. */
+  market?: TradingService;
+  /** §экспертность: база знаний по доменам — общая на gateway. Опциональна. */
+  knowledge?: KnowledgeBase;
   /** Мост к браузерному расширению (§6): невидимая отправка в Telegram и т.п. */
   extBridge: ExtensionBridge;
+  /** Сервис напоминаний (§9): durable-таймер + проактивная озвучка — один на gateway. */
+  reminders: ReminderService;
+  /** Сервис наблюдений (§долгие-задачи): durable recurring-мониторинг + проактивная озвучка — один на gateway. */
+  watch?: WatchService;
+  /** Стор обязательств/счетов (§проактив-всё) — для инструментов obligation_*; ambient-движок читает его. */
+  obligations?: ObligationStore;
+  /** Движок ambient-осведомлённости (§проактив-всё): проактивно сообщает важное (счета/Telegram) — один на gateway. */
+  ambient?: AmbientEngine;
+  /** Опытная память резолва получателей (§ скорость) — одна на gateway, переживает рестарт. */
+  resolutionMemory?: ResolutionMemory;
+  /** §: MCP-host — подключённые MCP-серверы (инструменты как у Claude Code). Опционален (нет конфига → пуст). */
+  mcp?: McpManager;
 }
 
 /** Потолок параллельных фоновых agent-loop'ов на сессию (§20): «много агентов», но не
  *  бесконечно (LLM/CPU). GUI-задачи всё равно сериализует аренда ввода; research-задачи
  *  бегут реально параллельно. */
-const MAX_PARALLEL_TASKS = 5;
+// §20: потолок параллельных agent-loop'ов. 5 → 3: при 5 одновременных тяжёлых ходах Opus делит
+// throughput, часть стримов упирается в watchdog (>25с без токена) → «связь прервалась» (нагруз-тест).
+// 3 — баланс для одного пользователя (реально параллельных задач редко >2), меньше контеншена. Env-тюн.
+const MAX_PARALLEL_TASKS = Math.max(1, Number.parseInt(process.env.JARVIS_MAX_PARALLEL_TASKS ?? "", 10) || 3);
 
 /** Контекст одного соединения, который держит router между сообщениями. */
 export interface SessionContext {
@@ -100,11 +143,63 @@ export interface SessionContext {
   agentDeps: AgentDeps;
   /** Последний полученный ClientContext — вход для proactive (§9). */
   lastContext?: ClientContext;
+  /** §3 верификация диктора: общие на gateway движок + хранилище голосов (для enrollment). */
+  speakerVerifier?: ISpeakerVerifier;
+  speakerStore?: VoiceProfileStore;
+  /** §3: активная сессия записи отпечатка (между voice.enroll.start и stop/готово). */
+  enroll?: { name: string; session: import("../voice/speaker/verifier.js").EnrollSession; sentPct: number };
   /**
    * Закрытие сессии (§20): помечаем закрытой (фоновый итог не озвучиваем в мёртвую
    * сессию) и снимаем её незавершённые задачи. Вызывается gateway по ws-close.
    */
   disposeAgent(): void;
+}
+
+/** §контекст: компактная сводка открытых вкладок браузера для live-хвоста промпта (с ♪ у звучащей). */
+function formatTabsContext(
+  tabs: ReadonlyArray<{ title?: string; host?: string; url?: string; active?: boolean; audible?: boolean }>,
+): string {
+  if (!tabs.length) return "";
+  const cut = (s: string): string => (s.length > 42 ? `${s.slice(0, 41)}…` : s);
+  const items = tabs.slice(0, 8).map((t) => {
+    const name = cut(String(t.title || t.host || t.url || "?").trim());
+    const flags = [t.active ? "активна" : "", t.audible ? "♪ звучит" : ""].filter(Boolean).join(", ");
+    return flags ? `${name} (${flags})` : name;
+  });
+  return `Открытые вкладки браузера: ${items.join("; ")}`;
+}
+
+/** §: синтез TTS ЦЕЛИКОМ → base64 mp3 (для голосовых TG): копим чанки → склейка → base64. Голос — как
+ *  у обычной речи (провайдер по умолчанию = филипп), отдельных opts не передаём. */
+function synthTtsToBase64(tts: ITtsProvider, text: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    const stream = tts.synthesize(text);
+    stream.onChunk((c: TtsChunk) => {
+      if (c.audio && c.audio.byteLength) chunks.push(new Uint8Array(c.audio));
+    });
+    stream.onError((e) => reject(e));
+    stream.onDone(() => {
+      const total = chunks.reduce((n, a) => n + a.length, 0);
+      const buf = new Uint8Array(total);
+      let off = 0;
+      for (const a of chunks) {
+        buf.set(a, off);
+        off += a.length;
+      }
+      resolve(Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength).toString("base64"));
+    });
+  });
+}
+
+/**
+ * §6B/B5: отправить клиенту снимок расхода/лимитов (вкладка «Оплата»). Read-only — сервер считает,
+ * клиент отображает. План — производная (нет платёжной системы, §0-p5): потолок выше дефолтного → «Pro».
+ */
+function sendUsage(session: Session, spend: SpendGuard): void {
+  const s = spend.snapshot();
+  const plan = s.cap > DEFAULT_LIMITS.spendCap ? "Pro" : "Базовый";
+  session.send("usage.info", { plan, ...s });
 }
 
 /** Создать контекст для свежей/возобновлённой сессии. */
@@ -114,7 +209,10 @@ export function makeSessionContext(
   providers: VoiceProviders,
   brain: BrainProviders,
 ): SessionContext {
-  const memory = new WorkingMemory();
+  // §5 resume + персист: память диалога СКОУПЛЕНА на Session (переживает reconnect) И грузится С ДИСКА
+  // по userId (переживает рестарт сервера/клиента) — иначе «забывал, о чём говорили». На новой сессии
+  // поднимается из data/memory/<user>.json, дальше авто-сохраняется (см. working-store).
+  const memory = session.scoped("workingMemory", () => loadWorkingMemory(session.userId));
   // Per-session состояние async-контура (§20): живёт с сессией, GC'ится с контекстом —
   // никаких процесс-глобальных Map по sessionId (прежний bgChains тёк на каждой сессии).
   const inputArbiter = new AsyncMutex(); // аренда мыши/клавы/фокуса — сериализует GUI-команды
@@ -125,61 +223,162 @@ export function makeSessionContext(
     memory,
     llm: brain.llm,
     episodic: brain.episodic,
+    responseCache: brain.responseCache, // §15 семантический кэш ответов (lookup до LLM / store после)
     web: brain.web,
     models: brain.models,
-    spend: brain.spend,
+    tierThinking: brain.tierThinking,
+    spend: brain.spend.forUser(session.userId), // §6B/B5: гвард ЭТОГО юзера (траты не мешаются, persist живой)
     userId: session.userId,
-    // Персистентный профиль (§8/§11): имя/факты из data/profile.json → в персону,
-    // чтобы Джарвис ПОМНИЛ пользователя и не спрашивал имя каждый раз.
-    userContext: { displayName: getProfile().displayName, facts: getProfile().facts },
+    // Персистентный профиль (§8/§11, §6B/B3 — раздел этого userId): имя/факты в персону, чтобы
+    // Джарвис ПОМНИЛ пользователя. Загружен в handshake (loadProfile) ДО makeSessionContext.
+    userContext: {
+      displayName: getProfile(session.userId).displayName,
+      facts: getProfile(session.userId).facts,
+      context: getProfile(session.userId).context, // §15: свободный контекст из настроек → в персону
+      language: getProfile(session.userId).language,
+    },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
     warmth: brain.warmth, // общая тёплость сессий (§15)
     dynamicTools: brain.dynamicTools, // §8+ самописные инструменты в наборе модели
+    // §15 ленивая загрузка: набор подгруженных холодных инструментов — per-session (скоуплен на Session,
+    // переживает reconnect). tool_load добавляет имена, агент включает их схемы со следующего хода.
+    toolActivation: session.scoped("toolActivation", () => new Set<string>()),
+    mcp: brain.mcp, // § MCP-host: инструменты подключённых MCP-серверов (холодный каталог + callTool)
     skills: brain.skills, // §8 выученные показом навыки (skill_list/skill_execute)
+    market: brain.market, // §трейдинг: рыночные данные + анализ (только чтение)
+    knowledge: brain.knowledge, // §экспертность: база знаний (свериться перед экспертной задачей)
     inputArbiter, // §20: GUI-команды (вкл. tier0) сериализуются, прочее — параллельно
     concurrency, // §20: ограничитель параллельных фоновых задач
     bgTasks, // §20: реестр живых фоновых задач
-    acks: brain.acks, // §11: дворецкие подтверждения голосом персоны (прегенерация)
-    ackRotation: 0, // §11: ротация ack per-session
     isClosed: () => closed, // §20: не озвучивать итог в закрытую сессию
     // §6: невидимая отправка в Telegram через браузерное расширение (фоновая вкладка).
     telegramSend: (to, text) => brain.extBridge.telegramSend(to, text),
+    telegramSendVoice: (to, audioB64) => brain.extBridge.telegramSendVoice(to, audioB64), // § голосовое голосом филиппа
+    synthVoice: (text) => synthTtsToBase64(providers.tts, text), // § синтез TTS → base64 для голосовых
+
+    // §: открыть URL в браузере пользователя через расширение С УЧЁТОМ открытых вкладок (фокус
+    // существующей вместо дубля). Reject (нет расширения) → агент откатится на shell-open.
+    openOrFocus: (url) => brain.extBridge.openOrFocus(url),
+    // §: браузер пользователя через расширение для browser_open/read/act (его реальные вкладки/сессия).
+    ext: brain.extBridge,
+    reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
+    watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
+    obligations: brain.obligations, // §проактив-всё: счета/обязательства (инструменты obligation_*)
+    resolutionMemory: brain.resolutionMemory, // §: опытная память резолва получателей (скорость)
   };
+  // §9 «не мешать»: поздняя привязка к ctx — пайплайн читает занятость пользователя из client.context.
+  let ctxForBusy: SessionContext | undefined;
   const voice = createVoicePipeline({
     stt: providers.stt,
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
+    // §10 realtime: прекеш-филлер «Секунду, сэр.» маскировал пол латентности Opus, НО на
+    // каждую реплику (включая болтовню) звучал как деферрал «погоди, занят» → Джарвис будто
+    // отделывается, а не разговаривает (фидбэк пользователя). С быстрым STT (deepgram) пауза
+    // Opus ~2с естественна и без заглушки. По умолчанию ВЫКЛ; включить: JARVIS_VOICE_FILLER=1.
+    ...(process.env.JARVIS_VOICE_FILLER === "1" ? { filler: providers.filler } : {}),
     // §11: голос активного режима-маски — берётся на каждый синтез из профиля, поэтому
     // «будь дерзким» меняет подачу мгновенно (без пересоздания пайплайна).
     getVoiceOpts: () => {
-      const m = getMode(getProfile().mode).voice;
-      return m ? { voiceId: m.voiceId, stability: m.stability, style: m.style, speed: m.speed } : undefined;
+      const p = getProfile(session.userId);
+      const m = getMode(p.mode).voice;
+      // §21 эмоция подачи — из профиля, НЕЗАВИСИМО от режима (даже у базового butler без voice).
+      const emotion = isEmotion(p.emotion) ? p.emotion : undefined;
+      if (!m && !emotion) return undefined;
+      return { voiceId: m?.voiceId, stability: m?.stability, style: m?.style, speed: m?.speed, emotion };
     },
-    // §3 wake word: реагировать только на обращение «Джарвис» (вне окна разговора).
+    // §3 wake word: «Джарвис» нужен только чтобы НАЧАТЬ разговор (или после долгой паузы).
     requireWakeWord: true,
+    // §3 АДРЕСАЦИЯ: окна КОРОТКИЕ. Раньше 180с → после одного «Джарвис» он 3 минуты реагировал
+    // на ЛЮБУЮ речь и встревал в разговор/narration (жалоба). Окна катятся от КАЖДОЙ принятой
+    // реплики — живой диалог не глохнет; но если ~20с не обращаешься, снова нужен «Джарвис».
+    // followupMs — сколько мик «слушает» после ответа; conversationWindowMs — сколько можно
+    // говорить без повторного «Джарвис» (см. pipeline.gateWake). Env-тюнятся (универсальность).
+    // P1.4: followup 8→12с — даёт чуть больше времени ОТВЕТИТЬ после реплики Джарвиса (жалоба «не успел
+    // договорить — перестал слушать»); риск barge-in низкий (окно только сразу после его речи, когда
+    // ответ и так ожидаем). conversationWindowMs ОСТАВЛЕН 8с ОСОЗНАННО: 180с уже были и вызывали худшую
+    // жалобу «3 минуты встревает в любую речь/нарратив»; корень (акустическое «обращено ли ко мне») —
+    // отдельная большая задача (loopback-AEC + speaker-gate, нужен живой микрофон), не ползунок времени.
+    followupMs: envInt("JARVIS_FOLLOWUP_MS", 12_000),
+    conversationWindowMs: envInt("JARVIS_CONV_WINDOW_MS", 8_000),
+    // §3 верификация диктора — РАЗВЯЗКА «движок» vs «фильтрация» (2026-06-24):
+    //  • ДВИЖОК (sherpa в сайдкаре) поднимается по умолчанию (server.ts: JARVIS_SPEAKER_GATE!=="0") —
+    //    чтобы РАБОТАЛА кнопка «Записать голос» в настройках (enroll нужен verifier+store).
+    //  • РАНТАЙМ-ФИЛЬТРАЦИЯ (глушить «чужого») здесь — ТОЛЬКО при ЯВНОМ JARVIS_SPEAKER_GATE=1.
+    //    Почему не авто-вкл по «есть записанный голос»: прежняя биометрия ЛОЖНО глушила САМОГО владельца
+    //    (живой лог: score 0.03–0.7 при пороге 0.35 → 0.03 < reject 0.31 = «уверенно чужой» → оглох на
+    //    хозяина). Авто-вкл оглушал бы владельца. Поэтому фильтрация — OPT-IN, пока биометрию не доведём
+    //    (AS-Norm/банк векторов). Запись голоса при этом доступна всегда (движок есть).
+    // Защита даже при =1: fail-open ([reject,accept)→пускаем, null→пускаем) + self-check на записи.
+    ...(process.env.JARVIS_SPEAKER_GATE === "1" && providers.speakerVerifier && providers.speakerStore
+      ? { speaker: { verifier: providers.speakerVerifier, profiles: () => providers.speakerStore!.list(session.userId) } }
+      : {}),
+    // §9 «уважительная проактивность»: занят ли пользователь СЕЙЧАС (звонок/полный экран/блокировка)
+    // — несрочный фоновый итог держим до освобождения, срочное напоминание пропускаем (см. pipeline).
+    isUserBusy: () => {
+      const c = ctxForBusy?.lastContext;
+      return Boolean(c && (c.micBusyByOtherApp || c.fullscreen || c.locked));
+    },
     // brain на финальном тексте реплики (§21: {voice, display?}).
     onUserTurn: (text) => handleUserText(session, text, agentDeps),
+    // §10 realtime: пофразный стрим реплики (token-streaming → первый звук раньше). Включён
+    // по умолчанию; аварийный выключатель JARVIS_VOICE_STREAMING=0 → классический onUserTurn.
+    ...(process.env.JARVIS_VOICE_STREAMING === "0"
+      ? {}
+      : {
+          onUserTurnStream: (text: string, sink: ReplySink): Promise<void> =>
+            handleUserText(session, text, agentDeps, sink).then(() => undefined),
+        }),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
     sendSpeakChunk: (c: TtsChunk) =>
       session.send("speak.chunk", { audio: bufToBase64(c.audio), seq: c.seq, last: c.last }),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
+    sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)
     sendDisplay: (d) => session.send("ui.display", d),
   });
   // §20 async: фоновые задачи не блокируют разговор — их ИТОГ озвучивается через
   // очередь пайплайна (когда канал свободен), плюс карточка в renderer.
   agentDeps.speakResult = (reply) => {
     voice.speakQueued(reply.voice);
+    // §22: итог фоновой задачи — ТАКЖE в чат-историю (раньше уходил только голосом → в текст-канале
+    // результат web/MCP/задач не появлялся; печатающий/в mute пользователь его не видел).
+    if (reply.voice.trim()) session.send("chat", { role: "assistant", text: reply.voice });
     if (reply.display) session.send("ui.display", reply.display);
   };
+  // §9 проактивная речь: когда сработает таймер напоминания — фраза идёт в ТУ ЖЕ очередь озвучки
+  // (speakQueued произнесёт, когда канал свободен — не перебивая пользователя). Текст вербализуем
+  // (числа/латиница), как обычные реплики. Снимаем регистрацию на закрытии сессии.
+  // §9: напоминание — СРОЧНОЕ (будильник): озвучивается даже если пользователь занят (urgent=true).
+  brain.reminders?.registerSpeaker(session.sessionId, session.userId, (text) => voice.speakQueued(verbalize(text), true));
+  // §долгие-задачи: тот же канал проактивной речи для срабатываний наблюдений (мониторинг).
+  brain.watch?.registerSpeaker(session.sessionId, session.userId, (text) => voice.speakQueued(verbalize(text), true));
+  // §проактив-всё: ambient-осведомлённость (счета/Telegram). urgent (день оплаты) проходит даже при занятости.
+  brain.ambient?.registerSpeaker(session.sessionId, session.userId, (text, urgent) => voice.speakQueued(verbalize(text), urgent));
+  // §6B/B5: начальный снимок расхода/лимитов для вкладки «Оплата» (read-only; per-user SpendGuard).
+  sendUsage(session, brain.spend.forUser(session.userId));
   const disposeAgent = (): void => {
     closed = true;
     // Снимаем ВСЕ незавершённые задачи сессии одним проходом: петли увидят cancel-флаг,
     // выйдут ≤1 шага и освободят аренду ввода; задачи сами удалятся из bgTasks по завершении.
     // Озвучку фонового итога глушит isClosed() — в мёртвую сессию не говорим (§20).
     brain.tasks.cancelSession(session.sessionId);
+    brain.reminders?.unregisterSpeaker(session.sessionId); // §9: больше не доставляем сюда
+    brain.watch?.unregisterSpeaker(session.sessionId); // §долгие-задачи: больше не доставляем сюда
+    brain.ambient?.unregisterSpeaker(session.sessionId); // §проактив-всё: больше не доставляем сюда
   };
-  return { session, memory, heartbeat, voice, agentDeps, disposeAgent };
+  const ctx: SessionContext = {
+    session,
+    memory,
+    heartbeat,
+    voice,
+    agentDeps,
+    disposeAgent,
+    speakerVerifier: providers.speakerVerifier,
+    speakerStore: providers.speakerStore,
+  };
+  ctxForBusy = ctx; // §9: пайплайн теперь видит client.context этой сессии
+  return ctx;
 }
 
 /**
@@ -208,6 +407,7 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const c = env.payload as ClientContext;
       ctx.lastContext = c;
       noteClientContext(ctx.session.sessionId, c); // вход salience (§9)
+      ctx.voice.drainPending(); // §9: освободился (вышел из звонка/полноэкранки) → отдать отложенный фоновый итог
       break;
     }
     case "client.state":
@@ -216,7 +416,7 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "task.control": {
       // Управление задачей из UI (кнопка «стоп»/«пауза»/«продолжить», §20).
       const c = env.payload as TaskControl;
-      handleTaskControl(ctx, c.action, c.taskId);
+      handleTaskControl(ctx, c.action, c.taskId, "ui");
       break;
     }
     case "client.takeover": {
@@ -232,9 +432,63 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       log.info("client.env: профиль окружения получен", { len: summary?.length ?? 0 });
       break;
     }
+    case "client.system": {
+      // §контекст: живой снимок (окна/передний план/мониторы + ОТКУДА ЗВУК — с клиента) → некешируемый
+      // хвост промпта. Сюда же добавляем ОТКРЫТЫЕ ВКЛАДКИ браузера (из расширения, с ♪-флагом звучащей),
+      // чтобы Джарвис КАЖДЫЙ ХОД «видел» окна, вкладки и источник звука БЕЗ tool-call и без уточнений.
+      const summary = (env.payload as ClientSystem).summary ?? "";
+      let combined = summary;
+      if (ctx.agentDeps.ext?.connected) {
+        try {
+          const r = (await ctx.agentDeps.ext.tabList()) as
+            | { tabs?: Array<{ title?: string; host?: string; url?: string; active?: boolean; audible?: boolean }> }
+            | undefined;
+          const line = formatTabsContext(r?.tabs ?? []);
+          if (line) combined = [summary, line].filter((s) => s && s.trim()).join(" · ");
+        } catch {
+          /* расширение не ответило — окна/звук всё равно в контексте */
+        }
+      }
+      ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, systemContext: combined };
+      break;
+    }
+    case "client.settings": {
+      // §15: язык/контекст из настроек UI → персист в профиль + применяем к ТЕКУЩЕЙ сессии
+      // сразу (не дожидаясь реконнекта). Ключи сюда не приходят (хранятся локально на клиенте).
+      const s = env.payload as ClientSettings;
+      if (typeof s.language === "string") void setLanguage(ctx.session.userId, s.language);
+      if (typeof s.context === "string") void setContext(ctx.session.userId, s.context);
+      ctx.agentDeps.userContext = {
+        ...ctx.agentDeps.userContext,
+        ...(typeof s.context === "string" ? { context: s.context } : {}),
+        ...(typeof s.language === "string" ? { language: s.language } : {}),
+      };
+      log.info("client.settings: язык/контекст получены", { language: s.language, ctxLen: s.context?.length ?? 0 });
+      break;
+    }
+    case "client.usage.request": {
+      // §6B/B5: клиент (вкладка «Оплата») просит свежий снимок расхода/лимитов.
+      sendUsage(ctx.session, ctx.agentDeps.spend);
+      break;
+    }
+    case "client.keys": {
+      // §6B/B4: API-ключи из UI → шифруем в user_credentials (per-user). Значения НЕ логируем.
+      const k = env.payload as ClientKeys;
+      const entries = Array.isArray(k?.keys) ? k.keys : [];
+      for (const { service, value } of entries) {
+        if (!service || !value) continue;
+        void setCredential(ctx.session.userId, String(service), String(value)).then((ok) =>
+          log.info("client.keys: ключ сохранён", { service, ok }),
+        );
+      }
+      break;
+    }
+    // (sendUsage — модульный хелпер ниже)
     case "audio.frame": {
       const f = env.payload as AudioFrame;
-      ctx.voice.onAudioFrame(toArrayBuffer(f.pcm));
+      // §3: во время записи отпечатка тот же аудиопоток кормит enrollment, НЕ голосовой цикл.
+      if (ctx.enroll) await feedEnroll(ctx, toArrayBuffer(f.pcm));
+      else ctx.voice.onAudioFrame(toArrayBuffer(f.pcm));
       break;
     }
     case "audio.vad":
@@ -252,14 +506,30 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "demo.save":
       await onDemoSave(ctx, env.payload as DemoSave);
       break;
+    case "voice.enroll.start":
+      startVoiceEnroll(ctx, (env.payload as { name: string }).name);
+      break;
+    case "voice.enroll.cancel":
+      ctx.enroll?.session.cancel();
+      ctx.enroll = undefined;
+      break;
+    case "voice.list":
+      sendVoiceList(ctx);
+      break;
+    case "voice.remove":
+      await ctx.speakerStore?.remove(ctx.session.userId, (env.payload as { name: string }).name);
+      sendVoiceList(ctx);
+      break;
     default:
       log.warn("необработанный тип входящего сообщения", { type });
   }
 }
 
 /** dev.text → агент → ответ клиенту (transcript + speak + опц. карточка). */
-async function onDevText(ctx: SessionContext, payload: DevText): Promise<void> {
-  const text = payload?.text ?? "";
+export async function onDevText(ctx: SessionContext, payload: DevText): Promise<void> {
+  // Коэрсим в строку (defense-in-depth, §честность): не-строковый text (битый клиент/кривой кадр)
+  // НЕ должен молча падать на text.trim — приводим к строке, иначе ход тихо теряется.
+  const text = typeof payload?.text === "string" ? payload.text : String(payload?.text ?? "");
   if (!text.trim()) return;
 
   // Голосовое/текстовое управление задачей (§20): «отмени»/«пауза»/«продолжи»/«что
@@ -267,6 +537,7 @@ async function onDevText(ctx: SessionContext, payload: DevText): Promise<void> {
   // рубит озвучку. Иначе — обычная реплика идёт в агент.
   if (handleControlUtterance(ctx, text)) return;
 
+  ctx.session.send("chat", { role: "user", text }); // §22 чат: напечатанная реплика в историю
   ctx.session.send("client.state", { state: "thinking" });
   let reply: AgentReply;
   try {
@@ -363,7 +634,13 @@ export function pushSavedSkills(ctx: SessionContext): void {
  * Карточка (если есть) — отдельным каналом ui.display (§21).
  */
 function sendReply(ctx: SessionContext, reply: AgentReply): void {
-  ctx.session.send("transcript", { text: reply.voice, final: true });
+  // §20 тихий финал: пустая реплика = ход без произносимой фразы (фоновый итог придёт отдельно
+  // через speakResult → свой chat). НЕ шлём пустой транскрипт/чат — иначе «пустой пузырь» в UI
+  // и лишняя assistant-реплика помимо результата (та же «×2 фразы», но в текст-канале §22).
+  if (reply.voice.trim()) {
+    ctx.session.send("transcript", { text: reply.voice, final: true });
+    ctx.session.send("chat", { role: "assistant", text: reply.voice }); // §22 чат: ответ в историю
+  }
   if (reply.display) ctx.session.send("ui.display", reply.display);
   ctx.session.send("client.state", { state: "idle" });
   // Примечание: голосовой ответ (speak.chunk из TTS) идёт через VoicePipeline
@@ -372,131 +649,6 @@ function sendReply(ctx: SessionContext, reply: AgentReply): void {
 }
 
 // ── управление задачами (§20) ──────────────────────────────────
-
-/**
- * Перехватить реплику как команду управления задачей (§20). Возвращает true, если
- * реплика обработана как управление (агент НЕ вызывается).
- *
- *  - «стоп»/«заткнись» (stop_tts) — рубит ТОЛЬКО озвучку (barge-in), задача живёт;
- *  - «отмени»/«пауза»/«продолжи»/«что делаешь» — действуют на активную задачу сессии;
- *    без активной задачи такие реплики НЕ перехватываются (уходят в агент как контент).
- */
-export function handleControlUtterance(ctx: SessionContext, text: string): boolean {
-  if (!ctx.agentDeps.tasks) return false;
-  const decision = classifyTaskControl(text);
-  if (decision.kind === "none") return false;
-
-  // «стоп» — оборвать TTS (§20), задачу не трогаем (различие «заткнись» vs «отмени»).
-  if (decision.kind === "stop_tts") {
-    ctx.voice.onVadEvent("barge_in");
-    ctx.voice.clearPendingSpeech(); // пользователь хочет тишины — не озвучивать отложенные фоновые итоги
-    ctx.session.send("client.state", { state: "idle" });
-    log.info("stop_tts: оборвана озвучка, задача не тронута (§20)", { reason: decision.reason });
-    return true;
-  }
-
-  // cancel/pause/resume/status осмысленны только при активной задаче.
-  const active = ctx.agentDeps.tasks.active(ctx.session.sessionId);
-  if (!active) return false;
-  if (decision.confidence === "low") {
-    // §20: спорная формулировка — действуем по наиболее вероятному kind (Haiku-доуточнение — TODO).
-    log.info("низкая уверенность классификации управления — действуем по эвристике", {
-      kind: decision.kind,
-      reason: decision.reason,
-    });
-  }
-  // «отмени» голосом → «останови ВСЁ, что делаешь»: при параллельных задачах (§20)
-  // снимаем все, а не только самую свежую (иначе остальные доедут и озвучат итог).
-  // Пауза/возобновление/статус — по самой свежей активной (taskId).
-  if (decision.kind === "cancel") {
-    handleTaskControl(ctx, "cancel");
-    return true;
-  }
-  handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId);
-  return true;
-}
-
-/** Применить команду управления к задаче и отчитаться клиенту (§20). */
-export function handleTaskControl(ctx: SessionContext, action: TaskControl["action"], taskId?: string): void {
-  const tasks = ctx.agentDeps.tasks;
-  if (!tasks) return;
-
-  // «отмени» без явного taskId → снять ВСЕ задачи сессии (параллельный режим §20). С
-  // явным taskId (кнопка в UI на конкретной задаче) — гранулярная отмена ниже.
-  if (action === "cancel" && !taskId) {
-    const cancelled = tasks.cancelSession(ctx.session.sessionId);
-    ctx.voice.clearPendingSpeech(); // отменил всё → отложенные фоновые итоги тоже не нужны
-    for (const t of cancelled) emitTaskStatus(ctx.session, t);
-    const text =
-      cancelled.length === 0 ? "Нет активной задачи." : cancelled.length > 1 ? "Остановил все, сэр." : "Остановил.";
-    ctx.session.send("transcript", { text, final: true });
-    ctx.session.send("client.state", { state: "idle" });
-    return;
-  }
-
-  const task = taskId ? tasks.get(taskId) : tasks.active(ctx.session.sessionId);
-  // Защита от кросс-сессионного управления: явный taskId должен принадлежать ЭТОЙ сессии.
-  if (task && task.sessionId !== ctx.session.sessionId) {
-    log.warn("task.control на задачу чужой сессии — игнор", { taskId, session: ctx.session.sessionId });
-    return;
-  }
-  if (!task) {
-    const text = action === "status" ? "Сейчас ничего не выполняю." : "Нет активной задачи.";
-    ctx.session.send("transcript", { text, final: true });
-    return;
-  }
-
-  switch (action) {
-    case "cancel": {
-      const ok = tasks.cancel(task.taskId);
-      emitTaskStatus(ctx.session, task);
-      ctx.session.send("transcript", { text: ok ? "Остановил." : "Уже завершено.", final: true });
-      ctx.session.send("client.state", { state: "idle" });
-      break;
-    }
-    case "pause": {
-      const ok = tasks.pause(task.taskId);
-      emitTaskStatus(ctx.session, task);
-      ctx.session.send("transcript", { text: ok ? "Поставил на паузу." : "Сейчас нельзя поставить на паузу.", final: true });
-      break;
-    }
-    case "resume": {
-      const ok = tasks.resume(task.taskId);
-      emitTaskStatus(ctx.session, task);
-      ctx.session.send("transcript", { text: ok ? "Продолжаю." : "Нечего возобновлять.", final: true });
-      break;
-    }
-    case "status": {
-      ctx.session.send("transcript", { text: statusReport(task), final: true });
-      break;
-    }
-  }
-}
-
-/**
- * User-takeover (§6): пользователь взялся за мышь/клавиатуру → агент УСТУПАЕТ управление.
- * active:true ставит активную задачу на паузу (петля перестаёт слать команды), active:false
- * (простой ввода) — возобновляет. Делается тихо (без голосовых реплик) — это автоматика.
- */
-export function handleTakeover(_ctx: SessionContext, _active: boolean): void {
-  // §20/концепция: НЕ паузим задачу по физическому вводу. Причина: пока ты просто смотришь
-  // и шевелишь мышью, авто-пауза флапала (пауза↔возобновление на каждое движение) и
-  // «приостанавливала» работу — это против автономного Джарвиса («много агентов, не
-  // тормозить, когда я рядом»). Явная остановка — голосом «стоп»/«отмени» (handleTaskControl).
-  // Сигнал takeover принимаем, но игнорируем (no-op).
-}
-
-/** Стрим состояния/прогресса задачи на клиент (§20, task.status). */
-function emitTaskStatus(session: Session, task: Task): void {
-  const payload: TaskStatus = {
-    taskId: task.taskId,
-    state: task.state,
-    summary: task.goal,
-    stepsDone: task.stepsDone,
-    stepsTotal: task.stepsTotal,
-  };
-  session.send("task.status", payload);
-}
 
 // ── кодирование аудио для DEV-пути по WS (§5: в проде — WebRTC) ──────────
 

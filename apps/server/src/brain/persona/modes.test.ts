@@ -33,4 +33,11 @@ describe("режимы-маски Джарвиса (§11)", () => {
     expect(matchModeCommand("сколько сейчас времени")).toBeNull();
     expect(matchModeCommand("напиши кате привет")).toBeNull();
   });
+
+  it("стем-подстроки в обычных словах НЕ ловятся (граница токена)", () => {
+    expect(matchModeCommand("достань мне что-нибудь весёлое")).toBeNull(); // «стань» в «достань», «весел» в «весёлое»
+    expect(matchModeCommand("покажи наглядно")).toBeNull(); // «нагл» в «наглядно» без маркера режима
+    expect(matchModeCommand("говори громче")).toBeNull(); // «говори» больше не маркер режима
+    expect(matchModeCommand("включи музыку")).toBeNull(); // «включи» больше не маркер режима
+  });
 });
