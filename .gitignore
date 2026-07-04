@@ -45,3 +45,19 @@ infra/pgdata/
 
 # Локальные ML-модели (качаются отдельно, не в git)
 apps/server/models/
+
+# Одноразовые dev-пробники (остаются на диске, не в git; документированные
+# инструменты _jarvis_cmd.mjs / _qa_battery.mjs / sidecar smoke-test.mjs — трекаются)
+/_qa_slow.mjs
+/test_failing_input.mjs
+/test_failing_input2.mjs
+/test_full_match.mjs
+/test_verify.mjs
+/yandex-emotion-ab.mjs
+/yandex-male-roles.mjs
+/yandex-roles-probe.mjs
+/apps/server/_probe_embed_poison.mjs
+/apps/server/stealth-tg.mjs
+/apps/server/test-token-issue.mjs
+/apps/server/tts-ab.mjs
+/apps/server/tts-models-ab.mjs
