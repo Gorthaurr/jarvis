@@ -28,7 +28,7 @@ describe("code-runner — runnerEnv фильтрует секреты", () => {
   });
 
   it("вырезает безобидное ИМЯ с кредами в URL-ЗНАЧЕНИИ (DATABASE_URL=postgres://user:pass@host)", () => {
-    process.env.DATABASE_URL = "postgres://user:S3cr3t@localhost:5432/db";
+    process.env.DATABASE_URL = "postgres://user:redacted-test-pw@localhost:5432/db";
     process.env.USERPROFILE = "C:/Users/anton";
     const out = runnerEnv();
     expect(out.DATABASE_URL).toBeUndefined();
