@@ -59,6 +59,21 @@ export class Session {
   lastPongAt = Date.now();
   /** Жива ли сессия (false после close — in-flight отклоняются disconnected). */
   private alive = true;
+  /**
+   * Сессионно-скоупленные синглтоны, ПЕРЕЖИВАЮЩИЕ resume (§5): рабочая память диалога и пр. Раньше
+   * makeSessionContext создавал WorkingMemory заново на КАЖДОМ коннекте → reconnect терял всю историю
+   * («забыл, о чём говорили»). Теперь то, что лежит здесь, переиспользуется при rebind.
+   */
+  private readonly scopedStore = new Map<string, unknown>();
+
+  /**
+   * H8: коллбэк финальной очистки сессии — выполняется ТОЛЬКО при РЕАЛЬНОМ удалении (teardown из
+   * registry.remove/teardownAll), НЕ на обрыве сокета в resume-grace. Сюда makeSessionContext вешает
+   * отмену фоновых §20-задач: раньше её звали синхронно на ws-close → reconnect в 120с grace-окне
+   * находил задачу уже УБИТОЙ (результат потерян), хотя память цела. Теперь задача живёт весь grace и
+   * снимается лишь когда сессия действительно уходит. Один слот (перезапись при rebind — актуален
+   * последний ctx). */
+  private onTeardownCb?: () => void;
 
   constructor(sessionId: string, userId: string, socket: SessionSocket) {
     this.sessionId = sessionId;
@@ -67,12 +82,40 @@ export class Session {
     this.log = createLogger(`session:${sessionId.slice(0, 8)}`);
   }
 
+  /**
+   * Сессионно-скоупленный синглтон (§5 resume): создать один раз и переиспользовать при reconnect.
+   * makeSessionContext берёт через это рабочую память диалога — она переживает rebind, история не теряется.
+   * Session не знает типа значения (хранит unknown) — слой памяти не протекает в gateway.
+   */
+  scoped<T>(key: string, factory: () => T): T {
+    if (!this.scopedStore.has(key)) this.scopedStore.set(key, factory());
+    return this.scopedStore.get(key) as T;
+  }
+
+  /**
+   * H8: зарегистрировать коллбэк финальной очистки (запускается в teardown — реальное удаление сессии,
+   * а НЕ обрыв сокета в resume-grace). makeSessionContext вешает сюда отмену фоновых задач. Перезапись
+   * при reconnect (актуален последний ctx). */
+  onTeardown(cb: () => void): void {
+    this.onTeardownCb = cb;
+  }
+
   /** Переподключить сессию к новому сокету (resume, §5). In-flight сохраняются. */
   rebind(socket: SessionSocket): void {
     this.socket = socket;
     this.alive = true;
     this.lastPongAt = Date.now();
     this.log.info("сессия перепривязана к новому сокету (resume)");
+  }
+
+  /**
+   * Привязана ли сессия ИМЕННО к этому сокету (§5). Нужно, чтобы отличить «закрылся старый сокет
+   * после resume» (сессию уже забрало новое соединение — трогать нельзя) от «закрылось текущее
+   * соединение» (можно сносить сессию). Без этой проверки close старого сокета убивал живую
+   * возобновлённую сессию (teardown + отклонение in-flight + снятие фоновых задач).
+   */
+  isBoundTo(socket: SessionSocket): boolean {
+    return this.socket === socket;
   }
 
   /** Низкоуровневая отправка конверта. */
@@ -177,6 +220,18 @@ export class Session {
       pending.resolve({ requestId: "", approved: false });
     }
     this.pendingConfirms.clear();
+    // H8: финальная очистка (отмена фоновых §20-задач и т.п.) — ТОЛЬКО здесь, на реальном удалении
+    // сессии (grace истёк / shutdown), не на каждом обрыве сокета. Одноразово: снимаем слот, чтобы
+    // повторный teardown не выполнял её дважды. Не роняем teardown, если коллбэк бросил.
+    const cb = this.onTeardownCb;
+    this.onTeardownCb = undefined;
+    if (cb) {
+      try {
+        cb();
+      } catch (e) {
+        this.log.warn("ошибка финальной очистки сессии (teardown)", e instanceof Error ? e.message : String(e));
+      }
+    }
   }
 
   /** Сколько действий сейчас в полёте (диагностика/тесты). */

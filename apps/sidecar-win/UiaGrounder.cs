@@ -23,54 +23,311 @@ public sealed class UiaGrounder : IDisposable
     private const int MaxSearchDepth = 8;
     // Лимит символов при выгрузке текста окна (§19).
     private const int DefaultMaxChars = 8_000;
+    // Граница реестра дескрипторов: AutomationElement держит нативные/COM-ресурсы,
+    // без вытеснения долгая сессия копит тысячи ссылок (утечка). Храним последние N.
+    // §Волна2: 512→2048 — снапшоты регистрируют до 60 хендлов за вызов; при бурсте снапшотов
+    // старый кап вытеснял handle, который модель ещё держала в контексте (ревью).
+    private const int MaxRegistry = 2048;
 
     // -----------------------------------------------------------------------
     // Грундинг
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Найти элемент по роли UIA и (опционально) имени.
-    /// <paramref name="scope"/>: null / "" = рабочий стол; иначе — pid процесса-владельца окна.
+    /// Найти элемент по роли UIA и (опционально) имени/AutomationId.
+    /// <paramref name="scope"/> (§Волна2 2.4): null/"" = АКТИВНОЕ окно, при промахе — фолбэк на весь
+    /// рабочий стол (exact-поиск по всему столу медленный и ловит чужие окна); "desktop" = сразу весь
+    /// стол; pid = окно процесса. <paramref name="nameMode"/>="substring" — матч имени по вхождению.
     /// Возвращает null если элемент не найден.
     /// </summary>
-    public GroundResult? Ground(string role, string? name, string? scope)
+    public GroundResult? Ground(string role, string? name, string? scope, string? nameMode = null, string? automationId = null)
     {
-        AutomationElement root = ResolveRoot(scope);
-
         ControlType? ct = RoleToControlType(role);
         if (ct is null)
             throw new ArgumentException($"Неизвестная роль: {role}");
 
-        // Строим условие поиска.
-        Condition cond = string.IsNullOrEmpty(name)
-            ? new PropertyCondition(AutomationElement.ControlTypeProperty, ct)
-            : new AndCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ct),
-                new PropertyCondition(AutomationElement.NameProperty, name, PropertyConditionFlags.IgnoreCase));
-
-        AutomationElement? found = root.FindFirst(TreeScope.Descendants, cond);
-        if (found is null)
-            return null;
-
-        return RegisterElement(found);
+        bool substring = nameMode == "substring" && !string.IsNullOrEmpty(name);
+        foreach ((AutomationElement root, bool isDesktop) in CandidateRoots(scope))
+        {
+            AutomationElement? found = FindIn(root, ct, name, substring, automationId, isDesktop);
+            if (found is not null) return RegisterElement(found);
+        }
+        return null;
     }
 
-    /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.</summary>
-    private GroundResult RegisterElement(AutomationElement el)
+    /// <summary>Корни поиска по scope: pid → окно процесса; null/"" → активное окно, затем весь стол.
+    /// Флаг isDesktop передаётся ЯВНО: AutomationElement.RootElement — НОВЫЙ инстанс на каждый доступ,
+    /// ReferenceEquals с ним всегда false (живой прогон: substring падал в полный UIA-обход стола).</summary>
+    private static IEnumerable<(AutomationElement root, bool isDesktop)> CandidateRoots(string? scope)
+    {
+        if (!string.IsNullOrEmpty(scope) && scope != "desktop" && int.TryParse(scope, out int pid))
+        {
+            Condition pidCond = new PropertyCondition(AutomationElement.ProcessIdProperty, pid);
+            AutomationElement? win = null;
+            try { win = AutomationElement.RootElement.FindFirst(TreeScope.Children, pidCond); } catch { /* окна нет */ }
+            // Ревью Волны 2: явный pid БЕЗ окна → пусто → честное «не найдено».
+            // Молчаливое расширение на весь стол грундило бы ЧУЖОЕ приложение.
+            if (win is not null) yield return (win, false);
+            yield break;
+        }
+        if (string.IsNullOrEmpty(scope))
+        {
+            AutomationElement? fg = ForegroundWindowElement();
+            if (fg is not null) yield return (fg, false);
+        }
+        yield return (AutomationElement.RootElement, true);
+    }
+
+    /// <summary>Активное (foreground) окно как AutomationElement; null при сбое (защищённое окно/десктоп).</summary>
+    private static AutomationElement? ForegroundWindowElement()
+    {
+        try
+        {
+            IntPtr h = WindowManager.Foreground();
+            return h == IntPtr.Zero ? null : AutomationElement.FromHandle(h);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Поиск в корне: точное имя — через PropertyCondition; substring — перебор кандидатов роли.</summary>
+    private static AutomationElement? FindIn(AutomationElement root, ControlType ct, string? name, bool substring, string? automationId, bool isDesktop)
+    {
+        var conds = new List<Condition> { new PropertyCondition(AutomationElement.ControlTypeProperty, ct) };
+        if (!string.IsNullOrEmpty(automationId))
+            conds.Add(new PropertyCondition(AutomationElement.AutomationIdProperty, automationId));
+        if (!substring && !string.IsNullOrEmpty(name))
+            conds.Add(new PropertyCondition(AutomationElement.NameProperty, name, PropertyConditionFlags.IgnoreCase));
+        Condition cond = conds.Count == 1 ? conds[0] : new AndCondition(conds.ToArray());
+
+        try
+        {
+            // Поиск ОКНА по имени на корне РАБОЧЕГО СТОЛА (exact И substring): UIA-обход стола
+            // опрашивает провайдер КАЖДОГО окна и блокируется на зависшем — без таймаута (живой
+            // смоук: 40с+ и на промахе exact). Окна ищем БЕЗ UIA — EnumWindows (миллисекунды) →
+            // FromHandle только по попаданию.
+            if (isDesktop && ct == ControlType.Window && !string.IsNullOrEmpty(name))
+            {
+                WindowInfo? hit = WindowManager.List().Windows.FirstOrDefault(w =>
+                    substring
+                        ? w.Title.Contains(name, StringComparison.OrdinalIgnoreCase)
+                        : string.Equals(w.Title, name, StringComparison.OrdinalIgnoreCase));
+                if (hit is null) return null;
+                try { return AutomationElement.FromHandle(new IntPtr(hit.Hwnd)); }
+                catch { return null; }
+            }
+            if (!substring) return root.FindFirst(TreeScope.Descendants, cond);
+            // Substring НЕ-оконной роли по всему столу не поддерживаем (честный промах; активное
+            // окно уже пробовалось предыдущим кандидатом CandidateRoots).
+            if (isDesktop) return null;
+            // Substring-перебор ВНУТРИ окна (дерево обозримо): видимый кандидат приоритетнее
+            // (ревью: offscreen-дубль перехватывал матч).
+            AutomationElementCollection all = root.FindAll(TreeScope.Descendants, cond);
+            AutomationElement? offscreenHit = null;
+            foreach (AutomationElement el in all)
+            {
+                try
+                {
+                    if (!(el.Current.Name ?? "").Contains(name!, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!el.Current.IsOffscreen) return el;
+                    offscreenHit ??= el;
+                }
+                catch { /* элемент исчез между FindAll и чтением — пропускаем */ }
+            }
+            return offscreenHit;
+        }
+        catch
+        {
+            return null; // сбой поиска в этом корне → пробуем следующий (фолбэк на весь стол)
+        }
+    }
+
+    /// <summary>
+    /// §бесшумный-ввод: элемент под ФИЗИЧЕСКОЙ точкой (из screen_capture) → ближайший actionable-предок → handle.
+    /// Последующий ui.invoke по этому handle кликает БЕЗ движения курсора. null — под точкой нет UIA-элемента
+    /// (canvas/игра) → вызывающий деградирует на оконное сообщение / физ.клик. Для бесшумного клика «по пикселям».
+    /// </summary>
+    public GroundResult? GroundAtPoint(double physX, double physY)
+    {
+        AutomationElement? el;
+        try { el = AutomationElement.FromPoint(new System.Windows.Point(physX, physY)); }
+        catch { return null; }
+        if (el is null) return null;
+        el = ClimbToActionable(el) ?? el; // предок с Invoke/Toggle/SelectionItem — цель клика (сам пиксель мог попасть в текст/иконку внутри кнопки)
+        return RegisterElement(el);
+    }
+
+    /// <summary>Подняться по ControlView до предка с Invoke/Toggle/SelectionItem (или до окна/лимита глубины).</summary>
+    private static AutomationElement? ClimbToActionable(AutomationElement el)
+    {
+        TreeWalker walker = TreeWalker.ControlViewWalker;
+        AutomationElement? cur = el;
+        for (int depth = 0; depth < MaxSearchDepth && cur is not null; depth++)
+        {
+            if (IsActionable(cur)) return cur;
+            if (cur.Current.ControlType == ControlType.Window) break; // выше окна не лезем
+            cur = walker.GetParent(cur);
+        }
+        return null;
+    }
+
+    /// <summary>Есть ли у элемента паттерн, которым его можно «нажать» без курсора.</summary>
+    private static bool IsActionable(AutomationElement el)
+    {
+        return el.TryGetCurrentPattern(InvokePattern.Pattern, out _)
+            || el.TryGetCurrentPattern(TogglePattern.Pattern, out _)
+            || el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
+    }
+
+    /// <summary>Зарегистрировать элемент в реестре дескрипторов (handle для последующего invoke/click).</summary>
+    private int RegisterHandle(AutomationElement el)
     {
         int handle = System.Threading.Interlocked.Increment(ref _nextHandle);
         _registry[handle] = el;
+        TrimRegistry();
+        return handle;
+    }
 
+    /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.
+    /// Ревью Волны 2: Rect.Empty/offscreen даёт Infinity — System.Text.Json падает на сериализации
+    /// («Infinity» не представим) и вместо результата уходила ошибка. Санируем в 0.</summary>
+    private GroundResult RegisterElement(AutomationElement el)
+    {
+        int handle = RegisterHandle(el);
         System.Windows.Rect bbox = el.Current.BoundingRectangle;
+        static double San(double v) => double.IsFinite(v) ? v : 0;
         return new GroundResult(
             Handle: handle,
-            X: bbox.X,
-            Y: bbox.Y,
-            W: bbox.Width,
-            H: bbox.Height,
+            X: San(bbox.X),
+            Y: San(bbox.Y),
+            W: San(bbox.Width),
+            H: San(bbox.Height),
             Name: el.Current.Name ?? "",
             Role: el.Current.ControlType.ProgrammaticName
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // §Волна2 (2.4) — Снапшот интерактивных элементов окна (set-of-marks)
+    // -----------------------------------------------------------------------
+
+    /// <summary>ControlType, интересные для снапшота (интерактив), даже без Invoke/Toggle-паттерна.</summary>
+    private static readonly ControlType[] InteractiveTypes =
+    [
+        ControlType.Button, ControlType.Edit, ControlType.ComboBox, ControlType.CheckBox,
+        ControlType.RadioButton, ControlType.ListItem, ControlType.MenuItem, ControlType.TabItem,
+        ControlType.Hyperlink, ControlType.Slider, ControlType.Spinner, ControlType.SplitButton,
+        ControlType.TreeItem,
+    ];
+
+    /// <summary>Глубина обхода снапшота — глубже грундинга (вложенные панели современных UI).</summary>
+    private const int SnapshotMaxDepth = 14;
+
+    /// <summary>
+    /// §Волна2 (2.4): индексированный список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name,
+    /// automationId, value, bbox} — «дешёвые глаза» (~сотни токенов текста вместо 2K-скрина).
+    /// Каждый элемент регистрируется в реестре — следующий ui.invoke/click бьёт точно по handle.
+    /// pid=null → активное (foreground) окно. bbox — ФИЗИЧЕСКИЕ пиксели экрана (как GroundResult).
+    /// </summary>
+    public SnapshotResult Snapshot(int? pid, int? maxItems)
+    {
+        AutomationElement root = pid.HasValue
+            ? CandidateRoots(pid.Value.ToString()).FirstOrDefault().root
+              ?? throw new InvalidOperationException($"У процесса pid={pid} нет окна верхнего уровня — снапшот невозможен")
+            : ForegroundWindowElement() ?? AutomationElement.RootElement;
+
+        int cap = Math.Clamp(maxItems ?? 60, 1, 200);
+        var items = new List<SnapshotItem>(Math.Min(cap, 64));
+        bool truncated = false;
+        CollectInteractive(root, items, cap, ref truncated, depth: 0);
+
+        string title = "";
+        int rootPid = 0;
+        try
+        {
+            title = root.Current.Name ?? "";
+            rootPid = root.Current.ProcessId;
+        }
+        catch { /* окно исчезло — снапшот всё равно отдаём */ }
+        return new SnapshotResult(title, rootPid, items, truncated);
+    }
+
+    private void CollectInteractive(AutomationElement el, List<SnapshotItem> items, int cap, ref bool truncated, int depth)
+    {
+        if (items.Count >= cap) { truncated = true; return; }
+        if (depth > SnapshotMaxDepth) return;
+
+        try
+        {
+            AutomationElement.AutomationElementInformation cur = el.Current;
+            // Невидимое (offscreen) пропускаем целиком по узлу, но потомков всё же смотрим на
+            // корневом уровне не надо — offscreen-контейнер обычно держит offscreen-потомков.
+            if (!cur.IsOffscreen && depth > 0 && (IsActionable(el) || InteractiveTypes.Contains(cur.ControlType)))
+            {
+                string? value = null;
+                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
+                    value = vp.Current.Value;
+                System.Windows.Rect b = cur.BoundingRectangle;
+                items.Add(new SnapshotItem(
+                    Handle: RegisterHandle(el),
+                    Role: ShortRole(cur.ControlType.ProgrammaticName),
+                    Name: cur.Name ?? "",
+                    AutomationId: string.IsNullOrEmpty(cur.AutomationId) ? null : cur.AutomationId,
+                    Value: string.IsNullOrEmpty(value) ? null : value,
+                    X: double.IsInfinity(b.X) ? 0 : b.X,
+                    Y: double.IsInfinity(b.Y) ? 0 : b.Y,
+                    W: double.IsInfinity(b.Width) ? 0 : b.Width,
+                    H: double.IsInfinity(b.Height) ? 0 : b.Height));
+            }
+        }
+        catch { /* проблемный узел не рушит снапшот */ }
+
+        AutomationElementCollection children;
+        try { children = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
+        catch { return; }
+        foreach (AutomationElement child in children)
+        {
+            if (items.Count >= cap) { truncated = true; return; }
+            CollectInteractive(child, items, cap, ref truncated, depth + 1);
+        }
+    }
+
+    /// <summary>"ControlType.Button" → "button" — токен-экономия снапшота.</summary>
+    private static string ShortRole(string programmatic)
+    {
+        int dot = programmatic.LastIndexOf('.');
+        string s = dot >= 0 ? programmatic[(dot + 1)..] : programmatic;
+        return s.ToLowerInvariant();
+    }
+
+    /// <summary>Вытеснить самые старые дескрипторы (handle монотонно растёт) сверх лимита.</summary>
+    private void TrimRegistry()
+    {
+        while (_registry.Count > MaxRegistry)
+        {
+            int oldest = int.MaxValue;
+            foreach (int k in _registry.Keys) if (k < oldest) oldest = k;
+            if (oldest == int.MaxValue) break;
+            _registry.TryRemove(oldest, out _);
+        }
+    }
+
+    /// <summary>
+    /// Точка клика по дескриптору (§6, fallback синтетического клика по элементу, который
+    /// НЕ поддерживает UIA-паттерн — напр. canvas/кастомный контрол). Координаты ФИЗИЧЕСКИЕ.
+    /// Предпочитаем ClickablePoint UIA; иначе — центр BoundingRectangle.
+    /// </summary>
+    public (double x, double y) GetClickPoint(int handle)
+    {
+        AutomationElement el = GetElement(handle);
+        if (el.TryGetClickablePoint(out System.Windows.Point pt) && (pt.X != 0 || pt.Y != 0))
+            return (pt.X, pt.Y);
+        System.Windows.Rect r = el.Current.BoundingRectangle;
+        if (double.IsInfinity(r.Width) || r.IsEmpty)
+            throw new InvalidOperationException("Элемент не имеет видимой области для клика");
+        return (r.X + r.Width / 2.0, r.Y + r.Height / 2.0);
     }
 
     // -----------------------------------------------------------------------
@@ -85,53 +342,46 @@ public sealed class UiaGrounder : IDisposable
     {
         AutomationElement el = GetElement(handle);
 
+        // ВАЖНО: AutomationElement.GetCurrentPattern БРОСАЕТ при неподдержке паттерна,
+        // а не возвращает null. Поэтому везде TryGetCurrentPattern (graceful).
         switch (pattern.ToLowerInvariant())
         {
             case "invoke":
-                if (el.GetCurrentPattern(InvokePattern.Pattern) is InvokePattern inv)
-                    inv.Invoke();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает InvokePattern");
+                Require<InvokePattern>(el, InvokePattern.Pattern, "InvokePattern").Invoke();
                 break;
 
             case "setvalue":
-                if (el.GetCurrentPattern(ValuePattern.Pattern) is ValuePattern vp)
-                    vp.SetValue(value ?? "");
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает ValuePattern");
+                Require<ValuePattern>(el, ValuePattern.Pattern, "ValuePattern").SetValue(value ?? "");
                 break;
 
             case "select":
-                if (el.GetCurrentPattern(SelectionItemPattern.Pattern) is SelectionItemPattern sip)
-                    sip.Select();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает SelectionItemPattern");
+                Require<SelectionItemPattern>(el, SelectionItemPattern.Pattern, "SelectionItemPattern").Select();
                 break;
 
             case "toggle":
-                if (el.GetCurrentPattern(TogglePattern.Pattern) is TogglePattern tp)
-                    tp.Toggle();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает TogglePattern");
+                Require<TogglePattern>(el, TogglePattern.Pattern, "TogglePattern").Toggle();
                 break;
 
             case "expand":
-                if (el.GetCurrentPattern(ExpandCollapsePattern.Pattern) is ExpandCollapsePattern ecp)
-                    ecp.Expand();
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает ExpandCollapsePattern");
+                Require<ExpandCollapsePattern>(el, ExpandCollapsePattern.Pattern, "ExpandCollapsePattern").Expand();
                 break;
 
             case "scroll":
-                if (el.GetCurrentPattern(ScrollPattern.Pattern) is ScrollPattern sp)
-                    sp.Scroll(ScrollAmount.SmallIncrement, ScrollAmount.SmallIncrement);
-                else
-                    throw new InvalidOperationException("Элемент не поддерживает ScrollPattern");
+                Require<ScrollPattern>(el, ScrollPattern.Pattern, "ScrollPattern")
+                    .Scroll(ScrollAmount.SmallIncrement, ScrollAmount.SmallIncrement);
                 break;
 
             default:
                 throw new ArgumentException($"Неизвестный паттерн: {pattern}");
         }
+    }
+
+    /// <summary>Получить паттерн или бросить понятную ошибку (без падения на «Unsupported pattern»).</summary>
+    private static T Require<T>(AutomationElement el, AutomationPattern pattern, string label) where T : class
+    {
+        if (el.TryGetCurrentPattern(pattern, out object? obj) && obj is T typed)
+            return typed;
+        throw new InvalidOperationException($"Элемент не поддерживает {label}");
     }
 
     // -----------------------------------------------------------------------
@@ -149,7 +399,7 @@ public sealed class UiaGrounder : IDisposable
             : AutomationElement.FocusedElement
               ?? throw new InvalidOperationException("Нет фокусированного элемента");
 
-        if (el.GetCurrentPattern(TextPattern.Pattern) is not TextPattern textPattern)
+        if (!el.TryGetCurrentPattern(TextPattern.Pattern, out object? tpObj) || tpObj is not TextPattern textPattern)
             return new SelectionResult("");
 
         TextPatternRange[] ranges = textPattern.GetSelection();
@@ -194,23 +444,32 @@ public sealed class UiaGrounder : IDisposable
         if (sb.Length >= maxChars) { truncated = true; return; }
         if (depth > MaxSearchDepth) return;
 
-        string name = el.Current.Name ?? "";
-        string value = "";
-
-        if (el.GetCurrentPattern(ValuePattern.Pattern) is ValuePattern vp)
-            value = vp.Current.Value ?? "";
-
-        if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(value))
+        // Доступ к одному узлу может бросить (элемент исчез, COM-таймаут, защищённое окно) —
+        // изолируем, чтобы один проблемный узел не рушил всю выжимку (§19).
+        try
         {
-            string role = el.Current.ControlType.ProgrammaticName;
-            sb.Append(role).Append(": ").Append(name);
-            if (!string.IsNullOrWhiteSpace(value))
-                sb.Append(" [").Append(value).Append(']');
-            sb.AppendLine();
+            string name = el.Current.Name ?? "";
+            string value = "";
+
+            // TryGetCurrentPattern — НЕ GetCurrentPattern (тот бросает на неподдержке).
+            if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
+                value = vp.Current.Value ?? "";
+
+            if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(value))
+            {
+                string role = el.Current.ControlType.ProgrammaticName;
+                sb.Append(role).Append(": ").Append(name);
+                if (!string.IsNullOrWhiteSpace(value))
+                    sb.Append(" [").Append(value).Append(']');
+                sb.AppendLine();
+            }
         }
+        catch { /* пропускаем проблемный узел */ }
 
         // Рекурсивный обход потомков
-        AutomationElementCollection children = el.FindAll(TreeScope.Children, Condition.TrueCondition);
+        AutomationElementCollection children;
+        try { children = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
+        catch { return; }
         foreach (AutomationElement child in children)
         {
             if (sb.Length >= maxChars) { truncated = true; return; }

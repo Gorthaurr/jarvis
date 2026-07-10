@@ -1,0 +1,719 @@
+# Jarvis — карта системы (ЧИТАТЬ В НАЧАЛЕ КАЖДОЙ СЕССИИ)
+
+> 🔴 **ЧИТАТЬ ПЕРВЫМ: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)** — МЕХАНИЗМЫ + **КАК Я ТЕСТИРУЮ САМ
+> (текст-драйвер `_jarvis_cmd.mjs`, dev-эндпоинты)** + мышление. Я действую как опытный ML/IT инженер:
+> корень не симптом, верификация (тесты+живой прогон), сам тестирую текстом — НЕ прошу пользователя
+> говорить голосом. Этот файл (CLAUDE.md) — карта файлов; HOW_IT_WORKS — механика и операционка.
+>
+> **ПРАВИЛО:** этот файл — единый источник «что/где/как» по Джарвису. **Меняешь архитектуру —
+> обнови этот файл в том же изменении.** Устаревшая карта хуже отсутствующей. Глубокие детали —
+> в `docs/` (HOW_IT_WORKS.md, ARCHITECTURE.md, JARVIS_SPEC.md, STATUS.md, NEXT_SESSION.md) и в авто-памяти
+> (`MEMORY.md` → project_jarvis_*).
+
+## Что это
+Голосовой ИИ-ассистент-мажордom («Джарвис» у Старка) для ОДНОГО пользователя на его Windows-ПК.
+Слышит речь → понимает намерение → **управляет компьютером инструментами** → отвечает голосом.
+**Мозг — облачный Claude:** слабый тир Sonnet 4.6 (дефолт ходов), эскалация на Opus 4.8 при застревании
+(§7-каскад, 2026-06-23). Тонкий клиент + облачные нейро-сервисы (STT/TTS/LLM).
+
+### КОНЦЕПЦИЯ (критично для любых правок)
+- **НЕ хардкодить шаги под сценарии.** Даём мощные, надёжные, ЧЕСТНЫЕ инструменты — модель сама
+  хорошо ими пользуется. Актуатор резолвит из источников истины ОС и честно сообщает провал; что
+  не вышло — модель добирает сама (`web_search`/`code_run`).
+- **Честность по ошибкам — закон.** Инструмент НИКОГДА не возвращает ложный успех. Провал → ошибка
+  → Джарвис говорит «не вышло», а не «Готово» (см. error-voice ниже).
+- **Автономность/самообучение, не god-objects.** ООП, SRP, модули <150 строк, общие компоненты, DRY.
+- **НЕ чат-бот.** Голос — узкий канал; запрет текстового ввода-как-основного (см. project_jarvis_concept).
+
+## Запуск (грабли — см. project_jarvis_infra)
+- Сервер: из `apps/server` → `npx tsx src/index.ts` (Fastify+WS на **порту 8787**). НЕ `tsx watch`
+  (падает EADDRINUSE на правках — рестарт вручную: убить процесс на 8787 → запустить). Грузит `.env`.
+- Клиент: `pnpm --filter @jarvis/client start` (или `dev` = пересборка esbuild + electron). Electron
+  запускать БЕЗ редиректа stdio. После правок .ts клиента — пересборка (`node scripts/build.mjs`).
+  - **Расширение** (`apps/extension`, MV3 SW) теперь ТОЖЕ собирается этим `build.mjs` (esbuild iife-бандл
+    `background.js` + `modules/*.js` → `dist/background.js`; manifest `service_worker`→`dist/background.js`,
+    §ревью-split 2026-06-30). Исходник = `background.js` (entry: WS-ядро `connect/handle`/синхронные top-level
+    листенеры + single-ws синглтон — НЕ выносить) + `modules/` (utils/tab-find/cookies/keep-alive вынесены; инжекторы
+    self-contained, остаются в entry). Бандл ловит оборванные импорты (node --check — нет). После правок расширения —
+    пересборка + **reload в `chrome://extensions` + смоук** (боевые инжекторы Telegram/browser_act проверяются ТОЛЬКО живым Chrome).
+- C#-сайдкар (`apps/sidecar-win`): UIA-грундинг + запись навыков показом. `SidecarWin.exe` собран на диске.
+- БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL` в .env); фолбэк — PGlite. Docker НЕ используется.
+- Тесты: `apps/server` `npx vitest run` (≈1023), `apps/client` `npx vitest run` (≈138). Typecheck: `npx tsc --noEmit`. Линтера нет.
+  - **Гигиена данных (аудит 2026-07-02):** `apps/server/vitest.setup.ts` ставит изолированный `JARVIS_DATA_DIR`
+    во временную папку на прогон — тесты НЕ пишут в боевой `apps/server/data` (раньше засоряли стор фикстурами
+    `learned__test-distillyacii-*`, «Полить кактус», напоминания «Конец теста»). Тестам со своим каталогом
+    (crypto/credentials) переопределять env — их право.
+- **Наблюдаемость (аудит 2026-07-02):** durable логи в `dataDir/logs/` — `server-YYYY-MM-DD.log` (JSONL, ротация
+  по дню, retention `JARVIS_LOG_RETENTION_DAYS` деф 7) + `metrics.jsonl` (одна строка на задачу: латентность/
+  стоимость/токены/ok). Раньше сервер писал ТОЛЬКО в консоль → каждый разбор «вчера не сработало» был слеп.
+  Файловый sink: `obs/file-log.ts` (буфер+флаш, fail-safe) через `addLogSink` в @jarvis/shared; JSONL-метрики:
+  `MetricsCollector.enableJsonl()`. Выключатели `JARVIS_FILE_LOG=0`/`JARVIS_METRICS_JSONL=0`. Поднимается в
+  `gateway.listen()`, dispose в `close()`.
+
+## Карта репозитория (pnpm monorepo)
+- `packages/protocol/src/actions.ts` — ActionCommand/ActionResult (контракт server↔client).
+- `packages/tools/src/index.ts` — **ВСЕ инструменты** (JSON-схемы Anthropic tool-use). Тут добавлять инструмент.
+- `packages/shared` — логгер, AsyncMutex, Semaphore, типы, **`name-match.ts`** (кросс-скрипт резолв
+  получателей §13: `nameSearchVariants`/`pickRecipient`/`foldName`/`transliterate` — Герман↔Herman; ⭐
+  ПРИНЦИП: транслитерация = recall, РЕШЕНИЕ при неоднозначности — модель, не таблица).
+- `apps/server/src` — МОЗГ (см. ниже).
+- `apps/client/main` — Electron main: транспорт, **актуаторы**, tier0, аудио/vad/wake, сенсоры.
+- `apps/client/renderer` — UI (орб состояния, карточки, **вкладка «Чат» §22**, кнопка mute). `renderer.ts`
+  (312 строк, был god-object 811 — разобран §ревью 2026-06-30) = ФУНДАМЕНТ (DOM-init, орб/состояние, карточки,
+  аудио+чат playback-узел, панель настроек) + вызовы `init<Панель>(jarvis)`. Кластеры вынесены в модули рядом:
+  `dom.ts` (общий `$`), `wave.ts`, `task-panel.ts` (§20 чипы), `monitor-panel.ts` (§6), `billing-panel.ts` (§6B/B5),
+  `confirm-dialog.ts` (§14) + `focus-trap.ts` (общий a11y), `skill-recorder.ts` (§8, settingsPanel через DI-коллбэк),
+  `voice-enroll.ts` (§3), `list-item.ts` (общий `buildListItem`, дедуп строк навыки↔голоса). Паттерн: jarvis-мост
+  аргументом init (DI), модули импортируются обратно односторонне (renderer = esbuild IIFE-entry, 0 value-экспортов
+  → циклы исключены). DOM-юнит-тестов нет (нет jsdom) → выносы делались чистым move + tsc + esbuild на каждом шаге.
+  - **H18-фикс `audio.ts` (2026-07-02, «оглох навсегда»):** провал реинита захвата (игра держит
+    устройство → getUserMedia кидает) больше не молчит — таймер-ретрай с бэкоффом 1с→30с (после stop()
+    трека нет, события mute/ended не придут — только таймер вернёт слух); `ensureCapture` (renderer.ts)
+    при частичном провале start() добивает захват (не держит MediaStream). Тесты в `renderer/audio.test.ts`
+    (браузерные глобалы — заглушки, без jsdom).
+
+## Сервер (`apps/server/src`)
+- `gateway/server.ts` — boot: поднимает провайдеры (BrainProviders), WS `/ws` (клиент) и `/ext`
+  (расширение Chrome), heartbeat, hydrate (profile/consent/dynamicTools/spend/**reminders**).
+  - **§6B/B2 ИДЕНТИЧНОСТЬ+AUTH (честный минимум, 2026-06-21):** `doHandshake` АСИНХРОННЫЙ; токен →
+    `identity.ts resolveAndProvision` (async-обёртка над чистым `resolveUserId`): UUID→партиция +
+    lazy-provision `users` (`db/users.ts ensureUser` ON CONFLICT — ДО `createOrResume`, закрывает FK
+    Hazard 1); strict (`JARVIS_AUTH_STRICT=1`, дефолт off) сверяет sha256(token) с `auth_tokens`
+    (миграция 0003), нет строки→4003 (**fail-CLOSED всегда, вкл. БД-down — ревью 2026-07-04, M1**:
+    strict = hardened/remote контекст, лучше отвергнуть, чем впустить непроверенного; `isDbReady()`
+    теперь реальный `SELECT 1` с кэшом, а не проверка «объект пула существует»). Single-flight латч
+    `handshakeStarted` (sync до await). ⚠️ На loopback токен = КЛЮЧ ПАРТИЦИИ, НЕ auth (секрет театр);
+    реальная граница — bind (`gateway/bind.ts resolveBindHost`: не-loopback без `JARVIS_ALLOW_REMOTE`→
+    127.0.0.1+error). Клиент: per-install UUID ОПТ-ИН за `JARVIS_CLIENT_IDENTITY` (`identity-store.ts`),
+    дефолт = 'dev-token' → DEV_USER (существующая установка цела). «Вооружение» UUID — только с B3.
+- `gateway/router-ws.ts` — `makeSessionContext` (per-connection): создаёт VoicePipeline + agentDeps,
+  `getVoiceOpts` (голос режима+**эмоция**), регистрация озвучки напоминаний, dispatch входящих кадров.
+- `gateway/session.ts` — Session (send/sendAction/requestConfirm), resume.
+- `brain/agent/index.ts` — **ядро**: `handleUserText` → детерминированные перехваты (имя, режим-маска,
+  **эмоция**) → tier0 (`runLocalIntent`) / `runAgentLoop` (LLM + tools, эскалация тира §7, anti-runaway,
+  фоновые задачи §20). Терминал: честный провал вместо ложного «Готово» (`error-voice.ts`).
+  - **СТРУКТУРНЫЙ verify/анти-капитуляция (P0, 2026-06-30, корень «сдаётся+врёт готово»):** петля больше
+    НЕ верит первому терминальному тексту. `anyMutateSucceeded` (успех ТОЛЬКО `toolEffect==="mutate"`, не
+    нейтрального web_search) гейтит анти-капитуляцию и masked-failure → «погуглил и сдался»/«нейтральный
+    поиск → ложное Готово» ловятся. Verify-нудж теперь по СТРУКТУРЕ — `blindMutatePending` (после СЛЕПОГО
+    действия `isBlindMutate`: input_*/browser_act/web_act/app_focus/ui_* — ok≠цель; code_run/fs/office/
+    system/launch/open самоподтверждаются и сверки НЕ требуют), а не по regex `claimsObservedResult` (он
+    теперь усилитель). Капы: `JARVIS_MAX_VERIFY_NUDGES`(деф 2), `JARVIS_MAX_RETRY_NUDGES`(деф 2, мин 1 —
+    нельзя тихо выключить). См. [[project_jarvis_verify_loop]].
+  - **ВОЛНА 1 «скорость/приёмка» (2026-07-10, план `docs/HARNESS_PLAN_2026-07-10.md`, эпизод «поиск
+    в доте»: STT-повтор → 2 параллельные задачи → обе убиты потолком, $1.09):**
+    (1.1) слышимая ПРИЁМКА фоновой задачи МГНОВЕННО — earcon-тон ~160мс (`voice/earcon.ts` WAV-генератор +
+    `pipeline.playTaskAckEarcon`, проводка `AgentDeps.taskAccepted`; клиентский плеер сниффит RIFF;
+    выкл `JARVIS_TASK_ACK_EARCON=0`); отложенный голосовой ack 8с→4с (`JARVIS_TASK_ACK_MS`); гард earcon
+    полный (speaking ∨ ttsStream ∨ phraseSpeaker.active — не рвём чужой аудио-стрим);
+    (1.2) дубль-гейт устойчив к STT-обрывкам (`scope.isDuplicateGoal`): стем-Жаккар (точное равенство) +
+    фрагмент-overlap по ПОЛНЫМ токенам (≥0.8 + ≥1 содержательный токен; НЕ префиксы — ревью: «свет»⊂
+    «светлую» давало ложные «Уже делаю») + канонизация латиницы (`shared latinToCyrillic`: dot'е→доте) +
+    семантический бэкстоп e5 (`AgentDeps.embedder`, `JARVIS_DUP_SEMANTIC_MIN` деф 0.9, параллельные
+    embed'ы с бюджетом 400мс) + полярность-гард на ОБОИХ слоях (стоп-команда ≠ дубль старт-цели);
+    гейт СТОИТ выше steer, но только для scope=new (реджект-повтор «нет, не то…» уходит в steer);
+    (1.3) очередь за арендой ввода НЕ сжигает потолок задачи (loopStartMs сдвигается на waited; в
+    task-метриках `queueWaitMs` отдельно, в avg-раунд не входит); acquire с таймаутом
+    (`shared Semaphore.acquireWithTimeout`, `JARVIS_INPUT_WAIT_MS` деф 60с → честная ошибка «ввод занят»);
+    гард протухшего клика: после ожидания >10с слепые действия блокируются до сверки глазами (кэп 2);
+    (1.4) `ui_ground`/`ui_invoke` — ГОРЯЧИЕ (из COLD убраны); `ui_ground` = НЕЙТРАЛЬНОЕ чтение (не
+    blind-mutate, verify-нуджем не карается) и НЕ блокируется в браузерной задаче (MOUSE_TOOLS − ui_ground);
+    (1.5) видимый бюджет: на 70% потолка — одноразовый нудж «сворачивайся» (честный частичный итог),
+    остаток < среднего раунда → ранний свёрток (причина «свернулся заранее», не «превышен потолок»);
+    (1.6) роутер: STT-обрывок (микс латиница+кириллица, <4 токенов, без глагола-действия) → мгновенный
+    clarify «повторите» ($0, ключ `__repeat__` — следующая реплика маршрутизируется обычно), не фоновая
+    петля (`router.looksLikeGarbledFragment`); confidence Deepgram пробрасывается в персистентном пути;
+    (1.7) кеш-гигиена: `JARVIS_KEEP_SCREENSHOTS` деф 2→1, family-boost 1→2 раунда (амортизация перезаписи
+    префикса при свитче модели), тариф записи 1h-кеша 2×input (`obs/pricing.cacheWriteRate` по
+    `ANTHROPIC_CACHE_TTL` — SpendGuard больше не занижает на 37.5%), history-changelog персоны вынесен в
+    `persona/persona-changelog.md` (−3K мёртвых токенов из КАЖДОГО запроса);
+    (1.8) наблюдаемость: пер-раундовые строки `type:"round"` в metrics.jsonl (`metrics.recordRound`) +
+    WARN «перезапись префикса» с причиной (model-switched/pruned-images/prefix-changed) + latency-марки
+    на earcon (метрика «конец речи → первая обратная связь» существует).
+  - **ВОЛНА 2 «структурные» (2026-07-10, план `docs/HARNESS_PLAN_2026-07-10.md` §Волна2 — все 7 пунктов):**
+    (2.1) **FUSED ACT+OBSERVE** — актуаторы input_click/type/key/mouse/ui_invoke/skill.execute САМИ прикладывают
+    дешёвое наблюдение ПОСЛЕ действия в ТОТ ЖЕ tool_result (клиент `actuators/observe.ts`: пауза стабилизации →
+    a11y-выжимка активного окна; окно UIA-слепое → OCR региона вокруг точки; выкл `JARVIS_FUSED_OBSERVE=0`);
+    сервер (`dispatch.ts` generic-путь) форматирует его untrusted-блоком и ставит `ToolResult.observed` → агент
+    снимает verify-долг в ТОМ ЖЕ раунде (`blindMutatePending` не взводится при observed — строгость LAW цела,
+    сверка реальная, не доверие «ok»); `browser_act`: клик ВСЕГДА DOM-диф (`changed:true/false` от инжектора;
+    changed:false наблюдением успеха НЕ считается), observed при playing/currentTime/navigated/changed:true.
+    Паттерн «клик→скрин→клик→скрин» схлопнут — экономика −35-50% раундов GUI-задач.
+    (2.2) **`input_batch`** (HOT): ≤12 механических шагов одним вызовом → `skill.execute` с синтетическим id
+    (`adhoc-batch-*`) → готовый runSkill под одной арендой, стоп на первой ошибке, честный «выполнено k из n»
+    (`handlers/skills.ts inputBatch`; валидация действий ДО отправки — молчаливый no-op клиента не маскируется
+    успехом; needsLlm запрещён); + петля: раунд целиком из не-GUI ЧИТАЮЩИХ вызовов (toolEffect neutral/verify)
+    диспатчится ПАРАЛЛЕЛЬНО (research 2-3× быстрее; mutate/GUI — строго последовательно). Persona v72:
+    «батчь механику, независимые чтения — вместе».
+    (2.3) **ДЕШЁВЫЕ СЕНСОРЫ**: `screen_capture{rect,scale}` (кроп ~50-200 ток; lastMapping НЕ трогается —
+    клики продолжают считаться от последнего ПОЛНОГО кадра); `screen_read_text` (HOT; ЛОКАЛЬНЫЙ OCR
+    Windows.Media.Ocr в сайдкаре — клиент снимает кадр, сайдкар отдаёт текст+bbox строк, `OcrService.cs`);
+    `screen_probe` (COLD; перцептивный 8×8-хеш — детектор перемен, НЕ доказательство успеха, план §4.2);
+    `wait_for{condition,timeoutMs}` (HOT; клиентский поллинг БЕЗ LLM-раундов: window/ui/text(OCR)/sound(WASAPI),
+    gone:true = ждать исчезновения; met:false — честный исход, met:true = observed) — `actuators/sensors-cheap.ts`;
+    visual-expect макросов ОЖИЛ (client-actuator: OCR вместо безусловного false → $0-реплей для игр работает).
+    (2.4) **САЙДКАР** (TFM → `net8.0-windows10.0.19041.0` ради WinRT OCR; путь exe в client/index.ts обновлён;
+    смоук-тест 9/9 живьём): `ui.snapshot`→`ui_snapshot` (HOT; set-of-marks: интерактивные элементы окна
+    {handle,role,name,automationId,value,bbox} ~сотни токенов вместо 2K-скрина, элементы сразу в реестре
+    хендлов → ui_invoke по handle); `window.list`/`window.focus`→`window_list`/`window_focus` (HOT; EnumWindows
+    без DWM-клоак; SetForegroundWindow+AttachThreadInput+ALT-нудж с ЧЕСТНЫМ readback focused; `apps.focusApp`
+    теперь сайдкар-first с фолбэком на AppActivate — TODO M3 закрыт); ПОЛНАЯ МЫШЬ `input.mouse`→`input_mouse`
+    (HOT; move/down/up/wheel/drag с интерполяцией, right/middle; `input_click{button,count}` — контекст-меню/
+    дабл-клик; зажатые кнопки мыши в реестре удержаний watchdog'а); ground: scope дефолт АКТИВНОЕ ОКНО→фолбэк
+    весь стол + nameMode="substring" + automationId; READ-опы сайдкара — в Task.Run-пуле (не блокируют ввод);
+    `SidecarClient` — авто-рестарт с бэкоффом 1с→30с (сброс по аптайму 60с; stop() не рестартит).
+    Классификация: ui_snapshot/screen_read_text = VERIFY; window_list/screen_probe/wait_for = NEUTRAL;
+    input_mouse/input_batch = BLIND_MUTATE (+ input_mouse в MOUSE_TOOLS); input.mouse/window.focus/input_batch
+    — под арендой ввода. OCR/снапшот/окна оборачиваются `<untrusted_content>` (M11: влияемые данные).
+    (2.5) **ADMISSION-ОЧЕРЕДЬ GUI-задач**: GUI-boundness известна ДО петли (по recall-навыку: kindNeedsInput
+    на шагах) + арбитр занят + фоновый путь → `tasks.markQueued` (честный чип «в очереди»; narrate/панель
+    уже умели) + ОДИН ack «Сначала закончу текущее, сэр» + ожидание аренды ДО первого LLM-раунда
+    (`JARVIS_QUEUE_WAIT_MS` деф 90с; таймаут → честный терминал «так и не приступил», НИ ОДНОГО раунда не
+    сожжено); после аренды `tasks.start` (queued→running) + гард протухшего клика (форс свежего взгляда);
+    дубль-гейт видит queued (повтор в очереди не плодит вторую). Без навыка признак молчит → страховка
+    Волны 1 (queue-aware дедлайн в ensureInput) остаётся.
+    (2.6) **STT**: (а) НОРМАЛИЗАТОР ЛЕКСИКИ `voice/lexicon.ts` (`TranscriptNormalizer`): доменная латиница →
+    кириллица С СОХРАНЕНИЕМ словоформы («в dot'е.»→«в доте.»); лексикон = `routerLexicon()`
+    (QUICK_ALIASES+WEB_SERVICES) ∪ client.env apps/games (ClientEnv расширен структурными списками — строку
+    summary не парсим) ∪ имена/when навыков; заменяются ТОЛЬКО exact/lev≤1-узнанные токены (GitHub/ffmpeg
+    не трогаются — §13-принцип «recall, не исправление»); сборка фоновая TTL 60с, normalize СИНХРОННЫЙ;
+    врезка ОДНА — `pipeline.gateWake` (кроет спекулятивный эндпоинт и поздний финал; анти-дубль сравнивает
+    нормализованное). (б) СЕРВЕРНЫЙ ENDPOINTING: `speech_final` Deepgram (endpointing=300) больше не
+    выбрасывается → `SttPartial.speechFinal` → pipeline эндпоинтит через `turn.onProviderEndpoint`
+    (семантическое вето: висящий союз/одиночное слово не рубим, порог 0.5 — тишину провайдер уже подтвердил)
+    — ~350-400мс от конца речи против 520+150мс клиентского пути (тот остаётся фолбэком); выкл
+    `JARVIS_STT_ENDPOINT=0`.
+    (2.7) **ПЕР-РАУНДОВЫЙ THINKING** `agent/thinking-policy.ts` (`decideRoundThinking`/`stripThinkingBlocks`):
+    план (step 0)/нудж/эскалация — базовый эффорт тира; механика (recall-навык, follow-up после blind-mutate)
+    — off (−2-5с и сотни output-ток/раунд); fable/Opus НЕ глушится НИКОГДА (грабля §4.7); off→on ТОЛЬКО на
+    текстовой границе (на хвосте tool_result включать нельзя — HTTP 400: assistant-ход с tool_use обязан
+    нести свои thinking-блоки), иначе off до ближайшего нуджа; при off реплеенные thinking-блоки стрипаются
+    (разовая перезапись префикса — WARN 1.8 покажет причиной prefix-changed); все 8 нудж-сайтов ставят
+    `nudgeBoostNextRound`; выкл `JARVIS_ROUND_THINKING=0`. Persona v72: «между tool-вызовами текст не пиши».
+  - **ПАМЯТЬ+КОНТЕКСТ уровень А + Б4а/Б5 (2026-07-10, отчёт `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md`;
+    диагноз: facts:0 навсегда — 3 структурных разрыва; контекст ПК замораживался; 39-мин STT-ход):**
+    ПАМЯТЬ: (А1) баг спреда — retrieval-facts затирал профильные, теперь merge+dedup; (А2/А9) единый
+    писатель `memory/user-memory.ts` (семантический дедуп ≥0.93 + мост fact/preference → профиль,
+    кап 20 FIFO в `profile.addFact`); (А3) рефлекс-бэкстоп `agent/memory-reflect.ts` — реплика с
+    маркером устойчивого факта («я всегда…», «мой брат…») → fire-and-forget рефлексия на дешёвом
+    тире с узким набором [memory_write], суточный кап `JARVIS_MEMORY_REFLECT_CAP` (деф 8), выкл
+    `JARVIS_MEMORY_REFLECT=0` (в vitest.setup глушится); persona v71 — позитивные триггеры записи
+    («DO write unprompted…»); гигиена: 141 июньский STT-event помечен stale (обратимо). Проверено
+    живьём: «я обычно работаю по ночам» → рефлекс записал, модель сама тоже вызвала memory_write,
+    дедуп поймал дубль; profile.json facts наполнился впервые.
+    КОНТЕКСТ ПК: (А4) `formatAmbient` — заголовки у ВСЕХ окон (группировка по процессу, кап 14,
+    title 40); (А5) `WindowSnap.fullscreen` (rect≈bounds×scaleFactor) + presence-строка в снимке
+    («Пользователь: за ПК/отошёл; полноэкранно: X») + оживлены сенсоры §9 (setActiveApp/setFullscreen
+    из fg-окна — гейт проактива «не мешать в игре» работает); (А7) client.env TTL 6ч + Steam-игры из
+    манифестов (`detectSteamGames`; живьём: «Dota 2» впервые в окружении); (А6) онбординг-кулдаун
+    (`lastGreetedAt` в профиле, 6ч + «разговор шёл <1ч» + dev-сессии не здороваются — конец
+    «приветствие ×7/день»); (А8) наблюдаемость: WARN 5 пустых снимков подряд, лог перехода
+    пусто↔непусто, лог каждого записанного факта; (А10) деградация вкладок видима.
+    ГОЛОС/УПРАВЛЕНИЕ: (Б4а) «отмени» адресуется по USERID (`tasks.cancelUser`) — после reconnect
+    sessionId новый и отмена по sessionId плодила задачи-«отменить»; (Б5) `DEEPGRAM_KEYTERM=1` в
+    .env (живьём: Results идут, страх «молчит» не подтвердился); wake near-miss в лог игнора +
+    second-chance «Вы мне, сэр?» (первый токен lev≤4 + активная задача + кулдаун 2 мин, выкл
+    `JARVIS_WAKE_SECOND_CHANCE=0`); EnergyVad: потолок «речи» ~20с (`maxSpeechFrames`) → форс
+    speech_end + адаптивный порог под громкий фон (спад на тихих кадрах) — конец 39-минутных ходов.
+  - **P0-фиксы «ложный успех/провал» (аудит логов + ревью, 2026-07-02):** (1) H2: аварийный стаб LLM
+    (`stopReason==="stub"`) = провал хода — `tasks.fail`, ok=false, семантический кэш НЕ пишется (раньше
+    «Связь прервалась» финалило задачу успехом и «заедало» из кэша после восстановления связи); (2) H3:
+    чисто читающие инструменты (fs_read/list/search, telegram_read, knowledge_consult, market_*,
+    tinkoff_portfolio, trade_winrate/predictions, monitor_list + mcp__* с читающим именем get/list/…)
+    → `neutral` в `toolEffect` — «прочитал» не взводит anyMutateSucceeded; (3) H4: anti-runaway на
+    байт-в-байт повторе успешного действия — нудж «сверь глазами/смени подход», при упорстве честный
+    провал (раньше дефолт «Готово, сэр.» мимо verify); (4) goal-check срабатывает и ПОСЛЕ verify-раунда,
+    если финал звучит как чистый запуск (`launchOnlyClaim`; живой случай «запусти поиск в доте» → «Дота
+    запущена»: сверила глазами ПОДЦЕЛЬ); (5) ВОПРОС (`opts.conversational`) не гейтится masked-failure
+    (mutate не ожидается; живой смоук: «2+2» + tool_load → «Не вышло») + нудж на СОДЕРЖАТЕЛЬНЫЙ финал
+    при пустом тексте после инструментов (ответ, съеденный отброшенной преамбулой tool-раунда).
+    Живой смоук текст-драйвером: «поиск матча в доте» → честное «задача не выполнена» вместо ложного done.
+- `brain/router/index.ts` — **tier0** детерминированный путь ($0, без LLM): `WEB_SERVICES` (сайты),
+  `LAUNCH_RE`/`looksLikeAppName` (запуск), `classifyTier`.
+  - **ВОПРОС vs ДЕЙСТВИЕ (2026-07-01, корень «каждый вопрос воспринимает как задачу»):** `RouteDecision.
+    conversational` решает СИНХРОННО-разговор vs ФОНОВАЯ §20-задача — НЕ тир (раньше любой sonnet/fable ход
+    шёл в фон с дворецким-фреймингом). `looksLikeQuestion` (первое слово вопросительное / «?» / частица «ли»
+    / зачин «расскажи/объясни/что такое») → conversational; `looksHardReasoning` → conversational ТОЛЬКО
+    без `looksLikeAction` (глагол-действие: «проанализируй и СОСТАВЬ отчёт» = задача, не разговор). Простой
+    вопрос → haiku (token-эконом), глубокое рассуждение → fable, но ОБА разговором. agent: фон только если
+    `conversational !== true`. Вопрос ≠ задача: нет карточки/ack, ответ сразу стримом. Проверено живьём.
+  - **ТИР сложного ввода (P1.1, 2026-06-30):** `looksHardReasoning` (объясни/сравни/проанализируй/как
+    лучше/стоит ли/план) → `fable`(Opus), не слабый Sonnet (корень «мало понимает на разборе»;
+    эскалация §7 для рассуждения не наступала — у него нет проваленных инструментов). Теперь ещё и conversational (см. выше).
+  - **tier0 СУЖЕН (P1.2):** `looksLikeAppName` теперь отвергает фразу-инструкцию с предлогом-связкой в
+    многословии («X в поиске») или контент-сущ. («джазовый ПЛЕЙЛИСТ», «музыку») → уходит в LLM, не в
+    слепой `app.launch`. Голое имя приложения ловится как раньше.
+  - **МЕДИА/ГРОМКОСТЬ → tier0 (2026-06-23, фикс «перемотка гоняла полный Sonnet»):** `matchMediaIntent`
+    (анкер `^…$` — команда = вся фраза, не ловит в середине) → интенты `media`(pause/play/next/prev) /
+    `volume`(up/down/mute/set N) → `system.media`/`system.volume`. Исполняются СИНХРОННО без ack
+    (одна фраза, мгновенно, $0) — `runTier0` `instant`-ветка, не плодит «Принял»+результат и не ждёт аренду.
+    ⚠️ точную перемотку «на N секунд» НЕ берём (media-клавиши seek-по-секундам не умеют — нужен seek-актуатор,
+    браузерный JS `video.currentTime`, отдельной задачей).
+    - **ХВОСТЫ/ПРЕФИКСЫ/M5-кириллица (аудит 2026-07-02, «команды гоняли полный LLM»):** якорь всё ещё `^…$`,
+      но матчер срезает хвостовую вежливость (`потише пожалуйста`, M10), берёт объект+локацию (`продолжи видео
+      на ютубе`, `останови музыку` — pause с ОБЯЗАТЕЛЬНЫМ объектом, голое «выключи» НЕ медиа), инверсию
+      `сними с паузы`/`паузы сними`→play, STT-словоформу `продолжу`, и короткий хвост после запятой (STT-шум
+      `Videos, паузы сними`). M5: `следующ\p{L}*`/`включи следующ\p{L}*` вместо мёртвого `\w+` (не матчил
+      кириллицу). Контент-задачи (`включи видео про котиков`, `включи музыку`) остаются в LLM. +тесты.
+  - **Консьерж (§): ГОЛАЯ команда-сервис** («Джарвис, ютуб») → `matchQuickIntent` → интент `clarify`
+    = МГНОВЕННЫЙ короткий вопрос (`QUICK_INTENTS`), без LLM (иначе лаг секунды даже на Sonnet-тире).
+    Агент ставит `deps.pendingClarify`, следующая реплика резолвится `resolveClarifyAnswer` (тоже
+    tier0) → действие. С ГЛАГОЛОМ «открой/запусти ютуб» — прямое открытие, как раньше (не вопрос).
+    Расширять — строкой в `QUICK_INTENTS`/`QUICK_ALIASES`. **ВСЕ tier0-открытия** (консьерж И
+    «открой/запусти X») идут с `browser.open{inDefault:true}` → НЕ CDP-инстанс.
+  - **Открытие в браузере пользователя (мышь-сейф + без дублей вкладок):** `inDefault`-открытие в
+    `runLocalIntent` сперва идёт через РАСШИРЕНИЕ (`deps.openOrFocus`→`ExtensionBridge.openOrFocus`→
+    `tab.openOrFocus` в background.js): `chrome.tabs.query` видит открытые вкладки → есть вкладка
+    сервиса → ФОКУС (не дубль), нет → новая — в ТВОЕЙ сессии/логине, без SendInput (мышь не трогаем).
+    Расширение не подключено/ошибка → откат на `apps.launchApp` (shell-open в дефолтный браузер).
+    ⚠️ Chrome 136+ ИГНОРИРУЕТ `--remote-debugging-port` на дефолтном профиле (анти-кража cookie) →
+    CDP на реальном профиле НЕ работает; поэтому «просто открой» = расширение/shell, а CDP-управление
+    (`browser.act`) — только на выделенном профиле. `browser-cdp` discover-таймаут снижен (env
+    `JARVIS_CDP_TIMEOUT_MS`, деф 5с) — не висим 12с на заведомо мёртвом debug-порте.
+- `brain/tools/dispatch.ts` — **ТОНКИЙ маршрутизатор tool-use** (376 строк, был god-object 1276 — разобран §ревью 2026-06-29):
+  switch по имени → server-side хендлер ИЛИ ActionCommand → клиент. Общие хелперы — `dispatch-util.ts`
+  (`ok`/`err`/`untrusted`/`numField`/`browserUrlBlocked`). Доменные хендлеры — `brain/tools/handlers/*.ts`:
+  `market` (трейдинг), `browser` (вкладки/act/read через расширение + inBrowserTask), `messaging`
+  (telegram/message/order + send-гарды confirm-once/cadence/идемпотентность), `info` (web/knowledge/memory-поиск),
+  `skills` (HERMES list/execute/save/promote), `dynamic-tools` (саморасширение), `code` (`executeGuardedCode`),
+  `reminders` (§9). ДОБАВИТЬ хендлер = файл в `handlers/` + case в switch. `ToolContext`/`ToolResult` — в dispatch.ts (импорт type-only в хендлеры, без цикла).
+  - **БРАУЗЕР через расширение (§, ctx.ext=brain.extBridge):** `browser_open`/`browser_read`/`browser_act`
+    идут в РЕАЛЬНЫЕ вкладки пользователя (его сессия/логин) через расширение, а НЕ в CDP-инстанс
+    (мёртв на Chrome 136). `browser_open`→`tab.openOrFocus` (есть вкладка сервиса → ФОКУС, не дубль —
+    лечит «плодит новые вкладки»); `browser_act`→`tab.act` (chrome.scripting: play/pause/next/click/
+    type/scroll В вкладке — «взаимодействуй с уже открытой»); `browser_read`→`tab.read`. Расширение не
+    подключено → откат: open=shell(inDefault), read/act=CDP(почти всегда ошибка). На странице не вышло
+    (регион/нет элемента) → ЧЕСТНАЯ ошибка (§persona v22), не ложное «готово». Манифест `<all_urls>`.
+    - **CANVAS ESCAPE-HATCH (P2.1, 2026-06-30):** мышь (`input_click`/`ui_ground`) во время браузерной
+      задачи блокируется (не дёргаем курсор)... НО после ЧЕСТНОГО промаха `browser_act` (`markBrowserActMiss`
+      на исключении/autoplay-гейте) открывается окно `canvasClickAllowed` (30с), где координатный
+      `input_click` РАЗРЕШЁН — для canvas/WebGL/видео без DOM-кнопки (раньше «сдавался» на этом классе).
+- **ЛЕНИВАЯ ЗАГРУЗКА инструментов (§15, фундамент MCP):** `tools[]` шлётся в префиксе ПЕРЕД `system` БЕЗ
+  cache_control → любая мутация набора между ходами рушит весь prompt-кеш. Поэтому: ГОРЯЧИЕ инструменты
+  (частые) всегда в наборе; ХОЛОДНЫЕ (`packages/tools COLD_TOOL_NAMES` — редкие + будущие MCP) НЕ шлются
+  схемами, а одной строкой в кешируемом блоке `systemTools` (4-й cache-breakpoint в `anthropic.buildSystemBlocks`,
+  после персоны). Модель подгружает схему `tool_load{names}` → `dispatch.toolLoad` кладёт в per-session
+  `toolActivation` (Set, scoped на Session) → агент включает их схемы со следующего хода (дозапись в хвост
+  tools = разовый кеш-промах, как rolling-breakpoint). `dispatch` исполняет инструмент по имени независимо
+  от наличия схемы (фолбэк-безопасность). Это даёт арсенал в 100+ инструментов без раздувания контекста.
+  **MCP-HOST РАБОТАЕТ (2026-06-19):** `brain/mcp/manager.ts` (McpManager: stdio через @modelcontextprotocol/sdk,
+  неймспейс `mcp__<server>__<tool>`, callTool, dispose) + `brain/mcp/config.ts` (`mcp.json` в корне, `${ENV}`,
+  Windows npx→npx.cmd, **uvx/uv→.exe** для Python-серверов). Boot: `server.ts` создаёт + `connectAll()`
+  FIRE-AND-FORGET (не блокирует listen) + `mcp.dispose()` в close. `dispatch` роутит `mcp__`-tool →
+  `ctx.mcp.callTool` (строго после KIND_BY_TOOL, не затеняет штатные; ошибка→честный err). MCP-tools =
+  ХОЛОДНЫЕ (каталог §15, tool_load по имени). Проверено end-to-end: `think` (sequential-thinking, npx)
+  подключается за ~2.3с. **Добавить сервер = строка в `mcp.json`** (есть закомментированные примеры
+  git/fetch/time/github/postgres/playwright в `_disabled`). ⚠️ **uvx-сервера (Python: git/fetch/time) на
+  Windows гонятся за установку pywin32 в кэше uv при ПЕРВОМ конкурентном запуске (os error 32) → нужен
+  ОДНОРАЗОВЫЙ ПОСЛЕДОВАТЕЛЬНЫЙ прогрев `uvx mcp-server-<x>` ДО первого boot** (см. `_uvx_note` в mcp.json);
+  поэтому в активных `servers` держим только проверенно-подключающиеся (честность: не плодим мёртвые).
+  Открыто: result-image из MCP сводится к тексту. (Зомби stdio-child на Windows — ЗАКРЫТО ревью 2026-07-04, L6:
+  `manager.dispose()` держит ссылку на transport, берёт PID до `close()` и бьёт `taskkill /PID <pid> /T /F`;
+  `gateway.close()` теперь `await mcp.dispose()` с таймаутом.)
+- `brain/tools/input-kinds.ts` — какие команды берут **аренду ввода** §20 (GUI сериализуется).
+- `brain/persona/` — `persona.md` (vХХ, тон/правила/возможности), `modes.ts` (режимы-маски butler/
+  bold/storyteller/comedian), **`emotion.ts`** (команды «говори зло/радостно» §21).
+- **§6B/B4-B5 (2026-06-21):** `db/crypto.ts` (AES-256-GCM, мастер-ключ env `CREDENTIALS_MASTER_KEY`→
+  self-bootstrap keyfile) + `db/credentials.ts` (per-user шифр-ключи в user_credentials, `resolveUserKey`
+  per-user→.env-фолбэк) + протокол `client.keys` (UI→сервер шифр.). `billing/index.ts SpendGuards` —
+  реестр гвардов по userId (ожил persist usage_quota, траты per-tenant); вкладка «Оплата» биндит реальные
+  `usage.info` (spent/cap/remaining). **COGS-телеметрия (2026-06-22):** `obs/pricing.ts` — ЕДИНЫЙ источник
+  per-model тарифов (`costUsd(model,usage)`); РАНЬШЕ стоимость считалась в ДВУХ местах по разным и обоим
+  неверным цифрам (SpendGuard по Haiku $1/$5, obs/metrics по старому Opus $15/$75, обе model-blind) → теперь
+  по фактической модели хода. `obs/metrics snapshot` отдаёт `costByModel`; **`GET /cogs`** = окно телеметрии +
+  расход per-user (`SpendGuards.allSnapshots()`) — дашборд юнит-экономики. Boot-WARN если все тиры схлопнуты
+  в одну модель (footgun all-Opus: эскалация §7 мертва + дорогая ставка). Юнит-экономика → [project_jarvis_unit_econ].
+  Миграции 0003 (auth_tokens) / 0004 (UNIQUE user_credentials). ДРЕМЛЮТ
+  до hosted: strict-auth, provider hot-swap per-user ключей. Гайд: docs/UNIVERSALITY_MULTITENANT_PLAN.md.
+- `brain/profile.ts` — персист профиля (имя, mode, **emotion**, facts, язык/контекст). **§6B/B3
+  ПАРТИЦИЯ по userId:** `Map<userId,Profile>` + файл на юзера (DEV_USER→legacy `data/profile.json`,
+  прочие→`data/profile/<id>.json`); `loadProfile(userId)` в handshake ДО makeSessionContext,
+  get/setX берут userId. Так же по userId: resolution-memory (ключ `${userId}:…`), reminders
+  (доставка только владельцу-userId, без any-speaker fallback), dynamic-tools (ключ `${userId}::name`).
+- **Эмбеддинги (§1, 2026-06-23):** дефолт — ЛОКАЛЬНАЯ `integrations/local-embeddings.ts`
+  (`LocalEmbeddingProvider`, multilingual-e5-small, 384d, CPU, без ключа/облака/GPU) вместо прежнего
+  мусорного `HashEmbeddingProvider`. OpenAI — опт-ин при `OPENAI_API_KEY` (усечение `dimensions=384`).
+  Канон dim=384 → столбец `episodic_memory.embedding=VECTOR(384)` (миграция `0005`). e5 требует
+  префиксов: `embed(text,"query")` поиск / `embed(text,"passage")` запись (`episodic.ts`). Сбой загрузки
+  модели → `null` (честная деградация, пустой retrieval), НЕ мусор. Проводка в `gateway/server.ts`.
+  - **Грабли эмбеддера (живой тест 2026-06-23):** (1) `device`/`dtype` читаются В МОМЕНТ ВЫЗОВА getPipe, НЕ
+    на module-load — `.env` грузится в index.ts ПОСЛЕ ESM-хойст-импортов. (2) На Windows нативный CPU-EP
+    onnxruntime-node НЕ грузится («cannot run %1») → нужен `JARVIS_EMBED_DEVICE=dml` (DirectML, есть в
+    зависимостях; цепочка фолбэков cpu→dml→webgpu в getPipe). На Linux-сервере дефолт `cpu` штатно работает.
+    (3) `dtype=fp32` (model.onnx) — `q8`/model_quantized на hf-mirror 404. (4) 🔴 **sherpa-onnx-node
+    (верификатор диктора) КОНФЛИКТУЕТ с onnxruntime-node (e5) в одном процессе на Windows** — оба тащат
+    onnxruntime.dll, второй биндинг падает. **РЕШЕНО (2026-06-24): SPEAKER-САЙДКАР** — sherpa грузится в
+    ОТДЕЛЬНОМ дочернем Node-процессе (`voice/speaker/sidecar-host.ts`), главный процесс держит лишь
+    прокси (`verifier-sidecar.ts SidecarSpeakerVerifier`/`createSpeakerVerifierSidecar`), общение по
+    stdio newline-JSON (`sidecar-protocol.ts`, PCM/байты base64). Так sherpa-onnxruntime изолирован от
+    e5-onnxruntime → owner-gate работает ВМЕСТЕ с эмбеддингами. server.ts при `JARVIS_SPEAKER_GATE=1`
+    зовёт сайдкар-фабрику (in-process — только `JARVIS_SPEAKER_SIDECAR=0`); любой сбой сайдкара →
+    Mock (гейт выкл, boot цел). Проверено: smoke (реальный sherpa в child + identify round-trip) +
+    boot gate=1 (`верификация диктора {ready:true, voices:1, mode:'sidecar'}`, без onnxruntime-краша).
+    Гейт по умолчанию ВЫКЛ (`.env JARVIS_SPEAKER_GATE=0`) — включать осознанно у микрофона (калибровка).
+- **Семантический кэш ответов (§15, `brain/response-cache.ts`, 2026-06-23):** `SemanticResponseCache` —
+  пропуск вызова LLM, если на семантически близкий ФАКТИЧЕСКИЙ вопрос уже был чисто-вербальный ответ
+  (эмбеддинг e5 + косинус, порог `JARVIS_RESPONSE_CACHE_MIN` деф 0.92). 🔴 БЕЗОПАСНОСТЬ: кэшируется ТОЛЬКО
+  ход с `toolTrajectory.length===0` (ноль инструментов → нет побочных эффектов, реплей не врёт «сделано»)
+  и только контекст-НЕзависимый запрос (`isCacheableQuery` денлист: ты/мы/сейчас/это/время/состояние →
+  не кэшируем; токенизация, НЕ regex-`\b` — на кириллице не работает). Scoped по userId (мультитенант).
+  lookup в `agent/index.ts handleUserText` ДО разветвления tier (хит = мгновенный вербальный ответ, $0),
+  store в успешном терминале `runAgentLoop`. На hash-эмбеддере (null) кэш молчит (безопаснее матча по мусору).
+- `memory/` — `episodic.ts` (pgvector RAG), `working.ts` (окно диалога), **`resolution-memory.ts`**
+  (ОПЫТНАЯ ПАМЯТЬ резолва §скорость: `${channel}:foldName(query)`→{peerId,title}; remember на вериф.
+  успехе, recall→fast-path, forget→self-heal; персист data/resolutions.json, переживает рестарт),
+  **`skills.ts`** (HERMES
+  самообучение навыками-процедурами; recall теперь **СЕМАНТИЧЕСКИЙ** (e5-косинус `recallSemantic`,
+  порог `JARVIS_SKILL_SEMANTIC_MIN` деф 0.82) с лексическим фолбэком `matchLearnedSkill`; дедуп на сейве
+  тоже семантический `findDuplicateSemantic` (порог 0.9, строже — лечит дубли дота/доте); кэш векторов
+  триггеров `triggerVecCache`; эмбеддер передаётся в `createSkillProvider(embedder)` из server.ts.
+  **ГАРД ПОЛЯРНОСТИ (аудит лога 2026-07-03):** `memory/intent-polarity.ts` — recall (семантика И
+  лексика) НЕ подсовывает навык противоположного намерения: строгий конфликт start↔stop по
+  глагольным стемам («прекрати поиск у доти» ≠ навык «запустить поиск в доте», sim 0.856 — с
+  авто-макросом реплей ЗАПУСТИЛ бы поиск на команду остановки); mixed/neutral не режем (решает
+  модель). Заблокированный лучший кандидат логируется («подавлен гардом полярности»).
+  **НАДЁЖНОСТЬ НАВЫКА (P2.3, 2026-06-30):** `fail_count` теперь ЖИВОЙ — `SkillProvider.recordOutcome`
+  (agent-терминал зовёт для recall'нутого СВОЕГО навыка: провал +1, успех −1 через `adjustSkillFailCount`);
+  recall (`isSuppressed`) перестаёт подсовывать навык при `failCount ≥ JARVIS_SKILL_FAIL_SUPPRESS`(деф 3) —
+  Джарвис «учится на ошибках», не повторяет провальный приём; надёжный восстанавливается успехами.
+  **ОБЩАЯ БИБЛИОТЕКА НАВЫКОВ (§мультитенант Фаза 1, 2026-06-23):** псевдо-юзер `SHARED_USER_ID`
+  (нулевой UUID, ≠ DEV_USER `…0001`) хранит ОБЩИЕ навыки, видные ВСЕМ. `listSkillsMerged`/`getSkillMerged`
+  сливают `свои ∪ общие` с дедупом по id — **частный перекрывает общий** (свой вариант главнее);
+  provider list/get/recall/learnedCatalog идут через merged, а save-дедуп/delete — только свои (private-
+  only, чтобы не мёржить в общий id). Инструмент **`skill_promote`** (`provider.promote`, COLD §15) —
+  поднять СВОЙ выученный навык (owner-check, только learned-процедуры) копией под SHARED_USER_ID.
+  Boot-seed (`seedSharedSkills` + `seed/shared-skills.ts`, идемпотентно по версии) засевает курируемый
+  стартовый набор (плеер на сайте, Telegram) — чтобы новому юзеру не учить с нуля; `ensureUser(SHARED_
+  USER_ID)` на boot для FK. `RecalledSkill.fromShared` → честная формулировка в `formatRecalledSkill`
+  («приём из общей библиотеки» vs «твой прошлый»). Встроенные tools (telegram_send/browser_act/…) и так
+  общие — shared-слой добавляет общие ПРОЦЕДУРЫ. Верифицировано: юнит (merge/override/promote/seed) +
+  живой recall общего навыка чужим юзером (sim 0.864). ⚠️ кто может промоутить в hosted — ограничить
+  admin (Фаза 3)), **`skill-slots.ts`** (§8 параметризация replay-навыка:
+  `extractSlots`/`fillSlots` — переменные `{{slot}}` в шагах; `skillExecute` в dispatch заполняет их из
+  `params` ДО исполнения, незаполненный слот → честная ошибка, не литерал в актуатор; `SkillInfo.slots`
+  показывает нужные переменные в `skill_list`; литеральный навык без слотов не затронут),
+  `brain/tools/dynamic.ts` (tool_create саморасширение).
+  - **МУЛЬТИ-ДЕМО ДИСТИЛЛЯЦИЯ навыка (идея BrowserBC, §8, закрыт TODO «дистилляция процедуры»):** `skills.ts`
+    копит ПОКАЗЫ одной capability (per-(user,skill) в `data/skills/_demos/<user>__<id>.json`, распознавание «той же»
+    через существующий семантич. дедуп в `save`); чистая `distillProcedure(name,when,demos,fresh,distiller?)` — при ≥2
+    показах И наличии дистиллятора зовёт его (сильный тир Opus в server.ts `skillDistiller`, env-выкл `JARVIS_SKILL_DISTILL=0`)
+    → ОДНА обобщённая устойчивая процедура (общие шаги, частности в `{{slot}}`, грабли + шаг ВЕРИФИКАЦИИ), а не «как сделал
+    последний раз». Срабатывает РЕДКО (повторное обучение) → расход мал; нет дистиллятора/упал → честный фолбэк на свежую.
+    Исполнение/verify-loop НЕ тронуты (наша проверка исхода сильнее, чем «инжект markdown и надейся» у BrowserBC). +тесты.
+  - **Tiered-исполнитель навыка (§8):** клиентский `apps/client/main/skill-runner/index.ts` гонит шаги
+    ДЕТЕРМИНИРОВАННО ($0, без LLM); `EscalateFn` теперь возвращает карту params на `needs_llm` → раннер
+    МЁРЖИТ её в шаг («модель заполняет переменные на повторе»); `needsLlm`-шаг без заполнения → ЧЕСТНЫЙ
+    провал (не слепое исполнение, §честность). ⚠️ сам клиент↔сервер round-trip ещё no-op
+    (`actuators/index.ts` не передаёт escalate) → пока needsLlm-шаги честно валятся; детерм. шаги (вкл.
+    слоты, заполненные сервером в `skillExecute`) работают. Следующий срез: серверный handler escalate +
+    маршрут escalate-вызова на ДЕШЁВЫЙ тир (тир теперь ЕСТЬ — слабый=Sonnet, §7-каскад жив с 2026-06-23).
+  - **Токен-экономика навыка (§15):** recall'нутый навык инжектится в ОТДЕЛЬНЫЙ кешируемый
+    системный блок `systemSkill` (`buildSystemPrompt.skillSuffix` → `anthropic.buildSystemBlocks`
+    ставит свой cache_control ПОСЛЕ персоны, ДО динамики). На повторных ходах задачи навык читается
+    из кеша (cache_read 0.1×), а не шлётся заново. Подтверждено живым тестом против Anthropic
+    (`integrations/anthropic.live.test.ts`, gated `RUN_LIVE_LLM=1`). Открытые TODO из аудита:
+    дистилляция процедуры, семантический recall (vector-колонка), удешевить self-learn (fable→sonnet).
+- `brain/tasks/` — реестр долгих задач §20: `manager.ts` (TaskManager: lifecycle/active/list +
+  `recentTerminal`/`toJSON`/`restore`/`setOnChange`), `task.ts` (типы + чистые `deriveTaskTitle`/
+  `actionTitle`/**`formatRecentTasks`**/`isSubstantiveTask`), `scope.ts` (edit-vs-new + reject-маркеры
+  «не то/вместо»→edit), `narrate.ts`, `control.ts` (стоп/пауза/отмена).
+  - **ПРАВКА НА ХОДУ (§20, 2026-06-25):** `Task.steer{pending:[]}` (рантайм, как cancel) + `TaskManager.steer`;
+    петля СЛИВАЕТ pending ПЕРЕД шагом и впрыскивает «⚡ПОПРАВКА…» в хвост convo. Перехват в `handleUserText`:
+    активная задача + scope=edit → `tasks.steer`+ack «Принял, поправляю», БЕЗ второй петли (голос и текст).
+  - **ДУБЛЬ-ГЕЙТ (§20, аудит 2026-07-02):** `scope.ts isDuplicateGoal` (стем-Жаккар ≥0.75, ≥2 слов) — «new»-реплика,
+    почти дословно совпадающая с целью УЖЕ идущей задачи (STT-вариация/нетерпеливый повтор: «продолжи/продолжу
+    видео на ютубе» через 6с → две параллельные задачи, «остановил» ×2), не плодит вторую петлю: ack «Уже делаю, сэр».
+  - **ТИХИЙ CANCEL (§20, аудит 2026-07-02):** ack отмены («Остановил.»/«Остановил все, сэр.») произносит ТОЛЬКО
+    `gateway/task-control.ts` ОДИН раз на команду; терминал отменённой петли в `agent/index.ts` теперь `terminal("")`
+    (молчит) — раньше КАЖДАЯ отменённая фоновая петля возвращала «Хорошо, остановил.» → на N задачах N голосов.
+  - **ACK УПРАВЛЕНИЯ ОЗВУЧИВАЕТСЯ + ЛОГИРУЕТСЯ (аудит лога 2026-07-03):** `handleTaskControl` шлёт ack в ОБА
+    канала (`ackControl`: transcript + `voice.speakQueued`) и пишет log.info на КАЖДУЮ команду (action/source
+    voice|ui/taskId) — раньше UI-стоп был полностью немым и не оставлял НИ СТРОКИ в файловом логе («прекрати
+    поиск у доти» умерла тишиной, разбор потребовал дедукции по коду). UI-статус — только текстом (панель видит).
+  - **ОТЛОЖЕННЫЙ ACK долгой фоновой задачи (§20, аудит лога 2026-07-03):** задача без sink живёт дольше
+    `JARVIS_TASK_ACK_MS` (деф 8000, 0=выкл) и ни одной фразы не прозвучало → ОДИН «Занимаюсь, сэр.» через
+    speakResult. Cancel-safe ПО КОНСТРУКЦИИ (таймер читает task.cancel/state/spokeAny в момент срабатывания —
+    ровно ретро ButlerAcks), clearTimeout в finally петли. «Тихий финал» не тронут: это не безусловный «Принял».
+- `brain/knowledge/` — **слой ЭКСПЕРТНОСТИ (2026-06-25):** `index.ts` (`KnowledgeBase`) грузит доменные .md
+  из `docs/` (реестр `DOMAIN_FILES`, путь через import.meta.url), разбивает по `## `, `consult(domain,query)`
+  ищет релевантные разделы (ключевые слова, чисто/без эмбеддера). `DOMAIN_FILES` принимает `string|string[]` — под домен
+  **`trading`** слиты **24 файла**, **371 раздел** дистиллята канона: базовые (risk/price-action/structure/indicators/regimes/
+  psychology/quant/derivatives/macro/systems) + ГЛУБОКИЕ разборы методов (the-trading-process A→Z, support-resistance-levels,
+  wyckoff-method, elder-triple-screen, brooks-price-action, smart-money-liquidity, supply-demand-zones, chart-patterns-classic,
+  dow-theory-trend, market-profile-volume, market-wizards-lessons, entry-exit-execution, crypto-trading-specifics). Канон
+  Murphy/Schwager/Van Tharp/Douglas/Elder/Wyckoff/Brooks/Edwards-Magee/Dalton/Bulkowski/ICT. Инструмент `knowledge_consult` (COLD), `untrusted()`.
+  Персона v62: перед экспертной задачей — knowledge_consult + при нужде свежие web_*. Добавить домен = строка
+  в DOMAIN_FILES + .md (универсально). Проводка как `market`.
+- `brain/trading/` — **ТОРГОВЫЙ контур (без денег, 2026-06-25):** `indicators.ts` (чистые SMA/EMA/RSI-Уайлдер/
+  MACD/ATR), `market.ts` (`MarketDataProvider`: MOEX ISS + Binance, СПОТ и **ФЬЮЧЕРСЫ** `moex_fut` FORTS /
+  `crypto_fut` fapi-перпы; чистые парсеры; честные ошибки), `index.ts` (`TradingService`: quote/candles/analyze
+  + `inferMarket` + ПРОГНОЗЫ), `predictions.ts` (`PredictionStore`: record фиксирует вход+СТОП/ТЕЙК → `resolveDue`
+  сверка по горизонту: со стопом → `resolveByPath` (path по свечам окна: стоп/тейк/время → R-мультипликатор), иначе →
+  `resolveOne` (направление, backward-compat); `computeWinRate` += EXPECTANCY/R (`expectancyR`/`netExpectancyR`/`profitFactor`) —
+  ГЛАВНОЕ табло «как профи», винрейт вторичен; персист data/trading/predictions.json), `orders.ts` (типы+`applyFill` — фундамент исполнения, ещё не подключён),
+  `tinkoff.ts` (`TinkoffProvider`: Tinkoff Invest API REST — quote/candles/portfolio в РЕАЛЬНОМ времени;
+  токен env `TINKOFF_INVEST_TOKEN` READ-ONLY, нет→выключен; парсеры чистые). market=`tinkoff` (делегирует
+  MarketDataProvider) = «реальный тест»: точные данные API + `screen_capture` терминала (зрение) + trade_predict.
+  Инструменты (COLD): `market_quote`/`market_candles`/`market_analyze`/`tinkoff_portfolio` + `trade_predict`/
+  `trade_winrate`/`trade_predictions`. Проводка как `web`: BrainProviders.market→agentDeps→ctx;
+  TradingService(provider, loadPredictionStore(), tinkoff). ДАННЫЕ+ПРОГНОЗЫ, НЕ совет.
+  `backtest.ts` (историч. базовые ставки `conditionalBaseRate` по RSI + `multiFactorBaseRate` по связке
+  RSI∧тренд∧MACD; индикаторы per-bar `rsiSeries/smaSeries/macdHistSeries`; tool `market_backtest`).
+  `costs.ts` (`roundTripCostPct` круговая издержка; `Prediction.costPct` → `trade_winrate` net-после-комиссий +
+  лидерборд по инструментам). `auto-predictor.ts` (`AutoPredictor`: фоновый цикл — прогноз ТОЛЬКО при историч.
+  перевесе; `decideSetup` = дешёвый ПРЕД-СКРИН, env `JARVIS_AUTO_PREDICT=1`; набирает выборку за часы; старт/стоп в server.ts).
+  **СЛОЙ 2 — `expert.ts` (`TradeExpert`): отобранный скрином сетап эскалируется LLM-эксперту (Opus/fable-тир). SYSTEM = ПОЛНЫЙ
+  ПРОЦЕСС реального дискреционного трейдера (Wyckoff/Elder/Brooks/Market Wizards): биас старшего ТФ → значимый УРОВЕНЬ → РЕАКЦИЯ
+  на уровне (отбой/ложный пробой/ретест, не касание) → контекст (BTC/импульс) → R:R≥2 → ТЕРПЕНИЕ (только A+, иначе пас). Сверяется
+  с базой знаний (consult топ-4 раздела) + факты analyze → решение СО СТОПОМ/ТЕЙКОМ или ПАС; мусор/стоп-не-с-той-стороны/R:R<1.5 → честный пас (null).
+  env `JARVIS_AUTO_PREDICT_EXPERT=1` (деф ВЫКЛ — автономные LLM-вызовы, бьёт РЕДКО по отобранным). Живьём: вход на сильном
+  тренде R:R 4:1 со стопом за уровнем+ATR-буфер, пас на слабом откате.**
+  **БИРЖА = ТОЛЬКО МАКС МОДЕЛЬ (Opus), БЕЗ ТИРОВ** (Антон: важна обдуманность; прямой роут ещё и быстрее
+  эскалации): роутер `looksLikeTrading` (высокоточная лексика, кириллич. словоформы `[\p{L}]*`) → tier `fable`
+  ДО smalltalk/ПОСЛЕ локального интента; страховка — `TRADING_TOOLS` в agent-loop эскалируют на fable. **ИСПОЛНЕНИЕ деньгами (брокер+риск-лимиты+confirm-гейт,
+  бумажный режим) НЕ начато** — строится после трек-рекорда винрейта.
+  - **«ОСОЗНАНИЕ задач» — переживает рестарт (фикс «Джарвис забывает, что сделал»):** реестр §20
+    раньше жил в ОЗУ → перезапуск сервера (КАЖДЫЙ деплой) стирал «что я сделал», и на «сделал?» Джарвис
+    не знал. Теперь `tasks/task-store.ts` (зеркало `working-store.ts`): снимок реестра в `data/tasks.json`
+    (атомарно tmp→rename, дебаунс 300мс на onChange, **`flushTaskStores()` в gateway.close()** — иначе
+    unref'нутый таймер не успел бы на graceful-shutdown). На restore НЕ-терминальная задача честно →
+    `failed` («прервано перезапуском»), НЕ воскрешается как running (иначе соврал бы «всё ещё делаю»).
+    Retention терминальных поднят 10мин→6ч (env `JARVIS_TASK_RETENTION_MS`, sweep клиенту ничего не шлёт).
+  - **Инжект в контекст (§15-безопасно):** `agent/index.ts` зовёт `recentTerminal` (окно 6ч, ТОЛЬКО
+    содержательные — `stepsDone>0`, иначе болтовня «привет» засоряла бы «сделал?») → `formatRecentTasks`
+    → `UserContextSlot.recentTasks` → `renderDynamic` (НЕкешируемый хвост, кеш персоны не ломается).
+- `proactive/` — `greeting.ts`; **`reminders/`** (РАБОЧЕЕ §9: store JSON + scheduler next-wakeup +
+  set_reminder); **`watch/`** (РАБОЧЕЕ §долгие-задачи, 2026-07-01: durable МОНИТОРИНГ «следи за X→скажи
+  когда Y»). `watch.ts`/`store.ts`(`data/watches.json`)/`service.ts`(recurring next-due `tickNow`, one-shot/
+  continuous, антидребезг, лимиты min 30с/max 20, проактив через тот же speaker-registry, что напоминания)/
+  `checker.ts`(РЕАЛЬНЫЙ: ограниченный LLM-цикл web_search/web_fetch+report на дешёвом тире — не выдумывает,
+  нет данных=met:false). Инструменты COLD `watch_create`/`watch_cancel`/`watch_list` (имя `monitor_*` занято
+  дисплеями!). Проводка как reminders (ctx.watch, BrainProviders.watch, registerSpeaker). Живьём: create→tick→
+  web-чек→проактивная озвучка ✓; ⚠️ cancel в живом прогоне модель звала watch_create (follow-up, см.
+  [project_jarvis_watch]).
+  - **`ambient/`** (РАБОЧЕЕ §проактив-всё, 2026-07-01: «Сэр, вам написал X», «не забудьте оплатить счёт»).
+    Источнико-агностичный `engine.ts` (AmbientEngine: tick/дедуп(seen-store)/салиентность/проактив, 0 ток/тик) +
+    источники `obligations.ts` (СЧЕТА по датам; инструменты ГОРЯЧИЕ obligation_*) + `telegram-source.ts`
+    (непрочитанные из УЖЕ открытой вкладки через `telegram.unread`). BrainProviders.ambient/obligations. Конвейер
+    счетов верифицирован живьём. ⚠️ Telegram: reload расширения + калибровка webK. 🔴 **ТЕКУЩАЯ ДАТА инжектится**
+    (`persona/index.ts renderNow`) — без неё модель ставила прошлый год. watch_*/obligation_* — ГОРЯЧИЕ. [project_jarvis_ambient]
+  - `scheduler.ts`/`triggers/`/`salience.ts`/`presence.ts` — СТАБЫ (не подключены).
+- `voice/pipeline.ts` — машина состояний голоса (idle/listening/thinking/speaking), `speak`/
+  **`speakQueued`** (проактивная речь, не перебивает юзера), barge-in, пофразный стриминг.
+  - **«ТИХИЙ ФИНАЛ» (2026-06-23, фикс жалобы «×2-3 фразы на ВСЕХ ходах»):** содержательный ход
+    (sonnet/fable) и tier0-в-фон БОЛЬШЕ НЕ произносят дворецкий ack. Корень был: ack («Принял, сэр.»)
+    эмитился БЕЗУСЛОВНО + результат следом = 2 фразы на КАЖДОМ ходе. Теперь агент возвращает ПУСТУЮ
+    реплику (`{voice:""}`) → ход завершается тихо, единственная фраза — сам результат через `speakResult`.
+    Механика: `runAgentStreaming.done("")` (pipeline) не форсит «Готово.» и не шлёт пустой транскрипт/чат;
+    `PhraseSpeaker.finish()` без фраз эмитит speak_done без speak_start → state.ts (thinking) вернёт цикл
+    в listening+followup БЕЗ звука; `sendReply` (router-ws) тоже пропускает пустую реплику. Долгую
+    многошаговую задачу подсвечивает ВИЗУАЛЬНАЯ панель прогресса (`task.status`), голосового филлера нет
+    (как и прекеш-филлер «Секунду, сэр.» — выкл по умолчанию, та же причина «не отделываться фразой»).
+    🗑️ **`brain/persona/acks.ts` (`ButlerAcks`) УДАЛЁН** — генератор форсированного ack ретирован вместе
+    с фичей (если захочется короткий «принял» ТОЛЬКО на реально долгой задаче — делать ОТЛОЖЕННО и
+    cancel-safe в пайплайне, не безусловным таймером в агенте: agent-layer-таймер не видит cancel-флаг
+    задачи → стрелял лишним ack после «отмени», поймано адверсариал-ревью).
+  - **§AEC эхо «видео/TTS→микрофон→лишние команды» — НАЧАТО, текстовый-фильтр ОТВЕРГНУТ (2026-06-23):**
+    защиты, что УЖЕ есть: STT кормится ТОЛЬКО в `listening` (не в `speaking` → свой TTS не транскрибируется),
+    browser `echoCancellation:true` (гасит СВОЙ TTS — reference = выход Chromium), barge-grace 250мс.
+    Пробовал добавить ТЕКСТОВЫЙ self-echo фильтр (дропать транскрипт, совпавший с недавней речью Джарвиса) —
+    **ОТКАЧЕН после адверсариал-ревью:** текст НЕ отличает эхо от НАМЕРЕННОГО повтора пользователя →
+    глотал подтверждения уточнения («Создать напоминание купить хлеб?»→«создай напоминание купить хлеб») и
+    диктовку/readback. Класс «слышит сам себя» решается АКУСТИЧЕСКИ, не по тексту. Открытые пути (нужен
+    живой микрофон + выбор): (1) **loopback-AEC** — захват системного аудио (Electron desktopCapturer audio
+    / WASAPI loopback) как reference → WebRTC APM/WASM-AEC в ворклете (гасит ЛЮБОЙ выход, вкл. чужое видео;
+    см. [[project_jarvis_efficiency]] «лёгкий WASM на клиент»); (2) **оживить speaker-gate** (отклонять
+    не-владельца — вкл. голоса из видео; сейчас выкл, биометрия сырая); (3) **Win32-сенсор «играет
+    медиа/fullscreen»** (`client.context.fullscreen/micBusyByOtherApp` сейчас стаб) → при медиа требовать
+    wake-word. ⚠️ browser-AEC ВНЕШНЕЕ медиа НЕ гасит (нет reference) — это и есть суть нерешённого.
+- `integrations/` — STT `deepgram.ts` (облако, nova-3) / `whisper-stt.ts` (локал); **H14-фикс
+  (2026-07-02, «глохнет после сетевого блипа»):** персистентный WS сбрасывает таймлайн
+  (sentSec/processedSec/turnStartSec) на КАЖДОМ open, включая reconnect В ПРОСТОЕ — раньше стейл
+  turnStartSec дропал все Results нового сокета («РЕЧЬ ПОТЕРЯНА» на каждом ходе до 120с тишины); TTS
+  **`yandex-tts.ts`** (актив, голос filipp) / `elevenlabs.ts`; `tts-emotion.ts` (каталог ролей);
+  `anthropic.ts` (Opus, стаб при сбое; **prompt-кеш §15:** `buildSystemBlocks` — экспортируемая
+  чистая функция, ставит cache_control на [персона][навык] и оставляет [динамику] без кеша; живой
+  тест экономии — `anthropic.live.test.ts`. **TTL=1h АКТИВЕН (`ANTHROPIC_CACHE_TTL=1h`, 2026-06-23):**
+  extended-cache держит префикс тёплым в паузах разговора >5мин (5m истекал между репликами → холодная
+  перезапись 25K-префикса); beta-заголовок ставится в `requestOptions`); `voice-providers.ts` (интерфейсы+Mock).
+
+## Клиент (`apps/client/main`)
+- `transport/index.ts` — WS к серверу, backoff, resume.
+- `actuators/index.ts` — `dispatch(ActionCommand)` → нужный актуатор; исключение → `error.runtime`.
+- `actuators/`:
+  - **`apps.ts` + `app-resolve.ts`** — запуск (умный резолвер: App Paths→Steam-манифесты→Пуск→PATH,
+    честная проверка процесса), фокус (AppActivate, хрупкий), закрытие по процессу (self-exclusion).
+  - `input.ts` — клавиатура/мышь/scancode (игры) через сайдкар.
+  - `ground.ts` + `sidecar-client.ts` — UIA-грундинг (C# сайдкар).
+  - `browser.ts` + `browser-cdp.ts` — видимый управляемый Chrome (CDP).
+  - `jarvis-browser.ts` — НЕВИДИМЫЙ залогиненный браузер Джарвиса (web_open/read/act/login).
+  - `code-runner.ts` — `code_run` (python/node/powershell, wall-clock таймаут).
+  - `fs.ts` (CRUD + **`fs_edit`** точечная правка find/replace — для кодинга, дешевле перезаписи;
+    через **`self-guard.ts`** — рельсы самомодификации: HARD-блок записи в node_modules/.env/
+    запущенный бинарь + блок ЧТЕНИЯ .env §0), `system.ts` (питание/блокировка/медиа/громкость/буфер),
+    `office.ts` (Word/Excel COM), `messaging.ts` (Telegram через расширение).
+  - **`obs.ts`** — OBS Studio через **obs-websocket v5** (`obs_request` tool): ws→Hello→Identify(auth
+    base64(sha256(base64(sha256(pw+salt))+challenge)), офиц. тест-вектор в `obs.test.ts`)→Request.
+    Env `OBS_WEBSOCKET_HOST/PORT(4455)/PASSWORD`. ПРОГРАММНЫЙ путь вместо кликов: задать Twitch/ключ
+    (`SetStreamServiceSettings` rtmp_custom) + прочитать обратно (`Get*`) = дешёвая верификация без
+    скриншотов. ⚠️ раунд-трип к OBS вживую не прогнан (нет OBS в среде) — auth покрыт вектором.
+    Правило персоны v21: «сначала API/CLI программы, GUI — последним».
+  - **`screen.ts`** — ЗРЕНИЕ (§): `screen_capture` tool → Electron desktopCapturer снимает РАБОЧИЙ
+    монитор (§6) → base64 PNG → `dispatch.lookAtScreen` отдаёт image-блоком в tool_result (модель
+    ВИДИТ пиксели). ~1.5–2K токенов/взгляд, по необходимости. ⚠️ живой захват требует Electron —
+    юнит-тест покрывает конвертацию (`dispatch-vision.test.ts`), сам захват проверять вживую.
+- `monitors.ts` (§6 мультимонитор): `MonitorManager` — рабочий монитор Джарвиса (персист
+  `jarvis-monitors.json`). Tools `monitor_list`/`monitor_assign` (автономно) + ручная настройка в
+  Настройках→Общее→Мониторы (IPC monitorList/monitorAssign/monitorInfo); `monitor_set` — врем. override.
+  - **ОКНО реально позиционируется** (index.ts `placeWindow` через `monitors.setRelayout` +
+    `windowPosition`): открывается на РАБОЧЕМ (по умолч. неосновном) мониторе; `monitor_set`(primary)
+    = «выведи на основной» двигает окно на главный, (jarvis)/смена индекса — обратно/на новый.
+- `settings-store.ts` — ЛОКАЛЬНЫЙ персист настроек (вкладки Общее/Ключи): язык/контекст → JSON
+  `jarvis-settings.json`, API-ключи → ШИФРОВАННО через Electron `safeStorage` (нет шифрования ОС →
+  ключ НЕ пишем, честно сообщаем `keysSkipped`). IPC `settingsGet`/`settingsSave` (invoke). Прифилл
+  формы + честный фидбэк кнопки «Сохранить» в renderer.
+  - **Язык/контекст ПОТРЕБЛЯЮТСЯ сервером:** при сохранении и на каждом коннекте main шлёт
+    `client.settings`{language,context} → gateway `setLanguage`/`setContext` (profile.json) →
+    `UserContextSlot.context/language` → системный промпт (`persona/index.ts renderDynamic`).
+  - ⚠️ ГРАНИЦА: **API-ключи остаются ТОЛЬКО локально** (сервер их не получает, провайдеры берут
+    ключи из `.env` один раз при boot — горячая подмена не сделана). Вкладка **«Оплата» — заглушка**
+    (Pro/баланс статичны): реального тарифа/баланса в системе нет (§0 принцип 5 — без платёжных
+    данных), есть лишь `SpendGuard` (лимит/потрачено) на сервере, клиенту не отправляется.
+- `tier0/index.ts` — локальный $0-парсер dev-текста (renderer-ввод); громкость через SendKeys.
+- `audio/` `vad/` `wakeword/` — захват, VAD, wake-слово «Джарвис» (текстовый MockWakeWord, не акустика).
+- `sensors/system-profiler.ts` — что Джарвис знает о машине (detectApps по реальным exe) + **каталог
+  автоматизации** `detectAutomationTools`/`TOOL_SPECS`: детектит CLI/локальные-API на PATH/exe
+  (ffmpeg, tesseract, yt-dlp, git, gh, docker, ollama, blender, dotnet, psql, obs) и СООБЩАЕТ агенту
+  КАК драйвить программно (через code_run / спец-инструмент). Расширять покрытие — строкой в TOOL_SPECS,
+  НЕ новым актуатором (дедик-актуатор только для stateful-протоколов: OBS/Office). Правило персоны v21.
+
+## Ключевые потоки
+- **Ход (voice):** wake → STT(Deepgram) → `pipeline.onUserTurn` → `handleUserText` → перехваты/tier0/
+  LLM-петля → tool-use → (server-side ИЛИ ActionCommand→клиент→актуатор→ActionResult) → ответ →
+  verbalize → TTS(Yandex) → speak.chunk → клиент играет.
+- **tool→ПК:** LLM эмитит `app_launch{app}` → dispatch → `ActionCommand{kind:app.launch}` →
+  Session.sendAction → клиент `actuators/dispatch` → `apps.launchApp` → ActionResult назад.
+- **Аренда ввода §20:** GUI-команды (input/app/browser/ui) сериализуются per-session `AsyncMutex`;
+  не-GUI (fs/web/код) параллельно (Semaphore(3)).
+- **Проактивная речь §9:** `ReminderScheduler` fire → `speakQueued` (тот же канал, что итоги фоновых
+  задач) → speak.chunk. Клиент для проактива НЕ дорабатывался.
+
+## Что Джарвис УМЕЕТ на ПК (и где гэпы) — по ревью 2026-06-18
+| Операция | Инструмент | Статус |
+|---|---|---|
+| Запуск приложений/игр (Дота, Steam, Discord, Chrome) | `app_launch` (умный резолвер) | ✅ чинено: резолв из ОС + честный провал |
+| Закрыть/фокус окна | `app_close`/`app_focus` | ✅ close надёжен; focus хрупкий (AppActivate) |
+| Веб (поиск/открыть/читать/форма/логин) | `web_search`/`browser_*`/`web_*` | ✅ |
+| Медиа/громкость | `system_media`/`system_volume` + tier0 SendKeys | ✅ |
+| Файлы (CRUD/поиск) | `fs_*` | ✅ |
+| Печать/хоткеи/клики/scancode (игры) | `input_*` | ✅ (UIA нужен сайдкар) |
+| Telegram (отправка/чтение) | `telegram_send`/`telegram_read` (расширение) | ✅; прочие мессенджеры — через UI |
+| Система (блок/сон/выкл/настройки) | `system_lock`/`system_power` | ✅ (выключение с предупреждением) |
+| Мультимонитор (назначить рабочий экран) | `monitor_list`/`monitor_assign`/`monitor_set` + UI Настройки | ✅ автономно + вручную |
+| Q&A / поиск в вебе | `web_search` (Brave→DDG keyless) / `web_fetch` | ✅ работает БЕЗ ключа (DuckDuckGo Lite фолбэк) |
+| Текстовый чат + mute озвучки | вкладка «Чат» + кнопка mute в топбаре (§22) | ✅ печать→текст; mute=слышит+делает молча, ответ текстом |
+| Word/Excel | `office_word`/`office_excel` (COM) | ✅ (фолбэк code_run если нет Office) |
+| Напоминания/таймеры | `set_reminder`/`cancel`/`list` | ✅ новое (durable + проактивная озвучка) |
+| Рынок: котировки/свечи/теханализ/ФЬЮЧИ | `market_quote`/`market_candles`/`market_analyze` (MOEX ISS+Binance, спот+фьючи) | ✅ read-only (данные не совет) |
+| Прогнозы + EXPECTANCY/R | `trade_predict` (со стопом/тейком)/`trade_winrate` (матожидание в R + профит-фактор)/`trade_predictions`; LLM-эксперт в петле (`expert.ts`, env-гейт) | ✅ матожидание ≠ винрейт; path-сверка по R; денег не двигает |
+| Исполнение сделок деньгами | брокер+лимиты+confirm | ⛔ не начато (после трек-рекорда винрейта) |
+| Правка задачи на ходу | «нет не то / добавь ещё» → `Task.steer` впрыск в идущую петлю | ✅ не плодит вторую задачу |
+| Эмоция голоса «говори зло/радостно» | `emotion.ts` + TtsOpts.emotion | ⚠️ работает, но filipp (тек.голос) умеет лишь strict; полная эмоция = голос jane |
+| Произвольный лаунчер/экзотика | `code_run`/`web_search` | модель сама (по концепции) |
+
+**Открытые гэпы (из 35-агентного ревью):** App Paths/Пуск/Steam-резолв есть. UWP-ЗАПУСК (Калькулятор и
+т.п. через App Paths) ПОФИКШЕН вживую 2026-06-21 (стаб-лончер с ExitCode 0 = успех, не ложный провал);
+остаются UWP только в `Get-StartApps` без App Paths (резолв не находит) и Epic (Spotify-Store → честный
+провал → модель через code_run); verbose proactive-слой
+(salience/presence/triggers) — стабы; persistent Deepgram WS (churn ~0.3с/ход); дубль-синтез очереди.
+
+## Грабли (не наступать)
+- TTS-провайдер = **Yandex** (`TTS_PROVIDER=yandex`), НЕ ElevenLabs. Аудио-теги `[warmly]` Yandex
+  срезает. Эмоция Yandex — РОЛЬ голоса; **filipp эмоцию good/evil НЕ умеет** (проверено), только strict.
+- **LLM SDK timeout** (`anthropic.ts`): общий потолок HTTP-вызова `JARVIS_LLM_TIMEOUT_MS` (деф 60с, был
+  10с → тяжёлый кеш-промпт под нагрузкой давал `Request timed out`→стаб «связь прервалась»). Голос НЕ
+  страдает: стрим защищён stall-watchdog `JARVIS_LLM_STREAM_STALL_MS` (25с, нет токенов → abort).
+- **Напоминания идемпотентны** (`reminders/service.add`): идентичный текст+fireAt в окне
+  `JARVIS_REMINDER_DEDUP_MS` (15с) → не создаём дубль (под rapid-fire ход наслаивался → задвоение).
+- **ЖИВОЙ ТЕСТ КЛИЕНТСКИХ АКТУАТОРОВ (2026-06-21):** `POST /dev/action {kind,...}` шлёт РЕАЛЬНЫЙ
+  ActionCommand в подключённый Electron-клиент и возвращает настоящий результат (текст-драйвер их
+  фейкает). Клиент поднимать через **PowerShell** (`npx electron .`), НЕ Git Bash — bash даёт урезанный
+  PATH без System32 → резолв app.launch падает (артефакт, не баг). Найдено+пофикшено вживую: (1)
+  `app-resolve.ts` — UWP/Store-приложения (Калькулятор) РЕАЛЬНО запускались, но стаб-лончер (`calc.exe`)
+  выходит мгновенно → ложный «не вышло»; теперь ExitCode 0 = успешный хэндофф (app.launch UWP работает);
+  (2) `system.ts ps()` — буфер обмена бил кириллицу (PS писал в cp866, node читал utf8) → форс
+  `[Console]::OutputEncoding=UTF8` (round-trip кириллицы/греческого ✓).
+- Opus 4.8: НЕ слать temperature/top_p/top_k → HTTP 400. **thinking слать МОЖНО и НУЖНО, но ТОЛЬКО
+  `{type:"adaptive"}`** (`thinkingArg` в anthropic.ts даёт Opus именно adaptive; `enabled`+budget на Opus →
+  400, поэтому числовой эффорт коэрсится в adaptive). НЕ путать: «убрать thinking у Opus» вырубит
+  рассуждение — это НЕ грабля, adaptive рабочий. **max_tokens — это ВЫВОД за ход,
+  НЕ контекст** (контекст ~200K). Деф вывода env `JARVIS_MAX_OUTPUT_TOKENS` (8192, кламп [256,64000]).
+  Обрыв (`stop_reason=max_tokens`) на не-голосовом ходе ДОКРУЧИВАЕТСЯ в agent-loop (continuation,
+  кап `JARVIS_MAX_CONTINUATIONS`=6) — длинный код/реферат не отдаётся огрызком. Очень большой
+  документ — писать в файл по частям (fs_write/office_word), а не одним ответом.
+- PowerShell в актуаторах: цель через ENV (анти-инъекция). `where.exe` со `$ErrorActionPreference='Stop'`
+  бросает на ненаходе — использовать `Get-Command`. Кириллица в PS-скриптах — через char-коды (ASCII).
+- tier0 жадно ловит «запусти X» до LLM — следить, чтобы не глотал то, что должна решать модель.
+- Эскалация тира §7 срабатывает ТОЛЬКО если целевой тир — другая модель (`nextModel !== model`).
+  **Тиры РАЗВЕДЕНЫ (2026-06-23): слабый = Sonnet 4.6 (TIER1/TIER2), сильный = Opus 4.8 (TIER3).**
+  Дефолт ходов → `sonnet`-тир (Sonnet); при полном провале раунда §7 эскалирует sonnet→fable=Opus
+  (каскад ЖИВ). Haiku НЕ используем (забракована). `DEFAULT_MODELS` (shared) тоже без Haiku: дешёвый
+  слот = Sonnet. Хочешь иной сплит — TIER1/2/3_MODEL в .env (boot-WARN ловит схлопывание в одну модель).
+- НЕ закрывать сам Джарвис (electron/node) и критические процессы — `CRITICAL_PROCESSES` в apps.ts.
+
+## Боли по форензике логов (2026-06-18, приоритет открытых)
+1. **STT Deepgram WS churn** (HIGH): открытие/закрытие WS КАЖДЫЙ ход (~1600 open/close), 925 «ws error», 726 «ПУСТОЙ финал» (часть — реальная речь при peak>0.3) → главный корень «не слышит». Фикс: persistent WS + KeepAlive/Finalize вместо open-per-utterance.
+2. **Resume** (БЫЛ сломан, ФИКС 2026-06-19): раньше `registry.remove` убивал сессию МГНОВЕННО на дисконнекте + `makeSessionContext` пересоздавал `WorkingMemory` на каждом коннекте → каждый обрыв WS терял историю («Джарвис забыл, о чём говорили»). ФИКС: (а) `registry.scheduleRemove` держит сессию **resume-окно 120с** (`RESUME_GRACE_MS`), reconnect отменяет удаление; (б) память диалога скоуплена на `Session.scoped("workingMemory")` — переживает rebind. Клиент уже шлёт `resumeSessionId` (transport:291). +4 теста registry.
+   - **ПЕРСИСТ НА ДИСК (2026-06-19, корень «забывает»):** WS-resume не спасал от рестарта сервера (сессии в ОЗУ) — а я перезапускаю сервер на каждый деплой → контекст стирался КАЖДЫЙ раз (главная причина жалоб). ФИКС: `memory/working-store.ts` — `WorkingMemory` грузится/сохраняется в `data/memory/<userId>.json` (userId стабилен — захардкожен один dev-user `0000…0001`). `WorkingMemory.toJSON/restore/onChange` (дебаунс-сохранение 800мс, TTL 12ч, окно 20 реплик). Переживает рестарт СЕРВЕРА и КЛИЕНТА и обрыв WS. +5 тестов. Теперь мои рестарты НЕ стирают контекст.
+   - **РЕЕСТР ЗАДАЧ ТОЖЕ ПЕРЕЖИВАЕТ РЕСТАРТ (2026-06-19, «забывает ЧТО сделал»):** §20-реестр был in-memory → на «сделал?» после деплоя Джарвис не знал. ФИКС: `brain/tasks/task-store.ts` (`data/tasks.json`, атомарно, `flushTaskStores()` на graceful-close) + инжект последних СОДЕРЖАТЕЛЬНЫХ терминальных задач в НЕкешируемый хвост промпта (`formatRecentTasks`, окно 6ч). Restore не-терминальной задачи → честный `failed` («прервано перезапуском»). Прогнан адверсариал-ревью (9 находок исправлено: болтовня stepsDone=0 не всплывает, flush на shutdown, parseInt retention, NaN-коэрс, дата прерванной = startedAt, чистка .tmp). +20 тестов (604 серв. зелёные). См. [project_jarvis_continuity](memory).
+3. **Двойная обработка хода** (MEDIUM): interim+final коллизия → каждый ход логируется/обрабатывается дважды; dedup «дубль реплики» иногда съедает реальные команды. Обрабатывать только is_final/speech_final.
+4. **Wake-word жёсткий** (MEDIUM): STT искажает «Джарвис»→«Джервис/Jarvia» → команды молча дропаются «без обращения». Нужен fuzzy-матч + Deepgram keyterm. **ЧАСТИЧНО ФИКС (живой лог 2026-06-18):** `wake.ts` теперь ловит «г»-ослышки (Гарвис/Гарвиз/Jarry's — Deepgram роняет «дж»→«г»; prefix-гард пускал только дж/ж/я/j → 218 зовов игнорилось). Добавлены «г»-варианты + «г» в fuzzy. Остаётся Deepgram keyterm.
+   - **Ложный «Готово» по GUI (HIGH, живой лог):** на регион-блокнутой Я.Музыке (нет плеера) `input_click` возвращал ok («ткнул») → модель врала «Готово, заиграла», потом сама призналась. ФИКС: persona **v22** — «клик ≠ результат; проверь исход (screen_capture/browser_read) перед „готово“». **ПОДТВЕРЖДЕНО живым логом: честность сработала** — Джарвис сказал «за волну зацепиться не получилось… открыть видимым окном?» вместо вранья «готово».
+   - **Браузер вслепую → через расширение (v24, воркфлоу `jarvis-music-stt-deepdive`):** `browser_open/read/act` в РЕАЛЬНЫХ вкладках (chrome.scripting), мышь не трогается, окно не выпрыгивает, латентность 60с→2с. Зафикшено по воркфлоу:
+     - **hostOf падал на голом хосте** (`new URL("music.yandex.ru")` бросал → "" → дрейф в активную = Telegram). ФИКС: подставляем схему. Это был главный баг таргетинга под маской фикса.
+     - **Селектор play промахивался:** боевая Я.Музыка — `aria-label="Воспроизведение"/"Пауза"` (не «воспроизвести»), `media()`=null (MSE). ФИКС `pageActInPage`: матч глобальной кнопки по aria-label (RU+EN), идемпотентность, **проверка исхода** (a/л флипается на «Пауза» если звук пошёл → не врём «играет»; иначе честно «нужен живой клик по вкладке», autoplay).
+     - **tabId сквозь канал** (dispatch WeakMap `{url,tabId}` ← openOrFocus → tab.act/read): точное попадание + лечит гонку about:blank свежей вкладки. **Акт без open → честная ошибка** (не бьём в активную вслепую). Цель помним только на успехе того канала, которым открыли.
+     - Медиаклавиша (`system_media`) — НЕ primary для play (уходит владельцу SMTC, может попасть в игру); только резерв.
+   - **НЕ МЕШАТЬ активному пользователю (v26, по просьбе Антона):** физический ввод (`input.click/type/key` — SendInput, двигает курсор/шлёт нажатия) откладывается с ЧЕСТНЫМ отказом `denied:USER_BUSY`, если юзер СЕЙЧАС сам за компом. Сигнал — `powerMonitor.getSystemIdleTime()` (Electron, сек простоя); порог 4с. Тонкость: ввод САМОГО Джарвиса (SendInput) тоже сбрасывает idle → чистая логика `actuators/user-presence.ts isUserActive` отсекает свой ввод по `lastJarvisInputAt` (иначе мульти-шаг блокировал бы сам себя). Простаивает → действуем; активен → модель озвучивает «вижу, вы заняты, не хочу мешать» (persona §Поведение). Веб всё равно через `browser_act` (мышь не трогает вообще). Дотюн порога/толеранса — там же.
+   - **Barge-in не работал** (живой лог: `barge_in` 0 раз за 17 сессий речи): браузерный `echoCancellation` при double-talk душит микрофон → rms не добивал порог 600. ФИКС [audio/index.ts]: порог 600→350 + диагностика «пик rms за сессию речи» (лог) для дотюна. Цепочка end-to-end цела (клиент→cancelTts→playback.stop).
+   - **STT handshake-race** (короткая команда терялась: `close()` выбрасывал буфер до открытия WS → Deepgram ноль → «РЕЧЬ ПОТЕРЯНА»). ФИКС `deepgram.ts`: `close()` ждёт хендшейк (`waitForOpen`), если есть буфер.
+   - **ОТКРЫТО — persistent Deepgram WS (боль #1):** воркфлоу дал детальный план (5 точек поломки: epoch вместо захваченного gen, beginTurn() отдельно от open, finalize() вместо close, watchdog KeepAlive). ОТДЕЛЬНОЙ сессией — рискованно, нужны тесты ДО свопа. Handshake-race выше — частичное смягчение.
+5. **Латентность** (architectural): фраза→LLM = генерация Opus 2–13с (НЕ TTS, тот ~0.4с). Метрику «800мс» мерить как TTFB первого чанка; филлер-ack пока думает.
+6. **ОПЕРАЦИОННОЕ:** логи показали сервер под `tsx watch` (56 рестартов) → EADDRINUSE + шторм ECONNREFUSED у клиента + частичные сборки (отсюда были transient `isEmotion`/`registerSpeaker` ReferenceError). ЗАПУСКАТЬ `npx tsx src/index.ts`, НЕ watch. Сервер теперь имеет crash-backstop (uncaughtException не валит процесс; handshake в try/catch).
+> Многое из прежних логов УЖЕ исправлено в этой сессии (Дота/ложный успех, напоминания, keyless-поиск, гейт диктора, паузы-точки) — логи историчны.
+
+## Кибербезопасность (волны 1–3, 2026-06-24) — см. docs/SECURITY.md + docs/SECURITY_AUDIT_2026-06-24.md
+**Политика владельца:** мажордом для ОДНОГО юзера с ПОЛНЫМ управлением Windows. `code.run` НАМЕРЕННО
+мощный (НЕ песочница) — защита не в урезании мощи, а в том, что ею управляет только владелец.
+- **Граница данные/инструкции (гл. вектор, анти-prompt-injection):** недоверенный вывод инструментов
+  (`web_*`/`browser_read`/`browser_inspect`) оборачивается в `<untrusted_content source="…">`
+  (`dispatch.untrusted()`), `screen_capture` помечен «текст = данные», persona **v44** запрещает
+  исполнять инструкции из читаемого текста. Это замена песочнице code.run. **Ревью 2026-07-04 (M11):**
+  живой контекст ПК (заголовки окон/имена процессов из `client.system`) — тоже влияемые атакующим данные →
+  оборачиваются тем же `<untrusted_content source="live-system">` при сборке промпта (`persona/index.ts`);
+  клиент (`sensors/system-snapshot.ts`) шлёт заголовки СЫРЫМИ, тег навешивает сервер.
+- **Денилист секретов** (`apps/client/.../self-guard.isSecretPath`): `.env`/`id_rsa`/`*.pem`/`*.key`/
+  `credentials-master.key`/`Login Data`/`.ssh`/`.aws` — блок read+write+delete+move+search в `fs_*`.
+  **Ревью 2026-07-04:** C2 — денилист ловит и САМУ папку `.ssh`/`.aws`/`.gnupg` (regex `(?:[\\/]|$)`, не
+  только файлы внутри); H3 — `fs_search` фильтрует секреты и в ветке поиска ПО ИМЕНИ (не только по контенту);
+  H1 — `office_word`/`office_excel` тоже проходят `assertReadable`/`assertWritable` до COM.
+- **Сеть fail-closed:** `bind.ts` — не-loopback только при `JARVIS_ALLOW_REMOTE` И `JARVIS_AUTH_STRICT`
+  (иначе → 127.0.0.1). HTTP `/dev/*`+`/ext/*` (исполняли действия БЕЗ auth) — за `JARVIS_DEV_HTTP=1`
+  (деф ВЫКЛ → 404) + loopback-only + опц. `JARVIS_DEV_TOKEN`. `/ext` WS — Origin-чек `chrome-extension://`.
+  `browser_*` — SSRF-гард (приватная сеть/loopback/метаданные/`file:`/`chrome:` блок, `browserUrlBlocked`).
+  **Ревью 2026-07-04 (C1):** `browserUrlBlocked` больше НЕ fail-open на голом хосте без схемы (`new URL`
+  бросал → нормализуем `https://` и прогоняем те же проверки; непарсящийся → блок). `web_login` добавлен
+  в `URL_NAV_TOOLS`; `jarvis-browser`/`browser-cdp` санитайзят url (`safeBrowserUrl`: http/https + reject
+  `-`-leading argv → анти Chrome-flag-инъекция, H2/L9). `input_key` — учёт удерживаемых модификаторов между
+  `down`/`up` (Alt+F4 двумя вызовами блокируется, H4).
+- **Least-privilege:** MCP-дети — env-allowlist (`manager.baseChildEnv`), не весь `process.env`; версии
+  MCP в `mcp.json` ЗАПИНЕНЫ (H16, не `@latest`).
+- **НЕ реализовано осознанно** (политика «полное управление Windows»): сэндбокс code.run (Job Object/
+  CLM/firewall/CWD-jail), confirm на каждый PowerShell. **Инфра/отложено:** TLS/wss (reverse-proxy),
+  overwrite-confirm fs, admin-гейт `skill_promote` (hosted).
+
+## Где искать
+- Новый инструмент → `packages/tools/src/index.ts` (схема) + `brain/tools/dispatch.ts` (хендлер) +
+  (если ActionCommand) `packages/protocol/actions.ts` + `apps/client/main/actuators/`.
+- Поведение/тон → `brain/persona/persona.md` (бампать version при правке тона).
+- Что было сделано/решено → авто-память `MEMORY.md` (project_jarvis_*), `docs/STATUS.md`, `docs/NEXT_SESSION.md`.

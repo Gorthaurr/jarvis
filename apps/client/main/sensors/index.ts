@@ -1,14 +1,17 @@
 /**
- * Сенсоры контекста клиента (§9) — вход salience-движка сервера.
+ * Сенсоры контекста клиента (§9) — вход «уважительной проактивности» сервера.
  *
  * Собирает ClientContext (§5): активное приложение, fullscreen, занятость микрофона
  * communications-приложением (Zoom/Discord/телефония), залочен ли экран. Сервер использует
- * это, чтобы решать, уместно ли проактивно вмешиваться (§9): не дёргать во время звонка/игры.
+ * это, чтобы НЕ дёргать пользователя проактивной речью во время звонка/игры/блокировки
+ * (см. pipeline.isUserBusy / speakQueued).
  *
- * На Windows реальный сбор — через UIA/Win32 (foreground window, fullscreen-флаг) и аудио-сессии
- * (occupied mic). Часть — через сайдкар apps/sidecar-win.
+ * Сама Sensors — БЕЗ зависимости от Electron (тестируема): реальные сигналы инжектит main через
+ * setLocked/setFullscreen/setActiveApp (powerMonitor lock-события и т.п.). Снимок шлётся как
+ * client.context периодически И сразу при изменении (emit on change → проактивность отдаётся быстро).
  *
- * // TODO(M3): реализовать реальный сбор; на M0 возвращаем безопасные дефолты.
+ * Реализовано: `locked` (powerMonitor lock/unlock в main — надёжно). TODO: реальные fullscreen
+ * (Win32 foreground-rect) и micBusyByOtherApp (аудио-сессии) — пока дефолт false, гейт их учтёт сам.
  */
 import { EventEmitter } from "node:events";
 import type { ClientContext } from "@jarvis/protocol";
@@ -23,9 +26,14 @@ export interface SensorsEvents {
 
 export class Sensors extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
+  private locked = false;
+  private fullscreen = false;
+  private micBusyByOtherApp = false;
+  private activeApp = "unknown";
 
   start(intervalMs = 5000): void {
-    log.info("(stub) sensors запущены (M3) — безопасные дефолты контекста");
+    log.info("sensors запущены (§9 не мешать) — locked через powerMonitor, остальное дефолт");
+    this.emit("context", this.snapshot()); // сразу отдать стартовый контекст
     this.timer = setInterval(() => this.emit("context", this.snapshot()), intervalMs);
   }
 
@@ -36,13 +44,38 @@ export class Sensors extends EventEmitter {
     }
   }
 
-  /** Текущий снимок. На M0 — консервативные дефолты (не мешать = не блокировать). */
+  /** §9: экран заблокирован/разблокирован (powerMonitor 'lock-screen'/'unlock-screen' из main). */
+  setLocked(v: boolean): void {
+    if (this.locked === v) return;
+    this.locked = v;
+    this.emit("context", this.snapshot()); // ИЗМЕНЕНИЕ → сразу шлём (сервер отдаст отложенную речь по разблокировке)
+  }
+
+  /** §9: активное приложение полноэкранно (игра/видео/презентация) — инжектит main, когда научится. */
+  setFullscreen(v: boolean): void {
+    if (this.fullscreen === v) return;
+    this.fullscreen = v;
+    this.emit("context", this.snapshot());
+  }
+
+  /** §9: микрофон занят другим приложением (звонок) — инжектит main. */
+  setMicBusy(v: boolean): void {
+    if (this.micBusyByOtherApp === v) return;
+    this.micBusyByOtherApp = v;
+    this.emit("context", this.snapshot());
+  }
+
+  setActiveApp(name: string): void {
+    this.activeApp = name || "unknown";
+  }
+
+  /** Текущий снимок контекста. */
   snapshot(): ClientContext {
     return {
-      activeApp: "unknown",
-      fullscreen: false,
-      micBusyByOtherApp: false,
-      locked: false,
+      activeApp: this.activeApp,
+      fullscreen: this.fullscreen,
+      micBusyByOtherApp: this.micBusyByOtherApp,
+      locked: this.locked,
     };
   }
 }

@@ -8,6 +8,7 @@
  * Принцип латентности (§10): НИКОГДА не ждать полный результат — стримим частичные
  * транскрипты и первый аудио-чанк TTS после первого предложения.
  */
+import type { Emotion } from "./tts-emotion.js";
 
 // ── STT (streaming) ──────────────────────────────────────────
 
@@ -18,6 +19,12 @@ export interface SttPartial {
   final: boolean;
   /** Уверенность 0..1, если провайдер отдаёт. */
   confidence?: number;
+  /**
+   * §Волна2 (2.6): провайдер сам зафиксировал КОНЕЦ ФРАЗЫ (Deepgram speech_final: речь + ~300мс
+   * тишины по его VAD) — сигнал раннего серверного эндпоинта (быстрее клиентской цепочки
+   * hangover+minSilence ~520мс). Провайдеры без сигнала поле не ставят (поведение как раньше).
+   */
+  speechFinal?: boolean;
 }
 
 export interface SttOpts {
@@ -49,6 +56,8 @@ export interface ISttProvider {
   readonly live: boolean;
   /** Открыть новый стрим распознавания. */
   open(opts: SttOpts): SttStream;
+  /** Освободить ресурсы (персистентный сокет) на teardown сервера. Необязателен. */
+  dispose?(): void;
 }
 
 // ── TTS (streaming) ──────────────────────────────────────────
@@ -63,6 +72,19 @@ export interface TtsChunk {
 export interface TtsOpts {
   voiceId?: string;
   sampleRate?: number;
+  /**
+   * Тонкая подстройка голоса под режим-маску (§11): сдвигает ПОДАЧУ на том же голосе.
+   * stability/style 0..1, speed ~0.7..1.2 (ElevenLabs voice_settings). undefined → дефолт.
+   */
+  stability?: number;
+  style?: number;
+  speed?: number;
+  /**
+   * Семантическая ЭМОЦИЯ подачи (§21): провайдеро-независимая (happy/angry/strict/whisper/neutral).
+   * Каждый TTS-провайдер сам отображает её на свои возможности (Yandex — роль голоса, ElevenLabs v3 —
+   * аудио-тег). См. integrations/tts-emotion.ts. undefined → без эмоции (нейтрально/как настроено).
+   */
+  emotion?: Emotion;
 }
 
 /**
@@ -82,6 +104,95 @@ export interface ITtsProvider {
   readonly live: boolean;
   /** Начать синтез текста; чанки стримятся по мере готовности. */
   synthesize(text: string, opts?: TtsOpts): TtsStream;
+}
+
+// ── аудио-теги интонации (ElevenLabs v3, §21) ────────────────
+
+/**
+ * Аудио-теги интонации v3 в квадратных скобках: [warmly], [thoughtfully], [chuckles softly].
+ * v3 их ИНТЕРПРЕТИРУЕТ (эмоция/подача); другие модели прочитали бы их вслух, а в тексте-дисплее
+ * они мусор — поэтому вырезаем везде, КРОМЕ TTS-пути на v3.
+ */
+const AUDIO_TAG_RE = /\[[^\]\n]{1,40}\]/gu;
+/** Валидный v3-тег — только английские слова в скобках ([warmly]), не «[1]»/«[см.]». */
+const V3_TAG_OK = /^\[[a-z][a-z ]{1,30}\]$/u;
+
+/** Убрать ВСЕ аудио-теги (для дисплея и моделей кроме v3). */
+export function stripAudioTags(s: string): string {
+  return s
+    .replace(AUDIO_TAG_RE, "")
+    .replace(/\s+([,.!?…;:])/gu, "$1")
+    .replace(/[ \t]{2,}/gu, " ")
+    .trim();
+}
+
+/** Оставить только валидные английские v3-теги, мусорные скобки убрать (защита на v3-пути). */
+export function sanitizeV3Tags(s: string): string {
+  return s
+    .replace(AUDIO_TAG_RE, (m) => (V3_TAG_OK.test(m) ? m : ""))
+    .replace(/[ \t]{2,}/gu, " ")
+    .trim();
+}
+
+/** Поддерживает ли модель аудио-теги интонации (семейство eleven_v3). */
+export function isV3Model(modelId: string | undefined): boolean {
+  return (modelId ?? "").toLowerCase().startsWith("eleven_v3");
+}
+
+// ── адаптивная скорость речи для длинных фраз (§10/§21) ───────
+
+/**
+ * Запрос Антона: «немного ускорять речь, если фраза длинная». Долгий ответ дворецкого на штатном
+ * темпе тянется и утомляет — на длинной фразе чуть поджимаем темп, на короткой не трогаем.
+ * Параметры — общие для ВСЕХ TTS-провайдеров (Yandex/ElevenLabs), единый источник правды (DRY).
+ */
+export interface SpeedupConfig {
+  /** Включена ли адаптация (JARVIS_TTS_SPEEDUP=0 → выкл, темп = base всегда). */
+  enabled: boolean;
+  /** Максимальный множитель темпа на самой длинной фразе (напр. 1.12 = +12%). */
+  max: number;
+  /** Длина (символов спикабельного текста) ≤ этой → база, ускорения нет. */
+  minChars: number;
+  /** Длина ≥ этой → полный множитель max; между min и full — линейно. */
+  fullChars: number;
+}
+
+function envNumber(name: string, fallback: number, lo: number, hi: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const n = Number.parseFloat(raw);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+}
+
+/** Конфиг адаптивной скорости из env (тюнинг без перекомпиляции). */
+export function speedupConfigFromEnv(): SpeedupConfig {
+  const minChars = envNumber("JARVIS_TTS_SPEEDUP_MIN_CHARS", 90, 0, 100_000);
+  const fullChars = envNumber("JARVIS_TTS_SPEEDUP_FULL_CHARS", 280, 1, 100_000);
+  return {
+    enabled: (process.env.JARVIS_TTS_SPEEDUP ?? "1") !== "0",
+    max: envNumber("JARVIS_TTS_SPEEDUP_MAX", 1.12, 1, 2),
+    minChars,
+    // full всегда строго больше min (иначе деление на ноль / ступенька)
+    fullChars: Math.max(fullChars, minChars + 1),
+  };
+}
+
+/**
+ * Множитель темпа речи под длину фразы. Короткая (≤minChars) → base без изменений; длинная
+ * (≥fullChars) → base*max; между — линейная интерполяция. Чистая функция (тестируется без сети).
+ * Текст следует передавать УЖЕ очищенный от аудио-тегов/разметки (как реально звучит).
+ */
+export function adaptiveSpeed(
+  text: string,
+  base: number,
+  cfg: SpeedupConfig = speedupConfigFromEnv(),
+): number {
+  if (!cfg.enabled || cfg.max <= 1) return base;
+  const len = text.trim().length;
+  if (len <= cfg.minChars) return base;
+  const span = Math.max(1, cfg.fullChars - cfg.minChars);
+  const t = Math.min(1, (len - cfg.minChars) / span);
+  return base * (1 + (cfg.max - 1) * t);
 }
 
 // ── Mock-реализации (тесты и режим без ключей) ───────────────

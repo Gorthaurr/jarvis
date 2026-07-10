@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<template id="__bundler_thumbnail"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#0a0b0e"/><g transform="translate(50 44)"><circle r="20" fill="none" stroke="#5ed6ff" stroke-width="2" opacity="0.5"/><g fill="#5ed6ff"><rect x="-9" y="-3" width="2.4" height="6" rx="1.2"/><rect x="-4.5" y="-7" width="2.4" height="14" rx="1.2"/><rect x="0" y="-10" width="2.4" height="20" rx="1.2"/><rect x="4.5" y="-7" width="2.4" height="14" rx="1.2"/><rect x="9" y="-3" width="2.4" height="6" rx="1.2"/></g></g><text x="50" y="82" fill="#5ed6ff" font-family="sans-serif" font-size="9" font-weight="700" letter-spacing="2" text-anchor="middle">JARVIS</text></svg></template>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@400;450;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.16) transparent; }
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); background-clip: padding-box; }
+  ::-webkit-scrollbar-button { display: none; }
+  html, body { margin: 0; }
+  body {
+    background: #0d0f13;
+    font-family: "Manrope", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  :root {
+    --ink: #eef6fa;
+    --soft: #a4b6c1;
+    --mute: #5f6e78;
+    --faint: #3f4a52;
+    --acc: #5ed6ff;
+    --acc-deep: #1f9fd6;
+    --on-acc: #06212b;
+    --warn: #ff7a7a;
+    --line: rgba(255,255,255,0.07);
+    --line2: rgba(255,255,255,0.13);
+    --win-bg: radial-gradient(110% 50% at 50% -2%, rgba(94,214,255,0.07), transparent 55%), #0a0b0e;
+  }
+  @keyframes eq { 0%,100% { transform: scaleY(0.30); } 50% { transform: scaleY(1); } }
+  @keyframes halo { 0%,100% { transform: scale(0.9); opacity: 0.4; } 50% { transform: scale(1.1); opacity: 0.7; } }
+  @keyframes dotpulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.5); opacity: 0.5; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes indet { 0% { transform: translateX(-100%); } 100% { transform: translateX(330%); } }
+  @media (prefers-reduced-motion: reduce) { .j-anim { animation: none !important; } }
+</style>
+</helmet>
+
+<div style="min-height: 100vh; padding: 60px 48px 84px; background: radial-gradient(120% 80% at 50% -10%, #181c24, #0c0e12 60%); display: flex; flex-direction: column; align-items: center; gap: 56px;">
+
+  <header style="max-width: 740px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 16px;">
+    <span style="font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0.34em; text-transform: uppercase; color: var(--acc);">Премиум-минимал · полный проход</span>
+    <h1 style="margin: 0; font-family: 'Manrope', sans-serif; font-size: 40px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.12; color: var(--ink);">Jarvis, целиком</h1>
+    <p style="margin: 0; font-size: 16px; line-height: 1.6; color: var(--soft); text-wrap: pretty; max-width: 600px;">Тишина, воздух, тонкая линия голоса. Все состояния, задача, подтверждение, запись навыка и настройки — в одном языке.</p>
+  </header>
+
+  <!-- ════════════ СЕКЦИЯ: СОСТОЯНИЯ ════════════ -->
+  <section style="display: flex; flex-direction: column; gap: 22px; width: 100%; align-items: center;">
+    <div style="display: flex; align-items: center; gap: 14px; width: 100%; max-width: 1264px;">
+      <span style="font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; color: var(--mute);">Состояния</span>
+      <span style="flex: 1; height: 1px; background: var(--line);"></span>
+    </div>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 44px; justify-content: center;">
+
+      <!-- Слушаю -->
+      <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+        <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">01</span> &nbsp;Слушаю</span>
+        <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: var(--win-bg);">
+          <div style="position: absolute; inset: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,0.05); border-radius: 26px; pointer-events: none;"></div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px;">
+            <span style="font-family: 'Manrope', sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink);">Jarvis</span>
+            <div style="display: flex; align-items: center; gap: 14px;">
+              <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span>
+              <span style="display: grid; place-items: center; width: 30px; height: 30px; color: var(--mute);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px;">
+            <div class="j-anim" style="position: absolute; width: 240px; height: 240px; border-radius: 50%; background: radial-gradient(circle, rgba(94,214,255,0.13), transparent 68%); animation: halo 6s ease-in-out infinite;"></div>
+            <span style="position: relative; font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.42em; text-transform: uppercase; color: var(--soft);">Слушаю</span>
+            <div style="position: relative;">{{ waveListen }}</div>
+          </div>
+          <div style="position: relative; flex: none; margin: 0 24px; padding-top: 20px; border-top: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; gap: 14px;">
+            <span style="font-size: 14px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">«Deep Focus» включён</span>
+            <span style="font-family: 'Manrope', sans-serif; font-size: 14px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums;">50:00</span>
+          </div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 24px 22px;">
+            <span class="j-anim" style="width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 8px var(--acc); animation: dotpulse 1.6s ease-in-out infinite;"></span>
+            <span style="flex: 1; font-size: 12.5px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">поставь музыку для фокуса</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Думаю -->
+      <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+        <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">02</span> &nbsp;Думаю</span>
+        <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: var(--win-bg);">
+          <div style="position: absolute; inset: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,0.05); border-radius: 26px; pointer-events: none;"></div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px;">
+            <span style="font-family: 'Manrope', sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink);">Jarvis</span>
+            <div style="display: flex; align-items: center; gap: 14px;">
+              <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span>
+              <span style="display: grid; place-items: center; width: 30px; height: 30px; color: var(--mute);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 34px;">
+            <div class="j-anim" style="position: absolute; width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle, rgba(94,214,255,0.10), transparent 68%); animation: halo 6s ease-in-out infinite;"></div>
+            <span style="position: relative; font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.42em; text-transform: uppercase; color: var(--soft);">Думаю</span>
+            <svg class="j-anim" viewBox="0 0 120 120" width="116" height="116" style="position: relative; animation: spin 1.15s linear infinite; filter: drop-shadow(0 0 10px rgba(94,214,255,0.45));"><circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="2"/><circle cx="60" cy="60" r="54" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-dasharray="64 275"/></svg>
+          </div>
+          <div style="position: relative; flex: none; margin: 0 24px; padding-top: 20px; border-top: 1px solid var(--line);">
+            <span style="font-size: 14px; color: var(--soft);">подбираю билеты на выходные</span>
+          </div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 24px 22px;">
+            <span class="j-anim" style="width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 8px var(--acc); animation: dotpulse 1s ease-in-out infinite;"></span>
+            <span style="flex: 1; font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--mute);">Обрабатываю</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Говорю -->
+      <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+        <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">03</span> &nbsp;Говорю</span>
+        <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: var(--win-bg);">
+          <div style="position: absolute; inset: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,0.05); border-radius: 26px; pointer-events: none;"></div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px;">
+            <span style="font-family: 'Manrope', sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink);">Jarvis</span>
+            <div style="display: flex; align-items: center; gap: 14px;">
+              <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span>
+              <span style="display: grid; place-items: center; width: 30px; height: 30px; color: var(--mute);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 30px;">
+            <div class="j-anim" style="position: absolute; width: 260px; height: 260px; border-radius: 50%; background: radial-gradient(circle, rgba(94,214,255,0.18), transparent 66%); animation: halo 4.4s ease-in-out infinite;"></div>
+            <span style="position: relative; font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.42em; text-transform: uppercase; color: var(--acc);">Говорю</span>
+            <div style="position: relative;">{{ waveSpeak }}</div>
+          </div>
+          <div style="position: relative; flex: none; margin: 0 20px 4px; padding: 16px 18px; border-radius: 16px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);">
+            <div style="font-family: 'Manrope', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--acc); margin-bottom: 7px;">Джарвис</div>
+            <div style="font-size: 14.5px; line-height: 1.55; color: var(--soft);">Нашёл три рейса. Самый удобный — в 09:40, без пересадок.</div>
+          </div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; gap: 10px; padding: 14px 24px 22px;">
+            <span class="j-anim" style="width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 8px var(--acc); animation: dotpulse 0.85s ease-in-out infinite;"></span>
+            <span style="flex: 1; font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--acc);">Говорю</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ════════════ СЕКЦИЯ: ЗАДАЧА И ПОДТВЕРЖДЕНИЕ ════════════ -->
+  <section style="display: flex; flex-direction: column; gap: 22px; width: 100%; align-items: center;">
+    <div style="display: flex; align-items: center; gap: 14px; width: 100%; max-width: 1264px;">
+      <span style="font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; color: var(--mute);">Задача · подтверждение · навык</span>
+      <span style="flex: 1; height: 1px; background: var(--line);"></span>
+    </div>
+
+    <div style="display: flex; flex-wrap: wrap; gap: 44px; justify-content: center;">
+
+      <!-- Задача в работе -->
+      <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+        <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">04</span> &nbsp;Задача в работе</span>
+        <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: var(--win-bg);">
+          <div style="position: absolute; inset: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,0.05); border-radius: 26px; pointer-events: none;"></div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px;">
+            <span style="font-family: 'Manrope', sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink);">Jarvis</span>
+            <div style="display: flex; align-items: center; gap: 14px;">
+              <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span>
+              <span style="display: grid; place-items: center; width: 30px; height: 30px; color: var(--mute);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 26px;">
+            <svg class="j-anim" viewBox="0 0 120 120" width="92" height="92" style="animation: spin 1.15s linear infinite; filter: drop-shadow(0 0 10px rgba(94,214,255,0.4));"><circle cx="60" cy="60" r="54" fill="none" stroke="rgba(255,255,255,0.07)" stroke-width="2"/><circle cx="60" cy="60" r="54" fill="none" stroke="var(--acc)" stroke-width="2" stroke-linecap="round" stroke-dasharray="58 280"/></svg>
+            <span style="font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 0.42em; text-transform: uppercase; color: var(--soft);">Выполняю</span>
+          </div>
+          <!-- task card -->
+          <div style="position: relative; flex: none; margin: 0 18px; padding: 18px; border-radius: 18px; background: rgba(255,255,255,0.025); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 16px;">
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); white-space: nowrap;">Шаг 3 из 5</span>
+                <span style="font-family: 'Manrope', sans-serif; font-size: 13px; font-weight: 700; color: var(--acc); font-variant-numeric: tabular-nums;">60%</span>
+              </div>
+              <span style="font-size: 16px; font-weight: 500; line-height: 1.35; color: var(--ink);">Бронирую столик на 19:30</span>
+              <div style="height: 6px; border-radius: 999px; background: rgba(255,255,255,0.07); overflow: hidden;"><div style="height: 100%; width: 60%; border-radius: 999px; background: var(--acc); box-shadow: 0 0 10px rgba(94,214,255,0.6);"></div></div>
+            </div>
+            <div style="display: flex; gap: 10px;">
+              <button style="flex: 1; height: 44px; border-radius: 12px; border: 1px solid rgba(255,122,122,0.32); background: transparent; color: var(--warn); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Стоп</button>
+              <button style="flex: 1; height: 44px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.04); color: var(--ink); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Пауза</button>
+            </div>
+          </div>
+          <div style="position: relative; flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 24px 22px;">
+            <span class="j-anim" style="width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 8px var(--acc); animation: dotpulse 1s ease-in-out infinite;"></span>
+            <span style="flex: 1; font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--mute);">Выполняю задачу</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Подтверждение (modal) -->
+      <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+        <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">05</span> &nbsp;Подтверждение</span>
+        <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: var(--win-bg);">
+          <!-- faint backdrop (общий) -->
+          <div style="position: absolute; inset: 0; opacity: 0.5; display: flex; flex-direction: column;">
+            <div style="flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px;">
+              <span style="font-family: 'Manrope', sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink);">Jarvis</span>
+              <div style="display: flex; align-items: center; gap: 14px;"><span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span><span style="display: grid; place-items: center; width: 30px; height: 30px; color: var(--mute);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span></div>
+            </div>
+            <div style="flex: 1; display: flex; align-items: center; justify-content: center;"><div style="width: 152px; height: 152px; border-radius: 50%; border: 2px solid var(--line2);"></div></div>
+            <div style="flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 24px 22px;"><span style="width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 8px var(--acc);"></span><span style="font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--mute);">Слушаю</span></div>
+          </div>
+          <div style="position: absolute; inset: 0; background: rgba(7,9,12,0.66); backdrop-filter: blur(8px);"></div>
+          <!-- modal -->
+          <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px;">
+            <div style="width: 100%; min-height: 320px; border-radius: 20px; background: #111419; border: 1px solid var(--line2); box-shadow: 0 24px 60px rgba(0,0,0,0.6); padding: 24px; display: flex; flex-direction: column; gap: 16px;">
+              <div style="display: flex; flex-direction: column; gap: 11px;">
+                <span style="align-self: flex-start; font-family: 'Manrope', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; color: var(--acc); background: rgba(94,214,255,0.1); border: 1px solid rgba(94,214,255,0.22);">Отправка</span>
+                <h3 style="margin: 0; font-family: 'Manrope', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: -0.015em; color: var(--ink);">Подтверждение</h3>
+              </div>
+              <div style="font-size: 15px; line-height: 1.55; color: var(--soft);">Отправить <span style="color: var(--ink); font-weight: 600;">Антону</span>: «Буду к 19:00, бронь на двоих».</div>
+              <div style="display: flex; flex-direction: column; gap: 8px;">
+                <label style="font-size: 13px; font-weight: 500; color: var(--soft);">Правка (необязательно)</label>
+                <div style="height: 46px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.03); display: flex; align-items: center; padding: 0 14px; font-size: 14.5px; color: var(--mute);">напр. «короче и без эмодзи»</div>
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button style="flex: 1; height: 46px; border-radius: 12px; border: 1px solid rgba(255,122,122,0.32); background: transparent; color: var(--warn); font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer;">Отклонить</button>
+                <button style="flex: 1; height: 46px; border-radius: 12px; border: 1px solid var(--line); background: transparent; color: var(--soft); font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer;">Переписать</button>
+                <button style="flex: 1; height: 46px; border-radius: 12px; border: none; background: var(--acc); color: var(--on-acc); font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 0 0 18px rgba(94,214,255,0.35);">Готово</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Запись навыка (modal) -->
+      <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+        <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">06</span> &nbsp;Запись навыка</span>
+        <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: var(--win-bg);">
+          <!-- faint backdrop (общий) -->
+          <div style="position: absolute; inset: 0; opacity: 0.5; display: flex; flex-direction: column;">
+            <div style="flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px;">
+              <span style="font-family: 'Manrope', sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink);">Jarvis</span>
+              <div style="display: flex; align-items: center; gap: 14px;"><span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span><span style="display: grid; place-items: center; width: 30px; height: 30px; color: var(--mute);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="12" cy="12" r="3.1"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span></div>
+            </div>
+            <div style="flex: 1; display: flex; align-items: center; justify-content: center;"><div style="width: 152px; height: 152px; border-radius: 50%; border: 2px solid var(--line2);"></div></div>
+            <div style="flex: none; display: flex; align-items: center; gap: 10px; padding: 16px 24px 22px;"><span style="width: 6px; height: 6px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 8px var(--acc);"></span><span style="font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.16em; text-transform: uppercase; color: var(--mute);">Слушаю</span></div>
+          </div>
+          <div style="position: absolute; inset: 0; background: rgba(7,9,12,0.66); backdrop-filter: blur(8px);"></div>
+          <!-- modal -->
+          <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 20px;">
+            <div style="width: 100%; min-height: 320px; border-radius: 20px; background: #111419; border: 1px solid var(--line2); box-shadow: 0 24px 60px rgba(0,0,0,0.6); padding: 24px; display: flex; flex-direction: column; gap: 16px;">
+              <div style="display: flex; flex-direction: column; gap: 11px;">
+                <span style="align-self: flex-start; font-family: 'Manrope', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; padding: 4px 10px; border-radius: 999px; color: var(--soft); background: rgba(255,255,255,0.05); border: 1px solid var(--line);">Навык</span>
+                <h3 style="margin: 0; font-family: 'Manrope', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: -0.015em; color: var(--ink);">Сделать скилл</h3>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 14px; padding: 16px; border-radius: 14px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);">
+                <div style="display: inline-flex; align-items: center; gap: 9px; font-size: 13.5px; font-weight: 600; color: var(--warn);"><span class="j-anim" style="width: 9px; height: 9px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 10px var(--warn); animation: dotpulse 1.1s ease-in-out infinite;"></span>Идёт запись</div>
+                <div style="display: flex; align-items: baseline; justify-content: space-between;"><span style="font-size: 14px; color: var(--soft);">Поймано действий</span><span style="font-family: 'Manrope', sans-serif; font-size: 24px; font-weight: 700; color: var(--acc); font-variant-numeric: tabular-nums;">12</span></div>
+                <div style="font-size: 13.5px; color: var(--acc); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Клик: кнопка «Создать отчёт»</div>
+              </div>
+              <p style="margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--mute);">Покажите всё по шагам. Когда закончите — нажмите «Готово».</p>
+              <div style="display: flex; gap: 8px; margin-top: auto;">
+                <button style="flex: 1; height: 46px; border-radius: 12px; border: 1px solid rgba(255,122,122,0.32); background: transparent; color: var(--warn); font-family: inherit; font-size: 14px; font-weight: 500; cursor: pointer;">Отмена</button>
+                <button style="flex: 1.4; height: 46px; border-radius: 12px; border: none; background: var(--acc); color: var(--on-acc); font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; box-shadow: 0 0 18px rgba(94,214,255,0.35);">Готово</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ════════════ СЕКЦИЯ: НАСТРОЙКИ ════════════ -->
+  <section style="display: flex; flex-direction: column; gap: 22px; width: 100%; align-items: center;">
+    <div style="display: flex; align-items: center; gap: 14px; width: 100%; max-width: 1264px;">
+      <span style="font-family: 'Manrope', sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; color: var(--mute);">Настройки</span>
+      <span style="flex: 1; height: 1px; background: var(--line);"></span>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 16px; width: 392px;">
+      <span style="padding-left: 4px; font-size: 13px; color: var(--soft);"><span style="font-family: 'Manrope', sans-serif; font-weight: 700; color: var(--acc);">07</span> &nbsp;Панель настроек</span>
+      <div style="position: relative; width: 392px; height: 624px; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column; border: 1px solid var(--line); box-shadow: 0 40px 90px -34px rgba(0,0,0,0.82); background: #0a0b0e;">
+        <div style="position: absolute; inset: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,0.05); border-radius: 26px; pointer-events: none; z-index: 2;"></div>
+        <!-- head -->
+        <div style="flex: none; display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 14px;">
+          <h2 style="margin: 0; font-family: 'Manrope', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink);">Настройки</h2>
+          <span style="display: grid; place-items: center; width: 32px; height: 32px; border-radius: 11px; border: 1px solid var(--line); background: rgba(255,255,255,0.03); color: var(--soft);"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>
+        </div>
+        <!-- tabs -->
+        <div style="flex: none; padding: 0 20px 12px;">
+          <div style="display: flex; gap: 3px; padding: 3px; border-radius: 12px; background: rgba(255,255,255,0.04); border: 1px solid var(--line);">
+            <button onClick="{{ goGeneral }}" style="flex: 1; height: 32px; border: none; cursor: pointer; background: transparent; position: relative; display: grid; place-items: center; border-radius: 9px; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--soft);">
+              <sc-if value="{{ isGeneral }}" hint-placeholder-val="{{ true }}"><span style="position: absolute; inset: 0; border-radius: 9px; background: rgba(94,214,255,0.14); border: 1px solid rgba(94,214,255,0.28);"></span></sc-if>
+              <span style="position: relative;">Общее</span>
+            </button>
+            <button onClick="{{ goSkills }}" style="flex: 1; height: 32px; border: none; cursor: pointer; background: transparent; position: relative; display: grid; place-items: center; border-radius: 9px; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--soft);">
+              <sc-if value="{{ isSkills }}" hint-placeholder-val="{{ false }}"><span style="position: absolute; inset: 0; border-radius: 9px; background: rgba(94,214,255,0.14); border: 1px solid rgba(94,214,255,0.28);"></span></sc-if>
+              <span style="position: relative;">Навыки</span>
+            </button>
+            <button onClick="{{ goKeys }}" style="flex: 1; height: 32px; border: none; cursor: pointer; background: transparent; position: relative; display: grid; place-items: center; border-radius: 9px; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--soft);">
+              <sc-if value="{{ isKeys }}" hint-placeholder-val="{{ false }}"><span style="position: absolute; inset: 0; border-radius: 9px; background: rgba(94,214,255,0.14); border: 1px solid rgba(94,214,255,0.28);"></span></sc-if>
+              <span style="position: relative;">Ключи</span>
+            </button>
+            <button onClick="{{ goBilling }}" style="flex: 1; height: 32px; border: none; cursor: pointer; background: transparent; position: relative; display: grid; place-items: center; border-radius: 9px; font-family: inherit; font-size: 12.5px; font-weight: 600; color: var(--soft);">
+              <sc-if value="{{ isBilling }}" hint-placeholder-val="{{ false }}"><span style="position: absolute; inset: 0; border-radius: 9px; background: rgba(94,214,255,0.14); border: 1px solid rgba(94,214,255,0.28);"></span></sc-if>
+              <span style="position: relative;">Оплата</span>
+            </button>
+          </div>
+        </div>
+        <!-- body -->
+        <div style="flex: 1; min-height: 0; overflow-y: auto; padding: 8px 20px 20px; display: flex; flex-direction: column;">
+          <sc-if value="{{ isGeneral }}" hint-placeholder-val="{{ true }}">
+            <div style="display: flex; flex-direction: column; gap: 18px;">
+              <div style="display: flex; flex-direction: column; gap: 11px; padding-bottom: 18px; border-bottom: 1px solid var(--line);">
+                <span style="font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute);">Язык</span>
+                <p style="margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--mute);">Язык распознавания речи и ответов Джарвиса.</p>
+                <div style="height: 44px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.03); display: flex; align-items: center; justify-content: space-between; padding: 0 14px;"><span style="font-size: 14.5px; color: var(--ink);">Русский</span><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--mute)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 11px; padding-bottom: 18px; border-bottom: 1px solid var(--line);">
+                <span style="font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute);">Контекст</span>
+                <p style="margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--mute);">Что Джарвису знать о вас — стиль, привычки, как обращаться.</p>
+                <div style="min-height: 64px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.03); padding: 12px 14px; font-size: 14px; line-height: 1.5; color: var(--soft);">Зовут Антон. Обращаться на «ты». Зал пн/ср/пт.</div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 11px;">
+                <span style="font-family: 'Manrope', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute);">Устройства</span>
+                <div style="display: flex; align-items: center; gap: 12px; padding: 13px 14px; border-radius: 12px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);">
+                  <span style="width: 7px; height: 7px; border-radius: 50%; background: var(--acc); box-shadow: 0 0 9px var(--acc);"></span>
+                  <span style="flex: 1; font-size: 14px; color: var(--ink);">Этот компьютер</span>
+                  <span style="font-family: 'Manrope', sans-serif; font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; padding: 4px 9px; border-radius: 999px; color: var(--mute); background: rgba(255,255,255,0.05); border: 1px solid var(--line);">Desktop</span>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ isSkills }}" hint-placeholder-val="{{ true }}">
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+              <p style="margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--mute);">Покажите задачу один раз — Джарвис запомнит и повторит сам.</p>
+              <button style="width: 100%; height: 44px; border-radius: 12px; border: none; background: var(--acc); color: var(--on-acc); font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 9px; box-shadow: 0 0 18px rgba(94,214,255,0.3);"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/></svg>Сделать скилл</button>
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 13px; border-radius: 12px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);">
+                <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;"><span style="font-size: 14px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Отчёт за месяц</span><span style="font-size: 12px; color: var(--mute);">9 действий · вчера</span></div>
+                <span style="font-size: 12px; color: var(--acc);">▸</span>
+              </div>
+              <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 13px; border-radius: 12px; background: rgba(255,255,255,0.025); border: 1px solid var(--line);">
+                <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;"><span style="font-size: 14px; font-weight: 500; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Открыть дашборд</span><span style="font-size: 12px; color: var(--mute);">6 действий · 3 дня назад</span></div>
+                <span style="font-size: 12px; color: var(--acc);">▸</span>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ isKeys }}" hint-placeholder-val="{{ true }}">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+              <p style="margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--mute);">Хранятся локально (Electron safeStorage). Без них части работают в стаб-режиме.</p>
+              <div style="display: flex; flex-direction: column; gap: 7px;">
+                <label style="font-size: 12.5px; font-weight: 500; color: var(--soft);">Anthropic / шлюз (мозг)</label>
+                <div style="height: 44px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.03); display: flex; align-items: center; padding: 0 14px; font-size: 14px; color: var(--mute);">sk-…</div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 7px;">
+                <label style="font-size: 12.5px; font-weight: 500; color: var(--soft);">ElevenLabs — голос (voiceId)</label>
+                <div style="height: 44px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.03); display: flex; align-items: center; padding: 0 14px; font-size: 14px; color: var(--mute);">voiceId Джарвиса</div>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 7px;">
+                <label style="font-size: 12.5px; font-weight: 500; color: var(--soft);">Deepgram — распознавание речи</label>
+                <div style="height: 44px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.03); display: flex; align-items: center; padding: 0 14px; font-size: 14px; color: var(--mute);">резерв STT</div>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ isBilling }}" hint-placeholder-val="{{ true }}">
+            <div style="display: flex; flex-direction: column; gap: 14px;">
+              <div style="border-radius: 12px; background: rgba(255,255,255,0.025); border: 1px solid var(--line); padding: 4px 14px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 13px 0; border-bottom: 1px solid var(--line);"><span style="font-size: 13.5px; color: var(--mute);">Тариф</span><span style="font-family: 'Manrope', sans-serif; font-size: 14px; font-weight: 600; color: var(--acc);">Pro</span></div>
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 13px 0; border-bottom: 1px solid var(--line);"><span style="font-size: 13.5px; color: var(--mute);">Баланс</span><span style="font-family: 'Manrope', sans-serif; font-size: 14px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums;">1 240 ₽</span></div>
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 13px 0;"><span style="font-size: 13.5px; color: var(--mute);">Списание</span><span style="font-family: 'Manrope', sans-serif; font-size: 14px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap;">1 июля</span></div>
+              </div>
+              <button style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: transparent; color: var(--soft); font-family: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer;">Управление подпиской</button>
+              <p style="margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--mute);">Pro: безлимит навыков, премиум-голос и проактивные подсказки.</p>
+            </div>
+          </sc-if>
+        </div>
+        <!-- foot -->
+        <div style="flex: none; padding: 14px 20px 18px; border-top: 1px solid var(--line);">
+          <button style="width: 100%; height: 44px; border-radius: 12px; border: 1px solid var(--line2); background: rgba(255,255,255,0.04); color: var(--ink); font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;">Сохранить</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;: {&quot;editor&quot;: &quot;color&quot;, &quot;default&quot;: &quot;#5ed6ff&quot;, &quot;tsType&quot;: &quot;string&quot;}, &quot;glowStrength&quot;: {&quot;editor&quot;: &quot;float&quot;, &quot;default&quot;: 1, &quot;min&quot;: 0, &quot;max&quot;: 2, &quot;step&quot;: 0.1, &quot;tsType&quot;: &quot;number&quot;}}">
+class Component extends DCLogic {
+  state = { tab: 'general' };
+
+  tabStyle(active) {
+    return {
+      flex: 1, height: '32px', borderRadius: '9px', border: 'none', cursor: 'pointer',
+      fontFamily: 'inherit', fontSize: '12.5px', fontWeight: active ? 700 : 500,
+      background: active ? 'rgba(94,214,255,0.12)' : 'transparent',
+      color: active ? 'var(--acc)' : 'var(--mute)',
+      transition: 'background 0.15s ease, color 0.15s ease',
+    };
+  }
+
+  wave(opts) {
+    const { n, color, glow, wMin, wMax, gap, maxH } = opts;
+    const bars = [];
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n;
+      const env = 0.24 + 0.76 * Math.sin(t * Math.PI);
+      const h = Math.max(5, env * maxH);
+      const w = wMin + (wMax - wMin) * Math.sin(t * Math.PI);
+      const dur = (0.62 + (i % 6) * 0.12).toFixed(2);
+      const delay = (-(i * 0.097) % 1.4).toFixed(2);
+      bars.push(React.createElement('span', {
+        key: i,
+        className: 'j-anim',
+        style: {
+          display: 'block',
+          width: w.toFixed(1) + 'px',
+          height: h.toFixed(1) + 'px',
+          borderRadius: '999px',
+          background: color,
+          boxShadow: '0 0 ' + glow + 'px ' + color,
+          transformOrigin: 'center',
+          willChange: 'transform',
+          animation: 'eq ' + dur + 's ease-in-out ' + delay + 's infinite',
+        },
+      }));
+    }
+    return React.createElement('div', {
+      style: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: gap + 'px', height: maxH + 'px' },
+    }, bars);
+  }
+
+  renderVals() {
+    const acc = this.props.accent ?? '#5ed6ff';
+    const g = this.props.glowStrength ?? 1;
+    const tab = this.state.tab;
+    return {
+      waveListen: this.wave({ n: 24, color: '#bfe9f7', glow: 5 * g, wMin: 2, wMax: 3, gap: 6, maxH: 50 }),
+      waveSpeak: this.wave({ n: 26, color: acc, glow: 9 * g, wMin: 2.5, wMax: 4, gap: 5, maxH: 60 }),
+      isGeneral: tab === 'general',
+      isSkills: tab === 'skills',
+      isKeys: tab === 'keys',
+      isBilling: tab === 'billing',
+      goGeneral: () => this.setState({ tab: 'general' }),
+      goSkills: () => this.setState({ tab: 'skills' }),
+      goKeys: () => this.setState({ tab: 'keys' }),
+      goBilling: () => this.setState({ tab: 'billing' }),
+      tabGenStyle: this.tabStyle(tab === 'general'),
+      tabSkillsStyle: this.tabStyle(tab === 'skills'),
+      tabKeysStyle: this.tabStyle(tab === 'keys'),
+      tabBillingStyle: this.tabStyle(tab === 'billing'),
+    };
+  }
+}
+</script>
+</body>
+</html>

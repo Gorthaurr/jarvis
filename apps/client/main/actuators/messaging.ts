@@ -38,6 +38,12 @@ function ensure(channel: MessageChannel): ISender {
 /** Отправить сообщение (после серверных гардов §14). */
 export async function sendMessage(channel: MessageChannel, to: string, body: string): Promise<{ messageId?: string }> {
   const sender = ensure(channel);
+  // FAIL-CLOSED: если канал не подключён реальными кредами (доступен только Mock, ready=false),
+  // НЕ рапортуем успех — иначе Джарвис скажет «отправлено», а наружу ничего не ушло (потеря
+  // действия от лица пользователя + обман доверия). Mock-успех — только под явным dev-флагом.
+  if (!sender.ready && process.env.JARVIS_ALLOW_MOCK_SEND !== "1") {
+    throw new Error(`канал ${channel} не подключён — отправить не могу (нет сессии/кредов)`);
+  }
   const res = await sender.send({ channel, recipient: to, body });
   if (!res.ok) throw new Error(res.error ?? "ошибка отправки userbot");
   log.info("сообщение отправлено", { channel, to, mock: !sender.ready });

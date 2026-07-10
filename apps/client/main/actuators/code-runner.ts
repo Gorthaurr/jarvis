@@ -1,18 +1,17 @@
 /**
- * Ограниченный раннер кода (§6).
+ * Раннер кода (§4, §6) — РЕАЛЬНОЕ исполнение для управления Windows.
  *
- * Рантайм-ограничения (§6), реализованные здесь:
- *   - CWD = свежий временный каталог (mkdtemp), а не рабочая папка пользователя;
- *   - wall-clock таймаут + kill зависшего процесса;
+ * Политика (решение пользователя): Джарвис управляет системой сам, без урезания возможностей.
+ * Раннер даёт настоящий доступ (реестр/службы/сеть/COM через python/node/powershell FullLanguage),
+ * но с разумной обвязкой:
+ *   - CWD = свежий временный каталог (mkdtemp) — чистая рабочая директория по умолчанию;
+ *   - wall-clock таймаут + kill зависшего процесса (см. WALL_CLOCK_MS);
  *   - лимит размера stdout/stderr (усечение);
- *   - урезанный env (не пробрасываем секреты/полное окружение);
+ *   - env пользователя БЕЗ секретов (runnerEnv вырезает *KEY/SECRET/TOKEN/…);
  *   - аргументы не интерполируются в shell (spawn без shell).
- *   - powershell — Constrained Language Mode (best-effort) + всегда confirm на сервере (§6).
  *
- * Дополнительный слой — серверный lint-гард (brain/code-guard.ts): реестр/службы/сеть/
- * системные пути отсекаются ДО отправки. Полная ФС-изоляция (Job Object, сетевой запрет
- * per-process) — // TODO(M3+): требует нативной обёртки/firewall-правила на exe раннера.
- *
+ * Безопасность — КРИТИЧНЫЕ РЕЛЬСЫ §4 в серверном lint-гарде (brain/code-guard.ts): самозащита
+ * (не убить себя), питание (только system_power), необратимое (удаление/формат → confirm).
  * НИКОГДА (§0 принцип 5): не печатать/не передавать карточные и платёжные данные.
  */
 import { spawn } from "node:child_process";
@@ -32,38 +31,47 @@ export interface CodeRunResult {
 }
 
 const MAX_OUTPUT = 64 * 1024; // 64 КБ на поток
-const WALL_CLOCK_MS = 10_000;
+// Реальные задачи (поставить модуль, просканировать систему, дёрнуть COM) дольше 10с. Окно
+// настраивается env JARVIS_CODE_TIMEOUT_MS (деф. 30с, кламп [5с, 180с]). Долгое/фоновое — пусть
+// агент гонит как фоновую задачу (§20), а не одним code.run.
+const WALL_CLOCK_MS = (() => {
+  const raw = Number.parseInt(process.env.JARVIS_CODE_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(raw) ? Math.min(180_000, Math.max(5_000, raw)) : 30_000;
+})();
 
-/** Минимальный env: только то, что нужно интерпретатору; без секретов. */
-function minimalEnv(): NodeJS.ProcessEnv {
-  const e = process.env;
-  return {
-    PATH: e.PATH ?? e.Path,
-    SystemRoot: e.SystemRoot,
-    TEMP: e.TEMP,
-    TMP: e.TMP,
-    PATHEXT: e.PATHEXT,
-  };
+/**
+ * Окружение для раннера: РЕАЛЬНЫЙ env пользователя (USERPROFILE/APPDATA/PATH/… — нужно для
+ * настоящего управления Windows), но БЕЗ секретов: вырезаем ключи вида *KEY/SECRET/TOKEN/PASSWORD/
+ * CREDENTIAL, чтобы скрипт (теперь с сетью) не мог их выгрузить.
+ *
+ * Denylist по ИМЕНИ не ловит секрет в ЗНАЧЕНИИ безобидной переменной (DATABASE_URL=postgres://
+ * user:PASS@host) — дополнительно вырезаем переменные, чьё значение похоже на URL с кредами
+ * (scheme://user:pass@host).
+ */
+const CREDS_IN_URL_RE = /:\/\/[^/@\s]+:[^/@\s]+@/;
+
+export function runnerEnv(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/key|secret|token|password|passwd|credential/i.test(k)) continue;
+    if (v !== undefined && CREDS_IN_URL_RE.test(v)) continue;
+    out[k] = v;
+  }
+  return out;
 }
 
 /** Команда и аргументы интерпретатора для языка (код передаётся как аргумент, не через shell). */
 function interpreter(lang: CodeLang, code: string): { cmd: string; args: string[] } {
   switch (lang) {
     case "python":
-      return { cmd: "python", args: ["-I", "-c", code] }; // -I: isolated mode
+      return { cmd: "python", args: ["-c", code] }; // полный доступ к окружению/пакетам пользователя
     case "node":
       return { cmd: "node", args: ["-e", code] };
     case "powershell":
-      // CLM best-effort: ставим режим в начале сессии; -NoProfile/-NonInteractive обязательны.
-      return {
-        cmd: "powershell",
-        args: [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `$ExecutionContext.SessionState.LanguageMode='ConstrainedLanguage'; ${code}`,
-        ],
-      };
+      // FullLanguage: Add-Type/COM/.NET доступны — без этого нельзя реально управлять Windows
+      // (переключить аудиоустройство, дёрнуть COM-интерфейс и т.п.). Безопасность — рельсы §4 в
+      // code-guard (самозащита/питание/необратимое), не урезание языка.
+      return { cmd: "powershell", args: ["-NoProfile", "-NonInteractive", "-Command", code] };
   }
 }
 
@@ -76,7 +84,7 @@ export async function run(lang: CodeLang, code: string): Promise<CodeRunResult> 
     return await new Promise<CodeRunResult>((resolve, reject) => {
       const child = spawn(cmd, args, {
         cwd,
-        env: minimalEnv(),
+        env: runnerEnv(),
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -93,9 +101,25 @@ export async function run(lang: CodeLang, code: string): Promise<CodeRunResult> 
         return cur + add.slice(0, room);
       };
 
+      let settled = false;
+      let hardTimer: ReturnType<typeof setTimeout> | undefined;
+      const done = (r: CodeRunResult): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (hardTimer) clearTimeout(hardTimer);
+        resolve(r);
+      };
       const timer = setTimeout(() => {
         truncated = true;
-        child.kill("SIGKILL");
+        // Убиваем ВСЁ дерево: на Windows child.kill бьёт только сам интерпретатор, а внуки
+        // (subprocess/Start-Process/запущенный .exe) переусыновляются и продолжают жить/жечь
+        // сеть/держать файлы в cwd. taskkill /T /F валит дерево целиком.
+        killTree(child);
+        // HARD-RESOLVE: если внуки держат pipe-дескрипторы stdout/stderr, событие 'close' родителя
+        // может не прийти → промис висел бы вечно. Через 2с после kill завершаем принудительно.
+        hardTimer = setTimeout(() => done({ stdout, stderr, exitCode: -1, truncated: true }), 2_000);
+        hardTimer.unref?.();
       }, WALL_CLOCK_MS);
 
       child.stdout.setEncoding("utf8");
@@ -103,15 +127,63 @@ export async function run(lang: CodeLang, code: string): Promise<CodeRunResult> 
       child.stdout.on("data", (d: string) => (stdout = cap(stdout, d)));
       child.stderr.on("data", (d: string) => (stderr = cap(stderr, d)));
       child.on("error", (e) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
+        if (hardTimer) clearTimeout(hardTimer);
         reject(e);
       });
       child.on("close", (exitCode) => {
-        clearTimeout(timer);
-        resolve({ stdout, stderr, exitCode: exitCode ?? -1, truncated });
+        done({ stdout, stderr, exitCode: exitCode ?? -1, truncated });
       });
     });
   } finally {
-    await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
+    // На Windows после kill ОС может ещё держать дескрипторы файлов в cwd (особенно если выжили
+    // внуки) → rm падает. Ретраим с задержкой, неуспех логируем (а не молча копим temp-каталоги).
+    await rmWithRetry(cwd);
+  }
+}
+
+/** Убить процесс вместе с деревом потомков (Windows: taskkill /T /F; иначе SIGKILL). */
+function killTree(child: { pid?: number; kill: (s?: NodeJS.Signals) => boolean }): void {
+  const pid = child.pid;
+  if (pid === undefined) {
+    child.kill("SIGKILL");
+    return;
+  }
+  if (process.platform === "win32") {
+    try {
+      const tk = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      // КРИТично: незаслушанное async 'error' на ChildProcess (taskkill нет в PATH / EPERM) бросает
+      // uncaught exception → краш main-процесса Electron. Слушаем и деградируем в SIGKILL.
+      tk.on("error", () => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* уже мёртв */
+        }
+      });
+      tk.unref?.();
+      return;
+    } catch {
+      /* синхронный сбой spawn — падаем на SIGKILL ниже */
+    }
+  }
+  child.kill("SIGKILL");
+}
+
+/** Удалить временный каталог с ретраями (хэндлы могут освободиться не сразу после kill). */
+async function rmWithRetry(dir: string, attempts = 3): Promise<void> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      if (i === attempts - 1) {
+        log.warn("не удалось удалить temp-каталог раннера", { dir, error: e instanceof Error ? e.message : String(e) });
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 200 * (i + 1)));
+    }
   }
 }

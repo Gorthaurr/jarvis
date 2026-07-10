@@ -33,8 +33,26 @@ export interface EpisodeHit {
 }
 
 export interface EpisodicMemory {
-  search(userId: string, queryText: string, k: number): Promise<EpisodeHit[]>;
+  /** minScore — отсечь хиты с косинусом ниже порога (анти-конфабуляция). 0 → без отсечения. */
+  search(userId: string, queryText: string, k: number, minScore?: number): Promise<EpisodeHit[]>;
   write(episode: Omit<Episode, "id">): Promise<void>;
+  /**
+   * Досчитать эмбеддинги для строк с embedding IS NULL (факты, сохранённые пока эмбеддер был мёртв —
+   * иначе они НИКОГДА не вернутся в поиск). Идемпотентно, безопасно звать на каждом boot. Эмбеддер
+   * по-прежнему мёртв → 0 исправлено (попробуем в следующий раз). Возвращает счётчики.
+   */
+  backfillMissingEmbeddings?(limit?: number): Promise<{ scanned: number; fixed: number }>;
+}
+
+/**
+ * Порог релевантности для retrieval (env JARVIS_MEMORY_MIN_SCORE). Корень бага «вспоминает то,
+ * чего не было»: top-k соседи возвращаются БЕЗ порога → тематически несвязанные эпизоды вшиваются
+ * в промпт как «факты». Дефолт 0 = ВЫКЛ (масштаб косинуса зависит от embedding-модели — порог надо
+ * откалибровать на живых данных, иначе риск над-фильтрации; механика готова, включается одним env).
+ */
+export function memoryMinScore(): number {
+  const n = Number.parseFloat(process.env.JARVIS_MEMORY_MIN_SCORE ?? "");
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
 }
 
 /** Косинусная близость двух векторов. */
@@ -63,8 +81,8 @@ function toVectorLiteral(vec: readonly number[]): string {
 export class PgVectorEpisodicMemory implements EpisodicMemory {
   constructor(private readonly embedder: IEmbeddingProvider) {}
 
-  async search(userId: string, queryText: string, k: number): Promise<EpisodeHit[]> {
-    const vec = await this.embedder.embed(queryText);
+  async search(userId: string, queryText: string, k: number, minScore = 0): Promise<EpisodeHit[]> {
+    const vec = await this.embedder.embed(queryText, "query");
     if (!vec) return [];
     const res = await query(
       `select id, user_id, kind, text,
@@ -78,21 +96,32 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
       [userId, toVectorLiteral(vec), k],
     );
     if (!res) return [];
-    return res.rows.map((r) => ({
-      episode: {
-        id: String(r.id),
-        userId: String(r.user_id),
-        kind: String(r.kind) as EpisodeKind,
-        text: String(r.text),
-        ts: Number(r.ts),
-        salience: r.salience == null ? undefined : Number(r.salience),
-      },
-      score: Number(r.score),
-    }));
+    return res.rows
+      .map((r) => ({
+        episode: {
+          id: String(r.id),
+          userId: String(r.user_id),
+          kind: String(r.kind) as EpisodeKind,
+          text: String(r.text),
+          ts: Number(r.ts),
+          salience: r.salience == null ? undefined : Number(r.salience),
+        },
+        score: Number(r.score),
+      }))
+      .filter((h) => h.score >= minScore);
   }
 
   async write(episode: Omit<Episode, "id">): Promise<void> {
-    const vec = await this.embedder.embed(episode.text);
+    const vec = await this.embedder.embed(episode.text, "passage");
+    // ГРОМКО, не тихо: без вектора (нет ключа эмбеддера / транзиентный сбой) строка пишется с
+    // embedding=NULL, а search фильтрует `embedding is not null` → факт НИКОГДА не вернётся в
+    // поиск («говорил же» → не помнит). Раньше это было молча. Теперь warn + флаг на бэкилл.
+    if (!vec) {
+      log.warn("episodic.write без эмбеддинга — факт не попадёт в поиск до бэкилла", {
+        kind: episode.kind,
+        textPreview: episode.text.slice(0, 60),
+      });
+    }
     const res = await query(
       `insert into episodic_memory (user_id, kind, text, salience, embedding)
        values ($1, $2, $3, $4, $5::vector)`,
@@ -106,6 +135,29 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
     );
     if (!res) log.debug("episodic.write no-op (нет БД)");
   }
+
+  async backfillMissingEmbeddings(limit = 1000): Promise<{ scanned: number; fixed: number }> {
+    const res = await query(
+      `select id, text from episodic_memory
+        where embedding is null and stale = false
+        order by created_at desc
+        limit $1`,
+      [limit],
+    );
+    if (!res || res.rows.length === 0) return { scanned: 0, fixed: 0 };
+    let fixed = 0;
+    for (const r of res.rows) {
+      const vec = await this.embedder.embed(String(r.text), "passage");
+      if (!vec) break; // эмбеддер мёртв → нет смысла продолжать, добьём на следующем boot
+      const upd = await query(`update episodic_memory set embedding = $2::vector where id = $1`, [
+        String(r.id),
+        toVectorLiteral(vec),
+      ]);
+      if (upd) fixed += 1;
+    }
+    if (fixed > 0) log.info("эпизодическая память: бэкилл эмбеддингов (осиротевшие факты → в поиск)", { scanned: res.rows.length, fixed });
+    return { scanned: res.rows.length, fixed };
+  }
 }
 
 /** Dev/тесты: косинусный поиск в памяти процесса. */
@@ -115,18 +167,19 @@ export class InMemoryEpisodicMemory implements EpisodicMemory {
 
   constructor(private readonly embedder: IEmbeddingProvider) {}
 
-  async search(userId: string, queryText: string, k: number): Promise<EpisodeHit[]> {
-    const vec = await this.embedder.embed(queryText);
+  async search(userId: string, queryText: string, k: number, minScore = 0): Promise<EpisodeHit[]> {
+    const vec = await this.embedder.embed(queryText, "query");
     if (!vec) return [];
     return this.store
       .filter((e) => e.episode.userId === userId)
       .map((e) => ({ episode: e.episode, score: cosine(vec, e.vec) }))
+      .filter((h) => h.score >= minScore)
       .sort((a, b) => b.score - a.score)
       .slice(0, k);
   }
 
   async write(episode: Omit<Episode, "id">): Promise<void> {
-    const vec = await this.embedder.embed(episode.text);
+    const vec = await this.embedder.embed(episode.text, "passage");
     this.seq += 1;
     this.store.push({
       episode: { ...episode, id: `mem-${this.seq}` },

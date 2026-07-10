@@ -16,9 +16,34 @@ static void Log(string msg)
     => Console.Error.WriteLine($"[sidecar-win] {DateTime.UtcNow:HH:mm:ss.fff} {msg}");
 
 Log("Запуск. Ожидание запросов на stdin...");
+Log(InputSynthesizer.ReportDpiAwareness()); // §18 health-check: реально ли применился PerMonitorV2
+
+// Страховка от залипания зажатых клавиш (§6): отпустить всё при ЛЮБОМ завершении процесса
+// (нормальный выход, Ctrl+C, kill родителя), иначе игровая клавиша останется зажатой в ОС.
+AppDomain.CurrentDomain.ProcessExit += (_, _) => InputSynthesizer.ReleaseAllHeld();
+Console.CancelKeyPress += (_, _) => InputSynthesizer.ReleaseAllHeld();
 
 using UiaGrounder grounder = new();
 JsonSerializerOptions jsonOpts = ArgsHelper.Options;
+
+// stdout — единственный канал и для RPC-ответов, и для push демо-событий (с другого
+// потока, §8). Любая запись в Console.Out идёт под этим локом, иначе строки слипнутся.
+object stdoutLock = new();
+
+// Рекордер обучения демонстрацией (§8) — создаётся лениво по demo.record start.
+DemoRecorder? recorder = null;
+
+// Арбитр ввода (§6, user-takeover) — создаётся лениво по raw-input.subscribe enable.
+InputArbiter? arbiter = null;
+
+// §Волна2 (2.4): ЧИТАЮЩИЕ опы (UIA-обход/OCR/список окон) уходят в thread-pool — долгий обход
+// дерева сложного окна (секунды) не блокирует синтез ввода. Мутирующие (click/type/key/mouse/
+// invoke/window.focus) остаются СТРОГО последовательными в главном цикле — порядок жестов важен.
+HashSet<string> readOps = new()
+{
+    "ground", "ground.at", "read.selection", "read.window", "read.screen",
+    "ui.snapshot", "window.list", "ocr",
+};
 
 // -----------------------------------------------------------------------
 // Главный цикл: каждая строка stdin — один IpcRequest
@@ -41,8 +66,22 @@ while ((line = Console.ReadLine()) is not null)
         continue;
     }
 
-    await HandleRequestAsync(req);
+    if (readOps.Contains(req.Op))
+    {
+        // Fire-and-forget: HandleRequestAsync сам try/catch'ит и пишет ответ (под stdoutLock).
+        IpcRequest reqCopy = req;
+        _ = Task.Run(() => HandleRequestAsync(reqCopy));
+    }
+    else
+    {
+        await HandleRequestAsync(req);
+    }
 }
+
+// Снимаем глобальные хуки и отпускаем зажатые клавиши перед выходом.
+InputSynthesizer.ReleaseAllHeld(); // §6: не оставляем «зажатый WASD» при закрытии stdin
+arbiter?.Stop();
+if (recorder is { IsRecording: true }) recorder.Stop();
 
 Log("stdin закрыт. Завершение.");
 return 0;
@@ -58,6 +97,9 @@ async Task HandleRequestAsync(IpcRequest req)
         {
             // §6 — резолв контрола по роли/имени
             "ground" => HandleGround(req),
+
+            // §бесшумный-ввод — резолв контрола по КООРДИНАТАМ (для клика без курсора по точке из screen_capture)
+            "ground.at" => HandleGroundAtPoint(req),
 
             // §6 — вызов UIA-паттерна по дескриптору
             "invoke" => HandleInvoke(req),
@@ -77,8 +119,29 @@ async Task HandleRequestAsync(IpcRequest req)
             // §19 — выжимка a11y видимой области
             "read.window" => HandleReadWindow(req),
 
+            // §19 — «экран»: клиентский readContext('screen') всегда шлёт read.screen.
+            // Переиспользуем выжимку a11y по ФОКУСНОМУ окну (pid=null → FocusedElement),
+            // иначе операция валилась «Неизвестная операция».
+            "read.screen" => HandleReadWindow(req),
+
             // §6 — арбитраж ввода / user-takeover
             "raw-input.subscribe" => HandleRawInputSubscribe(req),
+
+            // §8 — обучение демонстрацией: запись/останов глобального UIA-хука
+            "demo.record" => HandleDemoRecord(req),
+
+            // §Волна2 (2.4) — снапшот интерактивных элементов окна (set-of-marks, дешёвые «глаза»)
+            "ui.snapshot" => HandleSnapshot(req),
+
+            // §Волна2 (2.4) — окна верхнего уровня: список / фокус (замена PowerShell AppActivate)
+            "window.list" => WindowManager.List(),
+            "window.focus" => HandleWindowFocus(req),
+
+            // §Волна2 (2.4) — полная мышь: move / down / up / wheel / drag
+            "mouse" => HandleMouse(req),
+
+            // §Волна2 (2.3) — локальный OCR (Windows.Media.Ocr): текст с canvas/игр без vision-раунда
+            "ocr" => await OcrService.RecognizeAsync(ArgsHelper.Deserialize<OcrArgs>(req.Args)),
 
             _ => throw new InvalidOperationException($"Неизвестная операция: {req.Op}"),
         };
@@ -98,14 +161,26 @@ async Task HandleRequestAsync(IpcRequest req)
 // Обработчики операций
 // -----------------------------------------------------------------------
 
-// "ground" — резолв контрола (§6)
+// "ground" — резолв контрола (§6). §Волна2 (2.4): + nameMode/automationId (ревью: раньше терялись).
 object? HandleGround(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<GroundArgs>(req.Args);
-    GroundResult? result = grounder.Ground(args.Role, args.Name, args.Scope);
+    GroundResult? result = grounder.Ground(args.Role, args.Name, args.Scope, args.NameMode, args.AutomationId);
     if (result is null)
         throw new InvalidOperationException(
             $"Элемент не найден: role={args.Role}, name={args.Name ?? "<any>"}");
+    return result;
+}
+
+// "ground.at" — резолв элемента по координатам (§бесшумный-ввод). Координаты ЛОГИЧЕСКИЕ (96dpi, как click) →
+// физические для UIA FromPoint. null → под точкой нет UIA-элемента (canvas/игра) → клиент деградирует.
+object? HandleGroundAtPoint(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<GroundAtPointArgs>(req.Args);
+    (double physX, double physY) = InputSynthesizer.LogicalToPhysical(args.X, args.Y);
+    GroundResult? result = grounder.GroundAtPoint(physX, physY);
+    if (result is null)
+        throw new InvalidOperationException($"Под точкой ({args.X},{args.Y}) нет UIA-элемента (canvas/игра?).");
     return result;
 }
 
@@ -122,20 +197,20 @@ object? HandleClick(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<ClickArgs>(req.Args);
     string button = args.Button ?? "left";
+    int count = args.Count ?? 1; // §Волна2 (2.4): 2 = дабл-клик
 
+    bool restore = args.RestoreCursor == true; // §бесшумный-ввод: вернуть курсор после физ.клика
     if (args.X.HasValue && args.Y.HasValue)
     {
-        // Прямые координаты от vision-движка — масштабируем через DPI (§18)
-        InputSynthesizer.Click(args.X.Value, args.Y.Value, button);
+        // Прямые координаты от vision-движка — ЛОГИЧЕСКИЕ (96dpi), масштабируем через DPI (§18).
+        InputSynthesizer.Click(args.X.Value, args.Y.Value, button, restore, count);
     }
     else if (args.Handle.HasValue)
     {
-        // Fallback: получить центр элемента из GroundResult (§6)
-        // Перегрундим по handle, чтобы получить актуальный bbox
-        GroundResult? r = grounder.Ground("button", null, null);
-        // TODO(M1): добавить метод GetBbox(handle) в UiaGrounder для точного fallback
-        throw new InvalidOperationException(
-            "Fallback-клик по handle не реализован — используй ground + coords (TODO M1)");
+        // Fallback-клик по a11y-элементу (§6): точка клика из UIA — уже ФИЗИЧЕСКАЯ,
+        // поэтому ClickPhysical (без повторного DPI-масштаба).
+        (double cx, double cy) = grounder.GetClickPoint(args.Handle.Value);
+        InputSynthesizer.ClickPhysical(cx, cy, button, restore, count);
     }
     else
     {
@@ -143,6 +218,57 @@ object? HandleClick(IpcRequest req)
     }
 
     return new { success = true };
+}
+
+// "ui.snapshot" — интерактивные элементы окна одним списком (§Волна2 2.4)
+object? HandleSnapshot(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<SnapshotArgs>(req.Args);
+    return grounder.Snapshot(args.Pid, args.MaxItems);
+}
+
+// "window.focus" — SetForegroundWindow с AttachThreadInput и честным readback (§Волна2 2.4)
+object? HandleWindowFocus(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<WindowFocusArgs>(req.Args);
+    return WindowManager.Focus(args.Hwnd, args.Query);
+}
+
+// "mouse" — полная мышь: move / down / up / wheel / drag (§Волна2 2.4)
+object? HandleMouse(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<MouseArgs>(req.Args);
+    switch ((args.Op ?? "").ToLowerInvariant())
+    {
+        case "move":
+            if (!(args.X.HasValue && args.Y.HasValue)) throw new ArgumentException("mouse.move: нужны x+y");
+            InputSynthesizer.MouseMove(args.X.Value, args.Y.Value);
+            break;
+        case "down":
+            InputSynthesizer.MouseButton(args.Button, down: true, args.X, args.Y);
+            break;
+        case "up":
+            InputSynthesizer.MouseButton(args.Button, down: false, args.X, args.Y);
+            break;
+        case "wheel":
+            // Ревью Волны 2: с координатами — сперва подвинуть курсор (Windows шлёт wheel окну ПОД
+            // курсором) — иначе скролл уходил произвольному окну, а мы честно рапортовали success.
+            if (args.X.HasValue && args.Y.HasValue)
+            {
+                InputSynthesizer.MouseMove(args.X.Value, args.Y.Value);
+                System.Threading.Thread.Sleep(30);
+            }
+            InputSynthesizer.MouseWheel(args.Dy ?? 0, args.Dx ?? 0);
+            break;
+        case "drag":
+            if (!(args.X.HasValue && args.Y.HasValue && args.ToX.HasValue && args.ToY.HasValue))
+                throw new ArgumentException("mouse.drag: нужны x+y (откуда) и toX+toY (куда)");
+            InputSynthesizer.MouseDrag(args.X.Value, args.Y.Value, args.ToX.Value, args.ToY.Value, args.Button);
+            break;
+        default:
+            throw new ArgumentException($"mouse: неизвестный op '{args.Op}' (ожидалось move|down|up|wheel|drag)");
+    }
+    return new { success = true, op = args.Op };
 }
 
 // "type" — набор текста (§6)
@@ -153,12 +279,15 @@ object? HandleType(IpcRequest req)
     return new { success = true, length = args.Text.Length };
 }
 
-// "key" — комбинация клавиш (§6)
+// "key" — комбинация клавиш (§6). mode: press|down|up, scancode: VK vs скан-код (игры).
 object? HandleKey(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<KeyArgs>(req.Args);
-    InputSynthesizer.SendKeyCombo(args.Combo);
-    return new { success = true, combo = args.Combo };
+    string mode = string.IsNullOrWhiteSpace(args.Mode) ? "press" : args.Mode;
+    bool scancode = args.Scancode ?? false;
+
+    InputSynthesizer.SendKeyCombo(args.Combo, mode, scancode);
+    return new { success = true, combo = args.Combo, mode };
 }
 
 // "read.selection" — выделенный текст через TextPattern (§19)
@@ -177,25 +306,59 @@ object? HandleReadWindow(IpcRequest req)
     return result;
 }
 
-// "raw-input.subscribe" — арбитраж ввода / user-takeover (§6) — скелет
+// "demo.record" — старт/стоп записи демонстрации навыка (§8)
+object? HandleDemoRecord(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<DemoRecordArgs>(req.Args);
+    string op = (args.Op ?? "").ToLowerInvariant();
+
+    if (op == "start")
+    {
+        recorder ??= new DemoRecorder(PushDemoEvent, Log);
+        recorder.Start();
+        return new { success = true, recording = true };
+    }
+
+    if (op == "stop")
+    {
+        if (recorder is null) return new DemoStopResult(Array.Empty<DemoEventDto>());
+        IReadOnlyList<DemoEventDto> events = recorder.Stop();
+        return new DemoStopResult(events);
+    }
+
+    throw new InvalidOperationException($"demo.record: неизвестный op '{args.Op}'");
+}
+
+// Push демо-события в stdout (без id — отдельный канал, читается клиентом как onPush).
+void PushDemoEvent(DemoEventDto e)
+{
+    var push = new DemoEventPush("demo", e.Role, e.Name, e.Action, e.Ts);
+    string json = JsonSerializer.Serialize(push, jsonOpts);
+    lock (stdoutLock) { Console.WriteLine(json); }
+}
+
+// "raw-input.subscribe" — арбитраж ввода / user-takeover (§6)
 object? HandleRawInputSubscribe(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<RawInputSubscribeArgs>(req.Args);
 
-    // TODO(M2): Установить low-level keyboard/mouse hook (SetWindowsHookEx WH_KEYBOARD_LL / WH_MOUSE_LL).
-    //   Хук фильтрует события по dwExtraInfo:
-    //   - если dwExtraInfo == InputSynthesizer.SyntheticMarker → синтетика, пропускаем (§6)
-    //   - иначе → физический ввод пользователя → user-takeover: уведомить Electron по stdout
-    //     и временно заблокировать выдачу команд от агента.
-    //   Хук требует message loop (Application.Run / PeekMessage) в отдельном потоке.
-    Log($"raw-input.subscribe enable={args.Enable} — TODO(M2): low-level hook не установлен");
-
-    return new
+    if (args.Enable)
     {
-        success = true,
-        subscribed = false,
-        note = "raw-input арбитраж не реализован (TODO M2)"
-    };
+        arbiter ??= new InputArbiter(PushUserInput, Log);
+        arbiter.Start();
+        return new { success = true, subscribed = true };
+    }
+
+    arbiter?.Stop();
+    return new { success = true, subscribed = false };
+}
+
+// Push «пользователь взялся за ввод» в stdout (отдельный канал, читается клиентом как onPush).
+void PushUserInput(string kind)
+{
+    var push = new UserInputPush("user-input", kind, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+    string json = JsonSerializer.Serialize(push, jsonOpts);
+    lock (stdoutLock) { Console.WriteLine(json); }
 }
 
 // -----------------------------------------------------------------------
@@ -204,11 +367,11 @@ object? HandleRawInputSubscribe(IpcRequest req)
 void WriteOk(string id, object? data)
 {
     string json = JsonSerializer.Serialize(new IpcOkResponse(id, true, data), jsonOpts);
-    Console.WriteLine(json);
+    lock (stdoutLock) { Console.WriteLine(json); }
 }
 
 void WriteError(string id, string error)
 {
     string json = JsonSerializer.Serialize(new IpcErrResponse(id, false, error), jsonOpts);
-    Console.WriteLine(json);
+    lock (stdoutLock) { Console.WriteLine(json); }
 }

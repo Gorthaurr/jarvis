@@ -31,6 +31,27 @@ describe("skill-runner (§8, §20)", () => {
     expect(actuator.executeStep).toHaveBeenCalledTimes(2);
   });
 
+  it("visual-expect (canvas/игра/видео): доходит до checkExpect; не подтвердился локально → эскалация к LLM (честно)", async () => {
+    const escalate = vi.fn(async () => undefined);
+    const seen: NonNullable<SkillStep["expect"]>[] = [];
+    const checkExpect = vi.fn(async (e: NonNullable<SkillStep["expect"]>) => {
+      seen.push(e);
+      return e.kind !== "visual"; // visual локально не подтверждаем (нет OCR) → false → эскалация
+    });
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("input.click", { expect: { kind: "visual", text: "Победа" }, timeoutMs: 100, retries: 1 })],
+      cancel: { cancelled: false },
+      actuator: mockActuator({ checkExpect }),
+      escalate,
+      sleep: noSleep,
+    });
+    expect(seen.some((e) => e.kind === "visual")).toBe(true); // visual-постусловие прошло через раннер
+    expect(escalate).toHaveBeenCalledWith(expect.anything(), "exhausted"); // не подтвердил → к LLM (видит экран)
+    expect(r.ok).toBe(false);
+  });
+
   it("retry: expect не выполняется → повтор → успех", async () => {
     let calls = 0;
     const checkExpect = vi.fn(async () => {
@@ -86,7 +107,7 @@ describe("skill-runner (§8, §20)", () => {
   });
 
   it("needsLlm-шаг вызывает эскалацию needs_llm (§8)", async () => {
-    const escalate = vi.fn(async () => undefined);
+    const escalate = vi.fn(async () => ({ text: "x" }));
     await runSkill({
       skillId: "s",
       version: 1,
@@ -97,5 +118,59 @@ describe("skill-runner (§8, §20)", () => {
       sleep: noSleep,
     });
     expect(escalate).toHaveBeenCalledWith(expect.objectContaining({ needsLlm: true }), "needs_llm");
+  });
+
+  it("needsLlm + эскалация ЗАПОЛНИЛА → params мёржатся в шаг, шаг исполняется (§8 tiered)", async () => {
+    const escalate = vi.fn(async () => ({ text: "сочинённый ответ" }));
+    let seenParams: Record<string, unknown> | undefined;
+    const execute = vi.fn(async (_s: SkillStep, p?: Record<string, unknown>) => {
+      seenParams = p;
+    });
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("input.type", { needsLlm: true, params: { text: "{{composed}}" } })],
+      params: { base: 1 },
+      cancel: { cancelled: false },
+      actuator: mockActuator({ executeStep: execute }),
+      escalate,
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(seenParams).toEqual({ base: 1, text: "сочинённый ответ" }); // escalate-значения поверх skill-params
+  });
+
+  it("needsLlm + эскалация НЕ заполнила (void) → честный провал, шаг НЕ исполняется вслепую (§честность)", async () => {
+    const escalate = vi.fn(async () => undefined);
+    const execute = vi.fn(async () => undefined);
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("input.type", { needsLlm: true })],
+      cancel: { cancelled: false },
+      actuator: mockActuator({ executeStep: execute }),
+      escalate,
+      sleep: noSleep,
+    });
+    expect(escalate).toHaveBeenCalledWith(expect.objectContaining({ needsLlm: true }), "needs_llm");
+    expect(r.ok).toBe(false);
+    expect(r.failedStepIndex).toBe(0);
+    expect(r.message).toMatch(/LLM/);
+    expect(execute).not.toHaveBeenCalled(); // не исполнили вслепую
+  });
+
+  it("needsLlm БЕЗ хука escalate → честный провал (round-trip не подключён)", async () => {
+    const execute = vi.fn(async () => undefined);
+    const r = await runSkill({
+      skillId: "s",
+      version: 1,
+      steps: [step("input.type", { needsLlm: true })],
+      cancel: { cancelled: false },
+      actuator: mockActuator({ executeStep: execute }),
+      sleep: noSleep,
+    });
+    expect(r.ok).toBe(false);
+    expect(execute).not.toHaveBeenCalled();
   });
 });

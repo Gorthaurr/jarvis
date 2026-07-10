@@ -8,11 +8,16 @@
 import { PROTOCOL_VERSION } from "@jarvis/protocol";
 import {
   DEFAULT_MODELS,
+  DEFAULT_TIER_THINKING,
   type LogLevel,
+  TIER_THINKING_ENV,
+  type ThinkingEffort,
   type Tier,
   env,
+  envBool,
   envInt,
   envOptional,
+  parseThinkingEffort,
 } from "@jarvis/shared";
 
 export interface ServerConfig {
@@ -28,14 +33,24 @@ export interface ServerConfig {
 
   /** Модели по тирам (§7). id берётся из env, иначе дефолт. */
   readonly models: Record<Exclude<Tier, "tier0">, string>;
+  /** «Эффорт» рассуждения (thinking) по тиру (§7). off|adaptive|число-бюджет. */
+  readonly tierThinking: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
   /** Ключи интеграций — опциональны (без них стаб-режим). */
   readonly anthropicApiKey: string | undefined;
+  /** Base URL Anthropic/шлюза (proxyapi.ru и т.п.); undefined → прямой Anthropic. */
+  readonly anthropicBaseUrl: string | undefined;
+  /** TTL prompt-кеша Anthropic (§15): "5m" дефолт, "1h" extended. */
+  readonly anthropicCacheTtl: "5m" | "1h";
   readonly openaiApiKey: string | undefined;
   readonly embeddingModel: string;
   readonly embeddingDim: number;
 
   /** Голос (§10) — без ключей провайдеры работают в mock-режиме. */
   readonly deepgramApiKey: string | undefined;
+  /** STT-провайдер (§10): 'deepgram'|'whisper'|'mock'; undefined → авто (whisper без ключа). */
+  readonly sttProvider: string | undefined;
+  /** Модель локального Whisper (transformers.js), если STT=whisper. */
+  readonly whisperModel: string;
   readonly elevenLabsApiKey: string | undefined;
   readonly elevenLabsVoiceId: string | undefined;
 
@@ -44,13 +59,23 @@ export interface ServerConfig {
 
   /** Биллинг (§14). */
   readonly defaultSpendCap: number;
+
+  /** §6B/B2: строгая верификация токена по auth_tokens (LAN/hosted). Дефолт false — на loopback
+   *  токен это ключ партиции, не auth (секрет здесь театр). */
+  readonly authStrict: boolean;
+  /** §6B/безопасность: явное разрешение не-loopback bind. Дефолт false — иначе listen-гард
+   *  принудит 127.0.0.1 (LAN-сосед не должен самопровижнить любой userId, пока auth дремлет). */
+  readonly allowRemote: boolean;
 }
 
 /** Собрать конфиг из process.env один раз на старте. */
 export function loadConfig(): ServerConfig {
   return {
     port: envInt("PORT", 8787),
-    host: env("HOST", "0.0.0.0"),
+    // §универсальность/безопасность: по умолчанию ТОЛЬКО loopback (клиент+расширение на той же
+    // машине идут на localhost/127.0.0.1). 0.0.0.0 без auth = LAN-сосед исполняет команды (аудит).
+    // Мульти-девайс (тонкий клиент на телефоне) → выставить HOST=0.0.0.0 ТОЛЬКО вместе с auth (Фаза 6B).
+    host: env("HOST", "127.0.0.1"),
     nodeEnv: env("NODE_ENV", "development"),
     logLevel: normalizeLogLevel(envOptional("LOG_LEVEL")),
     protocolVersion: envInt("PROTOCOL_VERSION", PROTOCOL_VERSION),
@@ -61,18 +86,38 @@ export function loadConfig(): ServerConfig {
       sonnet: env("TIER2_MODEL", DEFAULT_MODELS.sonnet),
       fable: env("TIER3_MODEL", DEFAULT_MODELS.fable),
     },
+    // «Эффорт» рассуждения по тиру (= параметр thinking Anthropic). Env JARVIS_TIER{1,2,3}_THINKING:
+    // off | adaptive | <число-бюджет>. Дефолт: дешёвый слот off (быстро), Sonnet/Opus adaptive (умно).
+    tierThinking: {
+      haiku: parseThinkingEffort(envOptional(TIER_THINKING_ENV.haiku), DEFAULT_TIER_THINKING.haiku),
+      sonnet: parseThinkingEffort(envOptional(TIER_THINKING_ENV.sonnet), DEFAULT_TIER_THINKING.sonnet),
+      fable: parseThinkingEffort(envOptional(TIER_THINKING_ENV.fable), DEFAULT_TIER_THINKING.fable),
+    },
     anthropicApiKey: envOptional("ANTHROPIC_API_KEY"),
+    anthropicBaseUrl: envOptional("ANTHROPIC_BASE_URL"),
+    anthropicCacheTtl: env("ANTHROPIC_CACHE_TTL", "5m") === "1h" ? "1h" : "5m",
     openaiApiKey: envOptional("OPENAI_API_KEY"),
     embeddingModel: env("EMBEDDING_MODEL", "text-embedding-3-small"),
-    embeddingDim: envInt("EMBEDDING_DIM", 1536),
+    // Канон размерности эмбеддингов (§1): 384 = нативная у локальной e5-small И усечённая у OpenAI
+    // text-embedding-3-small (dimensions=384). Один столбец pgvector(384) обслуживает оба провайдера.
+    embeddingDim: envInt("EMBEDDING_DIM", 384),
 
     deepgramApiKey: envOptional("DEEPGRAM_API_KEY"),
+    sttProvider: envOptional("STT_PROVIDER"),
+    whisperModel: env("WHISPER_MODEL", "Xenova/whisper-base"),
     elevenLabsApiKey: envOptional("ELEVENLABS_API_KEY"),
     elevenLabsVoiceId: envOptional("ELEVENLABS_VOICE_ID"),
 
     braveApiKey: envOptional("BRAVE_SEARCH_API_KEY"),
 
-    defaultSpendCap: Number.parseFloat(env("DEFAULT_SPEND_CAP", "50.00")),
+    // Битый DEFAULT_SPEND_CAP не должен дать NaN (иначе потолок трат молча отключается, §14).
+    defaultSpendCap: (() => {
+      const n = Number.parseFloat(env("DEFAULT_SPEND_CAP", "50.00"));
+      return Number.isFinite(n) && n > 0 ? n : 50;
+    })(),
+
+    authStrict: envBool("JARVIS_AUTH_STRICT"),
+    allowRemote: envBool("JARVIS_ALLOW_REMOTE"),
   };
 }
 

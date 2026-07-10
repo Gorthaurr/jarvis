@@ -1,0 +1,185 @@
+/**
+ * §10 realtime: клиентская ОЧЕРЕДЬ воспроизведения. Реплика приходит несколькими
+ * озвучками (по предложению) — они должны играть ПОДРЯД (а не обрывать друг друга),
+ * а barge-in/stop — глушить текущую и чистить очередь. Плеер инъектируется (без DOM).
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AudioCapture, AudioPlayback, type PlayerFactory, type Utterance } from "./audio.js";
+
+/** Базовая base64 одного-двух байт (atob в base64ToBytes — нодовский глобал). */
+const b64 = (bytes: number[]): string => Buffer.from(bytes).toString("base64");
+
+class FakePlayer {
+  stopped = false;
+  constructor(
+    readonly bytes: Uint8Array,
+    readonly onEnded: () => void,
+  ) {}
+}
+
+function harness() {
+  const players: FakePlayer[] = [];
+  const factory: PlayerFactory = (bytes, onEnded): Utterance => {
+    const p = new FakePlayer(bytes, onEnded);
+    players.push(p);
+    return {
+      stop() {
+        p.stopped = true;
+      },
+    };
+  };
+  return { pb: new AudioPlayback(factory), players };
+}
+
+describe("AudioPlayback очередь (§10)", () => {
+  it("две озвучки реплики играют ПОДРЯД, не обрывая друг друга", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // фраза 1 → играет
+    expect(players).toHaveLength(1);
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // фраза 2 → в очередь
+    expect(players).toHaveLength(1);
+    expect(players[0]!.stopped).toBe(false); // первую НЕ оборвали
+
+    players[0]!.onEnded(); // первая доиграла → стартует вторая
+    expect(players).toHaveLength(2);
+    expect(players[1]!.bytes[0]).toBe(2);
+  });
+
+  it("многочанковая озвучка склеивается и играется одним буфером", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([10, 11]), seq: 0, last: false });
+    pb.enqueue({ audio: b64([12]), seq: 1, last: true });
+    expect(players).toHaveLength(1);
+    expect(Array.from(players[0]!.bytes)).toEqual([10, 11, 12]);
+  });
+
+  it("barge-in/stop глушит текущую и чистит очередь", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true });
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // в очереди
+    pb.stop();
+    expect(players[0]!.stopped).toBe(true);
+    // очередь очищена — окончание текущей НЕ запускает «фразу 2»
+    players[0]!.onEnded();
+    expect(players).toHaveLength(1);
+  });
+
+  it("пустой чанк без last ничего не запускает; last без байтов не падает", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: "", seq: 0, last: false });
+    expect(players).toHaveLength(0);
+    pb.enqueue({ audio: "", seq: 0, last: true }); // нет накопленных байтов → нет озвучки
+    expect(players).toHaveLength(0);
+  });
+
+  it("новая реплика после доигрывания предыдущей стартует сразу", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true });
+    players[0]!.onEnded(); // доиграла, очередь пуста, current=null
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true });
+    expect(players).toHaveLength(2);
+    expect(players[1]!.bytes[0]).toBe(2);
+  });
+});
+
+/**
+ * H18 (ревью 2026-07-02): «оглох навсегда». Watchdog реинитил захват по mute/ended, но если
+ * start() падал (игра держит устройство → getUserMedia кидает NotReadableError), трек уже был
+ * убит stop() → события больше НЕ приходили, таймеров не было → тишина до перезапуска клиента.
+ * Теперь restart() чинит себя таймером-ретраем с бэкоффом. Браузерные глобалы — заглушки.
+ */
+class FakeTrack {
+  onended: (() => void) | null = null;
+  onmute: (() => void) | null = null;
+  onunmute: (() => void) | null = null;
+  stop = vi.fn();
+}
+
+class FakeStream {
+  constructor(public track = new FakeTrack()) {}
+  getAudioTracks(): FakeTrack[] {
+    return [this.track];
+  }
+  getTracks(): FakeTrack[] {
+    return [this.track];
+  }
+}
+
+class FakeWorkletNode {
+  port = { onmessage: null as unknown, close: vi.fn() };
+  connect = vi.fn();
+}
+
+class FakeAudioContext {
+  state = "running";
+  onstatechange: (() => void) | null = null;
+  audioWorklet = { addModule: vi.fn(async () => {}) };
+  destination = {};
+  createMediaStreamSource(): { connect: ReturnType<typeof vi.fn> } {
+    return { connect: vi.fn() };
+  }
+  createWaveShaper(): { connect: ReturnType<typeof vi.fn>; curve: unknown; oversample: string } {
+    return { connect: vi.fn(), curve: null, oversample: "" };
+  }
+  createGain(): { gain: { value: number }; connect: ReturnType<typeof vi.fn> } {
+    return { gain: { value: 0 }, connect: vi.fn() };
+  }
+  async resume(): Promise<void> {}
+  async close(): Promise<void> {}
+}
+
+describe("AudioCapture — само-лечение захвата (H18)", () => {
+  let getUserMedia: ReturnType<typeof vi.fn>;
+  let streams: FakeStream[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    streams = [];
+    getUserMedia = vi.fn(async () => {
+      const s = new FakeStream();
+      streams.push(s);
+      return s as unknown as MediaStream;
+    });
+    vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    vi.stubGlobal("AudioWorkletNode", FakeWorkletNode);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("устройство занято при реините → таймер-ретрай с бэкоффом возвращает слух (не глохнет навсегда)", async () => {
+    const cap = new AudioCapture(() => {});
+    await cap.start();
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+
+    // Игра забрала устройство: трек кончился, а реинит падает — устройство ещё не отдали.
+    getUserMedia
+      .mockRejectedValueOnce(new Error("NotReadableError"))
+      .mockRejectedValueOnce(new Error("NotReadableError"));
+    streams[0]!.track.onended?.();
+    await vi.advanceTimersByTimeAsync(0); // restart(): stop → start (падает) → армируется ретрай 1с
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(1000); // ретрай №1 — всё ещё занято → бэкофф 2с
+    expect(getUserMedia).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(2000); // ретрай №2 — устройство отдали → захват ожил
+    expect(getUserMedia).toHaveBeenCalledTimes(4);
+    const last = streams.at(-1)!;
+    expect(last.track.onended).toBeTypeOf("function"); // watchdog заново повешен на живой трек
+  });
+
+  it("stop() отменяет запланированный ретрай (ручная остановка не оживает сама)", async () => {
+    const cap = new AudioCapture(() => {});
+    await cap.start();
+    getUserMedia.mockRejectedValue(new Error("NotReadableError"));
+    streams[0]!.track.onended?.();
+    await vi.advanceTimersByTimeAsync(0); // ретрай армирован
+    const calls = getUserMedia.mock.calls.length;
+    await cap.stop(); // пользователь/приложение остановили захват
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(getUserMedia).toHaveBeenCalledTimes(calls); // ретраи не тикают после stop()
+  });
+});

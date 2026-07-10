@@ -21,10 +21,12 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     userId: "u1",
     sessionId: "s1",
     goal: "сделать таблицу расходов",
+    title: "Таблица расходов",
     state: "running",
     stepsDone: 0,
     startedAt: 0,
     cancel: { cancelled: false },
+    steer: { pending: [] },
     ...overrides,
   };
 }
@@ -63,10 +65,10 @@ describe("milestoneLine", () => {
     );
   });
 
-  it("плюрализация слова «шаг» по номеру", () => {
-    expect(milestoneLine(1, 10)).toContain("Шаг 1");
-    expect(milestoneLine(2, 10)).toContain("Шага 2");
-    expect(milestoneLine(5, 10)).toContain("Шагов 5");
+  it("«Шаг N из M» — фиксированная форма (без неверной плюрализации «Шагов 5 из 40»)", () => {
+    expect(milestoneLine(1, 10)).toBe("Шаг 1 из 10.");
+    expect(milestoneLine(2, 10)).toBe("Шаг 2 из 10.");
+    expect(milestoneLine(5, 10)).toBe("Шаг 5 из 10.");
   });
 
   it("без total — метка с многоточием", () => {

@@ -1,441 +1,335 @@
 -- =============================================================================
--- §13 Схема базы данных Jarvis
--- Миграция 0001_init — полная инициализация всех таблиц
+-- §13 Схема базы данных Jarvis — миграция 0001_init
+-- =============================================================================
+-- Источник истины: JARVIS_SPEC.md §13. Для таблиц, которые УЖЕ читает/пишет
+-- серверный код (episodic_memory, skills, usage_quota, action_log), имена
+-- колонок выверены 1:1 с реальными SQL-запросами (memory/episodic.ts,
+-- memory/skills.ts, billing/index.ts, db/action-log.ts) — иначе INSERT/SELECT
+-- падают на несуществующих колонках. Прочие таблицы — по §13 «на вырост»
+-- (intents=умные напоминания, contacts.aliases, *.idempotency_key и т.д.).
 -- =============================================================================
 
--- pgvector: расширение для хранения эмбеддингов и HNSW-индексов (§13 §4).
--- HNSW выбран вместо IVFFlat: не требует предварительного обучения (IVFFLAT
--- нужен отдельный VACUUM / ANALYZE перед первым запросом), лучше работает
--- при малых (~10K) объёмах на пользователя и обеспечивает лучший recall
--- при высокой скорости поиска ближайших соседей (ANN).
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- =============================================================================
--- users — основной профиль пользователя
+-- users — профиль пользователя (§13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS users (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    email         TEXT        NOT NULL UNIQUE,
-    display_name  TEXT,
-    -- persona_config хранит JSONB с предпочтениями голоса, стиля, языка
-    -- (§13: единая точка настройки персоны без лишних столбцов)
-    persona_config JSONB      NOT NULL DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    email          TEXT        UNIQUE,
+    name           TEXT,
+    display_name   TEXT,
+    locale         TEXT        NOT NULL DEFAULT 'ru',
+    timezone       TEXT        NOT NULL DEFAULT 'Europe/Moscow',
+    -- persona_config: стиль, голос, do-not-disturb, пороги доверия (§11, §13)
+    persona_config JSONB       NOT NULL DEFAULT '{}',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE users IS '§13 Профиль пользователя; persona_config — единая точка настройки персоны';
-COMMENT ON COLUMN users.persona_config IS 'Предпочтения голоса, стиля ответов, языка — хранится как JSONB для гибкой эволюции схемы';
+COMMENT ON TABLE users IS '§13 Профиль; persona_config — единая точка настройки персоны';
 
 -- =============================================================================
--- user_credentials — WebAuthn / passwordless хранилище (§8)
+-- user_credentials — серверные креды интеграций, зашифрованные (§13)
+-- Сессии userbot VK/TG живут НА КЛИЕНТЕ (§12) и сюда не попадают.
+-- Мастер-ключ шифрования — из secret-менеджера сервера, не в БД.
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS user_credentials (
-    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- credential_id — raw bytes из WebAuthn (base64url при передаче, bytea в БД)
-    credential_id   BYTEA       NOT NULL UNIQUE,
-    public_key      BYTEA       NOT NULL,
-    -- counter защищает от replay-атак (WebAuthn spec §6.2.3)
-    counter         BIGINT      NOT NULL DEFAULT 0,
-    device_type     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_used_at    TIMESTAMPTZ
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    service        TEXT        NOT NULL,            -- 'maps' | 'deepgram' | ...
+    kind           TEXT        NOT NULL,            -- 'oauth' | 'token'
+    encrypted_blob BYTEA       NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE user_credentials IS '§8 WebAuthn/Passkey credentials; counter защищает от replay-атак';
-COMMENT ON COLUMN user_credentials.credential_id IS 'raw bytes из WebAuthn Credential ID (UNIQUE — каждый физический ключ уникален)';
-
-CREATE INDEX IF NOT EXISTS idx_user_credentials_user_id
-    ON user_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_credentials_user_id ON user_credentials(user_id);
 
 -- =============================================================================
--- sessions — сессии WebSocket-соединений (§3 §13)
+-- sessions — сессии WS-соединений (§13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS sessions (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- started_at / ended_at позволяют восстанавливать контекст при resumed=true (§3)
-    started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    ended_at      TIMESTAMPTZ,
-    -- device_info: JSON с user-agent, платформой, версией клиента
-    device_info   JSONB       NOT NULL DEFAULT '{}'
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at    TIMESTAMPTZ,
+    summary     TEXT,                              -- сжатая сводка (compaction)
+    tokens_in   BIGINT      NOT NULL DEFAULT 0,
+    tokens_out  BIGINT      NOT NULL DEFAULT 0
 );
-
-COMMENT ON TABLE sessions IS '§3 WS-сессии; ended_at=NULL означает активную сессию; resumed флаг приходит в ServerHello';
-
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id
-    ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_started_at
-    ON sessions(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 
 -- =============================================================================
--- messages — лог всех сообщений диалога (§13)
+-- messages — лог диалога (§13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS messages (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    session_id    UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- role: 'user' | 'assistant' | 'system'
-    role          TEXT        NOT NULL,
-    -- content_md — каноническое хранилище в Markdown (§13: единственный истинный
-    -- источник текста; HTML/plain производятся на лету при рендере)
-    content_md    TEXT        NOT NULL,
-    -- envelope_id: UUID из Envelope<T>.id для трассировки (§2)
-    envelope_id   UUID,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id  UUID        NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role        TEXT        NOT NULL,              -- 'user' | 'assistant' | 'tool'
+    content     JSONB       NOT NULL,
+    tier_used   TEXT,                              -- 'tier0'|'haiku'|'sonnet'|'fable'
+    tokens_in   INT         NOT NULL DEFAULT 0,
+    tokens_out  INT         NOT NULL DEFAULT 0,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE messages IS '§13 Лог диалога; content_md — каноническая форма (HTML/plain производятся при рендере)';
-COMMENT ON COLUMN messages.content_md IS 'Markdown — единственный истинный источник текста (§13)';
-
-CREATE INDEX IF NOT EXISTS idx_messages_session_id
-    ON messages(session_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_user_id
-    ON messages(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, created_at DESC);
 
 -- =============================================================================
--- episodic_memory — долгосрочная эпизодическая память (§4 §13)
+-- episodic_memory — эпизодическая память (§8, §13)
+-- ВЫВЕРЕНО ПО КОДУ memory/episodic.ts: kind, text, salience, stale, embedding.
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS episodic_memory (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- summary — краткое текстовое резюме эпизода (для отображения / fallback)
-    summary       TEXT        NOT NULL,
-    -- embedding: 1536-мерный вектор (text-embedding-3-small / ada-002, §4)
-    -- Размер 1536 соответствует OpenAI text-embedding-3-small и ada-002.
-    -- При смене модели потребуется пересчёт всех эмбеддингов (§4 note).
-    embedding     vector(1536),
-    -- metadata: источник, теги, идентификаторы связанных сущностей (§4)
-    metadata      JSONB       NOT NULL DEFAULT '{}',
-    importance    FLOAT4      NOT NULL DEFAULT 0.5, -- 0..1
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    accessed_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind           TEXT        NOT NULL,           -- 'preference' | 'fact' | 'event'
+    text           TEXT        NOT NULL,
+    -- embedding: 1536d (text-embedding-3-small, §1); смена модели → пересчёт.
+    embedding      VECTOR(1536),
+    salience       REAL        NOT NULL DEFAULT 0.5,
+    source_session UUID        REFERENCES sessions(id) ON DELETE SET NULL,
+    stale          BOOLEAN     NOT NULL DEFAULT FALSE,
+    metadata       JSONB       NOT NULL DEFAULT '{}',
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at   TIMESTAMPTZ
 );
-
-COMMENT ON TABLE episodic_memory IS '§4 Эпизодическая память; embedding vector(1536) для ANN-поиска';
-COMMENT ON COLUMN episodic_memory.embedding IS 'text-embedding-3-small (1536 dim); при смене модели нужен пересчёт';
-
--- HNSW индекс: §13 выбрал HNSW вместо IVFFlat:
---   • Не требует обучения (CREATE INDEX без предварительного ANALYZE)
---   • Хорошо работает при малых (~10K) per-user объёмах
---   • Recall лучше при ef_search >= 40 (cosine для нормализованных эмбеддингов)
--- На per-user объёмах HNSW опционален (§13 note) — при < 1000 записей
--- последовательный скан быстрее; индекс создаётся заранее для масштаба.
-CREATE INDEX IF NOT EXISTS idx_episodic_memory_embedding_hnsw
+COMMENT ON TABLE episodic_memory IS '§8 Эпизодическая память; колонки выверены по memory/episodic.ts';
+-- HNSW (не IVFFlat): строится инкрементально, без обучения на пустой таблице (§13).
+CREATE INDEX IF NOT EXISTS idx_episodic_embedding_hnsw
     ON episodic_memory USING hnsw (embedding vector_cosine_ops)
     WITH (m = 16, ef_construction = 64);
-
-CREATE INDEX IF NOT EXISTS idx_episodic_memory_user_id
-    ON episodic_memory(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_episodic_user ON episodic_memory(user_id, created_at DESC);
 
 -- =============================================================================
--- skills — каталог навыков (§6 §13)
+-- skills — процедурная память / SKILL.md (§8, §13)
+-- ВЫВЕРЕНО ПО КОДУ memory/skills.ts:
+--   • id — ТЕКСТОВЫЙ слаг из фронтматтера (напр. 'open-notion'), не UUID;
+--   • content_md — КАНОНИЧЕСКИЙ источник; steps — derived-парс;
+--   • saveSkill использует ON CONFLICT (id, user_id) → нужен PK/UNIQUE (user_id, id).
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS skills (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        REFERENCES users(id) ON DELETE CASCADE, -- NULL = системный навык
-    name          TEXT        NOT NULL,
-    version       TEXT        NOT NULL DEFAULT '1.0.0',
-    -- definition: JSON-описание шагов SkillStep[] (§6 ActionCommand)
-    definition    JSONB       NOT NULL DEFAULT '{}',
-    -- enabled позволяет деактивировать навык без удаления
-    enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
+    id            TEXT        NOT NULL,            -- слаг навыка из SKILL.md
+    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name          TEXT,
+    description   TEXT,
+    triggers      JSONB       NOT NULL DEFAULT '[]',
+    tools         JSONB       NOT NULL DEFAULT '[]',
+    steps         JSONB       NOT NULL DEFAULT '[]',  -- derived из content_md (§8)
+    content_md    TEXT,                               -- КАНОНИЧЕСКИЙ источник (§8)
+    surface       TEXT,                               -- 'vk-desktop' | 'youtube-web' | ...
+    grounding     TEXT        NOT NULL DEFAULT 'a11y', -- 'a11y'|'vision'|'hybrid'
+    version       INT         NOT NULL DEFAULT 1,
+    success_count INT         NOT NULL DEFAULT 0,
+    fail_count    INT         NOT NULL DEFAULT 0,
+    last_used_at  TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, name, version)
+    PRIMARY KEY (user_id, id)                         -- покрывает ON CONFLICT (id, user_id)
 );
-
-COMMENT ON TABLE skills IS '§6 Каталог навыков; user_id=NULL означает системный (глобальный) навык';
-COMMENT ON COLUMN skills.definition IS 'SkillStep[] из §6 ActionCommand в JSONB — гибко эволюционирует без миграций схемы';
-
-CREATE INDEX IF NOT EXISTS idx_skills_user_id
-    ON skills(user_id) WHERE user_id IS NOT NULL;
+COMMENT ON TABLE skills IS '§8 Навыки; content_md канонический, steps derived; id — текстовый слаг';
+CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id);
 
 -- =============================================================================
--- places — места пользователя для геоконтекста (§10 §13)
+-- places — места пользователя для геоконтекста (§9, §13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS places (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- label: 'home' | 'work' | 'gym' | произвольная метка
-    label         TEXT        NOT NULL,
-    address       TEXT,
-    lat           DOUBLE PRECISION,
-    lon           DOUBLE PRECISION,
-    -- radius_m: радиус геозоны в метрах (для определения "я дома")
-    radius_m      INT         NOT NULL DEFAULT 100,
-    metadata      JSONB       NOT NULL DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id           UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    label             TEXT        NOT NULL,        -- 'home' | 'gym' | 'work'
+    lat               DOUBLE PRECISION,
+    lng               DOUBLE PRECISION,
+    address           TEXT,
+    geofence_radius_m INT         NOT NULL DEFAULT 150,
     UNIQUE (user_id, label)
 );
-
-COMMENT ON TABLE places IS '§10 Геоконтекст; radius_m — геозона для проактивных триггеров';
-
-CREATE INDEX IF NOT EXISTS idx_places_user_id
-    ON places(user_id);
+CREATE INDEX IF NOT EXISTS idx_places_user ON places(user_id);
 
 -- =============================================================================
--- habits — привычки и расписания пользователя (§10 §13)
+-- habits — выученные паттерны (§9, §13)
+-- scheduler.learnedPrepMs читает data.minutes (pattern_type='prep_time').
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS habits (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name          TEXT        NOT NULL,
-    -- cron_expr: POSIX-cron для расписания ("0 7 * * 1-5" = будни в 07:00)
-    cron_expr     TEXT,
-    -- trigger_context: JSONB с условиями (место, время, устройство)
-    trigger_context JSONB     NOT NULL DEFAULT '{}',
-    action_config JSONB       NOT NULL DEFAULT '{}',
-    enabled       BOOLEAN     NOT NULL DEFAULT TRUE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pattern_type TEXT        NOT NULL,             -- 'prep_time'|'recurring_event'|'order'
+    description  TEXT,
+    data         JSONB       NOT NULL DEFAULT '{}', -- напр. {minutes: 10}
+    confidence   REAL        NOT NULL DEFAULT 0.5,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE habits IS '§10 Привычки/расписания; cron_expr — POSIX cron; trigger_context — доп. условия';
-
-CREATE INDEX IF NOT EXISTS idx_habits_user_id
-    ON habits(user_id) WHERE enabled = TRUE;
+CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id);
 
 -- =============================================================================
--- intents — распознанные намерения пользователя (§5 §13)
+-- intents — УМНЫЕ НАПОМИНАНИЯ: интент с дедлайном/местом (§9, §13)
+-- computed_trigger_ts пересчитывается: deadline − ETA − prep − buffer.
+-- (Прежняя миграция держала здесь NLU-лог — это расходилось с §9/scheduler.ts.)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS intents (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    session_id    UUID        REFERENCES sessions(id) ON DELETE SET NULL,
-    -- intent_type: например 'navigate', 'remind', 'search', 'control'
-    intent_type   TEXT        NOT NULL,
-    -- raw_text: исходный запрос пользователя
-    raw_text      TEXT        NOT NULL,
-    -- slots: распознанные сущности (JSONB для гибкости)
-    slots         JSONB       NOT NULL DEFAULT '{}',
-    -- confidence: уверенность классификатора 0..1
-    confidence    FLOAT4,
-    -- resolved: true = намерение выполнено / передано в executor
-    resolved      BOOLEAN     NOT NULL DEFAULT FALSE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    goal_text           TEXT        NOT NULL,      -- 'быть в зале'
+    place_id            UUID        REFERENCES places(id) ON DELETE SET NULL,
+    deadline_ts         TIMESTAMPTZ NOT NULL,
+    prep_minutes        INT         NOT NULL DEFAULT 0,  -- из habits, выученное
+    travel_mode         TEXT        NOT NULL DEFAULT 'walking', -- walking|driving|transit
+    buffer_min          INT         NOT NULL DEFAULT 5,
+    computed_trigger_ts TIMESTAMPTZ,               -- результат пересчёта
+    status              TEXT        NOT NULL DEFAULT 'pending', -- pending|notified|done|cancelled
+    last_recomputed_at  TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE intents IS '§5 Распознанные намерения; slots — NER-результат в JSONB';
-
-CREATE INDEX IF NOT EXISTS idx_intents_user_id
-    ON intents(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_intents_pending
+    ON intents(user_id, computed_trigger_ts) WHERE status = 'pending';
 
 -- =============================================================================
--- proactive_events — проактивные уведомления (§9 §13)
+-- proactive_events — журнал проактивных срабатываний (§9, §13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS proactive_events (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- kind: 'nudge' | 'reminder' | 'alert' | 'suggestion'
-    kind          TEXT        NOT NULL DEFAULT 'nudge',
-    text          TEXT        NOT NULL,
-    reason        TEXT,
-    -- expires_at: после этого момента событие не отправляется (§9 FOLLOWUP_WINDOW_MS)
-    expires_at    TIMESTAMPTZ NOT NULL,
-    -- delivered_at: NULL = ещё не доставлено
-    delivered_at  TIMESTAMPTZ,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    trigger_type   TEXT        NOT NULL,           -- 'time'|'context'|'external'
+    payload        JSONB       NOT NULL DEFAULT '{}',
+    salience_score REAL,
+    suppressed     BOOLEAN     NOT NULL DEFAULT FALSE, -- зарубил salience/DND
+    fired_at       TIMESTAMPTZ
 );
-
-COMMENT ON TABLE proactive_events IS '§9 Проактивные события; expires_at контролирует FOLLOWUP_WINDOW_MS';
-
-CREATE INDEX IF NOT EXISTS idx_proactive_events_user_pending
-    ON proactive_events(user_id, expires_at)
-    WHERE delivered_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_proactive_user ON proactive_events(user_id, fired_at DESC);
 
 -- =============================================================================
--- contacts — адресная книга пользователя (§11 §13)
+-- contacts — адресная книга с алиасами для дизамбигуации (§13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS contacts (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name          TEXT        NOT NULL,
-    -- channels: {"telegram": "@handle", "vk": "id123", "email": "x@y.z"}
-    channels      JSONB       NOT NULL DEFAULT '{}',
-    -- tags: метки для группировки ['family', 'work']
-    tags          TEXT[]      NOT NULL DEFAULT '{}',
-    metadata      JSONB       NOT NULL DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    display_name        TEXT        NOT NULL,
+    aliases             JSONB       NOT NULL DEFAULT '[]', -- ["Маша","маша из зала"]
+    channels            JSONB       NOT NULL DEFAULT '{}', -- {"telegram":"...","vk":"..."}
+    last_interaction_at TIMESTAMPTZ,
+    source              TEXT        NOT NULL DEFAULT 'observed', -- observed|imported|manual
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, display_name)
 );
-
-COMMENT ON TABLE contacts IS '§11 Адресная книга; channels JSONB — мессенджеры без фиксированной схемы';
-
-CREATE INDEX IF NOT EXISTS idx_contacts_user_id
-    ON contacts(user_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_user ON contacts(user_id);
 
 -- =============================================================================
--- devices — устройства пользователя (§12 §13)
+-- devices — presence-роутинг уведомлений и пуш-токены (§9, §13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS devices (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- device_name: 'Home PC', 'Work Laptop', 'Phone'
-    device_name   TEXT        NOT NULL,
-    -- platform: 'windows' | 'macos' | 'android' | 'ios' | 'linux'
-    platform      TEXT,
-    -- push_token: для push-уведомлений (NULL = не зарегистрировано)
-    push_token    TEXT,
-    -- last_seen_at: обновляется при каждом client.hello (§3)
-    last_seen_at  TIMESTAMPTZ,
-    -- capabilities: {"screen_capture": true, "audio": true, ...}
-    capabilities  JSONB       NOT NULL DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (user_id, device_name)
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind         TEXT        NOT NULL,             -- 'desktop'|'mobile'
+    push_token   TEXT,
+    app_version  TEXT,
+    last_seen_at TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE devices IS '§12 Устройства; capabilities — фичи клиента из ClientState (§3)';
-
-CREATE INDEX IF NOT EXISTS idx_devices_user_id
-    ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
 
 -- =============================================================================
--- tasks — долгосрочные задачи (§7 §13)
+-- tasks — долгие задачи: статус/прогресс/отмена/наррация (§20, §13)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS tasks (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    session_id    UUID        REFERENCES sessions(id) ON DELETE SET NULL,
-    -- state: TaskState из §7 ('idle'|'running'|'paused'|'done'|'failed'|'cancelled')
-    state         TEXT        NOT NULL DEFAULT 'idle',
-    summary       TEXT,
-    -- steps_done / steps_total для прогресс-бара (§7 TaskStatus)
-    steps_done    INT         NOT NULL DEFAULT 0,
-    steps_total   INT,
-    -- definition: полное описание задачи / шагов в JSONB
-    definition    JSONB       NOT NULL DEFAULT '{}',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    completed_at  TIMESTAMPTZ
+    id             UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id     UUID        REFERENCES sessions(id) ON DELETE SET NULL,
+    goal_text      TEXT        NOT NULL,
+    status         TEXT        NOT NULL DEFAULT 'queued', -- queued|running|paused|waiting_confirm|done|failed|cancelled
+    skill_id       TEXT,                           -- слаг навыка (skills.id), без FK (составной ключ)
+    steps_total    INT,
+    steps_done     INT         NOT NULL DEFAULT 0,
+    result_summary TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE tasks IS '§7 Долгосрочные задачи; state соответствует TaskState из протокола';
-
-CREATE INDEX IF NOT EXISTS idx_tasks_user_id
-    ON tasks(user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_tasks_state
-    ON tasks(state) WHERE state NOT IN ('done', 'cancelled', 'failed');
+CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_active
+    ON tasks(status) WHERE status NOT IN ('done', 'cancelled', 'failed');
 
 -- =============================================================================
--- outbound_messages — исходящие сообщения через мессенджеры (§11 §13)
+-- outbound_messages — исходящие от лица юзера, с гардами (§14, §13)
+-- idempotency_key UNIQUE: retry-цикл не отправляет дубль (§14).
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS outbound_messages (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- channel: 'telegram' | 'vk' (§2 MessageChannel)
-    channel       TEXT        NOT NULL,
-    -- recipient: идентификатор получателя в канале
-    recipient     TEXT        NOT NULL,
-    body          TEXT        NOT NULL,
-    -- status: 'pending' | 'sent' | 'failed'
-    status        TEXT        NOT NULL DEFAULT 'pending',
-    -- sent_at: время фактической отправки (NULL = ещё не отправлено)
-    sent_at       TIMESTAMPTZ,
-    error_msg     TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel         TEXT        NOT NULL,          -- 'vk'|'telegram'
+    contact_id      UUID        REFERENCES contacts(id) ON DELETE SET NULL,
+    recipient       TEXT        NOT NULL,          -- резолвнутый адрес в канале
+    body            TEXT        NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'pending', -- pending|confirmed|sent|blocked
+    cadence_ok      BOOLEAN     NOT NULL DEFAULT FALSE, -- прошёл гард кадэнса
+    idempotency_key TEXT        UNIQUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE outbound_messages IS '§11 Очередь исходящих сообщений; status позволяет retry при сбое';
-
-CREATE INDEX IF NOT EXISTS idx_outbound_messages_pending
-    ON outbound_messages(user_id, created_at)
-    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_outbound_pending
+    ON outbound_messages(user_id, created_at) WHERE status = 'pending';
 
 -- =============================================================================
--- orders — заказы (§11 §13)
--- ВАЖНО: платёжные/карточные данные здесь НЕ хранятся (§0 принцип 5).
--- Только метаданные заказа для трассировки — статус, вендор, сумма.
+-- orders — заказы с гардами (§14, §13)
+-- §0 принцип 5: карточные/платёжные данные НЕ хранятся — только аудит.
+-- idempotency_key UNIQUE: retry не оформляет три заказа (§14).
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS orders (
-    id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- vendor: название вендора ('yandex_market', 'wildberries', ...)
-    vendor        TEXT        NOT NULL,
-    -- external_order_id: ID заказа на стороне вендора (для трекинга)
+    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id           UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    vendor            TEXT        NOT NULL,
+    items             JSONB       NOT NULL DEFAULT '[]', -- {name,qty,price} без карточных данных
+    total             NUMERIC(12, 2),
+    status            TEXT        NOT NULL DEFAULT 'pending', -- pending|confirmed|placed|blocked
+    idempotency_key   TEXT        UNIQUE,
     external_order_id TEXT,
-    -- items: [{name, qty, price_rub}] — без карточных данных
-    items         JSONB       NOT NULL DEFAULT '[]',
-    -- total_rub: итоговая сумма в рублях (только для аудита, не для платежей)
-    total_rub     NUMERIC(12, 2),
-    -- status: 'pending' | 'confirmed' | 'shipped' | 'delivered' | 'cancelled'
-    status        TEXT        NOT NULL DEFAULT 'pending',
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE orders IS '§11 Метаданные заказов; §0-p5: платёжные данные НЕ хранятся';
-COMMENT ON COLUMN orders.items IS 'Без карточных/платёжных данных — только sku/qty/price для аудита (§0 принцип 5)';
-
-CREATE INDEX IF NOT EXISTS idx_orders_user_id
-    ON orders(user_id, created_at DESC);
+COMMENT ON COLUMN orders.items IS '§0-p5: только sku/qty/price для аудита, без карточных данных';
+CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id, created_at DESC);
 
 -- =============================================================================
--- usage_quota — квоты использования ресурсов (§14 §13)
--- PK (user_id, period): составной PK выбран потому что квота существует
--- единственный раз per-user per-period и не требует суррогатного UUID.
--- Это также автоматически создаёт уникальный индекс по (user_id, period).
--- period — строка вида '2024-01' (ISO year-month) для ежемесячных квот.
+-- usage_quota — квоты и учёт трат (§14, §13)
+-- PK(user_id, period): одна строка на (юзер × месяц). period = 'YYYY-MM'.
+-- ВЫВЕРЕНО ПО КОДУ billing/index.ts: upsert tokens_used / cost_estimate.
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS usage_quota (
-    user_id           UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- period: 'YYYY-MM' для ежемесячных квот (§14)
-    period            TEXT        NOT NULL,
-    -- tokens_used / tokens_limit: LLM-токены (§14 Tier)
-    tokens_used       BIGINT      NOT NULL DEFAULT 0,
-    tokens_limit      BIGINT      NOT NULL DEFAULT 1000000,
-    -- actions_used: количество выполненных ActionCommand (§6)
-    actions_used      INT         NOT NULL DEFAULT 0,
-    actions_limit     INT         NOT NULL DEFAULT 10000,
-    -- tts_chars_used: символы TTS (§4 SpeakChunk)
-    tts_chars_used    INT         NOT NULL DEFAULT 0,
-    tts_chars_limit   INT         NOT NULL DEFAULT 500000,
-    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- Составной PK: одна строка на (пользователь × период) — суррогатный
-    -- UUID был бы избыточен, т.к. (user_id, period) уже уникален по смыслу
+    user_id         UUID          NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    period          TEXT          NOT NULL,        -- 'YYYY-MM'
+    tokens_used     BIGINT        NOT NULL DEFAULT 0,
+    cost_estimate   NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    spend_cap       NUMERIC(12, 2),
+    kill_switch     BOOLEAN       NOT NULL DEFAULT FALSE,
+    tokens_limit    BIGINT        NOT NULL DEFAULT 1000000,
+    actions_used    INT           NOT NULL DEFAULT 0,
+    actions_limit   INT           NOT NULL DEFAULT 10000,
+    tts_chars_used  INT           NOT NULL DEFAULT 0,
+    tts_chars_limit INT           NOT NULL DEFAULT 500000,
+    updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, period)
 );
 
-COMMENT ON TABLE usage_quota IS '§14 Квоты; PK(user_id,period) — суррогатный UUID избыточен, (user_id,period) уже уникален';
-COMMENT ON COLUMN usage_quota.period IS 'YYYY-MM — ежемесячный период; §14 Tier определяет лимиты';
-
 -- =============================================================================
--- action_log — аудит-лог всех выполненных действий (§6 §13)
+-- action_log — аудит всех ActionCommand/Result (§8, §13)
+-- ВЫВЕРЕНО ПО КОДУ db/action-log.ts: kind, command, error_message, at.
+-- session_id/command_id — TEXT без FK: лог best-effort, сессия может быть не в БД.
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS action_log (
     id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    session_id    UUID        REFERENCES sessions(id) ON DELETE SET NULL,
+    user_id       UUID        REFERENCES users(id) ON DELETE CASCADE, -- nullable (best-effort)
+    session_id    TEXT,                            -- best-effort, без FK
     task_id       UUID        REFERENCES tasks(id) ON DELETE SET NULL,
-    -- command_id: UUID из ActionCommandEnvelope для корреляции с ActionResult (§6)
-    command_id    UUID,
-    -- action_kind: ActionKind из @jarvis/protocol (§6)
-    action_kind   TEXT        NOT NULL,
-    -- payload: полный ActionCommand в JSONB для детального аудита
-    payload       JSONB       NOT NULL DEFAULT '{}',
-    -- ok: результат выполнения (true/false = ActionResult.ok)
+    command_id    TEXT,
+    kind          TEXT        NOT NULL,            -- 'input.click' | 'skill.execute' | ...
+    command       JSONB       NOT NULL DEFAULT '{}',
     ok            BOOLEAN,
-    -- duration_ms: время выполнения (§6 ActionResult.durationMs)
+    error_code    TEXT,
+    error_message TEXT,
     duration_ms   INT,
-    error_msg     TEXT,
-    -- step_index: индекс шага в skill.execute (§6 SkillStep)
+    skill_id      TEXT,
     step_index    INT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-COMMENT ON TABLE action_log IS '§6 Аудит всех ActionCommand; command_id коррелирует с ActionResult.commandId';
-
--- Индекс (user_id, created_at) — основной паттерн запросов: "последние действия
--- пользователя за период" для аудита и отладки (§13 spec).
-CREATE INDEX IF NOT EXISTS idx_action_log_user_created
-    ON action_log(user_id, created_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_action_log_command_id
-    ON action_log(command_id) WHERE command_id IS NOT NULL;
+COMMENT ON TABLE action_log IS '§8 Аудит действий; колонки выверены по db/action-log.ts';
+CREATE INDEX IF NOT EXISTS idx_action_log_user ON action_log(user_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_action_log_command ON action_log(command_id) WHERE command_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_action_log_session ON action_log(session_id);
 
 -- =============================================================================
--- Триггер: автообновление updated_at для таблиц с этим полем
+-- Триггер: автообновление updated_at
 -- =============================================================================
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -449,7 +343,7 @@ DO $$ DECLARE
     t TEXT;
 BEGIN
     FOREACH t IN ARRAY ARRAY[
-        'users', 'skills', 'habits', 'contacts', 'tasks', 'orders', 'usage_quota'
+        'users', 'skills', 'tasks', 'orders', 'usage_quota'
     ] LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS trg_%s_updated_at ON %I;

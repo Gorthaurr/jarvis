@@ -2,7 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!--
+      §Волна2 (2.3): TFM с версией Windows SDK — даёт WinRT-проекции (Windows.Media.Ocr для
+      локального OCR). 10.0.19041 = Win10 2004, ниже Win10 сайдкар и так не работает.
+      Публикация складывается в bin/Release/net8.0-windows10.0.19041.0/... — путь поиска exe
+      в клиенте (apps/client/main/index.ts startSidecar) обновлён соответственно.
+    -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -18,11 +25,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
 
     <!--
-      PublishSingleFile профиль (запустить из корня monorepo):
-        dotnet publish apps/sidecar-win -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-          -o dist/sidecar-win
-      Итоговый бинарь: dist/sidecar-win/SidecarWin.exe — ~70–120 МБ.
+      Публикация (framework-dependent) в путь, который ждёт клиент:
+        dotnet publish -c Release
+      Итог: bin/Release/net8.0-windows/win-x64/publish/SidecarWin.exe
+      Single-file self-contained вариант описан в apps/sidecar-win/README.md.
     -->
     <PublishSingleFile Condition="'$(PublishSingleFile)' == ''">false</PublishSingleFile>
     <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>

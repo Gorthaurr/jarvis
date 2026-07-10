@@ -21,7 +21,7 @@ export type VoiceEvent =
   | { type: "transcript_final"; text: string } // STT финализировал фразу
   | { type: "speak_start" } // первый TTS-чанк пошёл
   | { type: "speak_done" } // TTS завершился
-  | { type: "barge_in" } // юзер заговорил во время speaking (§10)
+  | { type: "barge_in"; ttsActive?: boolean } // юзер заговорил во время speaking (§10); ttsActive — жив ли ещё синтез (заполняет pipeline)
   | { type: "followup_timeout" } // окно follow-up истекло (§10)
   | { type: "stop" } // внешний стоп («заткнись»): рубим TTS, в idle
   | { type: "mute" }; // честный mute: стоп захвата, в idle (§0.6)
@@ -68,7 +68,10 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
   // stop/mute обрабатываются из любого состояния (приоритетно).
   if (ev.type === "stop" || ev.type === "mute") {
     const actions: VoiceAction[] = [];
-    if (ctx.state === "speaking") actions.push({ type: "cancel_tts" });
+    // cancel_tts и в thinking: отменяет ещё не озвученный, но УЖЕ ЗАПУЩЕННЫЙ ход агента
+    // (инкремент gen в pipeline инвалидирует его поздний TTS), иначе Джарвис заговорит
+    // поверх пользователя после стопа.
+    if (ctx.state === "speaking" || ctx.state === "thinking") actions.push({ type: "cancel_tts" });
     if (ctx.state === "listening") actions.push({ type: "close_stt" });
     if (ctx.followupActive) actions.push({ type: "disarm_followup" });
     return go("idle", false, actions);
@@ -78,6 +81,11 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
     case "idle":
       // Активны только wake word. Всё прочее игнор (аудио ещё не стримится).
       if (ev.type === "wake") return go("listening", false, [{ type: "open_stt" }]);
+      // Программная речь из покоя — фоновый итог (§20 async) или проактивность (§9): входим
+      // в speaking, чтобы по завершении сработал штатный возврат speak_done → listening +
+      // follow-up. Без этого произнесённый фоном ВОПРОС не переоткрывал микрофон → «перестал
+      // слушать» (юзеру нечем ответить). Клиент при этом видит speaking → корректный эхо-гард.
+      if (ev.type === "speak_start") return go("speaking", false, []);
       return noop(ctx);
 
     case "listening": {
@@ -107,6 +115,20 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
           // Повторный wake во время listening — просто перезапускаем follow-up флаг.
           if (ctx.followupActive) return { context: { state: "listening", followupActive: false }, actions: [{ type: "disarm_followup" }] };
           return noop(ctx);
+        case "speak_start":
+          // Фоновый итог (§20) заговорил в окне follow-up: переходим в speaking, гася таймер
+          // follow-up (после речи он перезапустится через speak_done → listening). Иначе
+          // таймер истекал во время длинного ответа → уход в idle, и микрофон не возвращался.
+          return go("speaking", false, ctx.followupActive ? [{ type: "disarm_followup" }] : []);
+        case "barge_in":
+          // §barge: поздний barge_in приходит, когда сервер УЖЕ ушёл в listening (вышел из speaking по
+          // концу СИНТЕЗА), а клиент ещё доигрывает хвост очереди озвучки. Гасим ещё-живой синтез:
+          // cancel_tts бампает gen и обрывает phraseSpeaker/ttsStream если живы.
+          // H11: НЕ бампать gen, когда глушить нечего. cancel_tts безусловно делает gen+=1, а в listening
+          // уже открыт STT-стрим ЭТОГО хода (follow-up) — лишний инкремент инвалидирует его onPartial-гард
+          // (myGen!==gen), и follow-up-команда молча теряется. Поэтому cancel_tts шлём ТОЛЬКО если синтез
+          // реально жив (pipeline проставил ttsActive). Синтеза нет → тихий no-op, STT цел.
+          return { context: ctx, actions: ev.ttsActive ? [{ type: "cancel_tts" }] : [] };
         default:
           return noop(ctx);
       }
@@ -117,10 +139,17 @@ export function reduce(ctx: VoiceContext, ev: VoiceEvent): Transition {
         case "speak_start":
           // brain отдал ответ, пошёл первый TTS-чанк.
           return go("speaking", false, []);
+        case "speak_done":
+          // speak_done БЕЗ предшествующего speak_start = синтез не дал ни одного звука
+          // (ошибка/таймаут TTS, нулевой ответ провайдера). НЕ виснем в thinking (это был бы
+          // noop → микрофон не вернуть): возвращаемся слушать с follow-up окном, как после
+          // обычной речи. Один сбой синтеза не должен вешать весь голосовой цикл (§10).
+          return go("listening", true, [{ type: "open_stt" }, { type: "arm_followup" }]);
         case "barge_in":
         case "speech_start":
-          // Юзер перебил на этапе обдумывания — отменяем и слушаем заново (§10).
-          return go("listening", false, [{ type: "open_stt" }]);
+          // Юзер перебил на этапе обдумывания — ОТМЕНЯЕМ запущенный ход агента
+          // (cancel_tts инкрементит gen → поздний ответ не озвучится) и слушаем заново (§10).
+          return go("listening", false, [{ type: "cancel_tts" }, { type: "open_stt" }]);
         case "transcript_final":
           // Поздний финал от закрытого стрима — игнор (агент уже вызван).
           return noop(ctx);

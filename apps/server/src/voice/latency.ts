@@ -20,8 +20,12 @@ export interface LatencyReport {
   llmFirstTokenMs?: number;
   /** turn_end → первый чанк TTS. */
   ttsFirstChunkMs?: number;
+  /** Чистое время синтеза первой фразы TTS: llm_first_token → tts_first_chunk. */
+  ttsSynthMs?: number;
   /** Уложились ли в целевые 800 мс. */
   withinTarget?: boolean;
+  /** Однострочная сводка по стадиям (для логов: видно, ГДЕ деградация). */
+  summary: string;
 }
 
 export class LatencyTracker {
@@ -53,12 +57,34 @@ export class LatencyTracker {
 
   report(): LatencyReport {
     const firstAudioMs = this.delta("turn_end", "audio");
+    const llmFirstTokenMs = this.delta("turn_end", "llm_first_token");
+    const ttsFirstChunkMs = this.delta("turn_end", "tts_first_chunk");
+    const ttsSynthMs = this.delta("llm_first_token", "tts_first_chunk");
+    const withinTarget = firstAudioMs === undefined ? undefined : firstAudioMs <= TARGET_FIRST_AUDIO_MS;
     return {
       marks: { ...this.marks },
       firstAudioMs,
-      llmFirstTokenMs: this.delta("turn_end", "llm_first_token"),
-      ttsFirstChunkMs: this.delta("turn_end", "tts_first_chunk"),
-      withinTarget: firstAudioMs === undefined ? undefined : firstAudioMs <= TARGET_FIRST_AUDIO_MS,
+      llmFirstTokenMs,
+      ttsFirstChunkMs,
+      ttsSynthMs,
+      withinTarget,
+      summary: buildSummary({ firstAudioMs, llmFirstTokenMs, ttsSynthMs, withinTarget }),
     };
   }
+}
+
+/** Однострочная сводка стадий — видно, где время (фраза→LLM доминирует / TTS / итог). */
+function buildSummary(r: {
+  firstAudioMs?: number;
+  llmFirstTokenMs?: number;
+  ttsSynthMs?: number;
+  withinTarget?: boolean;
+}): string {
+  // Отрицательный/неполный firstAudioMs = фоновый/онбординг-оборот (метки не по порядку) — не шумим.
+  if (r.firstAudioMs === undefined || r.firstAudioMs < 0) return "оборот неполный (фон/онбординг)";
+  const ms = (n?: number): string => (n === undefined ? "—" : `${Math.round(n)}мс`);
+  return (
+    `фраза→LLM ${ms(r.llmFirstTokenMs)} · LLM→TTS ${ms(r.ttsSynthMs)} · →звук ${ms(r.firstAudioMs)} ` +
+    `(цель ${TARGET_FIRST_AUDIO_MS}мс ${r.withinTarget ? "✓" : "✗"})`
+  );
 }

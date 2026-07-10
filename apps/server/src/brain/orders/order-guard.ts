@@ -54,7 +54,34 @@ export class CardDataError extends Error {
 }
 
 const CARD_KEY_RE = /\b(card(_?number)?|pan|cvv|cvc|cvc2|expiry|exp_month|exp_year)\b/i;
-const CARD_NUMBER_RE = /\b\d{13,19}\b/;
+// Изолированный 13-19-значный токен (границы — не-цифры): после нормализации
+// разделителей это и есть кандидат в номер карты. (?<!\d)/(?!\d) точнее \b на стыке цифр.
+const CARD_NUMBER_RE = /(?<!\d)\d{13,19}(?!\d)/g;
+// Разделители номера карты — ЛЮБОЙ не-алфанум (пробел/дефис/точка/слэш/запятая/NBSP/скобки…).
+// Прежний узкий класс пропускал карту через запятую («4111,1111,1111,1111») — fail-open §0.
+// Расширять безопасно: ложные срабатывания отсекает Luhn-чек ниже, а не сам факт 13–19 цифр.
+const CARD_SEP_RE = /[^0-9A-Za-z]/g;
+
+/**
+ * Luhn-чек (контрольная сумма банковской карты). Нужен, чтобы не путать карту с
+ * EAN-13 штрихкодом, длинным артикулом, телефоном или total в копейках — иначе
+ * любой 13–19-значный номер ложно рубит весь заказ (отказ в обслуживании).
+ */
+export function passesLuhn(digits: string): boolean {
+  if (!/^\d{13,19}$/.test(digits)) return false;
+  let sum = 0;
+  let dbl = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let d = digits.charCodeAt(i) - 48;
+    if (dbl) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    dbl = !dbl;
+  }
+  return sum % 10 === 0;
+}
 
 /**
  * Инвариант §0: заказ НЕ должен содержать карточных/платёжных данных ни в ключах,
@@ -64,8 +91,13 @@ export function assertNoCardData(obj: unknown): void {
   const scan = (value: unknown, keyPath: string): void => {
     if (value === null || value === undefined) return;
     if (typeof value === "string") {
-      if (CARD_NUMBER_RE.test(value.replace(/[\s-]/g, ""))) {
-        throw new CardDataError(`значение похоже на номер карты (${keyPath})`);
+      const compact = value.replace(CARD_SEP_RE, "");
+      // Карта = изолированные 13–19 цифр, ПРОШЕДШИЕ Luhn. Без Luhn штрихкоды/ID/телефоны
+      // ложно считались бы картой и блокировали заказ (§0 важна, но не ценой ложных отказов).
+      for (const m of compact.matchAll(CARD_NUMBER_RE)) {
+        if (passesLuhn(m[0])) {
+          throw new CardDataError(`значение похоже на номер карты (${keyPath})`);
+        }
       }
       return;
     }

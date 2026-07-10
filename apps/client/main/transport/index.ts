@@ -29,17 +29,31 @@ import type {
   ActionResult,
   ServerHello,
   Transcript,
+  ChatMessage,
   SpeakChunk,
   ProactiveNudge,
   ConfirmRequest,
   TaskStatus,
   TaskControl,
+  Takeover,
+  ClientEnv,
+  ClientSystem,
+  ClientContext,
+  ClientSettings,
   DisplayCard,
   ProtocolError,
   Hello,
   DevText,
   ClientState,
   VadEvent,
+  DemoEvent,
+  DemoSave,
+  SkillSaved,
+  VoiceEnrollProgress,
+  VoiceEnrollDone,
+  VoiceList,
+  UsageInfo,
+  ClientKeys,
 } from "@jarvis/protocol";
 import { backoffMs, createLogger } from "@jarvis/shared";
 
@@ -66,6 +80,7 @@ export interface TransportEvents {
   connected: [ServerHello];
   disconnected: [{ reason: string }];
   transcript: [Transcript];
+  chat: [ChatMessage];
   speak: [SpeakChunk];
   /** Состояние от сервера (client.state): орб + аудио-гейт (§10). */
   serverState: [ClientState];
@@ -74,6 +89,14 @@ export interface TransportEvents {
   taskStatus: [TaskStatus];
   display: [DisplayCard];
   protocolError: [ProtocolError];
+  /** навык записан/доступен для повтора (§8). */
+  skillSaved: [SkillSaved];
+  /** §3 верификация диктора: прогресс/итог записи отпечатка + список голосов. */
+  voiceEnrollProgress: [VoiceEnrollProgress];
+  voiceEnrollDone: [VoiceEnrollDone];
+  voiceList: [VoiceList];
+  /** §6B/B5: расход/лимиты периода для вкладки «Оплата». */
+  usage: [UsageInfo];
   /** изменение «связности» для индикатора в UI. */
   link: [{ online: boolean }];
 }
@@ -179,6 +202,62 @@ export class Transport extends EventEmitter {
     this.send(makeEnvelope<TaskControl>("task.control", { action, taskId }));
   }
 
+  /** User-takeover (§6): пользователь взялся за ввод (active:true) / освободил (false). */
+  sendTakeover(active: boolean): void {
+    this.send(makeEnvelope<Takeover>("client.takeover", { active }));
+  }
+
+  /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту.
+   *  §Волна2 (2.6): + структурные списки приложений/игр — лексикон STT-нормализатора. */
+  sendEnv(summary: string, apps?: string[], games?: string[]): void {
+    this.send(makeEnvelope<ClientEnv>("client.env", { summary, ...(apps?.length ? { apps } : {}), ...(games?.length ? { games } : {}) }));
+  }
+
+  /** Живой системный снимок (§контекст): что открыто/на переднем плане/мониторы → хвост промпта. */
+  sendSystem(summary: string): void {
+    this.send(makeEnvelope<ClientSystem>("client.system", { summary }));
+  }
+
+  /** §9 «не мешать»: контекст занятости (звонок/полный экран/блокировка) → сервер гейтит проактивную речь. */
+  sendContext(c: ClientContext): void {
+    this.send(makeEnvelope<ClientContext>("client.context", c));
+  }
+
+  /** Настройки из UI (§15): язык/контекст → сервер кладёт в профиль (персона). Ключи НЕ шлём. */
+  sendSettings(s: ClientSettings): void {
+    this.send(makeEnvelope<ClientSettings>("client.settings", s));
+  }
+
+  /** §6B/B5: запросить у сервера свежий снимок расхода/лимитов (вкладка «Оплата»). */
+  requestUsage(): void {
+    this.send(makeEnvelope("client.usage.request", {}));
+  }
+
+  /** §6B/B4: отправить API-ключи на сервер (шифрует в user_credentials). Значения не логируем. */
+  sendKeys(keys: ClientKeys["keys"]): void {
+    if (keys.length) this.send(makeEnvelope<ClientKeys>("client.keys", { keys }));
+  }
+
+  /** Завершить запись демонстрации: отправить батч событий на сервер для сохранения (§8). */
+  sendDemoSave(name: string, events: DemoEvent[], commentary?: string): void {
+    this.send(makeEnvelope<DemoSave>("demo.save", { name, events, commentary }));
+  }
+
+  // ── §3 верификация диктора ────────────────────────────────────
+  /** Начать запись голосового отпечатка (далее аудио идёт обычным audio.frame, сервер его маршрутизирует). */
+  sendVoiceEnrollStart(name: string): void {
+    this.send(makeEnvelope("voice.enroll.start", { name }));
+  }
+  sendVoiceEnrollCancel(): void {
+    this.send(makeEnvelope("voice.enroll.cancel", {}));
+  }
+  sendVoiceList(): void {
+    this.send(makeEnvelope("voice.list", {}));
+  }
+  sendVoiceRemove(name: string): void {
+    this.send(makeEnvelope("voice.remove", { name }));
+  }
+
   // ── соединение ────────────────────────────────────────────────
 
   private connect(): void {
@@ -220,7 +299,10 @@ export class Transport extends EventEmitter {
 
   private scheduleReconnect(): void {
     if (this.closedByUser) return;
-    const delay = backoffMs(this.reconnectAttempt);
+    // Кап 5с (не дефолтные 30с): сервер локальный, tsx-watch может на пару секунд умереть/
+    // перезапуститься (см. client.err.log: 10 ECONNREFUSED подряд с backoff до 33с — первая
+    // минута была мёртвой). Малый кап → клиент встаёт ≤5с после возврата сервера, а не через полминуты.
+    const delay = backoffMs(this.reconnectAttempt, 500, 5_000);
     this.reconnectAttempt += 1;
     log.info(`реконнект через ${delay} мс (resume=${this.sessionId ?? "—"})`);
     setTimeout(() => {
@@ -306,6 +388,12 @@ export class Transport extends EventEmitter {
       case "transcript":
         this.emit("transcript", env.payload as Transcript);
         break;
+      case "chat":
+        this.emit("chat", env.payload as ChatMessage);
+        break;
+      case "usage.info":
+        this.emit("usage", env.payload as UsageInfo);
+        break;
       case "speak.chunk":
         this.emit("speak", env.payload as SpeakChunk);
         break;
@@ -323,6 +411,18 @@ export class Transport extends EventEmitter {
         break;
       case "ui.display":
         this.emit("display", env.payload as DisplayCard);
+        break;
+      case "skill.saved":
+        this.emit("skillSaved", env.payload as SkillSaved);
+        break;
+      case "voice.enroll.progress":
+        this.emit("voiceEnrollProgress", env.payload as VoiceEnrollProgress);
+        break;
+      case "voice.enroll.done":
+        this.emit("voiceEnrollDone", env.payload as VoiceEnrollDone);
+        break;
+      case "voice.voices":
+        this.emit("voiceList", env.payload as VoiceList);
         break;
       case "error": {
         const pe = env.payload as ProtocolError;

@@ -13,7 +13,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import { VoicePipeline, type VoicePipelineDeps } from "./pipeline.js";
 
 export { VoicePipeline } from "./pipeline.js";
-export type { VoicePipelineDeps, AgentReplyLike } from "./pipeline.js";
+export type { VoicePipelineDeps, AgentReplyLike, ReplySink } from "./pipeline.js";
 export * from "./state.js";
 export * from "./turn.js";
 export * from "./latency.js";

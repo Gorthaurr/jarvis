@@ -11,10 +11,25 @@
 // =============================================================================
 
 import { readdir, readFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Лёгкая загрузка .env из корня репо (без зависимости от dotenv) — чтобы
+// `pnpm db:migrate` подхватывал DATABASE_URL так же, как сервер через dotenv.
+try {
+    const envPath = resolve(__dirname, '..', '.env');
+    if (existsSync(envPath)) {
+        for (const line of readFileSync(envPath, 'utf-8').split(/\r?\n/)) {
+            const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/i.exec(line);
+            if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+        }
+    }
+} catch {
+    /* нет .env — используем дефолты */
+}
 
 // ---------------------------------------------------------------------------
 // Конфигурация
@@ -27,27 +42,25 @@ const DATABASE_URL =
 const MIGRATIONS_DIR = resolve(__dirname, 'migrations');
 
 // ---------------------------------------------------------------------------
-// Динамический импорт 'pg' с понятной ошибкой если не установлен
+// Ленивая загрузка драйвера 'pg' (нужен только для нативного/удалённого Postgres;
+// для встроенного PGlite — не требуется).
 // ---------------------------------------------------------------------------
 
-/** @type {import('pg')} */
-let pg;
-try {
-    pg = await import('pg');
-} catch {
-    console.error(
-        '\n[migrate] Ошибка: пакет "pg" не найден.\n' +
-        'Установите его командой:\n' +
-        '  pnpm add -D pg\n' +
-        '  # или глобально:\n' +
-        '  npm install -g pg\n'
-    );
-    process.exit(1);
+async function loadPgPool() {
+    let pg;
+    try {
+        pg = await import('pg');
+    } catch {
+        console.error(
+            '\n[migrate] Ошибка: пакет "pg" не найден.\n' +
+            'Установите его командой:\n' +
+            '  pnpm add -Dw pg\n'
+        );
+        process.exit(1);
+    }
+    const { default: pgModule } = pg;
+    return pgModule?.Pool ?? pg.Pool;
 }
-
-const { default: pgModule } = pg;
-// Поддержка как default-экспорта { Pool }, так и прямого { Pool }
-const Pool = pgModule?.Pool ?? pg.Pool;
 
 // ---------------------------------------------------------------------------
 // Таблица _migrations — журнал применённых миграций
@@ -68,6 +81,15 @@ async function main() {
     console.log(`[migrate] DATABASE_URL: ${maskUrl(DATABASE_URL)}`);
     console.log(`[migrate] Директория миграций: ${MIGRATIONS_DIR}`);
 
+    // Встроенный PGlite (локальный dev без установки Postgres).
+    if (DATABASE_URL === 'pglite' || DATABASE_URL.startsWith('pglite:')) {
+        const dataDir = DATABASE_URL.replace(/^pglite:(\/\/)?/, '') || `${process.cwd()}/infra/pgdata`;
+        console.log(`[migrate] Бэкенд: встроенный PGlite (${dataDir})`);
+        await migratePglite(dataDir);
+        return;
+    }
+
+    const Pool = await loadPgPool();
     const pool = new Pool({ connectionString: DATABASE_URL });
 
     // Проверяем соединение
@@ -147,6 +169,63 @@ async function main() {
         client.release();
         await pool.end();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Встроенный PGlite — миграции для локального dev без установки Postgres
+// ---------------------------------------------------------------------------
+
+async function migratePglite(dataDir) {
+    let PGlite, vector;
+    try {
+        ({ PGlite } = await import('@electric-sql/pglite'));
+        ({ vector } = await import('@electric-sql/pglite/vector'));
+    } catch {
+        console.error('\n[migrate] Ошибка: пакет "@electric-sql/pglite" не найден. pnpm install');
+        process.exit(1);
+    }
+
+    const db = new PGlite({ dataDir, extensions: { vector } });
+    await db.waitReady;
+    await db.exec(ENSURE_TABLE_SQL);
+
+    const { rows: applied } = await db.query('SELECT name FROM _migrations ORDER BY name');
+    const appliedSet = new Set(applied.map((r) => r.name));
+
+    const entries = await readdir(MIGRATIONS_DIR);
+    const files = entries.filter((f) => f.endsWith('.sql')).sort();
+
+    let applied_count = 0;
+    let skipped_count = 0;
+    for (const file of files) {
+        if (appliedSet.has(file)) {
+            console.log(`[migrate] Пропуск (уже применена): ${file}`);
+            skipped_count++;
+            continue;
+        }
+        const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf-8');
+        console.log(`[migrate] Применяем (PGlite): ${file} ...`);
+        const t0 = Date.now();
+
+        // Каждая миграция — в отдельной транзакции для атомарности (зеркалим нативную ветку)
+        await db.exec('BEGIN');
+        try {
+            await db.exec(sql);
+            await db.query('INSERT INTO _migrations (name) VALUES ($1)', [file]);
+            await db.exec('COMMIT');
+            console.log(`[migrate] ✓ ${file} (${Date.now() - t0}ms)`);
+            applied_count++;
+        } catch (err) {
+            await db.exec('ROLLBACK');
+            console.error(`[migrate] ✗ Ошибка в ${file}:\n  ${err.message}`);
+            await db.close();
+            process.exit(1);
+        }
+    }
+    console.log(
+        `\n[migrate] Готово: применено ${applied_count}, пропущено ${skipped_count} из ${files.length} миграций.`
+    );
+    await db.close();
 }
 
 // ---------------------------------------------------------------------------

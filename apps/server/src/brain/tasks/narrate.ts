@@ -55,8 +55,8 @@ export function milestoneLine(
   const spokenLabel = label ? verbalize(label) : "";
 
   if (stepsTotal !== undefined) {
-    const word = pluralRu(stepsDone, ["Шаг", "Шага", "Шагов"]);
-    const head = `${word} ${stepsDone} из ${stepsTotal}`;
+    // «Шаг N из M» — фиксированная форма (не плюрализуем по N: «Шагов 5 из 40» грамматически неверно).
+    const head = `Шаг ${stepsDone} из ${stepsTotal}`;
     return spokenLabel ? `${head}: ${spokenLabel}` : `${head}.`;
   }
 
@@ -111,8 +111,7 @@ function progressPhrase(task: Task): string {
   const { stepsDone, stepsTotal } = task;
 
   if (stepsTotal !== undefined) {
-    const word = pluralRu(stepsDone, ["Шаг", "Шага", "Шагов"]);
-    return `${word} ${stepsDone} из ${stepsTotal}.`;
+    return `Шаг ${stepsDone} из ${stepsTotal}.`;
   }
   if (stepsDone > 0) {
     const word = pluralRu(stepsDone, ["шаг", "шага", "шагов"]);

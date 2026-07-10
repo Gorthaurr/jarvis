@@ -1,5 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { extractReadable, parseBraveResults, stripHtml } from "./web.js";
+import { extractReadable, parseBraveResults, parseDuckDuckGoLite, stripHtml } from "./web.js";
+
+describe("parseDuckDuckGoLite (§12 keyless-фолбэк)", () => {
+  const html = `
+    <table>
+    <tr><td><a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fru.wikipedia.org%2Fwiki%2FX&rut=aa" class='result-link'>Заголовок <b>один</b></a></td></tr>
+    <tr><td>&nbsp;</td><td class='result-snippet'> Сниппет <b>один</b> текст </td></tr>
+    <tr><td><a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fhabr.com%2Farticle&rut=bb" class='result-link'>Заголовок два</a></td></tr>
+    <tr><td>&nbsp;</td><td class='result-snippet'> Сниппет два </td></tr>
+    </table>`;
+
+  it("извлекает реальный url из uddg, заголовок и сниппет", () => {
+    const hits = parseDuckDuckGoLite(html, 5);
+    expect(hits).toHaveLength(2);
+    expect(hits[0]).toEqual({
+      title: "Заголовок один",
+      url: "https://ru.wikipedia.org/wiki/X",
+      snippet: "Сниппет один текст",
+    });
+    expect(hits[1]!.url).toBe("https://habr.com/article");
+  });
+
+  it("уважает limit и игнорирует не-http ссылки", () => {
+    expect(parseDuckDuckGoLite(html, 1)).toHaveLength(1);
+    expect(parseDuckDuckGoLite(`<a href="//duckduckgo.com/l/?uddg=javascript%3Aalert(1)" class='result-link'>x</a>`)).toHaveLength(0);
+  });
+});
 
 describe("parseBraveResults (§12)", () => {
   it("извлекает результаты в SearchHit[]", () => {

@@ -34,6 +34,16 @@ describe("resolveContact (§13)", () => {
     expect(resolveContact("Гендальф", [masha1]).kind).toBe("none");
   });
 
+  it("ПУСТОЙ запрос (тишина/обрыв STT) → none, а НЕ выбор случайного адресата (fail-closed)", () => {
+    expect(resolveContact("", [masha1]).kind).toBe("none"); // один контакт — не выбираем молча
+    expect(resolveContact("   ", [masha1, masha2, petya]).kind).toBe("none");
+  });
+
+  it("односимвольный запрос не даёт массового подстрочного совпадения", () => {
+    // «а» не должно матчить никого по подстроке (только точный 1-символьный алиас, которого нет)
+    expect(resolveContact("а", [masha1, masha2, petya]).kind).toBe("none");
+  });
+
   it("фраза дизамбигуации перечисляет кандидатов", () => {
     const p = disambiguationPrompt("Маша", [masha1, masha2]);
     expect(p).toContain("Мария Иванова");

@@ -22,10 +22,25 @@ export interface TurnConfig {
   completeThreshold: number;
 }
 
+/** env-целое с клампом (тюнинг эндпоинта без перекомпиляции). */
+function envInt(name: string, def: number, lo: number, hi: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : def;
+}
+
 export const DEFAULT_TURN_CONFIG: TurnConfig = {
-  maxSilenceMs: 900,
-  minSilenceMs: 250,
-  completeThreshold: 0.6,
+  // §10 СКОРОСТЬ: «мёртвое время» эндпоинта (пауза после речи до старта Opus) — прямой вклад в
+  // ощущаемую задержку. ЖЁСТКИЙ потолок тишины финализирует независимо от семантики; на Deepgram
+  // есть interim, поэтому семантический эндпоинт срабатывает РАНЬШЕ потолка на завершённой фразе
+  // (tick() от minSilenceMs). Понижено 800→650 / 200→120 ради отзывчивости (TRAILING_INCOMPLETE
+  // ловит «висящие» союзы → их не рубим до потолка). Тюнится env, если режет на полуслове — поднять.
+  // 650/120 РЕЗАЛО на полуслове (юзер: «не дослушивает») — подняли обратно патиентнее: 850мс
+  // жёсткий потолок, 280мс до семантической проверки, порог 0.75 (рано финализируем только при
+  // явно завершённой фразе/терминальной пунктуации). Срезать «мёртвое время» лучше не здесь, а
+  // персоной (меньше слов) — обрыв речи хуже лишних мс.
+  maxSilenceMs: envInt("JARVIS_TURN_MAX_SILENCE_MS", 850, 300, 1500),
+  minSilenceMs: envInt("JARVIS_TURN_MIN_SILENCE_MS", 280, 50, 600),
+  completeThreshold: envInt("JARVIS_TURN_COMPLETE_PCT", 75, 30, 95) / 100,
 };
 
 /** Незавершающие хвосты RU — после них пауза почти наверняка временная. */
@@ -90,6 +105,15 @@ export class TurnDetector {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
+  /** Минимум тишины перед семантической проверкой (мс) — для расписания опроса в пайплайне. */
+  get minSilenceMs(): number {
+    return this.config.minSilenceMs;
+  }
+  /** Жёсткий потолок тишины (мс) — после него эндпоинт безусловен. */
+  get maxSilenceMs(): number {
+    return this.config.maxSilenceMs;
+  }
+
   /** Обновить накопленную гипотезу (interim-результат STT, §10). */
   onInterim(text: string): void {
     this.lastText = text;
@@ -115,6 +139,23 @@ export class TurnDetector {
     if (this.silenceStartedAt === null) return "wait";
     const silenceMs = this.now() - this.silenceStartedAt;
     const decision = decideEndpoint(this.lastText, silenceMs, this.detector, this.config);
+    if (decision === "endpoint") this.reset();
+    return decision;
+  }
+
+  /**
+   * §Волна2 (2.6): STT-провайдер САМ зафиксировал конец фразы (Deepgram speech_final = речь +
+   * ~300мс тишины по его VAD) — это авторитетный сигнал тишины, но СЕМАНТИЧЕСКОЕ вето сохраняем:
+   * «висящий союз/предлог» (TRAILING_INCOMPLETE → 0.15) и одиночное слово (0.4) не рубим — их
+   * дорешает клиентский VAD-путь/потолок, как раньше (иначе вернётся жалоба «не дослушивает»).
+   * Порог мягче штатного completeThreshold (тишину провайдер уже подтвердил), но НЕ хардкод —
+   * env-ручка как у остальных порогов эндпоинта (ревью Волны 2): JARVIS_STT_ENDPOINT_PCT, деф 60.
+   */
+  onProviderEndpoint(text?: string): EndpointDecision {
+    const t = (text ?? this.lastText).trim();
+    if (!t) return "wait";
+    const threshold = envInt("JARVIS_STT_ENDPOINT_PCT", 60, 30, 95) / 100;
+    const decision: EndpointDecision = this.detector.predictComplete(t) >= threshold ? "endpoint" : "wait";
     if (decision === "endpoint") this.reset();
     return decision;
   }

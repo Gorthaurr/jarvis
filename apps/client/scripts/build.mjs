@@ -30,21 +30,22 @@ const common = {
 };
 
 async function run() {
-  // main-процесс: Node + Electron API. electron и ws — external (рантайм-зависимости).
+  // main-процесс: Node + Electron API. CJS-бандл с расширением .cjs — пакет помечен
+  // "type":"module", поэтому .js трактовался бы как ESM и require() падал бы.
   await build({
     ...common,
     entryPoints: [resolve(root, "main/index.ts")],
-    outfile: resolve(outdir, "main/index.js"),
+    outfile: resolve(outdir, "main/index.cjs"),
     platform: "node",
     format: "cjs",
     external: ["electron", "ws"],
   });
 
-  // preload: запускается в привилегированном контексте до renderer.
+  // preload: запускается в привилегированном контексте до renderer. Тоже .cjs (CJS).
   await build({
     ...common,
     entryPoints: [resolve(root, "preload/index.ts")],
-    outfile: resolve(outdir, "preload/index.js"),
+    outfile: resolve(outdir, "preload/index.cjs"),
     platform: "node",
     format: "cjs",
     external: ["electron"],
@@ -59,11 +60,48 @@ async function run() {
     format: "iife",
   });
 
+  // расширение «Jarvis Web Hands» (MV3 service-worker): бандлим background.js (+ ./modules/*) в ОДИН
+  // файл — Chrome грузит classic SW по пути из манифеста (dist/background.js). Бандл РЕЗОЛВИТ import/export
+  // → оборванная ссылка между модулями = ОШИБКА СБОРКИ (node --check её НЕ ловит — был баг tgSendFileInPage).
+  // Инжекторы (executeScript func) остаются self-contained — проверено: esbuild НЕ переписывает их тела.
+  // iife (один файл) + top-level листенеры исполняются синхронно на спавне SW (как раньше).
+  const extRoot = resolve(root, "..", "extension");
+  await build({
+    ...common,
+    entryPoints: [resolve(extRoot, "background.js")],
+    outfile: resolve(extRoot, "dist/background.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
   // Статика renderer (включая AudioWorklet — он грузится как отдельный модуль, не бандлится).
   await mkdir(resolve(outdir, "renderer"), { recursive: true });
   await cp(resolve(root, "renderer/index.html"), resolve(outdir, "renderer/index.html"));
   await cp(resolve(root, "renderer/styles.css"), resolve(outdir, "renderer/styles.css"));
   await cp(resolve(root, "renderer/audio-worklet.js"), resolve(outdir, "renderer/audio-worklet.js"));
+
+  // Шрифты (вариативные woff2 из node_modules в dist/renderer/fonts).
+  const fontsOut = resolve(outdir, "renderer/fonts");
+  await mkdir(fontsOut, { recursive: true });
+  // Inter (резерв, latin + cyrillic).
+  const interSrc = resolve(root, "node_modules/@fontsource-variable/inter/files");
+  for (const [src, dst] of [
+    ["inter-latin-wght-normal.woff2", "inter-latin.woff2"],
+    ["inter-latin-ext-wght-normal.woff2", "inter-latin-ext.woff2"],
+    ["inter-cyrillic-wght-normal.woff2", "inter-cyrillic.woff2"],
+  ]) {
+    await cp(resolve(interSrc, src), resolve(fontsOut, dst));
+  }
+  // Manrope (основной, latin + cyrillic). Если пакета нет — рестайл гладко откатится на Inter.
+  const manropeSrc = resolve(root, "node_modules/@fontsource-variable/manrope/files");
+  for (const [src, dst] of [
+    ["manrope-latin-wght-normal.woff2", "manrope-latin.woff2"],
+    ["manrope-cyrillic-wght-normal.woff2", "manrope-cyrillic.woff2"],
+  ]) {
+    await cp(resolve(manropeSrc, src), resolve(fontsOut, dst)).catch((e) => {
+      console.warn(`[build] Manrope не скопирован (${dst}) — фолбэк на Inter:`, e.message);
+    });
+  }
 
   console.log("[build] клиент собран -> dist/");
 }

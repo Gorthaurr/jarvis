@@ -31,13 +31,20 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** Несолиситед-сообщение от сайдкара (без id) — напр. событие записи демонстрации (§8). */
+export type PushHandler = (msg: Record<string, unknown>) => void;
+
 /** Транспорт-независимое ядро RPC: фрейминг + корреляция по id. */
 export class JsonLineRpc {
   private buf = "";
   private seq = 0;
   private readonly pending = new Map<string, Pending>();
 
-  constructor(private readonly send: (line: string) => void) {}
+  constructor(
+    private readonly send: (line: string) => void,
+    /** Обработчик push-строк без id (демо-события, user-takeover). */
+    private readonly onPush?: PushHandler,
+  ) {}
 
   /** Отправить запрос и дождаться ответа (или таймаута). */
   request(op: string, args: Record<string, unknown> = {}, timeoutMs = 5000): Promise<unknown> {
@@ -81,6 +88,11 @@ export class JsonLineRpc {
       log.warn("sidecar: не-JSON строка проигнорирована");
       return;
     }
+    // Push-строка без id (демо-событие, user-takeover) — отдельный канал, не RPC-ответ.
+    if (resp.id === undefined || resp.id === null) {
+      this.onPush?.(resp as unknown as Record<string, unknown>);
+      return;
+    }
     const p = this.pending.get(resp.id);
     if (!p) return;
     clearTimeout(p.timer);
@@ -99,42 +111,104 @@ export class JsonLineRpc {
   }
 }
 
+/** §Волна2 (2.4): бэкофф авто-рестарта сайдкара — 1с → ×2 → потолок 30с; сбрасывается аптаймом. */
+const RESTART_BASE_MS = 1_000;
+const RESTART_MAX_MS = 30_000;
+/** Прожил дольше — считаем запуск здоровым, бэкофф сбрасывается (не копится от давних падений). */
+const HEALTHY_UPTIME_MS = 60_000;
+
 /** Управляет процессом сайдкара и предоставляет RPC. */
 export class SidecarClient {
   private child: ChildProcess | null = null;
   private rpc: JsonLineRpc | null = null;
   private _ready = false;
+  private pushHandler: PushHandler | null = null;
+  /** §Волна2 (2.4): колбэк после АВТО-рестарта — восстановить подписки (raw-input.subscribe и т.п.). */
+  private restartHandler: (() => void) | null = null;
+  // §Волна2 (2.4): авто-рестарт при падении процесса (раньше падение = «оглох навсегда» до
+  // перезапуска клиента). stop() — намеренная остановка, рестарт не планирует.
+  private exePath: string | null = null;
+  private restartDelayMs = RESTART_BASE_MS;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private startedAt = 0;
+  private stopped = false;
 
   get ready(): boolean {
     return this._ready;
   }
 
-  /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false. */
+  /** Подписаться на push-сообщения сайдкара (демо-события записи навыка, §8). */
+  onPush(cb: PushHandler): void {
+    this.pushHandler = cb;
+  }
+
+  /** §Волна2 (2.4): после авто-рестарта восстановить состояние нового процесса (подписки/хуки). */
+  onRestarted(cb: () => void): void {
+    this.restartHandler = cb;
+  }
+
+  /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false (+ авто-ретрай с бэкоффом). */
   start(exePath: string): void {
+    this.exePath = exePath;
+    this.stopped = false;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     try {
       const child = spawn(exePath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       this.child = child;
-      this.rpc = new JsonLineRpc((line) => child.stdin?.write(line));
+      this.startedAt = Date.now();
+      this.rpc = new JsonLineRpc(
+        (line) => child.stdin?.write(line),
+        (msg) => this.pushHandler?.(msg),
+      );
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (d: string) => this.rpc?.feed(d));
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (d: string) => log.debug(`sidecar stderr: ${d.trim()}`));
+      // Гард поколения (ревью Волны 2): exit/error СТАРОГО процесса не должны гасить ЗДОРОВЫЙ
+      // новый инстанс после рестарта (поздний exit прилетал бы уже чужому поколению).
+      const self = child;
       child.on("error", (e) => {
+        if (this.child !== self) return;
         log.warn(`sidecar не запустился: ${e.message}`);
         this._ready = false;
         this.rpc?.rejectAll("sidecar process error");
+        this.scheduleRestart();
       });
       child.on("exit", (code) => {
+        if (this.child !== self) return;
         log.warn(`sidecar завершился: code=${code}`);
         this._ready = false;
         this.rpc?.rejectAll("sidecar exited");
+        this.scheduleRestart();
       });
       this._ready = true;
       log.info(`sidecar запущен: ${exePath}`);
     } catch (e) {
       log.warn(`не удалось запустить sidecar: ${e instanceof Error ? e.message : String(e)}`);
       this._ready = false;
+      this.scheduleRestart();
     }
+  }
+
+  /** §Волна2 (2.4): перезапуск упавшего сайдкара с экспоненциальным бэкоффом (не при stop()). */
+  private scheduleRestart(): void {
+    if (this.stopped || !this.exePath || this.restartTimer) return;
+    // Здоровый аптайм сбрасывает бэкофф: редкое падение стартует ретраи заново с 1с.
+    if (Date.now() - this.startedAt > HEALTHY_UPTIME_MS) this.restartDelayMs = RESTART_BASE_MS;
+    const delay = this.restartDelayMs;
+    this.restartDelayMs = Math.min(RESTART_MAX_MS, this.restartDelayMs * 2);
+    log.info(`sidecar: авто-рестарт через ${Math.round(delay / 1000)}с`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (this.stopped || !this.exePath) return;
+      this.start(this.exePath);
+      // Новый процесс не помнит подписок старого (raw-input.subscribe/LL-хуки) — восстанавливаем.
+      if (this._ready) this.restartHandler?.();
+    }, delay);
+    this.restartTimer.unref?.();
   }
 
   /** Выполнить RPC-операцию. Бросает, если сайдкар не готов. */
@@ -143,7 +217,27 @@ export class SidecarClient {
     return this.rpc.request(op, args, timeoutMs);
   }
 
+  /** Начать запись демонстрации навыка — UIA-хук в сайдкаре (§8). */
+  startDemo(): Promise<unknown> {
+    return this.request("demo.record", { op: "start" }, 5000);
+  }
+
+  /**
+   * Остановить запись — вернуть авторитетный батч пойманных событий (§8).
+   * data: { events: Array<{role,name?,action,ts}> }.
+   */
+  stopDemo(): Promise<{ events?: Array<Record<string, unknown>> }> {
+    return this.request("demo.record", { op: "stop" }, 5000) as Promise<{
+      events?: Array<Record<string, unknown>>;
+    }>;
+  }
+
   stop(): void {
+    this.stopped = true; // намеренная остановка — авто-рестарт не планируем
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     this.child?.kill();
     this.child = null;
     this.rpc?.rejectAll("sidecar stopped");

@@ -4,13 +4,36 @@
  * Грузит .env, создаёт логгер, конфигурирует БД (лениво), поднимает gateway,
  * вешает graceful shutdown на SIGINT/SIGTERM.
  */
-import "dotenv/config";
+import { existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import dotenv from "dotenv";
 import { createLogger } from "@jarvis/shared";
 import { loadConfig } from "./config.js";
+import { buildEnvCandidates, findEnvFile } from "./env-path.js";
 import { closeDb, configureDb } from "./db/pool.js";
 import { createGateway } from "./gateway/server.js";
+import { warmupWhisper } from "./integrations/whisper-stt.js";
+
+/**
+ * Загрузить .env устойчиво к установке (§универсальность): JARVIS_ENV_PATH → %APPDATA%/Jarvis/.env →
+ * cwd/.env → ../.env → module-relative (dev-монорепо). См. env-path.ts (тестируемо).
+ */
+function loadEnv(): void {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = buildEnvCandidates({ here });
+  const found = findEnvFile(candidates, existsSync);
+  // override: .env — источник истины для сервера, важнее унаследованного окружения
+  // (напр. ANTHROPIC_BASE_URL родителя не должен перебивать прокси из .env).
+  if (found) {
+    dotenv.config({ path: found, override: true });
+    return;
+  }
+  dotenv.config({ override: true });
+}
 
 async function main(): Promise<void> {
+  loadEnv();
   const config = loadConfig();
   const log = createLogger("server", config.logLevel);
   log.info("старт Jarvis server", {
@@ -30,6 +53,10 @@ async function main(): Promise<void> {
     log.error("не удалось поднять gateway", e instanceof Error ? e.message : String(e));
     process.exit(1);
   }
+
+  // Прогрев Whisper на GPU сразу после старта (§10): первая фраза не ждёт загрузку
+  // модели и upload на видеокарту. Первый запуск с новой моделью качает веса (~один раз).
+  if (config.sttProvider === "whisper") warmupWhisper(config.whisperModel);
 
   // ── graceful shutdown ──────────────────────────────────────
   let shuttingDown = false;

@@ -33,8 +33,16 @@ export interface CancelToken {
   cancelled: boolean;
 }
 
-/** Хук эскалации к серверу: needsLlm-шаг или исчерпание retries (§8). */
-export type EscalateFn = (step: SkillStep, reason: "needs_llm" | "exhausted") => Promise<void>;
+/**
+ * Хук эскалации к серверу (§8): needsLlm-шаг (сочинить значение по месту) или исчерпание retries.
+ * Для "needs_llm" может ВЕРНУТЬ карту параметров — раннер мёржит её в params шага (это и есть
+ * «дешёвая/сильная модель заполняет переменные на повторе»). void/ничего на needs_llm → раннер НЕ
+ * исполняет шаг вслепую (закон честности), а честно валит его. Для "exhausted" результат не используется.
+ */
+export type EscalateFn = (
+  step: SkillStep,
+  reason: "needs_llm" | "exhausted",
+) => Promise<Record<string, unknown> | void>;
 
 /** Колбэк прогресса для task.status наверх (§20). */
 export type ProgressFn = (stepIndex: number, total: number) => void;
@@ -91,7 +99,19 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
     if (!step) continue;
     onProgress?.(i, steps.length);
 
-    if (step.needsLlm) await escalate?.(step, "needs_llm");
+    // needsLlm: значение шага сочиняется по месту (escalate → сервер/LLM). Раннер ИСПОЛЬЗУЕТ ответ —
+    // мёржит карту параметров в params шага. Если эскалация не подключена / ничего не вернула, шаг
+    // НЕ исполняется вслепую (иначе ушёл бы незаполненный плейсхолдер → ложный результат, §честность),
+    // а честно валится. exhausted-эскалация (ниже) — терминальная, её результат не используется.
+    let stepParams = opts.params;
+    if (step.needsLlm) {
+      const resolved = escalate ? await escalate(step, "needs_llm") : undefined;
+      if (!resolved || typeof resolved !== "object") {
+        log.warn(`шаг ${i} (${step.action}): needsLlm не заполнен эскалацией — честный провал, не исполняю вслепую`);
+        return { ok: false, failedStepIndex: i, message: `шаг ${i} (${step.action}) требует LLM, но заполнение недоступно` };
+      }
+      stepParams = { ...(opts.params ?? {}), ...resolved };
+    }
 
     const retries = step.retries ?? 2;
     const timeoutMs = step.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
@@ -101,7 +121,7 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
     while (attempt <= retries) {
       if (cancel.cancelled) return { ok: false, failedStepIndex: i, message: "cancelled" };
       try {
-        await actuator.executeStep(step, opts.params); // ground + действие (re-ground при повторе)
+        await actuator.executeStep(step, stepParams); // ground + действие (re-ground при повторе)
         stepOk = step.expect ? await waitForExpect(actuator, step.expect, timeoutMs, sleep) : true;
       } catch (e) {
         log.warn(`шаг ${i} попытка ${attempt} упала: ${e instanceof Error ? e.message : String(e)}`);

@@ -56,12 +56,40 @@ describe("voice state machine (§10)", () => {
     expect(r.context.state).toBe("speaking");
   });
 
+  it("thinking + speak_done (синтез без звука) → listening+follow-up, НЕ виснет (§10)", () => {
+    // Регресс: при сбое/нуле чанков TTS speak_done приходит из thinking (не было speak_start).
+    // Раньше это был noop → цикл навсегда висел в thinking. Теперь — штатный возврат к слуху.
+    const ctx: VoiceContext = { state: "thinking", followupActive: false };
+    const r = reduce(ctx, { type: "speak_done" });
+    expect(r.context.state).toBe("listening");
+    expect(r.context.followupActive).toBe(true);
+    expect(types(r.actions)).toContain("open_stt");
+    expect(types(r.actions)).toContain("arm_followup");
+  });
+
   it("speaking + barge_in → listening, рубит TTS и открывает STT (§10)", () => {
     const ctx: VoiceContext = { state: "speaking", followupActive: false };
     const r = reduce(ctx, { type: "barge_in" });
     expect(r.context.state).toBe("listening");
     expect(types(r.actions)).toContain("cancel_tts");
     expect(types(r.actions)).toContain("open_stt");
+  });
+
+  it("listening + barge_in (хвост озвучки ЖИВ) → рубит ещё-живой синтез, остаётся listening (§barge)", () => {
+    const ctx: VoiceContext = { state: "listening", followupActive: true };
+    const r = reduce(ctx, { type: "barge_in", ttsActive: true });
+    expect(r.context.state).toBe("listening"); // не дёргаем состояние — ждём речь юзера
+    expect(types(r.actions)).toContain("cancel_tts"); // гасим хвост синтеза, если жив
+  });
+
+  it("H11: listening + barge_in без живого TTS → НЕ рубит (не бампаем gen, STT-стрим цел)", () => {
+    // Синтеза нет (ttsActive не проставлен): cancel_tts бампнул бы gen и убил бы уже открытый
+    // STT-стрим этого хода → follow-up-команда потерялась бы. Ждём тишину действий.
+    const ctx: VoiceContext = { state: "listening", followupActive: true };
+    const r = reduce(ctx, { type: "barge_in" });
+    expect(r.context.state).toBe("listening"); // состояние не трогаем
+    expect(types(r.actions)).not.toContain("cancel_tts"); // нечего глушить → тихий no-op
+    expect(r.actions).toHaveLength(0);
   });
 
   it("speaking + speech_start тоже трактуется как barge-in", () => {
@@ -77,6 +105,30 @@ describe("voice state machine (§10)", () => {
     expect(r.context.state).toBe("listening");
     expect(r.context.followupActive).toBe(true);
     expect(types(r.actions)).toContain("arm_followup");
+  });
+
+  it("§20: idle + speak_start → speaking (фоновый итог/проактивность из покоя)", () => {
+    const r = reduce(initialContext(), { type: "speak_start" });
+    expect(r.context.state).toBe("speaking");
+    expect(types(r.actions)).toContain("set_client_state");
+  });
+
+  it("§20: listening(follow-up) + speak_start → speaking, гасит таймер follow-up", () => {
+    const ctx: VoiceContext = { state: "listening", followupActive: true };
+    const r = reduce(ctx, { type: "speak_start" });
+    expect(r.context.state).toBe("speaking");
+    expect(types(r.actions)).toContain("disarm_followup");
+  });
+
+  it("§20: полный цикл фонового итога переоткрывает микрофон (idle→speaking→listening+follow-up)", () => {
+    // Раньше произнесённый фоном ВОПРОС не возвращал слух: speak_* игнорились вне thinking.
+    const speaking = reduce(initialContext(), { type: "speak_start" });
+    expect(speaking.context.state).toBe("speaking");
+    const back = reduce(speaking.context, { type: "speak_done" });
+    expect(back.context.state).toBe("listening");
+    expect(back.context.followupActive).toBe(true);
+    expect(types(back.actions)).toContain("open_stt"); // микрофон снова слушает
+    expect(types(back.actions)).toContain("arm_followup");
   });
 
   it("follow-up: speech_start снимает follow-up и фиксирует реальный turn", () => {

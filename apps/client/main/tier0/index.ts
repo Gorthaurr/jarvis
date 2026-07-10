@@ -66,20 +66,21 @@ function sendMediaKey(key: "[char]173" | "[char]174" | "[char]175"): () => Promi
 // ── таблица правил (расширяемая) ───────────────────────────────
 
 const TIER0_RULES: Tier0Rule[] = [
-  // Запуск приложений: "открой <app>", "запусти <app>", "открой браузер"
+  // Открыть сайт: "открой сайт <url>", "перейди на <url>" — ВЫШЕ общего app.launch,
+  // иначе "открой сайт X" уходит в запуск несуществующего приложения "сайт X".
   {
-    re: /^(?:открой|запусти|открыть|запустить|open|launch)\s+(.+)$/u,
-    build: (m) => ({ kind: "command", command: { kind: "app.launch", app: (m[1] ?? "").trim() } }),
+    re: /^(?:открой сайт|перейди на|открой ссылку|go to)\s+(\S+)$/u,
+    build: (m) => ({ kind: "command", command: { kind: "browser.open", url: (m[1] ?? "").trim() } }),
   },
   // Фокус: "переключись на <app>", "фокус на <app>"
   {
     re: /^(?:переключись на|фокус на|focus)\s+(.+)$/u,
     build: (m) => ({ kind: "command", command: { kind: "app.focus", app: (m[1] ?? "").trim() } }),
   },
-  // Открыть сайт: "открой сайт <url>", "перейди на <url>"
+  // Запуск приложений: "открой <app>", "запусти <app>", "открой браузер"
   {
-    re: /^(?:открой сайт|перейди на|открой ссылку|go to)\s+(\S+)$/u,
-    build: (m) => ({ kind: "command", command: { kind: "browser.open", url: (m[1] ?? "").trim() } }),
+    re: /^(?:открой|запусти|открыть|запустить|open|launch)\s+(.+)$/u,
+    build: (m) => ({ kind: "command", command: { kind: "app.launch", app: (m[1] ?? "").trim() } }),
   },
   // Громкость: "выключи звук" / "включи звук" (mute toggle)
   {

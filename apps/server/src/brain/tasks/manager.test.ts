@@ -76,6 +76,43 @@ describe("TaskManager — жизненный цикл задач (§20)", () => 
     expect(m.cancel("нет")).toBe(false);
   });
 
+  it("steer: правка кладётся в активную задачу (true); терминальная/несуществующая → false", () => {
+    const m = new TaskManager(clock().now);
+    const task = m.create({ userId: "u1", sessionId: "s1", goal: "g" });
+    const steerRef = task.steer; // ссылка, которую держит петля агента
+
+    expect(m.steer(task.taskId, "нет, не то")).toBe(true);
+    expect(m.steer(task.taskId, "добавь ещё график")).toBe(true);
+    expect(task.steer).toBe(steerRef); // мутирован ТОТ ЖЕ объект, не заменён
+    expect(task.steer.pending).toEqual(["нет, не то", "добавь ещё график"]);
+
+    expect(m.steer(task.taskId, "   ")).toBe(false); // пустая правка игнорируется
+    m.cancel(task.taskId);
+    expect(m.steer(task.taskId, "поздно")).toBe(false); // терминальную не рулим
+    expect(m.steer("нет", "x")).toBe(false); // несуществующая
+  });
+
+  it("cancelSession: снимает ВСЕ незавершённые задачи сессии (параллельный режим §20)", () => {
+    const c = clock(2_000);
+    const m = new TaskManager(c.now);
+    const a = m.create({ userId: "u1", sessionId: "s1", goal: "a" });
+    const b = m.create({ userId: "u1", sessionId: "s1", goal: "b" });
+    const other = m.create({ userId: "u1", sessionId: "s2", goal: "c" }); // чужая сессия
+    m.finish(b.taskId); // уже терминальна — cancelSession её не трогает
+
+    c.advance(50);
+    const cancelled = m.cancelSession("s1");
+    expect(cancelled.map((t) => t.taskId)).toEqual([a.taskId]); // только живая «a» из s1
+    expect(a.state).toBe("cancelled");
+    expect(a.cancel.cancelled).toBe(true); // тот же флаг, что держит петля
+    expect(a.finishedAt).toBe(2_050);
+    expect(b.state).toBe("done"); // терминальная не перезаписана
+    expect(other.state).toBe("running"); // чужая сессия не тронута
+
+    // Идемпотентность: повторно нечего снимать.
+    expect(m.cancelSession("s1")).toEqual([]);
+  });
+
   it("pause/resume: разрешённые переходы и запреты", () => {
     const c = clock();
     const m = new TaskManager(c.now);
@@ -153,6 +190,17 @@ describe("TaskManager — жизненный цикл задач (§20)", () => 
     expect(m.progress("нет", 1)).toBeUndefined();
   });
 
+  it("progress: кламп — не >total, не <0, мусор не ломает", () => {
+    const m = new TaskManager(clock().now);
+    const t = m.create({ userId: "u1", sessionId: "s1", goal: "g", stepsTotal: 10 });
+    m.progress(t.taskId, 99);
+    expect(t.stepsDone).toBe(10); // не больше total
+    m.progress(t.taskId, -5);
+    expect(t.stepsDone).toBe(0); // не меньше 0
+    m.progress(t.taskId, Number.NaN);
+    expect(t.stepsDone).toBe(0); // мусор → держим прежнее
+  });
+
   it("list: задачи пользователя свежими первыми (startedAt desc)", () => {
     const c = clock();
     const m = new TaskManager(c.now);
@@ -197,5 +245,251 @@ describe("TaskManager — жизненный цикл задач (§20)", () => 
     // дефолтный ttl (10 минут) — свежий терминальный ещё жив
     expect(m.sweep(1_400)).toBe(0);
     expect(m.get(recentDone.taskId)).toBe(recentDone);
+  });
+});
+
+describe("TaskManager — onChange (персист §5)", () => {
+  it("дёргается на КАЖДОЙ мутации жизненного цикла", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    let changes = 0;
+    m.setOnChange(() => {
+      changes += 1;
+    });
+
+    const t = m.create({ userId: "u1", sessionId: "s1", goal: "x" }); // 1
+    m.progress(t.taskId, 1); // 2
+    m.pause(t.taskId); // 3
+    m.resume(t.taskId); // 4
+    m.finish(t.taskId, "итог"); // 5
+    expect(changes).toBe(5);
+
+    const t2 = m.create({ userId: "u1", sessionId: "s2", goal: "y" }); // 6
+    m.cancel(t2.taskId); // 7
+    expect(changes).toBe(7);
+
+    const t3 = m.create({ userId: "u1", sessionId: "s3", goal: "z" }); // 8
+    m.fail(t3.taskId, "ошибка"); // 9
+    expect(changes).toBe(9);
+  });
+
+  it("НЕ дёргается на чтениях и на no-op мутациях", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    const t = m.create({ userId: "u1", sessionId: "s1", goal: "x" });
+    m.finish(t.taskId, "итог");
+    let changes = 0;
+    m.setOnChange(() => {
+      changes += 1;
+    });
+
+    m.get(t.taskId);
+    m.list("u1");
+    m.active("s1");
+    m.recentTerminal("u1");
+    m.finish(t.taskId); // уже терминальна → no-op
+    m.cancel(t.taskId); // уже терминальна → no-op
+    m.pause("нет-такой"); // нет задачи → no-op
+    m.sweep(c.now(), 10_000_000); // ничего не удалил → no-op
+    expect(changes).toBe(0);
+  });
+
+  it("cancelSession дёргает onChange один раз, если что-то снято; иначе — нет", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    m.create({ userId: "u1", sessionId: "s1", goal: "a" });
+    m.create({ userId: "u1", sessionId: "s1", goal: "b" });
+    let changes = 0;
+    m.setOnChange(() => {
+      changes += 1;
+    });
+    expect(m.cancelSession("s1")).toHaveLength(2);
+    expect(changes).toBe(1); // одна запись на пакетную отмену, не по задаче
+    expect(m.cancelSession("s1")).toHaveLength(0); // уже терминальны
+    expect(changes).toBe(1); // нет изменений → нет записи
+  });
+});
+
+describe("TaskManager — toJSON/restore (переживает рестарт §5)", () => {
+  it("toJSON сериализует поля без рантайм-флага cancel", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    const t = m.create({ userId: "u1", sessionId: "s1", goal: "таблица", stepsTotal: 3 });
+    m.finish(t.taskId, "готова таблица");
+
+    const json = m.toJSON();
+    expect(json.tasks).toHaveLength(1);
+    const p = json.tasks[0]!;
+    expect(p).not.toHaveProperty("cancel");
+    expect(p.taskId).toBe(t.taskId);
+    expect(p.state).toBe("done");
+    expect(p.resultSummary).toBe("готова таблица");
+    // снимок сериализуем как JSON (никаких циклов/функций)
+    expect(() => JSON.stringify(json)).not.toThrow();
+  });
+
+  it("restore переносит терминальные задачи как есть (память «что сделал»)", () => {
+    const c = clock(5_000);
+    const src = new TaskManager(c.now);
+    const done = src.create({ userId: "u1", sessionId: "s1", goal: "отчёт" });
+    src.finish(done.taskId, "отчёт готов");
+    const failed = src.create({ userId: "u1", sessionId: "s1", goal: "музыка" });
+    src.fail(failed.taskId, "регион заблокирован");
+    const cancelled = src.create({ userId: "u1", sessionId: "s1", goal: "загрузка" });
+    src.cancel(cancelled.taskId);
+
+    const restored = new TaskManager(() => 9_000);
+    restored.restore(src.toJSON(), 9_000);
+
+    expect(restored.get(done.taskId)?.state).toBe("done");
+    expect(restored.get(done.taskId)?.resultSummary).toBe("отчёт готов");
+    expect(restored.get(failed.taskId)?.state).toBe("failed");
+    expect(restored.get(failed.taskId)?.lastError).toBe("регион заблокирован");
+    expect(restored.get(cancelled.taskId)?.state).toBe("cancelled");
+    // cancel-флаг воссоздан: для отменённой cancelled=true, для done/failed=false
+    expect(restored.get(done.taskId)?.cancel).toEqual({ cancelled: false });
+    expect(restored.get(cancelled.taskId)?.cancel).toEqual({ cancelled: true });
+  });
+
+  it("ЧЕСТНОСТЬ: задача, бывшая НЕ-терминальной, после рестарта помечается failed (не «всё ещё делаю»)", () => {
+    const c = clock(5_000);
+    const src = new TaskManager(c.now);
+    const running = src.create({ userId: "u1", sessionId: "s1", goal: "долгая работа" });
+    src.progress(running.taskId, 2, 5); // живая, running
+    const paused = src.create({ userId: "u1", sessionId: "s1", goal: "на паузе" });
+    src.pause(paused.taskId);
+
+    const restored = new TaskManager(() => 9_000);
+    restored.restore(src.toJSON(), 9_000);
+
+    const r = restored.get(running.taskId);
+    expect(r?.state).toBe("failed"); // НЕ "running" — петля, что её исполняла, умерла
+    expect(r?.lastError).toBe("прервано перезапуском сервера");
+    expect(r?.finishedAt).toBe(5_000); // РЕАЛЬНОЕ время жизни (startedAt), не момент рестарта (9_000)
+    expect(restored.get(paused.taskId)?.state).toBe("failed");
+    // прерванная задача не считается активной — «отмени»/«продолжи» к ней не липнут
+    expect(restored.active("s1")).toBeUndefined();
+    expect(restored.get(running.taskId)?.cancel).toEqual({ cancelled: true });
+  });
+
+  it("restore не дёргает onChange и устойчив к мусору", () => {
+    const m = new TaskManager(() => 1_000);
+    let changes = 0;
+    m.setOnChange(() => {
+      changes += 1;
+    });
+    m.restore(null);
+    m.restore(undefined);
+    m.restore({});
+    m.restore({ tasks: [{ foo: "bar" } as never] }); // без taskId → пропуск
+    expect(changes).toBe(0);
+    expect(m.list("u1")).toEqual([]);
+  });
+
+  it("нечисловые времена в снимке коэрсятся (не «NaN дн назад» в промпте)", () => {
+    const m = new TaskManager(() => 9_000);
+    m.restore({
+      tasks: [
+        // валидный taskId, но битые времена (правленный/повреждённый файл)
+        { taskId: "x1", userId: "u1", sessionId: "s1", goal: "g", title: "Битая", state: "done", stepsDone: 1, startedAt: "ой" as never, finishedAt: null as never, resultSummary: "ок" },
+      ],
+    }, 9_000);
+    const t = m.get("x1")!;
+    expect(Number.isFinite(t.startedAt)).toBe(true);
+    expect(t.finishedAt === undefined || Number.isFinite(t.finishedAt)).toBe(true);
+    // и формат не выдаёт NaN
+    const recent = m.recentTerminal("u1", { now: 9_000 });
+    expect(recent.every((x) => Number.isFinite(x.startedAt))).toBe(true);
+  });
+
+  it("прерванная задача сохраняет РЕАЛЬНОЕ время, не слипается на момент рестарта", () => {
+    const c = clock(1_000);
+    const src = new TaskManager(c.now);
+    // реальный успех в 1000 + 2 прерванных (running) задачи, начатых раньше
+    const realDone = src.create({ userId: "u1", sessionId: "s1", goal: "успех" });
+    src.progress(realDone.taskId, 2);
+    src.finish(realDone.taskId, "сделано"); // finishedAt=1000
+    c.set(1_500);
+    const r1 = src.create({ userId: "u1", sessionId: "s1", goal: "долгая1" });
+    src.progress(r1.taskId, 1); // running, startedAt=1500
+    c.set(1_800);
+    const r2 = src.create({ userId: "u1", sessionId: "s1", goal: "долгая2" });
+    src.progress(r2.taskId, 1); // running, startedAt=1800
+
+    const restored = new TaskManager(() => 100_000); // рестарт сильно позже
+    restored.restore(src.toJSON(), 100_000);
+    // прерванные датируются своим startedAt, НЕ «now=100000» → реальный успех не вытеснен
+    expect(restored.get(r1.taskId)?.finishedAt).toBe(1_500);
+    expect(restored.get(r2.taskId)?.finishedAt).toBe(1_800);
+    // в топ-1 по свежести — последняя прерванная (1800), realDone (1000) ниже; но все содержательны и видимы
+    const recent = restored.recentTerminal("u1", { now: 100_000 });
+    expect(recent.map((t) => t.taskId)).toEqual([r2.taskId, r1.taskId, realDone.taskId]);
+  });
+});
+
+describe("TaskManager — recentTerminal (осознание «сделал?» §20)", () => {
+  function seed(m: TaskManager, c: ReturnType<typeof clock>) {
+    c.set(1_000);
+    const a = m.create({ userId: "u1", sessionId: "s1", goal: "A" });
+    m.progress(a.taskId, 1); // содержательная (был tool-use)
+    m.finish(a.taskId, "A готово");
+    c.set(2_000);
+    const b = m.create({ userId: "u1", sessionId: "s1", goal: "B" });
+    m.progress(b.taskId, 2);
+    m.fail(b.taskId, "B сломалось");
+    c.set(3_000);
+    const running = m.create({ userId: "u1", sessionId: "s1", goal: "C" }); // активна
+    const other = m.create({ userId: "u2", sessionId: "s9", goal: "D" }); // чужой
+    m.progress(other.taskId, 1);
+    m.finish(other.taskId, "D");
+    return { a, b, running, other };
+  }
+
+  it("возвращает только терминальные задачи пользователя, свежие первыми", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    const { a, b, running } = seed(m, c);
+    const recent = m.recentTerminal("u1", { now: 3_000 });
+    expect(recent.map((t) => t.taskId)).toEqual([b.taskId, a.taskId]); // B (2000) перед A (1000)
+    expect(recent.some((t) => t.taskId === running.taskId)).toBe(false); // активная не входит
+  });
+
+  it("activeForUser: задачи В РАБОТЕ (не терминальные) пользователя, кроме текущего хода", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    const { a, running } = seed(m, c); // a — done; running — активна; other — чужой done
+    const active = m.activeForUser("u1");
+    expect(active.map((t) => t.taskId)).toEqual([running.taskId]); // только активная u1
+    expect(active.some((t) => t.taskId === a.taskId)).toBe(false); // терминальная не входит
+    // excludeId (таск текущего хода) — исключается, чтобы не считать сам вопрос «делом в работе»
+    expect(m.activeForUser("u1", running.taskId)).toEqual([]);
+    expect(m.activeForUser("u2").length).toBe(0); // чужой other уже done
+  });
+
+  it("ОТСЕКАЕТ пустую болтовню (stepsDone=0) — в «сделал?» только содержательные задачи", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    c.set(1_000);
+    const chat = m.create({ userId: "u1", sessionId: "s1", goal: "привет" });
+    m.finish(chat.taskId, "Здравствуйте, сэр"); // 0 шагов с инструментом → не задача
+    c.set(2_000);
+    const real = m.create({ userId: "u1", sessionId: "s1", goal: "таблица" });
+    m.progress(real.taskId, 3);
+    m.finish(real.taskId, "Готово");
+    expect(m.recentTerminal("u1", { now: 2_000 }).map((t) => t.taskId)).toEqual([real.taskId]);
+  });
+
+  it("отсекает по возрасту (maxAgeMs) и ограничивает по limit", () => {
+    const c = clock();
+    const m = new TaskManager(c.now);
+    const { a, b } = seed(m, c);
+    // окно 1500мс от now=3000 → видно только B (finishedAt 2000), A (1000) старо
+    const windowed = m.recentTerminal("u1", { now: 3_000, maxAgeMs: 1_500 });
+    expect(windowed.map((t) => t.taskId)).toEqual([b.taskId]);
+    // limit=1 → только свежайшая
+    const limited = m.recentTerminal("u1", { now: 3_000, limit: 1 });
+    expect(limited.map((t) => t.taskId)).toEqual([b.taskId]);
+    expect(m.recentTerminal("u1", { now: 3_000, limit: 0 })).toEqual([]);
+    void a;
   });
 });

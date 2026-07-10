@@ -30,11 +30,36 @@ export class WorkingMemory {
   private readonly entities: Entity[] = [];
 
   constructor(
-    /** Сколько последних реплик держать (кольцо). */
-    private readonly maxTurns = 20,
+    /** Сколько последних реплик держать (кольцо). Больше окно → дольше помнит задачу для «сделал?». */
+    private readonly maxTurns = 40,
     /** Сколько последних сущностей держать в стеке анафоры. */
     private readonly maxEntities = 12,
+    /** Колбэк на любое изменение (для персиста на диск §5) — дебаунсит вызывающий. */
+    private onChange?: () => void,
   ) {}
+
+  /** Назначить колбэк персиста (если не задан в конструкторе). */
+  setOnChange(cb: () => void): void {
+    this.onChange = cb;
+  }
+
+  /** Сериализовать для персиста на диск (контекст переживает рестарт сервера/клиента, §5). */
+  toJSON(): { turns: Turn[]; entities: Entity[] } {
+    return { turns: [...this.turns], entities: [...this.entities] };
+  }
+
+  /** Восстановить из персиста (новейшие в пределах кольца). НЕ дёргает onChange. */
+  restore(data: { turns?: Turn[]; entities?: Entity[] } | null | undefined): void {
+    if (!data) return;
+    if (Array.isArray(data.turns)) {
+      this.turns.length = 0;
+      this.turns.push(...data.turns.slice(-this.maxTurns));
+    }
+    if (Array.isArray(data.entities)) {
+      this.entities.length = 0;
+      this.entities.push(...data.entities.slice(-this.maxEntities));
+    }
+  }
 
   /** Добавить реплику; старые вытесняются (кольцевой буфер). */
   pushTurn(role: Turn["role"], text: string): void {
@@ -42,6 +67,7 @@ export class WorkingMemory {
     if (this.turns.length > this.maxTurns) {
       this.turns.splice(0, this.turns.length - this.maxTurns);
     }
+    this.onChange?.();
   }
 
   /** Последние реплики (по возрастанию времени) — контекст для LLM (§8). */
@@ -62,6 +88,7 @@ export class WorkingMemory {
     if (this.entities.length > this.maxEntities) {
       this.entities.splice(0, this.entities.length - this.maxEntities);
     }
+    this.onChange?.();
   }
 
   /**
