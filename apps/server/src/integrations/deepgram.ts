@@ -811,7 +811,7 @@ class PersistentDeepgramConnection {
       is_final?: boolean;
       start?: number;
       duration?: number;
-      channel?: { alternatives?: Array<{ transcript?: string }> };
+      channel?: { alternatives?: Array<{ transcript?: string; confidence?: number }> };
     };
     try {
       m = JSON.parse(String(data));
@@ -845,7 +845,10 @@ class PersistentDeepgramConnection {
         this.lastInterim = text;
       }
       const live = [this.committed, this.lastInterim].filter(Boolean).join(" ").trim();
-      if (live) this.currentLease?.emitPartial({ text: live, final: false });
+      // Волна 1: confidence больше НЕ выбрасывается (legacy-путь его отдавал, персистентный — нет):
+      // потребители (гейт обрывков/будущий clarify по неуверенности) видят уверенность Deepgram.
+      const confidence = m?.channel?.alternatives?.[0]?.confidence;
+      if (live) this.currentLease?.emitPartial({ text: live, final: false, ...(typeof confidence === "number" ? { confidence } : {}) });
     }
     // ПЕЧАТЬ, когда Deepgram обработал ВСЮ длительность хода (надёжнее таймера тишины — не зависит от
     // лага). Не дотянул — пинаем фолбэк-таймер тишины (на случай, если хвост хода был тишиной без Results).

@@ -302,6 +302,31 @@ export class Semaphore {
     return new Promise<void>((resolve) => this.waiters.push(resolve));
   }
 
+  /**
+   * Дождаться разрешения, но не дольше timeoutMs (Волна 1 §20: GUI-инструмент второй задачи не висит
+   * вечно за арендой ввода — по таймауту честная ошибка, решает модель). true — взято (обязателен
+   * release); false — таймаут: ожидающий УБРАН из очереди (разрешение не утекает, FIFO остальных цел).
+   * timeoutMs ≤ 0 → только мгновенная попытка (эквивалент tryAcquire).
+   */
+  acquireWithTimeout(timeoutMs: number): Promise<boolean> {
+    if (this.tryAcquire()) return Promise.resolve(true);
+    if (!(Number.isFinite(timeoutMs) && timeoutMs > 0)) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const waiter = (): void => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      this.waiters.push(waiter);
+      const timer = setTimeout(() => {
+        const i = this.waiters.indexOf(waiter);
+        if (i === -1) return; // release уже передал разрешение этому ожидающему — resolve(true) сработал
+        this.waiters.splice(i, 1);
+        resolve(false);
+      }, timeoutMs);
+      (timer as { unref?: () => void }).unref?.();
+    });
+  }
+
   /** Вернуть разрешение. Есть ожидающие — передаём первому (FIFO), счётчик не растёт. */
   release(): void {
     const next = this.waiters.shift();

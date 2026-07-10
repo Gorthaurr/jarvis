@@ -1392,7 +1392,10 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "fs_mkdir",
   "fs_move",
   "fs_append",
-  "ui_invoke",
+  // ⚠️ ui_ground/ui_invoke — ГОРЯЧИЕ (Волна 1, аудит 2026-07-10): дешёвый UIA-путь (грундинг+инвок
+  // через сайдкар, ~сотни токенов) должен вытеснять screen_capture (~2K токенов картинки/взгляд), но
+  // в COLD его схем модель не видела: в живом логе 0 вызовов ui_* против 9 screen_capture на задачу.
+  // Тот же прецедент, что watch_*: Reliability > микро-токены (cold-танец load→call = промах пути).
   "telegram_read",
   // §15 расширение cold-набора (2026-06-22, замер `_tool_audit.ts`): заведомо РЕДКИЕ инструменты —
   // полная схема в каждый ход раздувала горячий префикс (~8.9K→~7K ток), а нужны они эпизодически.
@@ -1402,7 +1405,6 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "browser_close", // закрытие вкладок CDP — редко
   "browser_tabs", // список вкладок CDP — редко
   "web_inspect", // отладка в невидимом браузере Джарвиса — редко
-  "ui_ground", // UIA-грундинг через сайдкар — специализированно (пара к уже-cold ui_invoke)
   "telegram_send_voice", // голосовые сообщения в TG — редко против текста (telegram_send горячий)
   "system_power", // выключение/сон/перезагрузка — редко + подтверждение
   "system_lock", // блокировка ПК — редко

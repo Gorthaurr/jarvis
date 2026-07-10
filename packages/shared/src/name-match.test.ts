@@ -3,6 +3,7 @@ import {
   type Candidate,
   classifyKind,
   foldName,
+  latinToCyrillic,
   nameSearchVariants,
   pickRecipient,
   scoreCandidate,
@@ -55,6 +56,22 @@ describe("transliterate (recall, не решение)", () => {
   it("смешанный/пустой → пусто", () => {
     expect(transliterate("")).toEqual([]);
     expect(transliterate("Ваня Cool")).toEqual([]);
+  });
+});
+
+describe("latinToCyrillic (канонизация STT-обрывков, Волна 1 2026-07-10)", () => {
+  it("латиница → кириллица primary-рендерингом, диграфы сперва", () => {
+    expect(latinToCyrillic("dota")).toBe("дота");
+    expect(latinToCyrillic("zhenya")).toBe("женя");
+  });
+
+  it("микс латиница+кириллица (живой случай «dotе») — латинские буквы сведены, кириллица цела", () => {
+    expect(latinToCyrillic("dotе")).toBe("доте"); // d-o-t латиница + «е» кириллица
+  });
+
+  it("чистая кириллица/пусто — как есть (lower)", () => {
+    expect(latinToCyrillic("Доте")).toBe("доте");
+    expect(latinToCyrillic("")).toBe("");
   });
 });
 

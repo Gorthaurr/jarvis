@@ -45,10 +45,14 @@ describe("toolEffect — классификация для verify-петли", (
 });
 
 describe("isBlindMutate — слепые действия (ok ≠ цель достигнута, нужна сверка)", () => {
-  it("клик/ввод/act/фокус/a11y → blind (true)", () => {
-    for (const t of ["input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke", "ui_ground"]) {
+  it("клик/ввод/act/фокус/инвок → blind (true)", () => {
+    for (const t of ["input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke"]) {
       expect(isBlindMutate(t)).toBe(true);
     }
+  });
+  it("ui_ground — ЧТЕНИЕ (найти элемент), не blind и neutral (Волна 1 2026-07-10: дешёвый UIA-путь не карается verify-нуджем)", () => {
+    expect(isBlindMutate("ui_ground")).toBe(false);
+    expect(toolEffect("ui_ground")).toBe("neutral");
   });
   it("самоподтверждающиеся mutate (исход в tool_result) → НЕ blind (false)", () => {
     for (const t of ["code_run", "fs_write", "fs_edit", "office_word", "system_volume", "app_launch", "browser_open", "web_open"]) {

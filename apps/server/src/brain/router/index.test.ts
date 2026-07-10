@@ -167,6 +167,35 @@ describe("classifyTier", () => {
     expect(classifyTier("скачай картинку и сохрани в загрузки").tier).toBe("sonnet");
   });
 
+  it("Волна 1 (эпизод 2026-07-10): STT-обрывок латиницей → clarify «повторите», НЕ фоновая задача", () => {
+    // Живой случай: «в dot'е.» (Deepgram потерял начало повтора и уронил слово в латиницу) шёл в
+    // sonnet-задачу → 245с и $ на бессмыслицу. Теперь — мгновенный переспрос ($0).
+    const d = classifyTier("в dot'е.");
+    expect(d.tier).toBe("tier0");
+    expect(d.local?.kind).toBe("clarify");
+    // Ключ НЕ из QUICK_INTENTS → следующая реплика маршрутизируется обычно (не в tier0-действие).
+    expect(resolveClarifyAnswer("__repeat__", "запусти поиск в доте")).toBeUndefined();
+  });
+
+  it("гейт обрывков НЕ трогает целые короткие команды и осмысленные слова", () => {
+    expect(classifyTier("открой youtube").tier).toBe("tier0"); // глагол-действие + сервис
+    expect(classifyTier("погода").tier).not.toBe("tier0"); // одиночное осмысленное слово — решает модель
+    expect(classifyTier("погода").local?.kind).not.toBe("clarify");
+    expect(classifyTier("составь план на завтра").tier).toBe("sonnet"); // действие — задача как раньше
+  });
+
+  it("ревью D+E: МЕЖтокенный микс (латинское имя + кириллический глагол) — живая команда, НЕ clarify", () => {
+    for (const cmd of ["wifi отруби", "steam обнови", "discord сверни", "chrome закрой"]) {
+      expect(classifyTier(cmd).local?.kind).not.toBe("clarify");
+    }
+  });
+
+  it("ревью D+E: подтверждения «да/нет/ага» — НЕ обрывок (уходят в LLM с контекстом диалога)", () => {
+    for (const w of ["да", "ага", "угу", "нет"]) {
+      expect(classifyTier(w).local?.kind).not.toBe("clarify");
+    }
+  });
+
   it("ВОПРОС → conversational (синхронный разговор, НЕ фоновая задача); фикс «каждый вопрос как задача»", () => {
     for (const q of [
       "какая столица Франции",

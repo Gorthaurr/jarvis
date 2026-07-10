@@ -221,6 +221,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     llm: anthropicLlm,
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
     responseCache: new SemanticResponseCache(embedder), // §15 семантический кэш чисто-вербальных ответов
+    embedder, // §20 Волна 1: семантический слой дубль-гейта (STT-обрывок повтора ловится косинусом)
     web,
     market, // §трейдинг (слой 1): рыночные данные + технический анализ (только чтение, без денег)
     knowledge, // §экспертность: база знаний по доменам (knowledge_consult перед экспертной задачей)
@@ -752,10 +753,11 @@ async function doHandshake(
 
   // §6B/B3: грузим РАЗДЕЛ профиля этого userId в кеш ДО makeSessionContext/онбординга — иначе
   // getProfile(userId) вернёт пусто (профиль партиционирован по userId, не глобальный синглтон).
-  await loadProfile(userId);
-  // §6B/B5: гидрируем траты периода ЭТОГО юзера из usage_quota ДО первого check (рестарт не обнуляет
-  // месячный потолок). Идемпотентно; без БД/userId — no-op (best-effort).
-  await brain.spend.hydrate(userId);
+  // Профиль и траты независимы (разные таблицы, друг друга не читают) и оба идут ПОСЛЕ
+  // resolveAndProvision (FK-родитель провижен) → грузим параллельно, экономя один RTT на connect.
+  // §6B/B5: hydrate — траты периода из usage_quota ДО первого check (рестарт не обнуляет месячный
+  // потолок). Оба идемпотентны; без БД/userId — no-op (best-effort).
+  await Promise.all([loadProfile(userId), brain.spend.hydrate(userId)]);
 
   const { session, resumed } = registry.createOrResume(userId, sock, hello.resumeSessionId);
 

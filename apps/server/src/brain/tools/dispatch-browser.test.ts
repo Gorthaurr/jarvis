@@ -101,11 +101,14 @@ describe("browser_* через расширение", () => {
     expect(sendAction).not.toHaveBeenCalled(); // мышь НЕ поехала (курсор не дёргается)
   });
 
-  it("ui_ground в браузерной задаче тоже заблокирован", async () => {
-    const c = makeCtx({ ext: ext() });
+  it("ui_ground в браузерной задаче РАЗРЕШЁН (Волна 1: чистый UIA-запрос, курсор не трогает)", async () => {
+    const sendAction = vi.fn<Send>(okSend);
+    const c = makeCtx({ ext: ext(), session: { sendAction } as unknown as ToolContext["session"] });
     await dispatchTool("browser_open", { url: "https://music.yandex.ru" }, c);
-    const r = await dispatchTool("ui_ground", { intent: "кнопка play" }, c);
-    expect(r.isError).toBe(true);
+    sendAction.mockClear();
+    const r = await dispatchTool("ui_ground", { role: "button", name: "play" }, c);
+    expect(r.isError).toBe(false); // дешёвое наблюдение доступно и в браузерной задаче
+    expect(sendAction).toHaveBeenCalled(); // ушло клиенту как ui.ground (read-only, без SendInput)
   });
 
   it("P2.1: ПОСЛЕ честного промаха browser_act (canvas/нет DOM) координатный input_click РАЗРЕШЁН (escape-hatch)", async () => {

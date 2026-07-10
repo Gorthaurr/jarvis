@@ -144,11 +144,13 @@ const KIND_BY_TOOL: Record<string, ActionKind> = Object.fromEntries(
 ) as Record<string, ActionKind>;
 
 /**
- * Инструменты, ДВИГАЮЩИЕ физический курсор (SendInput) или экранное грундинг-наведение под клик.
- * Во время браузерной задачи запрещены (см. inBrowserTask) — иначе «мышку дёргает», когда модель
- * сваливается на них вместо browser_act. Для нативных окон (вне веб-задачи) — разрешены.
+ * Инструменты, ДВИГАЮЩИЕ физический курсор (SendInput). Во время браузерной задачи запрещены
+ * (см. inBrowserTask) — иначе «мышку дёргает», когда модель сваливается на них вместо browser_act.
+ * Для нативных окон (вне веб-задачи) — разрешены. ui_ground ИЗ СПИСКА УБРАН (Волна 1, 2026-07-10):
+ * это чистый UIA-запрос через сайдкар (FindFirst, без SendInput) — курсор не трогает, а блокировка
+ * гасила дешёвый путь наблюдения именно там, где он нужен (ревью Пакета A).
  */
-const MOUSE_TOOLS = new Set<string>(["input_click", "ui_ground"]);
+const MOUSE_TOOLS = new Set<string>(["input_click"]);
 
 export async function dispatchTool(
   name: string,

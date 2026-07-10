@@ -35,6 +35,7 @@ import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
 import { isNoiseOnly, isWakeAddressed, stripWake } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
 import type { FillerCache } from "./filler-cache.js";
+import { buildAckEarconWav } from "./earcon.js";
 import type { ISpeakerVerifier, VoiceProfile } from "./speaker/verifier.js";
 
 /** Нормализация команды для анти-дубля: регистр/ё/пунктуация/пробелы — чтобы «Напиши Кате.» и
@@ -709,6 +710,32 @@ export class VoicePipeline {
       // Перебили, пока генерировали — канал мог освободиться, пробуем пролить фоновый итог.
       this.maybeDrainSpeech();
     }
+  }
+
+  /** Прекеш earcon приёмки (Волна 1): собирается один раз при первом использовании. */
+  private earconBuf: ArrayBuffer | null = null;
+
+  /**
+   * Волна 1 (эпизод 2026-07-10): мгновенная СЛЫШИМАЯ приёмка фоновой задачи — короткий тон
+   * (~160мс), НЕ фраза («тихий финал» цел). Раньше приёмка молчала до отложенного ack (8с),
+   * пользователь на ~6-й секунде решал «не услышал» и повторял команду → вторая петля.
+   * Состояние голосовой машины НЕ трогаем (это не речь): микрофон продолжает слушать; клиентская
+   * очередь воспроизведения играет тон немедленно. Выключатель: JARVIS_TASK_ACK_EARCON=0.
+   */
+  playTaskAckEarcon(): void {
+    if (process.env.JARVIS_TASK_ACK_EARCON === "0") return;
+    // Канал занят речью → доп. индикатор не нужен. Гард ПОЛНЫЙ (как maybeDrainSpeech, ревью B+C):
+    // state=speaking И идущий TTS-стрим drive=false (проактив §9 не диспатчит speak_start), И
+    // пофразная сессия между фразами (ttsStream=null, но канал занят). Клиентская сборка чанков —
+    // единый аккумулятор: чужой last:true посреди мультичанк-стрима склеил бы битый блоб.
+    if (this.ctx.state === "speaking" || this.ttsStream || this.phraseSpeaker?.active) return;
+    this.earconBuf ??= buildAckEarconWav();
+    // 1.8: earcon = ПЕРВАЯ обратная связь хода — отмечаем в latency-трекере (раньше фоновый ход
+    // не производил звука до результата → «оборот неполный» и метрика приёмки не существовала).
+    this.latency.mark("tts_first_chunk");
+    this.latency.mark("audio");
+    this.deps.sendSpeakChunk({ audio: this.earconBuf, seq: 0, last: true });
+    this.log.info("приёмка: earcon отправлен (фоновая задача принята)", this.latency.report());
   }
 
   /**

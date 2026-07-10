@@ -182,6 +182,29 @@ export class MetricsCollector {
     this.jsonl = false;
   }
 
+  /**
+   * Пер-раундовое событие (Волна 1, 1.8): экономика КАЖДОГО LLM-раунда — durable JSONL-строкой
+   * (type:"round"), в ОЗУ-окно агрегатов НЕ попадает (там per-task события). Раньше кеш-промахи и
+   * их причины были невидимы (метрики только per-task) — деградации находились археологией по логам.
+   */
+  recordRound(event: {
+    taskId: string;
+    round: number;
+    tier: string;
+    model: string;
+    usage: TokenUsage;
+    toolNames: readonly string[];
+    cacheThrashCause?: string;
+  }): void {
+    if (!this.jsonl) return;
+    try {
+      const rec = JSON.stringify({ ts: new Date().toISOString(), type: "round", ...event, costUsd: costUsd(event.model, event.usage) });
+      appendFileSync(join(dataPath("logs"), "metrics.jsonl"), rec + "\n");
+    } catch {
+      /* не критично */
+    }
+  }
+
   /** Записать событие задачи. При переполнении окна — выталкиваем старейшее (ring-buffer). */
   record(event: AgentMetricEvent): void {
     this.events.push(event);

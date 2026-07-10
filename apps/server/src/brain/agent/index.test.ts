@@ -345,6 +345,28 @@ describe("agent-loop (§7, §8)", () => {
     expect(tasks.list("u1")).toHaveLength(1); // задача одна
   });
 
+  it("§20 дубль-гейт (эпизод 2026-07-10): STT-обрывок повтора («в dot'е.») НЕ плодит вторую петлю", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    tasks.create({ userId: "u1", sessionId: "s1", goal: "запусти поиск в доте." }); // идёт (running)
+    const reply = await handleUserText(session, "в dot'е.", await makeDeps(llm, { tasks }));
+    expect(reply.voice).toContain("Уже делаю"); // живой каскад: обрывок → вторая задача → обе убиты потолком
+    expect(llm.requests).toHaveLength(0);
+    expect(tasks.list("u1")).toHaveLength(1);
+  });
+
+  it("§20 реджект-повтор («нет, не то — …та же цель») — это STEER (правка), а не «Уже делаю»", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "запусти поиск в доте." });
+    const reply = await handleUserText(session, "нет, не то — запусти поиск в доте", await makeDeps(llm, { tasks }));
+    expect(reply.voice).toContain("поправляю"); // рулёжка недовольного → впрыск в идущую задачу
+    expect(t.steer.pending).toHaveLength(1); // поправка легла в очередь петли
+    expect(llm.requests).toHaveLength(0);
+  });
+
   it("живой смоук 2026-07-02: ВОПРОС + нейтральный tool + пустой финал → нудж на ответ, НЕ «Не вышло»", async () => {
     const session = fakeSession();
     const tasks = new TaskManager();

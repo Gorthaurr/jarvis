@@ -28,6 +28,44 @@ describe("Semaphore (§20 параллелизм)", () => {
     expect(order).toEqual([1, 2]);
   });
 
+  it("acquireWithTimeout: свободно → true мгновенно; занято → false по таймауту, ожидающий убран из очереди", async () => {
+    const s = new Semaphore(1);
+    expect(await s.acquireWithTimeout(50)).toBe(true); // свободно — взяли сразу
+    expect(await s.acquireWithTimeout(30)).toBe(false); // занято → таймаут
+    expect(s.pending).toBe(0); // ожидающий вычищен — разрешение не утечёт «в никуда»
+    s.release();
+    expect(s.available).toBe(1); // release после таймаута вернул разрешение в пул, не мёртвому ожидающему
+  });
+
+  it("acquireWithTimeout: release до таймаута передаёт разрешение ожидающему (true)", async () => {
+    const s = new Semaphore(1);
+    await s.acquire();
+    const p = s.acquireWithTimeout(5_000);
+    s.release();
+    expect(await p).toBe(true);
+    expect(s.available).toBe(0); // разрешение у второго владельца
+  });
+
+  it("acquireWithTimeout: таймаут одного НЕ ломает FIFO остальных", async () => {
+    const s = new Semaphore(1);
+    await s.acquire();
+    const timedOut = s.acquireWithTimeout(20); // первый в очереди — отвалится по таймауту
+    const order: number[] = [];
+    const b = s.acquire().then(() => order.push(2));
+    expect(await timedOut).toBe(false);
+    s.release(); // → второму (первый уже вычищен)
+    await b;
+    expect(order).toEqual([2]);
+  });
+
+  it("acquireWithTimeout: timeoutMs ≤ 0 → только мгновенная попытка", async () => {
+    const s = new Semaphore(1);
+    await s.acquire();
+    expect(await s.acquireWithTimeout(0)).toBe(false);
+    s.release();
+    expect(await s.acquireWithTimeout(0)).toBe(true);
+  });
+
   it("run() освобождает разрешение даже при исключении внутри fn", async () => {
     const s = new Semaphore(1);
     await expect(

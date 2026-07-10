@@ -7,9 +7,9 @@
  * фактическую модель хода. Теперь и гейтинг трат (§14), и наблюдаемость ($/токены) считают ОТСЮДА.
  *
  * Цены — USD за 1M токенов, live-fetch 2026-06-22 (platform.claude.com/docs/.../pricing).
- * cacheWrite — ставка записи кеша 5m TTL (1.25× input). Для 1h TTL запись = 2× input (см. note);
- * usage из ответа не различает TTL, поэтому здесь используем 5m-ставку как разумную аппроксимацию
- * (телеметрия — для решений/наблюдаемости, не для точного инвойса).
+ * cacheWrite в таблице — ставка записи кеша 5m TTL (1.25× input). Для 1h TTL запись = 2× input —
+ * с Волны 1 (2026-07-10) расчёт берёт ФАКТИЧЕСКИЙ TTL из ANTHROPIC_CACHE_TTL (см. cacheWriteRate):
+ * проект живёт на 1h, и 5m-аппроксимация занижала cache-write на 37.5% (в эпизоде это 60% чека).
  */
 
 /** Тариф одной модели (USD за 1M токенов). */
@@ -56,18 +56,29 @@ export interface TokenUsage {
 }
 
 /**
- * Стоимость вызова в USD по ФАКТИЧЕСКОЙ модели (чистая функция). Каждый тип токенов × свой тариф / 1e6.
- * Не-конечные значения коэрсятся в 0 (стрим оборвался → usage может прийти NaN; иначе spent стал бы NaN
- * и предохранитель §14 молча отключился бы).
+ * Ставка записи кеша с учётом TTL (Волна 1, ревью 2026-07-10): 5m = 1.25× input (табличная),
+ * 1h = 2× input. Проект живёт с ANTHROPIC_CACHE_TTL=1h — прежний расчёт по 1.25× ЗАНИЖАЛ
+ * cache-write стоимость на 37.5% → SpendGuard недоучитывал траты (в эпизоде cache-write = 60% чека).
+ * opts.cacheTtl — для чистых тестов; без него читаем env (как её читает anthropic.ts).
  */
-export function costUsd(model: string, u: TokenUsage): number {
+export function cacheWriteRate(p: ModelPricing, cacheTtl?: "5m" | "1h"): number {
+  const ttl = cacheTtl ?? (process.env.ANTHROPIC_CACHE_TTL === "1h" ? "1h" : "5m");
+  return ttl === "1h" ? p.input * 2 : p.cacheWrite;
+}
+
+/**
+ * Стоимость вызова в USD по ФАКТИЧЕСКОЙ модели. Каждый тип токенов × свой тариф / 1e6.
+ * Не-конечные значения коэрсятся в 0 (стрим оборвался → usage может прийти NaN; иначе spent стал бы NaN
+ * и предохранитель §14 молча отключился бы). Запись кеша — по фактическому TTL (см. cacheWriteRate).
+ */
+export function costUsd(model: string, u: TokenUsage, opts?: { cacheTtl?: "5m" | "1h" }): number {
   const p = pricingForModel(model);
   const n = (x: number): number => (Number.isFinite(x) ? x : 0);
   return (
     (n(u.inputTokens) * p.input +
       n(u.outputTokens) * p.output +
       n(u.cacheReadTokens) * p.cacheRead +
-      n(u.cacheCreationTokens) * p.cacheWrite) /
+      n(u.cacheCreationTokens) * cacheWriteRate(p, opts?.cacheTtl)) /
     1_000_000
   );
 }

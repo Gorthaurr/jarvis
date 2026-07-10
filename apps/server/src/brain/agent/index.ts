@@ -27,7 +27,9 @@ import { pruneStaleImages } from "./prune-images.js";
 import { type GestureEvent, compileReplayLines } from "../../memory/skill-macro.js";
 import { SentenceChunker, splitIntoSentences } from "../nlu/sentences.js";
 import type { IWebProvider } from "../../integrations/web.js";
-import { type EpisodicMemory, memoryMinScore } from "../../memory/episodic.js";
+import { type EpisodicMemory, cosine, memoryMinScore } from "../../memory/episodic.js";
+import type { IEmbeddingProvider } from "../../integrations/openai-embeddings.js";
+import { polarityConflict } from "../../memory/intent-polarity.js";
 import type { WorkingMemory } from "../../memory/working.js";
 import type { SpendGuard } from "../../billing/index.js";
 import { type UserContextSlot, buildSystemPrompt } from "../persona/index.js";
@@ -132,6 +134,17 @@ export interface AgentDeps {
   userId: string;
   /** §15 семантический кэш чисто-вербальных ответов (опц.) — пропуск LLM на близком фактическом повторе. */
   responseCache?: SemanticResponseCache;
+  /**
+   * Эмбеддер (e5) для семантического слоя дубль-гейта §20 (Волна 1, эпизод 2026-07-10): STT-обрывок
+   * повтора («в dot'е.»), который лексический гейт не поймал, сверяется косинусом с целями активных
+   * задач. Опционален: нет/сбой/таймаут → работает только лексический слой (честная деградация).
+   */
+  embedder?: IEmbeddingProvider;
+  /**
+   * Волна 1: мгновенная СЛЫШИМАЯ приёмка фоновой задачи (earcon-тон, не фраза). Зовётся в момент
+   * ухода задачи в фон — пользователь сразу знает «услышал, делаю», не повторяет команду в тишину.
+   */
+  taskAccepted?: () => void;
   userContext?: UserContextSlot;
   /**
    * Консьерж (§): висящее уточнение — мы задали короткий вопрос («Волну или коллекцию?») и ждём
@@ -240,6 +253,79 @@ function extractName(text: string): string | null {
   return raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
 }
 
+/**
+ * Порог семантического дубля §20. Консервативный 0.9 (план предлагал 0.83, но ложный «Уже делаю»
+ * молча глотает РЕАЛЬНО НОВУЮ команду без пути возражения — цена ошибки асимметрична; лексический
+ * слой уже ловит наблюдавшийся класс STT-обрывков, семантика — только бэкстоп парафраза).
+ */
+function dupSemanticMin(): number {
+  const n = Number.parseFloat(process.env.JARVIS_DUP_SEMANTIC_MIN ?? "");
+  return Number.isFinite(n) && n >= 0.5 && n <= 1 ? n : 0.9;
+}
+
+/**
+ * Семантический слой дубль-гейта §20 (Волна 1): реплика против целей ЖИВЫХ задач сессии (e5-косинус).
+ * Бюджет жёсткий (400мс на ВСЕ эмбеддинги — гейт стоит на пути приёмки команды); сбой/таймаут/null →
+ * undefined (работает лексический слой, честная деградация). Полярность-гард (start↔stop) отсекает
+ * противоположное намерение: «останови поиск» не матчится дублем цели «запусти поиск» (sim высокий!).
+ */
+async function findSemanticDuplicate(
+  embedder: IEmbeddingProvider,
+  text: string,
+  tasks: readonly Task[],
+): Promise<Task | undefined> {
+  if (tasks.length === 0) return undefined;
+  try {
+    // Все эмбеддинги ПАРАЛЛЕЛЬНО под ОДНИМ бюджетом (ревью 2026-07-10: последовательные await при
+    // 3 задачах давали до 1.4с worst-case на пути приёмки каждой реплики). Сбой/таймаут одной цели
+    // (null) не гасит проверку остальных. CachingEmbeddingProvider делает повторные цели ~бесплатными.
+    const [qv, ...goals] = await withTimeout(
+      Promise.all([
+        embedder.embed(text, "query").catch(() => null),
+        ...tasks.map((t) => embedder.embed(t.goal, "query").catch(() => null)),
+      ]),
+      400,
+    );
+    if (!qv) return undefined;
+    let best: Task | undefined;
+    let bestSim = 0;
+    for (let i = 0; i < tasks.length; i += 1) {
+      const gv = goals[i];
+      if (!gv) continue;
+      const sim = cosine(qv, gv);
+      if (sim > bestSim) {
+        bestSim = sim;
+        best = tasks[i];
+      }
+    }
+    if (best && bestSim >= dupSemanticMin()) {
+      if (polarityConflict(text, best.goal)) {
+        log.info("§20 семантический дубль подавлен полярность-гардом", { sim: Number(bestSim.toFixed(3)) });
+        return undefined;
+      }
+      log.info("§20 дубль по семантике (e5)", { sim: Number(bestSim.toFixed(3)), goal: best.goal.slice(0, 60) });
+      return best;
+    }
+  } catch {
+    /* таймаут/сбой эмбеддера → решает лексический слой */
+  }
+  return undefined;
+}
+
+/**
+ * Дописать замечание в ХВОСТ последнего user-сообщения (steer-механика §20): convo обязан
+ * оканчиваться пользователем, второй user-ход подряд не плодим (Opus не принимает префилл).
+ */
+function appendUserNote(convo: LlmMessage[], note: string): void {
+  const last = convo[convo.length - 1];
+  if (last && last.role === "user") {
+    if (typeof last.content === "string") last.content = [{ type: "text", text: last.content }, { type: "text", text: note }];
+    else last.content.push({ type: "text", text: note });
+  } else {
+    convo.push({ role: "user", content: note });
+  }
+}
+
 /** Промис под жёстким таймаутом: reject по истечении ms (для НЕОБЯЗАТЕЛЬНЫХ шагов §10). */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -340,27 +426,43 @@ export async function handleUserText(
       active: activeTask.title,
       scope: freshContext ? "new (свежий контекст)" : "edit (контекст текущей)",
     });
+    // §20 ДУБЛЬ-ГЕЙТ — ПЕРВЫМ, до steer (Волна 1, эпизод 2026-07-10): повтор цели идущей задачи — не
+    // «поправка» и не отдельное дело. ТОЛЬКО для scope=new: реплика с маркерами правки/реджекта
+    // («нет, не то — запусти поиск в доте») — это рулёжка недовольного пользователя, ей ДОЛЖЕН
+    // заниматься steer, а не «Уже делаю» (с фрагмент-overlap повтор цели в такой реплике матчится!).
+    // Два слоя:
+    //  1) лексический isDuplicateGoal (Жаккар + фрагмент-overlap + канонизация латиницы) — мгновенно;
+    //  2) семантический бэкстоп (e5-косинус к целям активных задач) — ловит парафраз/STT-искажение,
+    //     которое лексика не взяла. Порог консервативный (JARVIS_DUP_SEMANTIC_MIN, деф 0.9) +
+    //     полярность-гард (start↔stop): «останови поиск» НИКОГДА не матчится дублем «запусти поиск».
+    if (freshContext && deps.tasks) {
+      const live = deps.tasks
+        .list(deps.userId)
+        .filter((t) => (t.state === "running" || t.state === "paused") && t.sessionId === session.sessionId);
+      let dup = live.find((t) => isDuplicateGoal(clean, t.goal));
+      // Полярность-гард и на ЛЕКСИЧЕСКОМ слое (ревью 2026-07-10): «останови запуск поиска в доте»
+      // лексически перекрывается с целью «запусти поиск в доте», но это команда ОСТАНОВКИ, не повтор.
+      if (dup && polarityConflict(clean, dup.goal)) {
+        log.info("§20 лексический дубль подавлен полярность-гардом", { goal: dup.goal.slice(0, 60) });
+        dup = undefined;
+      }
+      if (!dup && deps.embedder) dup = await findSemanticDuplicate(deps.embedder, clean, live);
+      if (dup) {
+        log.info("§20 дубль активной задачи — вторую петлю не плодим", { taskId: dup.taskId, active: dup.title });
+        const reply: AgentReply = { voice: verbalize("Уже делаю, сэр.") };
+        deps.memory.pushTurn("assistant", reply.voice);
+        return finishReply(reply);
+      }
+    }
     // §20 ПРАВКА НА ХОДУ: реплика-ПРАВКА («нет, не то» / «добавь ещё» / «переделай») во время активной
     // задачи — НЕ плодим вторую петлю и НЕ ждём её конца. Впрыскиваем в ИДУЩУЮ задачу (task.steer) —
     // петля подхватит перед ближайшим шагом — и сразу коротко подтверждаем. «new»-реплика (отдельное
     // дело) идёт прежним путём, самостоятельной параллельной задачей.
     if (!freshContext && deps.tasks?.steer(activeTask.taskId, clean)) {
       log.info("§20 правка впрыснута в активную задачу", { taskId: activeTask.taskId, active: activeTask.title });
-      deps.memory.pushTurn("user", clean);
-      return finishReply({ voice: "Принял, поправляю." });
-    }
-    // §20 ДУБЛЬ-ГЕЙТ (аудит 2026-07-02): «new»-реплика, почти дословно совпадающая с целью УЖЕ ИДУЩЕЙ
-    // задачи (STT-вариация/нетерпеливый повтор: «продолжи/продолжу видео на ютубе» через 6 секунд), —
-    // это не отдельное дело. Вторую параллельную петлю не плодим, коротко подтверждаем работу.
-    if (freshContext && deps.tasks) {
-      const dup = deps.tasks
-        .list(deps.userId)
-        .find((t) => (t.state === "running" || t.state === "paused") && t.sessionId === session.sessionId && isDuplicateGoal(clean, t.goal));
-      if (dup) {
-        log.info("§20 дубль активной задачи — вторую петлю не плодим", { taskId: dup.taskId, active: dup.title });
-        deps.memory.pushTurn("user", clean);
-        return finishReply({ voice: verbalize("Уже делаю, сэр.") });
-      }
+      const reply: AgentReply = { voice: "Принял, поправляю." };
+      deps.memory.pushTurn("assistant", reply.voice);
+      return finishReply(reply);
     }
   }
 
@@ -406,6 +508,9 @@ export async function handleUserText(
   // задачи и дворецкого-ack (фикс «каждый вопрос воспринимает как задачу»). Независимые задачи бегут
   // ПАРАЛЛЕЛЬНО; конкуренцию за мышь/клаву разруливает аренда ввода (§20) внутри петли.
   if (decision.conversational !== true && (tier === "sonnet" || tier === "fable") && deps.speakResult) {
+    // Волна 1: слышимая приёмка СРАЗУ (earcon) — фоновая задача молчит до результата по дизайну
+    // («тихий финал»), но тишина в момент приёма читалась как «не услышал» → повтор → дубль-каскад.
+    deps.taskAccepted?.();
     startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext }), deps, { bounded: true });
     // §20 «тихий финал»: ход завершается БЕЗ произносимой фразы — итог придёт ОДИН раз через
     // speakResult. Раньше СРАЗУ звучал безусловный дворецкий ack («Принял») + результат следом =
@@ -442,6 +547,10 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps): 
   // на быстрой команде (лечит «×2 фразы» на медиа) и не ждём, пока освободится мышь от фоновой задачи.
   const instant = local.kind === "media" || local.kind === "volume";
   if (deps.speakResult && !instant) {
+    // Волна 1: аренда ввода занята другой задачей → tier0-действие будет ЖДАТЬ в очереди — дай
+    // слышимую приёмку (earcon), иначе тишина читается как «не услышал». Свободная аренда →
+    // результат придёт через секунду-две, доп. звук не нужен.
+    if (arbiter?.locked) deps.taskAccepted?.();
     startBackgroundTask(() => runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus), deps, { bounded: false });
     // §20 «тихий финал»: результат действия («Открыл …») придёт ОДИН раз через speakResult —
     // без предварительного дворецкого ack (раньше «Принял»+«Открыл» = ×2 фразы на каждом открытии).
@@ -516,18 +625,42 @@ async function runAgentLoop(
   // Аренда ввода (§20): задача занимает мышь/клаву на ПЕРВОЙ GUI-команде и держит до
   // конца (исключает interleave кликов/печати с другой параллельной задачей). Пока
   // занимается только чтением/web/памятью/кодом — ввод свободен для других задач.
+  // Волна 1 (эпизод 2026-07-10): (а) ожидание аренды БОЛЬШЕ НЕ входит в потолок времени задачи —
+  // вторая GUI-задача сгорала в очереди, сделав 2 инструмента за 245с; (б) ожидание ограничено
+  // JARVIS_INPUT_WAIT_MS (деф 60с) — по таймауту GUI-инструмент получает честную ошибку «ввод занят»,
+  // и модель решает сама (работать без ввода / завершить честно); (в) после долгого ожидания
+  // слепое действие блокируется до свежего взгляда (клик по устаревшему кадру = промах — живой случай:
+  // клик выстрелил через 236с очереди по давно изменившемуся экрану).
   const arbiter = deps.inputArbiter;
   let holdsInput = false;
-  const ensureInput = async (): Promise<void> => {
-    if (!arbiter || holdsInput) return;
-    await arbiter.acquire();
+  let queueWaitMs = 0; // суммарное ожидание аренды (телеметрия; в потолок/latency не входит)
+  let lastAcquireWaitMs = 0; // ожидание ПОСЛЕДНЕГО успешного acquire (для гарда протухшего клика)
+  let staleGuardBlocks = 0; // сколько слепых действий уже заблокировал гард (кэп 2 — анти-deadloop)
+  const INPUT_WAIT_MS = (() => {
+    const n = Number.parseInt(process.env.JARVIS_INPUT_WAIT_MS ?? "", 10);
+    return Number.isFinite(n) && n >= 1_000 ? n : 60_000;
+  })();
+  const STALE_INPUT_WAIT_MS = 10_000; // ждали дольше — экран считается устаревшим для слепых действий
+  const ensureInput = async (): Promise<boolean> => {
+    if (!arbiter) return true;
+    if (holdsInput) return true;
+    const t0 = Date.now();
+    const got = await arbiter.acquireWithTimeout(INPUT_WAIT_MS);
+    const waited = Date.now() - t0;
+    if (waited > 0) {
+      queueWaitMs += waited;
+      loopStartMs += waited; // потолок задачи не тикает, пока стоим в очереди за арендой
+    }
+    if (!got) return false;
     holdsInput = true;
+    lastAcquireWaitMs = waited;
     // Могли отменить, пока ждали аренду (§20 «отмена ≤1 шага»): сразу отдаём её —
     // петля выйдет на ближайшей проверке cancel, не выполнив GUI-команду.
     if (task.cancel.cancelled) {
       arbiter.release();
       holdsInput = false;
     }
+    return true;
   };
   // Прогресс показываем (панель + кнопка «стоп» в renderer) только когда задача реально
   // многошаговая (пошёл tool-use) — чтобы не мигать панелью на простых ответах (§20).
@@ -664,8 +797,9 @@ async function runAgentLoop(
   const HARD_STEP_CAP = 50;
   // Защитный потолок времени задачи (§20): даже если шаг где-то завис мимо своих таймаутов,
   // петля не остаётся в «выполняю» навечно — финализируем (терминал → панель/чип закрывается).
-  // env JARVIS_TASK_MAX_MS (деф 4 мин, кламп [30с, 30мин]).
-  const loopStartMs = Date.now();
+  // env JARVIS_TASK_MAX_MS (деф 4 мин, кламп [30с, 30мин]). let: ensureInput сдвигает старт на время,
+  // простоянное в очереди за арендой ввода (Волна 1 — очередь не сжигает бюджет задачи).
+  let loopStartMs = Date.now();
   const loopMaxMs = (() => {
     const n = Number.parseInt(process.env.JARVIS_TASK_MAX_MS ?? "", 10);
     return Number.isFinite(n) ? Math.min(1_800_000, Math.max(30_000, n)) : 240_000;
@@ -673,7 +807,16 @@ async function runAgentLoop(
   let cancelled = false;
   let limited = false;
   let timedOut = false;
+  let earlyWrap = false; // подвид timedOut: свернулись ЗАРАНЕЕ (остаток < среднего раунда), потолок не превышен
   let round = 0; // число завершённых tool-use раундов (= прогресс задачи)
+  // Волна 1 (1.5, «видимый бюджет»): на 70% потолка времени — ОДИН впрыск «сворачивайся» (graceful
+  // wrap-up c честным частичным итогом вместо невидимого обрыва «251с работы → „затянулось" без итога»).
+  let budgetNudged = false;
+  let roundDurTotalMs = 0; // суммарная длительность завершённых раундов (для гарда «остаток < среднего раунда»)
+  // Волна 1 (1.8): пер-раундовая диагностика кеша — модель прошлого раунда и был ли prune скринов
+  // (обе — типовые причины перезаписи префикса; см. WARN «перезапись префикса» ниже).
+  let prevRoundModel = model;
+  let prunedLastRound = false;
   let cacheReadTokens = 0; // метрики prompt-кеша за задачу (§15)
   let cacheCreationTokens = 0;
   // Телеметрия (obs/metrics): копим токены/вызовы за всю задачу для per-task события.
@@ -752,9 +895,12 @@ async function runAgentLoop(
   // Cancel-safe ПО КОНСТРУКЦИИ: таймер читает task.cancel/state/spokeAny В МОМЕНТ срабатывания
   // (ровно требование из ретро ButlerAcks — слепой agent-таймер, не видящий cancel, стрелял
   // ack'ом после «отмени»). clearTimeout — в finally петли. env JARVIS_TASK_ACK_MS, 0 = выкл.
+  // Волна 1: дефолт 8000 → 4000 (эмпирический порог повтора команды пользователем — 4-6с тишины;
+  // первый индикатор теперь earcon в момент приёмки, «Занимаюсь» — второй эшелон для долгих задач;
+  // 2000 из плана отвергнуто: каждая 3-5-секундная фоновая задача получала бы лишнюю фразу).
   const taskAckMs = (() => {
     const n = Number.parseInt(process.env.JARVIS_TASK_ACK_MS ?? "", 10);
-    return Number.isFinite(n) && n >= 0 ? n : 8000;
+    return Number.isFinite(n) && n >= 0 ? n : 4000;
   })();
   let ackTimer: NodeJS.Timeout | undefined;
   if (!sink && deps.speakResult && taskAckMs > 0) {
@@ -769,9 +915,11 @@ async function runAgentLoop(
   const MAX_FAMILY_NUDGES = 1;
   // §скорость (зрение): в контексте держим только N последних скринов (каждый ~2K токенов, старые —
   // мёртвый груз: модель обязана опираться на СВЕЖИЙ кадр). env JARVIS_KEEP_SCREENSHOTS, кламп [1,8].
+  // Волна 1: деф 2→1 — prune мутирует ЗАКЕШИРОВАННУЮ историю (перезапись префикса); с 1 скрином
+  // вырезание бьёт по САМОЙ СВЕЖЕЙ позиции (мельче перезапись) и экономит ~2K токенов входа.
   const KEEP_SCREENSHOTS = (() => {
     const n = Number.parseInt(process.env.JARVIS_KEEP_SCREENSHOTS ?? "", 10);
-    return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 2;
+    return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 1;
   })();
   // §скорость: усиление family-нуджа ОДНОРАЗОВОЕ — раунд переосмысления идёт на сильной модели,
   // затем возвращаемся на прежний тир. Раньше эскалация была липкой, и вся оставшаяся МЕХАНИКА
@@ -842,7 +990,7 @@ async function runAgentLoop(
     if (replayable && recalled) {
       let note: string;
       try {
-        await ensureInput();
+        if (!(await ensureInput())) throw new Error("ввод занят другой задачей (таймаут аренды)");
         if (task.cancel.cancelled) throw new Error("cancelled");
         const t0 = Date.now();
         const res = await session.sendAction(
@@ -886,7 +1034,37 @@ async function runAgentLoop(
       timedOut = true;
       break;
     }
-
+    // Волна 1 (1.5): видимый бюджет времени. (а) 70% потолка → одноразовый впрыск «сворачивайся» —
+    // модель успевает завершить подшаг, свериться и дать ЧЕСТНЫЙ частичный итог штатным финалом;
+    // (б) остаток меньше среднего раунда → новый LLM-раунд не начинаем (его всё равно убьёт потолок
+    // на середине — деньги в мусор), сворачиваемся сразу.
+    {
+      const elapsedMs = Date.now() - loopStartMs;
+      if (!budgetNudged && elapsedMs > loopMaxMs * 0.7 && round > 0) {
+        budgetNudged = true;
+        const leftSec = Math.max(5, Math.round((loopMaxMs - elapsedMs) / 1000));
+        appendUserNote(
+          convo,
+          `⏳ БЮДЖЕТ ВРЕМЕНИ: на задачу осталось ~${leftSec}с. Не начинай новых длинных подходов: ` +
+            `заверши текущий подшаг, сверь результат глазами и дай ЧЕСТНЫЙ итог — что успел сделать, ` +
+            `что нет (частичный результат лучше молчаливого обрыва).`,
+        );
+        log.info("§20 бюджет-нудж: 70% потолка времени — прошу сворачиваться", { taskId, leftSec });
+      }
+      if (round > 0 && roundDurTotalMs > 0) {
+        const avgRoundMs = roundDurTotalMs / round;
+        if (loopMaxMs - elapsedMs < avgRoundMs * 0.9) {
+          log.warn("agent-loop: остаток бюджета меньше среднего раунда — сворачиваюсь заранее", {
+            taskId,
+            leftMs: Math.max(0, loopMaxMs - elapsedMs),
+            avgRoundMs: Math.round(avgRoundMs),
+          });
+          timedOut = true;
+          earlyWrap = true; // причина провала — «свернулся заранее», не «превышен потолок» (ревью B+C)
+          break;
+        }
+      }
+    }
     // Пауза реальна (§20, user-takeover §6): пока задача paused — петля ЖДЁТ, не шлёт
     // новых команд. Пользователь взял мышь → агент уступил; освободил → петля продолжит.
     await waitWhilePaused(task);
@@ -938,6 +1116,12 @@ async function runAgentLoop(
       limited = true;
       break;
     }
+
+    // Длительность раунда → roundDurTotalMs (гард бюджета выше). Снапшот ПОСЛЕ паузы (takeover не
+    // раздувает avg) + снапшот queueWaitMs: ожидание аренды ВНУТРИ раунда (ensureInput) вычитается —
+    // иначе один 50-секундный queue-wait раздувал средний раунд и гард сворачивал задачу зря (ревью B+C).
+    const stepStartedMs = Date.now();
+    const stepQueueWait0 = queueWaitMs;
 
     // §скорость: family-boost исчерпан (раунд переосмысления прошёл) → откат на прежний тир.
     // Если тем временем эскалировал КТО-ТО ЕЩЁ (trading-инструменты и т.п.) — не трогаем: откат
@@ -1026,6 +1210,38 @@ async function runAgentLoop(
     inputTokensTotal += resp.usage.inputTokens;
     outputTokensTotal += resp.usage.outputTokens;
     toolCallsTotal += resp.toolUses.length;
+    // Волна 1 (1.8): пер-раундовая телеметрия + WARN на перезапись кеш-префикса С ПРИЧИНОЙ. Норма
+    // rolling-кеша: read >> creation (пишется только свежий хвост); creation > read = префикс
+    // перезаписан (в эпизоде 2026-07-10 это съело $0.63 из $1.04 и было НЕВИДИМО в per-task метриках).
+    {
+      const thrash = step > 0 && resp.usage.cacheCreationTokens > 1000 && resp.usage.cacheCreationTokens > resp.usage.cacheReadTokens;
+      const thrashCause = thrash
+        ? model !== prevRoundModel
+          ? "model-switched"
+          : prunedLastRound
+            ? "pruned-images"
+            : "prefix-changed"
+        : undefined;
+      if (thrash) {
+        log.warn("prompt-кеш: перезапись префикса в раунде (§15)", {
+          step,
+          cacheCreationTokens: resp.usage.cacheCreationTokens,
+          cacheReadTokens: resp.usage.cacheReadTokens,
+          cause: thrashCause,
+        });
+      }
+      metrics.recordRound({
+        taskId,
+        round: step,
+        tier: currentTier,
+        model,
+        usage: resp.usage,
+        toolNames: resp.toolUses.map((t) => t.name),
+        ...(thrashCause ? { cacheThrashCause: thrashCause } : {}),
+      });
+      prevRoundModel = model;
+      prunedLastRound = false;
+    }
 
     // H2: аварийный стаб LLM — провал хода. Раньше стаб-текст («Связь прервалась… повторите»)
     // становился finalText → tasks.finish как успех (метрики ok=true), а ход без инструментов ещё и
@@ -1177,9 +1393,44 @@ async function runAgentLoop(
       // GUI-команда (клик/печать/фокус/окно/скилл) → берём аренду ввода ДО исполнения,
       // чтобы не столкнуться с параллельной задачей за курсор (§20). Держим до конца задачи.
       if (toolNeedsInput(tu.name)) {
-        await ensureInput();
+        const got = await ensureInput();
         // Отменили, пока ждали аренду — НЕ шлём GUI-команду (аренду ensureInput уже отдал).
         if (task.cancel.cancelled) break;
+        if (!got) {
+          // Волна 1: аренда не освободилась за таймаут → ЧЕСТНАЯ ошибка инструмента, решает модель
+          // (работать без физического ввода / завершить с честным статусом), а не вечное зависание.
+          toolTrajectory.push(`${tu.name} (ошибка)`);
+          resultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content:
+              `Мышь/клавиатура заняты другой задачей — аренда ввода не освободилась за ` +
+              `${Math.round(INPUT_WAIT_MS / 1000)}с. Сделай, что можно БЕЗ физического ввода ` +
+              `(web/код/чтение), или заверши с честным статусом «ввод занят».`,
+            is_error: true,
+          });
+          continue;
+        }
+        // Волна 1, гард протухшего клика: аренду ждали долго → экран мог измениться за это время
+        // (живой случай: клик выстрелил после 236с очереди по давно ушедшему состоянию). Слепые
+        // действия блокируются, пока модель не сверится глазами (verify снимает гард), но не больше
+        // 2 блоков (анти-deadloop, ревью B+C: упорный «клик без сверки» дальше добьют anti-runaway
+        // и verify-петля, а не вечный круг ошибок).
+        if (lastAcquireWaitMs > STALE_INPUT_WAIT_MS && isBlindMutate(tu.name)) {
+          const waitedSec = Math.round(lastAcquireWaitMs / 1000);
+          staleGuardBlocks += 1;
+          if (staleGuardBlocks >= 2) lastAcquireWaitMs = 0;
+          toolTrajectory.push(`${tu.name} (ошибка)`);
+          resultBlocks.push({
+            type: "tool_result",
+            tool_use_id: tu.id,
+            content:
+              `Ввод освободился только после ${waitedSec}с ожидания — экран мог измениться. ` +
+              `СНАЧАЛА сверь актуальное состояние (screen_capture / browser_read), потом действуй по свежему кадру.`,
+            is_error: true,
+          });
+          continue;
+        }
       }
       const r = await dispatchTool(tu.name, tu.input, toolCtx);
       log.info("tool", { name: tu.name, isError: r.isError });
@@ -1208,6 +1459,7 @@ async function runAgentLoop(
         if (eff === "verify") {
           blindMutatePending = false; // сверились глазами — слепое действие подтверждено
           sawVerifyThisRound = true;
+          lastAcquireWaitMs = 0; // свежий взгляд снимает гард протухшего клика (Волна 1)
         }
         else if (eff === "mutate") {
           anyMutateSucceeded = true; // P0.1: реальное дело сделано (не просто нейтральный поиск)
@@ -1243,7 +1495,10 @@ async function runAgentLoop(
 
     // §скорость (зрение): старые скрины — вон из контекста (см. prune-images.ts: токены, TTFT, кеш).
     const prunedImages = pruneStaleImages(convo, KEEP_SCREENSHOTS);
-    if (prunedImages > 0) log.debug("зрение: устаревшие скрины вырезаны из контекста", { pruned: prunedImages });
+    if (prunedImages > 0) {
+      prunedLastRound = true; // диагностика кеша (1.8): prune мутирует историю → перезапись префикса
+      log.debug("зрение: устаревшие скрины вырезаны из контекста", { pruned: prunedImages });
+    }
 
     // §трейдинг: задача коснулась БИРЖЕВОГО инструмента → дальше только МАКС модель (Opus), без тиров
     // (требование: на биржах важна обдуманность). Страховка к роутеру (looksLikeTrading): ловит случаи,
@@ -1334,9 +1589,12 @@ async function runAgentLoop(
         else convo.push({ role: "user", content: nudge });
         log.warn("anti-runaway (семейство): интервент-нудж — смени подход", { tool: worst[0], count: worst[1], familyNudges });
         if (currentTier !== "fable" && deps.models.fable !== model) {
-          // §скорость: усиление ОДНОРАЗОВОЕ — 1 раунд переосмысления на сильной модели, затем
-          // откат (см. familyBoost в шапке петли). Липкий Opus замедлял всю оставшуюся механику.
-          familyBoost = { tier: currentTier, model, roundsLeft: 1 };
+          // §скорость: усиление КОРОТКОЕ — 2 раунда переосмысления на сильной модели, затем откат
+          // (см. familyBoost в шапке петли). Липкий Opus замедлял всю оставшуюся механику; но 1 раунд
+          // (Волна 1, ревью кеша) дважды переписывал весь кеш-префикс (свитч модели = отдельный
+          // кеш-неймспейс) ради ЕДИНСТВЕННОГО хода — 2 раунда амортизируют перезапись и дают
+          // сильной модели закончить мысль (переосмысление + первый шаг нового подхода).
+          familyBoost = { tier: currentTier, model, roundsLeft: 2 };
           currentTier = "fable";
           model = deps.models.fable; // на переосмыслении — сильная модель
         }
@@ -1348,6 +1606,8 @@ async function runAgentLoop(
     }
 
     round += 1;
+    // Средняя длительность раунда → гард бюджета. Ожидание аренды внутри раунда вычтено (см. снапшот).
+    roundDurTotalMs += Math.max(0, Date.now() - stepStartedMs - (queueWaitMs - stepQueueWait0));
     tasks.progress(taskId, round);
     if (shown) emitTaskStatus(session, task);
   }
@@ -1461,7 +1721,8 @@ async function runAgentLoop(
   });
   log.info("task-метрики", {
     tier: currentTier,
-    latencyMs,
+    latencyMs, // чистое время работы (очередь за арендой ВЫЧТЕНА — см. queueWaitMs)
+    queueWaitMs, // сколько простояли в очереди за арендой ввода (Волна 1)
     rounds: round,
     toolCalls: toolCallsTotal,
     inputTokens: inputTokensTotal,
@@ -1502,9 +1763,23 @@ async function runAgentLoop(
     return terminal(verbalize(spokeAny ? "…дальше остановился — достигнут лимит." : "Остановился — достигнут лимит на задачу."));
   }
   if (timedOut) {
-    tasks.fail(taskId, "превышен потолок времени задачи");
+    // Волна 1: в причину провала — сколько успели (панель/«что делал?» видят прогресс, не голый обрыв).
+    tasks.fail(
+      taskId,
+      earlyWrap
+        ? `свернулся заранее: остаток времени меньше среднего раунда (сделано шагов: ${round})`
+        : `превышен потолок времени задачи (сделано шагов: ${round})`,
+    );
     if (shown) emitTaskStatus(session, task);
-    return terminal(verbalize(spokeAny ? "…дальше затянулось, остановил." : "Долго не отвечало — остановил. Повторить?"));
+    return terminal(
+      verbalize(
+        spokeAny
+          ? "…дальше затянулось, остановил."
+          : round > 0
+            ? `Время вышло, сэр — остановился, сделав ${round} шагов, до конца не довёл. Продолжить?`
+            : "Долго не отвечало — остановил. Повторить?",
+      ),
+    );
   }
   // H2: LLM недоступен (аварийный стаб) — честный офлайн-провал: НЕ finish, НЕ кэш, ok=false.
   if (llmStubbed) {

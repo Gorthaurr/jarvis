@@ -41,6 +41,7 @@ import { DEFAULT_LIMITS, type SpendGuard, type SpendGuards } from "../billing/in
 import { setCredential } from "../db/credentials.js";
 import type { ILlmProvider } from "../integrations/llm.js";
 import type { EpisodicMemory } from "../memory/episodic.js";
+import type { IEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import type { SemanticResponseCache } from "../brain/response-cache.js";
 import type { IWebProvider } from "../integrations/web.js";
 import type { ISttProvider, ITtsProvider, TtsChunk } from "../integrations/voice-providers.js";
@@ -90,6 +91,8 @@ export interface BrainProviders {
   episodic: EpisodicMemory;
   /** §15 семантический кэш чисто-вербальных ответов — общий на gateway (scoped по userId внутри). */
   responseCache: SemanticResponseCache;
+  /** Эмбеддер (e5, с кешем) — семантический слой дубль-гейта §20 (Волна 1). Опционален. */
+  embedder?: IEmbeddingProvider;
   web: IWebProvider;
   /** §6B/B5: реестр SpendGuard по userId (per-tenant траты + живой persist usage_quota). */
   spend: SpendGuards;
@@ -227,6 +230,7 @@ export function makeSessionContext(
     llm: brain.llm,
     episodic: brain.episodic,
     responseCache: brain.responseCache, // §15 семантический кэш ответов (lookup до LLM / store после)
+    embedder: brain.embedder, // §20 Волна 1: семантический слой дубль-гейта (e5-косинус к целям задач)
     web: brain.web,
     models: brain.models,
     tierThinking: brain.tierThinking,
@@ -342,6 +346,9 @@ export function makeSessionContext(
   });
   // §20 async: фоновые задачи не блокируют разговор — их ИТОГ озвучивается через
   // очередь пайплайна (когда канал свободен), плюс карточка в renderer.
+  // Волна 1 (эпизод 2026-07-10): мгновенная слышимая ПРИЁМКА фоновой задачи — короткий earcon-тон,
+  // не фраза. Убирает сам триггер повторов команды («8с тишины → не услышал → повторил → две петли»).
+  agentDeps.taskAccepted = () => voice.playTaskAckEarcon();
   agentDeps.speakResult = (reply) => {
     voice.speakQueued(reply.voice);
     // §22: итог фоновой задачи — ТАКЖE в чат-историю (раньше уходил только голосом → в текст-канале

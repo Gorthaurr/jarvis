@@ -86,6 +86,10 @@ const NEUTRAL_TOOLS = new Set([
   "fs_read", "fs_list", "fs_search", "telegram_read", "knowledge_consult",
   "market_quote", "market_candles", "market_analyze", "market_backtest",
   "tinkoff_portfolio", "trade_winrate", "trade_predictions", "monitor_list",
+  // Волна 1 (аудит 2026-07-10): ui_ground — ЧТЕНИЕ (найти элемент через UIA), не действие. Раньше
+  // числился слепым mutate → успешный грундинг взводил verify-нудж («сверь глазами») и КАРАЛ дешёвый
+  // UIA-путь лишним vision-раундом — модель закономерно предпочитала сразу screen_capture.
+  "ui_ground",
 ]);
 
 // H3: у MCP-инструментов (mcp__server__tool) эффект не известен заранее. Читающее ИМЯ (get/list/
@@ -104,14 +108,15 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
 }
 
 // СЛЕПЫЕ меняющие действия (P0.2): их ok-результат НЕ доказывает достижение цели в реальном мире.
-// SendInput (input_*) не имеет обратной связи; browser_act/web_act/ui_* могут «нажать» в пустоту
+// SendInput (input_*) не имеет обратной связи; browser_act/web_act/ui_invoke могут «нажать» в пустоту
 // (регион/нет элемента/потерян фокус) и вернуть ok; app_focus (AppActivate) хрупкий. После такого
 // действия перед «готово» ОБЯЗАТЕЛЬНА сверка глазами (browser_read/inspect/screen_capture).
 // Прочие mutate (code_run → stdout/exit, fs_* → запись, office_* → COM-результат, system_volume →
 // readback, app_launch → проверка процесса, *_open → открытая вкладка) САМОПОДТВЕРЖДАЮТСЯ своим
 // tool_result — внешняя визуальная сверка им не нужна (иначе спамим экран-чтением на каждый код-ран).
+// ui_ground здесь НЕ значится — это чтение (см. NEUTRAL_TOOLS выше).
 const BLIND_MUTATE_TOOLS = new Set([
-  "input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke", "ui_ground",
+  "input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke",
 ]);
 
 /** Слепое ли это меняющее действие — то, чей успех надо подтвердить наблюдением, не доверяя «ok». */

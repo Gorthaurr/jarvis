@@ -184,9 +184,12 @@ export interface Utterance {
 /** Фабрика плеера: получает байты mp3 и колбэк «доиграл» (→ следующая в очереди). */
 export type PlayerFactory = (bytes: Uint8Array<ArrayBuffer>, onEnded: () => void) => Utterance;
 
-/** Дефолтный плеер: нативный <audio> + blob (надёжно для целого mp3). */
+/** Дефолтный плеер: нативный <audio> + blob (надёжно для целого mp3).
+ *  Волна 1: сервер шлёт earcon приёмки как WAV (RIFF) — сниффим магию, чтобы blob получил
+ *  правильный MIME (audio/wav), а не «mp3 по умолчанию». */
 const defaultPlayer: PlayerFactory = (bytes, onEnded) => {
-  const blob = new Blob([bytes], { type: "audio/mpeg" });
+  const isWav = bytes.length > 3 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46; // "RIFF"
+  const blob = new Blob([bytes], { type: isWav ? "audio/wav" : "audio/mpeg" });
   const url = URL.createObjectURL(blob);
   const el = new Audio(url);
   let revoked = false;
