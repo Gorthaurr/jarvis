@@ -406,6 +406,16 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
                 additionalProperties: true,
                 description: "Параметры действия: text (type), combo (key), app/url (focus/launch/open), ms (wait), op/x/y/toX/toY/dy (mouse), pattern/value (ui.invoke).",
               },
+              precondition: {
+                type: "object",
+                description: "§Волна3: ПРЕДУСЛОВИЕ — элемент {role, name?} должен существовать ДО шага; нет → честный стоп берста (защита от кликов по изменившемуся экрану).",
+                properties: {
+                  role: { type: "string" },
+                  name: { type: "string" },
+                },
+                required: ["role"],
+                additionalProperties: false,
+              },
               expect: {
                 type: "object",
                 description: "Постусловие шага — клиент ждёт его сам (auto-wait): a11y role/name или visual text (OCR).",
@@ -584,7 +594,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "wait_for",
     description:
-      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text' — реально наблюдённое состояние.",
+      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет), 'gsi' (состояние, которое игра/программа САМА пушит на локальный листенер — напр. Dota 2 Game State Integration: включается конфигом gamestate_integration_*.cfg с uri http://127.0.0.1:3730/dota; НАДЁЖНЕЕ скриншотов для игр). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text' — реально наблюдённое состояние.",
     input_schema: obj(
       {
         condition: {
@@ -635,6 +645,19 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
               required: ["kind", "playing"],
               additionalProperties: false,
             },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "gsi" },
+                source: { type: "string", description: "Имя GSI-канала (путь пуша /<source>, напр. 'dota'). Без него — единственный активный." },
+                path: { type: "string", description: "Точка в JSON состояния, напр. 'map.game_state'." },
+                equals: { type: "string", description: "Ждать точного значения." },
+                contains: { type: "string", description: "Ждать вхождения подстроки (без регистра)." },
+                gone: { type: "boolean", description: "true — ждать, пока значение ПЕРЕСТАНЕТ матчиться." },
+              },
+              required: ["kind", "path"],
+              additionalProperties: false,
+            },
           ],
         },
         timeoutMs: { type: "integer", minimum: 1000, maximum: 120000, description: "Потолок ожидания (деф 30000)." },
@@ -646,7 +669,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "context_read",
     description:
-      "Прочитать текущий контекст пользователя для разрешения дейксиса (\"это\", \"вот тут\", §19) — ActionCommand context.read. scope: selection (выделение), active_window, screen.",
+      "ДЕШЁВАЯ текстовая сверка/чтение АКТИВНОГО окна (a11y-выжимка, ~сотни токенов, БЕЗ скриншота): проверить исход действия, прочитать содержимое окна, разрешить дейксис (\"это\", \"вот тут\", §19) — ActionCommand context.read. scope: selection (выделенный текст), active_window, screen (текст фокусного окна). Для интерактивных ЭЛЕМЕНТОВ (кнопки/поля с handle) — ui_snapshot; пиксели — screen_capture (последний резерв).",
     input_schema: obj(
       {
         scope: {
@@ -1323,7 +1346,10 @@ const WATCH_TOOLS: ToolSchema[] = [
       "новостей/статуса страниц. what — ЧТО отслеживать («курс биткоина», «заголовок на странице example.com»); " +
       "condition — при каком условии уведомить («упадёт ниже 60000», «появится слово „продано“»); every_seconds — как " +
       "часто проверять (минимум 30; для цен/новостей разумно 300–3600); continuous — true, чтобы следить и ПОСЛЕ первого " +
-      "срабатывания (по умолчанию false = уведомить один раз и снять). Сразу подтверди, что поставил наблюдение.",
+      "срабатывания (по умолчанию false = уведомить один раз и снять). " +
+      "§Волна3: predicate — ЛОКАЛЬНОЕ условие на ПК (форма как condition у wait_for: window/ui/text/sound/gsi) — проверяется " +
+      "на клиенте за $0 каждые ~5-10с БЕЗ веба/LLM: «скажи когда матч найдётся» = watch с predicate (text/gsi), и ты " +
+      "СВОБОДЕН сразу после запуска поиска — НЕ поллинг скриншотами в петле. Сразу подтверди, что поставил наблюдение.",
     input_schema: obj(
       {
         what: { type: "string", description: "Что отслеживать (объект наблюдения), на естественном языке." },
@@ -1332,6 +1358,12 @@ const WATCH_TOOLS: ToolSchema[] = [
           type: "integer",
           minimum: 30,
           description: "Период проверки в секундах (минимум 30). Для цен/новостей обычно 300–3600.",
+        },
+        predicate: {
+          type: "object",
+          additionalProperties: true,
+          description:
+            "Опц. ЛОКАЛЬНЫЙ предикат (форма condition из wait_for: {kind:'window'|'ui'|'text'|'sound'|'gsi', ...}) — проверка на ПК владельца за $0 (каждые ~5-10с), без веба/LLM. Для событий НА ЭТОМ компьютере (окно/текст на экране/звук/GSI-пуш игры).",
         },
         continuous: {
           type: "boolean",

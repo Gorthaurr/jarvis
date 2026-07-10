@@ -67,6 +67,11 @@ export interface TtsChunk {
   audio: ArrayBuffer;
   seq: number;
   last: boolean;
+  /** §Волна3 (3.5): сырой PCM16 (v3-стрим) — клиент играет чанки ПО МЕРЕ ПРИХОДА (WebAudio).
+   *  Отсутствует → контейнерное аудио (mp3), играется по last=true как раньше. */
+  format?: "pcm16";
+  /** Частота PCM (есть только при format="pcm16"). */
+  sampleRate?: number;
 }
 
 export interface TtsOpts {

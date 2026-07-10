@@ -183,3 +183,21 @@ describe("AudioCapture — само-лечение захвата (H18)", () => 
     expect(getUserMedia).toHaveBeenCalledTimes(calls); // ретраи не тикают после stop()
   });
 });
+
+// §Волна3 (3.5): WAV-обёртка сырого PCM16 — заголовок RIFF корректен, данные не искажаются.
+describe("wavFromPcm16 (§Волна3 3.5)", () => {
+  it("строит валидный WAV-заголовок и сохраняет PCM-байты", async () => {
+    const { wavFromPcm16 } = await import("./audio.js");
+    const pcm = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const wav = wavFromPcm16(pcm, 22_050);
+    const txt = (o: number, n: number): string => String.fromCharCode(...wav.slice(o, o + n));
+    expect(txt(0, 4)).toBe("RIFF");
+    expect(txt(8, 4)).toBe("WAVE");
+    expect(txt(36, 4)).toBe("data");
+    const dv = new DataView(wav.buffer);
+    expect(dv.getUint32(24, true)).toBe(22_050); // sampleRate
+    expect(dv.getUint16(22, true)).toBe(1); // mono
+    expect(dv.getUint32(40, true)).toBe(6); // размер данных
+    expect([...wav.slice(44)]).toEqual([1, 2, 3, 4, 5, 6]);
+  });
+});

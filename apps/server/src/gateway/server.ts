@@ -522,6 +522,13 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
         .embed("warmup", "query")
         .then((v) => log.info("эмбеддер прогрет на старте", { ready: Array.isArray(v) && v.length > 0 }))
         .catch((e) => log.warn("прогрев эмбеддера пропущен", e instanceof Error ? e.message : String(e)));
+      // §Волна3 (3.1) ПРОГРЕВ RECALL-КЭША: первый recall после boot холодный (список навыков из БД +
+      // эмбеддинги триггеров) и срывал $0-fast-path реплея по таймауту (живой эпизод). Один фоновый
+      // recall на dev-юзера греет кэш векторов триггеров заранее; ошибка — не беда (грелка).
+      void brain.skills
+        ?.recall(DEV_USER, "прогрев кэша навыков")
+        .then(() => log.info("recall-кэш навыков прогрет на старте"))
+        .catch((e) => log.debug("прогрев recall пропущен", e instanceof Error ? e.message : String(e)));
       // §память: досчитать эмбеддинги осиротевших фактов (embedding=NULL — писались, пока эмбеддер был
       // мёртв на Windows-CPU) → вернуть их в семантический поиск. В фоне, идемпотентно, не блокирует boot.
       void brain.episodic

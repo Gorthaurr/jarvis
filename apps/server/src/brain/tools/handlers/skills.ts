@@ -122,6 +122,10 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
       target,
       params: (s.params && typeof s.params === "object" ? s.params : undefined) as SkillStep["params"],
       expect,
+      // §Волна3 (3.3): предусловие шага — живой стейт до исполнения (валидирует клиентский раннер).
+      precondition: (s.precondition && typeof s.precondition === "object" && typeof (s.precondition as { role?: unknown }).role === "string"
+        ? s.precondition
+        : undefined) as SkillStep["precondition"],
       timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : undefined,
       // Ревью Волны 2: у слепого шага (без expect) НЕТ критерия неудачи → ретраи переисполняли бы
       // неидемпотентное действие (тройной клик/ввод). Без expect — 0 повторов по умолчанию.

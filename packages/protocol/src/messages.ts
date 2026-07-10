@@ -239,6 +239,10 @@ export interface SpeakChunk {
   audio: ArrayBuffer;
   seq: number;
   last: boolean;
+  /** §Волна3 (3.5): сырой PCM16-стрим (v3 TTS) — играть чанки по мере прихода. Отсутствует = mp3. */
+  format?: "pcm16";
+  /** Частота PCM (только при format="pcm16"). */
+  sampleRate?: number;
 }
 
 export interface Transcript {

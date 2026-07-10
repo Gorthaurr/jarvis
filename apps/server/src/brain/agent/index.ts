@@ -39,6 +39,7 @@ import { getMode, matchModeCommand } from "../persona/modes.js";
 import { emotionName, emotionOverlay, matchEmotionCommand } from "../persona/emotion.js";
 import { claimsObservedResult, isBlindMutate, isHollowSuccess, looksLikeGiveUp, maskedFailureReply, toolEffect } from "./error-voice.js";
 import { decideRoundThinking, stripThinkingBlocks, thinkingEnabled } from "./thinking-policy.js";
+import { prefillNeedsLlmSteps } from "./skill-prefill.js";
 import { type LocalIntent, classifyTier, resolveClarifyAnswer } from "../router/index.js";
 import { cap, failurePhrase, pick, successPhrase } from "../verbalize/action-phrases.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
@@ -736,8 +737,14 @@ async function runAgentLoop(
       return [];
     });
   // Если навык найден — его процедура вшивается в системный промпт, и модель ей СЛЕДУЕТ.
+  // §Волна3 (3.1): на ФОНОВОМ пути (без sink — earcon уже прозвучал, латентность замаскирована)
+  // recall получает БОЛЬШЕ времени: в живом эпизоде $0-fast-path реплея сорвался ровно на холодных
+  // 700мс первого recall после boot (e5 + кэш векторов ещё холодные) — задача ушла в 20 LLM-раундов.
+  const recallTimeoutMs = sink
+    ? ioTimeoutMs
+    : Math.max(ioTimeoutMs, Math.min(10_000, Number.parseInt(process.env.JARVIS_RECALL_TIMEOUT_MS ?? "", 10) || 2_500));
   const recallP: Promise<RecalledSkill | null> = deps.skills
-    ? withTimeout(deps.skills.recall(deps.userId, text), ioTimeoutMs).catch((e) => {
+    ? withTimeout(deps.skills.recall(deps.userId, text), recallTimeoutMs).catch((e) => {
         log.debug("recall навыка пропущен (таймаут/ошибка)", e instanceof Error ? e.message : String(e));
         return null;
       })
@@ -993,6 +1000,14 @@ async function runAgentLoop(
   let nudgeBoostNextRound = false;
   let prevThinkingOn = thinkingEnabled(deps.tierThinking?.[tier]);
   const roundThinkingEnabled = process.env.JARVIS_ROUND_THINKING !== "0";
+  // §Волна3 (3.2) executor-ступень: откуда §7-эскалация подняла тир (для отката на механике);
+  // strongLocked — сила выбрана ОСОЗНАННО (trading/анти-капитуляция), вниз не спускаемся;
+  // cleanRoundsStreak — чистые раунды подряд (сбрасывается провалом/нуджем).
+  const executorDownshiftEnabled = process.env.JARVIS_EXECUTOR_TIER !== "0";
+  let escalatedFrom: { tier: Exclude<Tier, "tier0">; model: string } | null = null;
+  let strongLocked = false;
+  let executorReverted = false;
+  let cleanRoundsStreak = 0;
   // Докрутка обрыва по лимиту вывода: модель не закончила (stop_reason=max_tokens) → продолжаем
   // генерацию с места обрыва, а не отдаём огрызок (большой код/реферат/курсовая). Кап продолжений
   // + общие потолки задачи (токены/шаги/время) защищают от runaway. Env JARVIS_MAX_CONTINUATIONS.
@@ -1075,13 +1090,22 @@ async function runAgentLoop(
       }
     }
   }
-  // ── §8 МАКРОС, быстрый путь: у recall'нутого навыка есть авто-реплей → гоним ЕГО ($0, секунды),
-  // LLM остаётся одна сверка глазами. Провал реплея — честный откат на полную процедуру. Гейты:
-  // только СВОЙ навык, только безопасные действия (фокус/клик/клавиши/пауза — никаких guard-шагов),
-  // без незаполненных {{слотов}}. Аренда ввода берётся как у обычной GUI-задачи (release в finally).
+  // ── §8 МАКРОС, быстрый путь (§Волна3 3.1 — «реплей прежде петли», расширен): у recall'нутого
+  // навыка есть авто-реплей → гоним ЕГО ($0, секунды), LLM остаётся одна сверка глазами. Провал
+  // реплея — честный откат на полную процедуру с контекстом «дошёл до шага N». Гейты: только СВОЙ
+  // навык, только безопасные действия (никаких guard-шагов), без незаполненных {{слотов}};
+  // needsLlm-шаги ЗАПОЛНЯЮТСЯ дешёвым тиром ДО реплея (skill-prefill, закрывает TODO M4+) —
+  // не заполнились → реплей честно отменяется. Аренда ввода — как у обычной GUI-задачи.
   {
-    const REPLAY_SAFE = new Set(["app.focus", "input.click", "input.key", "input.type", "wait"]);
-    const replaySteps = recalled?.steps ?? [];
+    // §Волна3: + ui.invoke/ui.ground (детерминированные UIA-шаги с expect) + app.launch/browser.open
+    // (самоподтверждаются) — раньше реплей умел только фокус/клик/клавиши/паузу.
+    const REPLAY_SAFE = new Set([
+      "app.focus", "app.launch", "browser.open",
+      "ui.invoke", "ui.ground",
+      "input.click", "input.key", "input.type", "input.mouse",
+      "wait", "ground", "verify",
+    ]);
+    let replaySteps = recalled?.steps ?? [];
     const replayable =
       recalled &&
       !recalled.fromShared &&
@@ -1092,11 +1116,16 @@ async function runAgentLoop(
       !task.cancel.cancelled &&
       replaySteps.length >= 2 &&
       replaySteps.every((s) => REPLAY_SAFE.has(s.action)) &&
-      replaySteps.some((s) => s.action.startsWith("input.")) &&
+      replaySteps.some((s) => s.action.startsWith("input.") || s.action === "ui.invoke") &&
       !/\{\{\s*[\w-]+\s*\}\}/u.test(JSON.stringify(replaySteps));
     if (replayable && recalled) {
       let note: string;
       try {
+        // §Волна3 (3.1): needsLlm-шаги («сочинить по месту») заполняет дешёвый тир ОДНИМ вызовом.
+        // null = не заполнилось → реплей отменяем (не исполняем вслепую), идём обычной петлёй.
+        const prefilled = await prefillNeedsLlmSteps({ llm: deps.llm, model: deps.models.sonnet }, text, recalled.name, replaySteps);
+        if (!prefilled) throw new Error("needsLlm-шаги не заполнились — реплей вслепую запрещён");
+        replaySteps = prefilled;
         if (!(await ensureInput())) throw new Error("ввод занят другой задачей (таймаут аренды)");
         if (task.cancel.cancelled) throw new Error("cancelled");
         const t0 = Date.now();
@@ -1248,6 +1277,29 @@ async function runAgentLoop(
         }
         familyBoost = null;
       }
+    }
+    // §Волна3 (3.2) EXECUTOR-СТУПЕНЬ ВНИЗ: §7-эскалация раньше была липкой до конца задачи — вся
+    // оставшаяся МЕХАНИКА (клики по известной процедуре) ехала на Opus в 2-3× медленнее/дороже.
+    // Теперь: эскалированная §7 задача с ИЗВЕСТНОЙ процедурой (recall) после ≥2 ЧИСТЫХ раундов
+    // подряд возвращается на прежний дешёвый тир — репланинг при новом провале снова эскалирует
+    // штатным §7 (это и есть planner↔executor). Гейты: НЕ trading/анти-капитуляция (strongLocked —
+    // там сила выбрана осознанно), одна попытка на задачу (анти-пинг-понг: свитч модели = перезапись
+    // кеш-префикса), выкл JARVIS_EXECUTOR_TIER=0.
+    if (
+      executorDownshiftEnabled &&
+      escalatedFrom &&
+      !executorReverted &&
+      !strongLocked &&
+      currentTier === "fable" &&
+      !familyBoost &&
+      recalled !== null &&
+      cleanRoundsStreak >= 2 &&
+      escalatedFrom.model !== model
+    ) {
+      executorReverted = true;
+      currentTier = escalatedFrom.tier;
+      model = escalatedFrom.model;
+      log.info("§Волна3 executor: механика пошла чисто — откат на дешёвый тир (репланинг вернёт сильный)", { tier: currentTier });
     }
 
     // §15 СКОРОСТЬ: кешируем статичный префикс (персона+инструменты, большой) ВСЕГДА, с первого
@@ -1442,6 +1494,7 @@ async function runAgentLoop(
         // На отказе СРАЗУ эскалируем на сильную модель (Opus) — повтор должен быть УМНЕЕ, а не на той же
         // слабой, которая уже спасовала. Так «попробуй ещё» = реальный шанс выполнить, а не отписка.
         if (currentTier !== "fable" && deps.models.fable !== model) {
+          strongLocked = true; // §Волна3 (3.2): анти-капитуляция = осознанная сила, executor вниз не спускает
           currentTier = "fable";
           model = deps.models.fable;
           familyBoost = null; // липкая эскалация перекрывает одноразовый family-boost (откат не нужен)
@@ -1476,8 +1529,8 @@ async function runAgentLoop(
         convo.push({
           role: "user",
           content: claimed
-            ? "Стоп. Ты заявил результат, но НЕ сверил его глазами после последнего действия — мог выдумать. СВЕРЬ ФАКТОМ: прочитай страницу/экран (browser_read / browser_inspect / screen_capture) и убедись, что цель РЕАЛЬНО достигнута. Достигнута → подтверди тем, что реально увидел. НЕ достигнута → зайди другим способом и доведи. Содержимое не сочиняй."
-            : "Стоп. Ты сделал действие, но НЕ проверил исход — клик/ввод/команда могли не сработать (регион, нет элемента, потерян фокус). Прежде чем сказать «готово», СВЕРЬ РЕАЛЬНЫЙ результат: прочитай страницу/экран (browser_read / browser_inspect / screen_capture). Цель достигнута → подтверди фактом, что увидел. НЕ достигнута → зайди другим способом и доведи, не сдавайся.",
+            ? "Стоп. Ты заявил результат, но НЕ сверил его глазами после последнего действия — мог выдумать. СВЕРЬ ФАКТОМ, дешёвое прежде дорогого (лестница §Волна3): ui_snapshot (нативное окно) / browser_read / browser_inspect (веб) / screen_read_text (текст с canvas/игры) / screen_capture (последний резерв) — и убедись, что цель РЕАЛЬНО достигнута. Достигнута → подтверди тем, что реально увидел. НЕ достигнута → зайди другим способом и доведи. Содержимое не сочиняй."
+            : "Стоп. Ты сделал действие, но НЕ проверил исход — клик/ввод/команда могли не сработать (регион, нет элемента, потерян фокус). Прежде чем сказать «готово», СВЕРЬ РЕАЛЬНЫЙ результат дешёвым сенсором (лестница §Волна3): ui_snapshot (нативное окно) / browser_read / browser_inspect (веб) / screen_read_text (canvas/игра) / screen_capture (последний резерв). Цель достигнута → подтверди фактом, что увидел. НЕ достигнута → зайди другим способом и доведи, не сдавайся.",
         });
         log.info("verify-петля: нудж на сверку результата глазами", { verifyNudges, claimed });
         nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
@@ -1689,11 +1742,14 @@ async function runAgentLoop(
     // §трейдинг: задача коснулась БИРЖЕВОГО инструмента → дальше только МАКС модель (Opus), без тиров
     // (требование: на биржах важна обдуманность). Страховка к роутеру (looksLikeTrading): ловит случаи,
     // где запрос не выглядел биржевым, но привёл к рыночному/торговому инструменту.
-    if (currentTier !== "fable" && resp.toolUses.some((t) => TRADING_TOOLS.has(t.name)) && deps.models.fable !== model) {
-      log.info("§трейдинг: эскалация на макс модель (Opus) — биржевой инструмент в ходе", { from: currentTier });
-      currentTier = "fable";
-      model = deps.models.fable;
-      familyBoost = null; // липкая эскалация перекрывает одноразовый family-boost
+    if (resp.toolUses.some((t) => TRADING_TOOLS.has(t.name))) {
+      strongLocked = true; // §Волна3 (3.2): биржа = осознанная сила, executor вниз НИКОГДА не спускает
+      if (currentTier !== "fable" && deps.models.fable !== model) {
+        log.info("§трейдинг: эскалация на макс модель (Opus) — биржевой инструмент в ходе", { from: currentTier });
+        currentTier = "fable";
+        model = deps.models.fable;
+        familyBoost = null; // липкая эскалация перекрывает одноразовый family-boost
+      }
     }
 
     // Эскалация тира (§7): если раунд провалился ЦЕЛИКОМ (все инструменты вернули ошибку)
@@ -1701,6 +1757,8 @@ async function runAgentLoop(
     // вместо того чтобы сдаться на слабой модели. Один успешный инструмент сбрасывает счётчик.
     const allErrored =
       resultBlocks.length > 0 && resultBlocks.every((b) => b.type === "tool_result" && b.is_error === true);
+    // §Волна3 (3.2): счётчик чистых раундов подряд — топливо executor-отката (сброс на провале).
+    cleanRoundsStreak = allErrored ? 0 : cleanRoundsStreak + 1;
     if (allErrored) {
       consecErrorRounds += 1;
       if (consecErrorRounds >= ESCALATE_AFTER && currentTier !== "fable") {
@@ -1709,6 +1767,10 @@ async function runAgentLoop(
         const nextModel = deps.models[nextTier];
         if (nextModel !== model) {
           // Реальная эскалация: целевой тир — ДРУГАЯ модель → есть смысл «зайти сильнее».
+          // §Волна3 (3.2): помним, ОТКУДА поднялись — executor вернёт дешёвый тир, когда механика
+          // пойдёт чисто (≥2 чистых раундов при известной процедуре); новый провал эскалирует снова.
+          escalatedFrom = { tier: currentTier, model };
+          cleanRoundsStreak = 0;
           currentTier = nextTier;
           model = nextModel;
           consecErrorRounds = 0;
@@ -1749,6 +1811,7 @@ async function runAgentLoop(
           else convo.push({ role: "user", content: nudge });
           log.warn("anti-runaway: повтор одинакового действия — нудж на сверку/смену подхода", { tool: toolSig.slice(0, 80) });
           nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
+          cleanRoundsStreak = 0; // §Волна3 (3.2): топтание = не «чистая механика», executor вниз не идёт
         } else {
           log.warn("повтор одного успешного действия после нуджа — обрыв петли (честный провал)", { tool: toolSig.slice(0, 80) });
           runawayStuck = true;
@@ -1776,6 +1839,7 @@ async function runAgentLoop(
         else convo.push({ role: "user", content: nudge });
         log.warn("anti-runaway (семейство): интервент-нудж — смени подход", { tool: worst[0], count: worst[1], familyNudges });
         nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
+        cleanRoundsStreak = 0; // §Волна3 (3.2): флуд одним инструментом = не «чистая механика»
         if (currentTier !== "fable" && deps.models.fable !== model) {
           // §скорость: усиление КОРОТКОЕ — 2 раунда переосмысления на сильной модели, затем откат
           // (см. familyBoost в шапке петли). Липкий Opus замедлял всю оставшуюся механику; но 1 раунд

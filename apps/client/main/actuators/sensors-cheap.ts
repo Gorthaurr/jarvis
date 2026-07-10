@@ -74,6 +74,7 @@ const WAIT_MAX_TIMEOUT_MS = 120_000;
 
 /** Дефолтный шаг опроса по типу условия: OCR тяжелее UIA/окон — реже. */
 function defaultPollMs(cond: WaitCondition): number {
+  if (cond.kind === "gsi") return 400; // локальная память процесса — почти бесплатно
   return cond.kind === "text" ? 1_200 : 600;
 }
 
@@ -126,6 +127,18 @@ async function checkOnce(cond: WaitCondition): Promise<[boolean, string]> {
       const r = await system.runSystem({ kind: "system.media", op: "state" });
       const playing = Boolean(r.playing);
       return [playing === cond.playing, `звук ${playing ? "идёт" : "не идёт"} (peak=${r.peak ?? 0})`];
+    }
+    case "gsi": {
+      // §Волна3 (3.4): состояние, запушенное программой на локальный GSI-листенер (Dota GSI и т.п.).
+      const { gsiValue } = await import("../sensors/gsi-listener.js");
+      const got = gsiValue(cond.source, cond.path);
+      if (!got) return [false, `GSI: источник «${cond.source ?? "default"}» ещё ничего не пушил`];
+      if (!got.fresh) return [false, "GSI: данные протухли (источник замолчал — игра закрыта?)"];
+      const v = got.value === undefined ? "" : String(got.value);
+      const matched =
+        cond.equals !== undefined ? v === cond.equals : cond.contains !== undefined ? v.toLowerCase().includes(cond.contains.toLowerCase()) : v !== "";
+      const detail = `GSI ${cond.path} = «${v.slice(0, 80)}»`;
+      return [cond.gone ? !matched : matched, detail];
     }
     default: {
       const _exhaustive: never = cond;

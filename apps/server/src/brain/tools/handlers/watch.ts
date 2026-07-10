@@ -10,10 +10,18 @@ export function watchCreate(ctx: ToolContext, input: Record<string, unknown>): T
   const what = String(input.what ?? "").trim();
   const condition = String(input.condition ?? "").trim();
   if (!what || !condition) return err("watch_create: нужны и what (что отслеживать), и condition (при каком условии уведомить).");
+  // §Волна3 (3.4): локальный предикат (форма wait_for.condition) — проверка на КЛИЕНТЕ ($0, каждые
+  // ~5с), без LLM-чекера. Валидируем минимально (kind обязателен) — полную проверку делает клиент.
+  const rawPredicate = input.predicate;
+  const predicate =
+    rawPredicate && typeof rawPredicate === "object" && typeof (rawPredicate as { kind?: unknown }).kind === "string"
+      ? rawPredicate
+      : undefined;
+  if (rawPredicate !== undefined && !predicate) return err("watch_create: predicate должен быть объектом-условием с полем kind (как у wait_for).");
   const everySec = Number(input.every_seconds);
-  const intervalMs = Number.isFinite(everySec) && everySec > 0 ? everySec * 1000 : 300_000; // деф 5 мин
+  const intervalMs = Number.isFinite(everySec) && everySec > 0 ? everySec * 1000 : predicate ? 10_000 : 300_000; // деф: предикат 10с, LLM 5 мин
   const continuous = input.continuous === true;
-  const res = ctx.watch.add({ sessionId: ctx.sessionId, userId: ctx.userId, what, condition, intervalMs, continuous });
+  const res = ctx.watch.add({ sessionId: ctx.sessionId, userId: ctx.userId, what, condition, intervalMs, continuous, predicate });
   if (!res.ok) {
     return res.reason === "limit"
       ? err("Слишком много активных наблюдений — сними одно (watch_cancel), прежде чем добавить новое.")
@@ -23,7 +31,7 @@ export function watchCreate(ctx: ToolContext, input: Record<string, unknown>): T
   const period = Math.round(w.intervalMs / 1000);
   return ok(
     `Поставил наблюдение: слежу за «${w.what}», уведомлю когда «${w.condition}». ` +
-      `Проверяю каждые ${period} с, ${w.continuous ? "слежу постоянно" : "уведомлю один раз"}. id=${w.id}`,
+      `Проверяю каждые ${period} с${predicate ? " локальным предикатом на клиенте ($0)" : ""}, ${w.continuous ? "слежу постоянно" : "уведомлю один раз"}. id=${w.id}`,
   );
 }
 

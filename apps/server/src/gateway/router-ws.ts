@@ -370,7 +370,13 @@ export function makeSessionContext(
         }),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
     sendSpeakChunk: (c: TtsChunk) =>
-      session.send("speak.chunk", { audio: bufToBase64(c.audio), seq: c.seq, last: c.last }),
+      session.send("speak.chunk", {
+        audio: bufToBase64(c.audio),
+        seq: c.seq,
+        last: c.last,
+        // §Волна3 (3.5): PCM-стрим v3 — клиент играет по мере прихода (WebAudio-очередь).
+        ...(c.format ? { format: c.format, sampleRate: c.sampleRate } : {}),
+      }),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
     sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)
@@ -395,6 +401,10 @@ export function makeSessionContext(
   brain.reminders?.registerSpeaker(session.sessionId, session.userId, (text) => voice.speakQueued(verbalize(text), true));
   // §долгие-задачи: тот же канал проактивной речи для срабатываний наблюдений (мониторинг).
   brain.watch?.registerSpeaker(session.sessionId, session.userId, (text) => voice.speakQueued(verbalize(text), true));
+  // §Волна3 (3.4): канал sendAction для ПРЕДИКАТ-наблюдений — проверка на клиенте владельца ($0).
+  brain.watch?.registerActions(session.sessionId, session.userId, (cmd, timeoutMs) =>
+    session.sendAction(cmd as never, timeoutMs).then((r) => ({ ok: r.ok, data: r.data, error: r.error })),
+  );
   // §проактив-всё: ambient-осведомлённость (счета/Telegram). urgent (день оплаты) проходит даже при занятости.
   brain.ambient?.registerSpeaker(session.sessionId, session.userId, (text, urgent) => voice.speakQueued(verbalize(text), urgent));
   // §6B/B5: начальный снимок расхода/лимитов для вкладки «Оплата» (read-only; per-user SpendGuard).
@@ -404,6 +414,7 @@ export function makeSessionContext(
   const detachSpeakers = (): void => {
     brain.reminders?.unregisterSpeaker(session.sessionId); // §9: больше не доставляем сюда
     brain.watch?.unregisterSpeaker(session.sessionId); // §долгие-задачи: больше не доставляем сюда
+    brain.watch?.unregisterActions(session.sessionId); // §Волна3 (3.4): канал предикат-проверок этой сессии мёртв
     brain.ambient?.unregisterSpeaker(session.sessionId); // §проактив-всё: больше не доставляем сюда
   };
   // H8: обрыв сокета (resume-grace) — НЕ убиваем фоновые §20-задачи. Раньше disposeAgent синхронно звал

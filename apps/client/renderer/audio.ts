@@ -241,6 +241,11 @@ export class AudioPlayback {
   private current: Utterance | null = null;
   private active = false; // идёт ли воспроизведение прямо сейчас (для barge-in в «хвосте», §10)
   private volume = 1; // громкость голоса Джарвиса 0..1 (ползунок в настройках)
+  // §Волна3 (3.5): PCM-стрим v3 — живой плеер, играющий чанки ПО МЕРЕ ПРИХОДА (WebAudio), когда
+  // канал свободен; занят → чанки копятся и оформляются WAV-озвучкой в обычную очередь.
+  private live: PcmLivePlayer | null = null;
+  private pcmParts: Uint8Array<ArrayBuffer>[] = [];
+  private pcmRate = 22_050;
 
   // onActive(true/false) — реальный СТАРТ/КОНЕЦ звучания очереди. Нужен main, чтобы перебивание (§10)
   // работало, пока звук ЕЩЁ ИГРАЕТ, даже если сервер уже ушёл из speaking (синтез кончился раньше плеера).
@@ -261,8 +266,13 @@ export class AudioPlayback {
     this.current?.setVolume?.(this.volume);
   }
 
-  /** Принять чанк (audio — base64). На последнем — озвучка в очередь и (если простаиваем) старт. */
-  enqueue(chunk: { audio: string; seq: number; last: boolean }): void {
+  /** Принять чанк (audio — base64). На последнем — озвучка в очередь и (если простаиваем) старт.
+   *  §Волна3 (3.5): чанк format="pcm16" (v3 TTS-стрим) играется ПО МЕРЕ ПРИХОДА (см. enqueuePcm). */
+  enqueue(chunk: { audio: string; seq: number; last: boolean; format?: string; sampleRate?: number }): void {
+    if (chunk.format === "pcm16") {
+      this.enqueuePcm(chunk);
+      return;
+    }
     if (chunk.audio) this.parts.push(base64ToBytes(chunk.audio));
     if (chunk.last) {
       const merged = this.assemble();
@@ -273,10 +283,57 @@ export class AudioPlayback {
     }
   }
 
+  /**
+   * §Волна3 (3.5): PCM16-стрим. Канал свободен → живой WebAudio-плеер играет чанки СРАЗУ (в этом
+   * весь выигрыш латентности v3: не ждём конца синтеза). Занят (фраза уже играет/очередь) → чанки
+   * копятся и на last оформляются WAV-озвучкой в общую очередь (штатный путь, без потери звука).
+   */
+  private enqueuePcm(chunk: { audio: string; last: boolean; sampleRate?: number }): void {
+    const rate = chunk.sampleRate ?? this.pcmRate;
+    this.pcmRate = rate;
+    const bytes = chunk.audio ? base64ToBytes(chunk.audio) : null;
+    if (this.live) {
+      if (bytes?.length) this.live.feed(bytes, rate);
+      if (chunk.last) {
+        this.live.markLast();
+        this.live = null; // хвост доиграет сам и дёрнет playNext через onEnded
+      }
+      return;
+    }
+    if (!this.current && this.queue.length === 0) {
+      this.setActive(true);
+      const lp = new PcmLivePlayer(rate, () => {
+        if (this.current === lp) this.current = null;
+        if (this.live === lp) this.live = null;
+        this.playNext();
+      });
+      lp.setVolume(this.volume);
+      this.current = lp;
+      this.live = lp;
+      if (bytes?.length) lp.feed(bytes, rate);
+      if (chunk.last) {
+        lp.markLast();
+        this.live = null;
+      }
+      return;
+    }
+    if (bytes?.length) this.pcmParts.push(bytes);
+    if (chunk.last) {
+      const merged = mergeParts(this.pcmParts);
+      this.pcmParts = [];
+      if (merged) {
+        this.queue.push(wavFromPcm16(merged, rate));
+        this.playNext();
+      }
+    }
+  }
+
   /** Barge-in (§10): мгновенно заглушить текущую озвучку и очистить очередь. */
   stop(): void {
     this.parts = [];
     this.queue = [];
+    this.pcmParts = [];
+    this.live = null; // current.stop() ниже закроет живой PCM-плеер (это тот же объект)
     if (this.current) {
       this.current.stop();
       this.current = null;
@@ -320,4 +377,120 @@ function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+/** Склеить массив байт-кусков в один буфер (null на пустом входе). */
+function mergeParts(parts: readonly Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> | null {
+  if (parts.length === 0) return null;
+  const total = parts.reduce((n, p) => n + p.byteLength, 0);
+  const merged = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    merged.set(p, off);
+    off += p.byteLength;
+  }
+  return merged;
+}
+
+/**
+ * §Волна3 (3.5): обернуть сырой PCM16 (mono, little-endian) в WAV — чтобы штатный <audio>-плеер
+ * (defaultPlayer уже сниффит RIFF с Волны 1) сыграл собранную озвучку из очереди. Чистая функция.
+ */
+export function wavFromPcm16(pcm: Uint8Array<ArrayBuffer>, sampleRate: number): Uint8Array<ArrayBuffer> {
+  const header = new ArrayBuffer(44);
+  const dv = new DataView(header);
+  const str = (o: number, s: string): void => {
+    for (let i = 0; i < s.length; i += 1) dv.setUint8(o + i, s.charCodeAt(i));
+  };
+  str(0, "RIFF");
+  dv.setUint32(4, 36 + pcm.byteLength, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  dv.setUint32(16, 16, true); // размер fmt-блока
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, 1, true); // mono
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * 2, true); // байт/сек (16 бит mono)
+  dv.setUint16(32, 2, true); // блок-выравнивание
+  dv.setUint16(34, 16, true); // бит на сэмпл
+  str(36, "data");
+  dv.setUint32(40, pcm.byteLength, true);
+  const out = new Uint8Array(44 + pcm.byteLength);
+  out.set(new Uint8Array(header), 0);
+  out.set(pcm, 44);
+  return out;
+}
+
+/**
+ * §Волна3 (3.5): живой PCM-плеер — играет чанки v3-стрима ПО МЕРЕ ПРИХОДА через WebAudio
+ * (курсор-планирование: каждый чанк стартует встык за предыдущим). Это и есть выигрыш
+ * латентности стримингового TTS: первый звук — на первом чанке, не после всего синтеза.
+ * stop() — barge-in (закрыть контекст); onEnded — когда прозвучал ХВОСТ после markLast().
+ */
+class PcmLivePlayer implements Utterance {
+  private readonly ctx: AudioContext;
+  private readonly gain: GainNode;
+  private cursor = 0; // время (ctx.currentTime), до которого уже запланирован звук
+  private pendingSources = 0;
+  private lastSeen = false;
+  private stopped = false;
+
+  constructor(
+    sampleRate: number,
+    private readonly onEnded: () => void,
+  ) {
+    this.ctx = new AudioContext({ sampleRate });
+    this.gain = this.ctx.createGain();
+    this.gain.connect(this.ctx.destination);
+  }
+
+  /** Скормить очередной PCM16-чанк (mono LE). Планируется встык за уже запланированным. */
+  feed(bytes: Uint8Array<ArrayBuffer>, sampleRate: number): void {
+    if (this.stopped) return;
+    const n = Math.floor(bytes.byteLength / 2);
+    if (n === 0) return;
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+    const f32 = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) f32[i] = dv.getInt16(i * 2, true) / 32768;
+    const buf = this.ctx.createBuffer(1, n, sampleRate);
+    buf.copyToChannel(f32, 0);
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.gain);
+    const startAt = Math.max(this.ctx.currentTime + 0.02, this.cursor);
+    this.cursor = startAt + buf.duration;
+    this.pendingSources += 1;
+    src.onended = () => {
+      this.pendingSources -= 1;
+      if (this.lastSeen && this.pendingSources <= 0) this.finish();
+    };
+    try {
+      src.start(startAt);
+    } catch {
+      this.pendingSources -= 1; // контекст уже закрыт (barge-in) — не зависаем на счётчике
+    }
+  }
+
+  /** Стрим кончился (last=true): доигрываем запланированный хвост и завершаемся. */
+  markLast(): void {
+    this.lastSeen = true;
+    if (this.pendingSources <= 0) this.finish();
+  }
+
+  private finish(): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    void this.ctx.close().catch(() => undefined);
+    this.onEnded();
+  }
+
+  stop(): void {
+    if (this.stopped) return;
+    this.stopped = true; // barge-in: onEnded НЕ зовём (очередь чистит вызывающий)
+    void this.ctx.close().catch(() => undefined);
+  }
+
+  setVolume(v: number): void {
+    this.gain.gain.value = Math.max(0, Math.min(1, v));
+  }
 }

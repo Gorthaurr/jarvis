@@ -113,6 +113,22 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
       stepParams = { ...(opts.params ?? {}), ...resolved };
     }
 
+    // §Волна3 (3.3, паттерн UFO2): ПРЕДУСЛОВИЕ шага — живой UIA-стейт проверяется ДО исполнения.
+    // Mismatch (экран изменился, элемента нет) → честный стоп с частичным результатом, а не слепой
+    // клик по ушедшему состоянию; модель получает «дошёл до шага N» и делает один репланинг-раунд.
+    if (step.precondition) {
+      const pre = step.precondition;
+      const preOk = await actuator.checkExpect({ role: pre.role, name: pre.name });
+      if (!preOk) {
+        log.warn(`шаг ${i}: предусловие не выполнено (${pre.role}${pre.name ? ` «${pre.name}»` : ""}) — стоп`);
+        return {
+          ok: false,
+          failedStepIndex: i,
+          message: `шаг ${i} (${step.action}): предусловие не выполнено — ${pre.role}${pre.name ? ` «${pre.name}»` : ""} не найден (экран изменился)`,
+        };
+      }
+    }
+
     const retries = step.retries ?? 2;
     const timeoutMs = step.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
     let attempt = 0;

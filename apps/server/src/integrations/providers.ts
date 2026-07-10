@@ -11,6 +11,7 @@ import { ElevenLabsTtsProvider } from "./elevenlabs.js";
 import { type ISttProvider, type ITtsProvider, MockSttProvider, MockTtsProvider } from "./voice-providers.js";
 import { WhisperSttProvider } from "./whisper-stt.js";
 import { YandexTtsProvider } from "./yandex-tts.js";
+import { YandexTtsV3Provider } from "./yandex-tts-v3.js";
 
 const log: Logger = createLogger("voice:providers");
 
@@ -40,6 +41,17 @@ export function createSttProvider(cfg: {
 }
 
 export function createTtsProvider(cfg: { elevenLabsApiKey?: string; voiceId?: string }): ITtsProvider {
+  // §Волна3 (3.5) ОПТ-ИН: Yandex v3 (REST-стрим) — первые байты за ~150-300мс, чанки уходят клиенту
+  // по мере синтеза (−300-600мс до первого звука на каждой фразе). Боевой дефолт остаётся v1.
+  if ((process.env.TTS_PROVIDER || "").toLowerCase() === "yandex3" && process.env.YANDEX_API_KEY) {
+    const p = new YandexTtsV3Provider({
+      apiKey: process.env.YANDEX_API_KEY,
+      folderId: process.env.YANDEX_FOLDER_ID,
+      voiceId: process.env.YANDEX_VOICE,
+    });
+    log.info("TTS провайдер", { provider: "yandex3 (стрим)", live: p.live, voice: process.env.YANDEX_VOICE || "filipp" });
+    return p;
+  }
   // Русско-нативный Yandex (правильные ударения) — если выбран TTS_PROVIDER=yandex и есть ключ.
   if ((process.env.TTS_PROVIDER || "").toLowerCase() === "yandex" && process.env.YANDEX_API_KEY) {
     const p = new YandexTtsProvider({

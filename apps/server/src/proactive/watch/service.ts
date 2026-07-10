@@ -26,12 +26,22 @@ export interface WatchServiceOpts {
   maxPerUser?: number;
 }
 
+/** §Волна3 (3.4): канал клиентской проверки предиката — sendAction живой сессии (wait.for-словарь). */
+export type PredicateSender = (cmd: Record<string, unknown>, timeoutMs: number) => Promise<{
+  ok: boolean;
+  data?: unknown;
+  error?: { code?: string; message?: string };
+}>;
+
 export class WatchService {
   private timer?: ReturnType<typeof setTimeout>;
   private ticking = false; // защита от перекрытия тиков (checker асинхронный, может быть долгим)
   private readonly speakers = new Map<string, { userId: string; speak: (text: string) => void }>();
+  /** §Волна3 (3.4): каналы sendAction живых сессий — для предикат-наблюдений (проверка на клиенте). */
+  private readonly actions = new Map<string, { userId: string; send: PredicateSender }>();
   private readonly now: () => number;
   private readonly minIntervalMs: number;
+  private readonly minPredicateIntervalMs: number;
   private readonly maxPerUser: number;
 
   constructor(
@@ -41,6 +51,9 @@ export class WatchService {
   ) {
     this.now = opts.now ?? Date.now;
     this.minIntervalMs = opts.minIntervalMs ?? envInt("JARVIS_WATCH_MIN_INTERVAL_MS", 30_000);
+    // Предикат-проверка — локальная и копеечная (клиентский поллинг, $0) → интервал жмётся сильнее
+    // LLM-чекера («когда матч найдётся» нужен каждые ~5с, не 30с).
+    this.minPredicateIntervalMs = envInt("JARVIS_WATCH_MIN_PREDICATE_INTERVAL_MS", 5_000);
     this.maxPerUser = opts.maxPerUser ?? envInt("JARVIS_WATCH_MAX_PER_USER", 20);
   }
 
@@ -69,6 +82,8 @@ export class WatchService {
     condition: string;
     intervalMs: number;
     continuous?: boolean;
+    /** §Волна3 (3.4): локальный предикат (WaitCondition) — проверка на клиенте вместо LLM-чекера. */
+    predicate?: unknown;
   }): { ok: true; watch: Watch } | { ok: false; reason: "limit" | "invalid" } {
     const what = input.what.trim();
     const condition = input.condition.trim();
@@ -77,16 +92,18 @@ export class WatchService {
       log.warn("лимит активных наблюдений на пользователя — отказ", { userId: input.userId, max: this.maxPerUser });
       return { ok: false, reason: "limit" };
     }
+    const minInterval = input.predicate ? this.minPredicateIntervalMs : this.minIntervalMs;
     const w: Watch = {
       id: newId(),
       sessionId: input.sessionId,
       userId: input.userId,
       what,
       condition,
-      intervalMs: Math.max(this.minIntervalMs, Math.floor(input.intervalMs)),
+      intervalMs: Math.max(minInterval, Math.floor(input.intervalMs)),
       continuous: input.continuous ?? false,
       status: "active",
       createdAt: this.now(),
+      ...(input.predicate ? { predicate: input.predicate } : {}),
     };
     this.store.add(w);
     this.reschedule();
@@ -124,6 +141,47 @@ export class WatchService {
 
   unregisterSpeaker(sessionId: string): void {
     this.speakers.delete(sessionId);
+  }
+
+  /** §Волна3 (3.4): канал sendAction сессии — предикат-наблюдения проверяются на ЕЁ клиенте. */
+  registerActions(sessionId: string, userId: string, send: PredicateSender): void {
+    this.actions.set(sessionId, { userId, send });
+  }
+
+  unregisterActions(sessionId: string): void {
+    this.actions.delete(sessionId);
+  }
+
+  /** Канал действий: точная сессия → любая сессия ТОГО ЖЕ userId (правило §6B/B3, как speakerFor). */
+  private actionFor(w: Watch): PredicateSender | undefined {
+    const exact = this.actions.get(w.sessionId);
+    if (exact && exact.userId === w.userId) return exact.send;
+    for (const a of this.actions.values()) if (a.userId === w.userId) return a.send;
+    return undefined;
+  }
+
+  /**
+   * §Волна3 (3.4): проверка ЛОКАЛЬНОГО предиката — один короткий wait.for на клиенте владельца
+   * ($0, миллисекунды; таймаут чуть больше пары поллов). Нет живого клиента → честная ошибка
+   * (повторим в следующий тик), НЕ met (недоступность сенсора ≠ «условие выполнено»).
+   */
+  private async checkPredicate(w: Watch): Promise<CheckResult> {
+    const send = this.actionFor(w);
+    if (!send) return { met: false, summary: "", error: "нет живой сессии клиента для проверки предиката" };
+    try {
+      const res = await send({ kind: "wait.for", condition: w.predicate, timeoutMs: 1_500, pollMs: 700 }, 8_000);
+      if (!res.ok) return { met: false, summary: "", error: res.error?.message ?? res.error?.code ?? "wait.for failed" };
+      const data = res.data as { met?: boolean; detail?: string } | undefined;
+      const met = data?.met === true;
+      return {
+        met,
+        value: typeof data?.detail === "string" ? data.detail.slice(0, 200) : undefined,
+        // Фраза владельцу — из condition (модель формулирует условие человеческим языком).
+        summary: met ? `Сработало: ${w.condition}.` : "",
+      };
+    } catch (e) {
+      return { met: false, summary: "", error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   // ── внутреннее ──────────────────────────────────────────────
@@ -188,7 +246,8 @@ export class WatchService {
     w.lastCheckAt = this.now(); // ставим ДО await — иначе наблюдение снова «созреет» во время долгой проверки
     let res: CheckResult;
     try {
-      res = await this.checker(w);
+      // §Волна3 (3.4): предикат-наблюдение проверяется НА КЛИЕНТЕ ($0), обычное — LLM-чекером.
+      res = w.predicate ? await this.checkPredicate(w) : await this.checker(w);
     } catch (e) {
       res = { met: false, summary: "", error: e instanceof Error ? e.message : String(e) };
     }

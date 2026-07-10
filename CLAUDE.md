@@ -190,6 +190,36 @@
     нести свои thinking-блоки), иначе off до ближайшего нуджа; при off реплеенные thinking-блоки стрипаются
     (разовая перезапись префикса — WARN 1.8 покажет причиной prefix-changed); все 8 нудж-сайтов ставят
     `nudgeBoostNextRound`; выкл `JARVIS_ROUND_THINKING=0`. Persona v72: «между tool-вызовами текст не пиши».
+  - **ВОЛНА 3 «кардинальная» (2026-07-10, план §Волна3 — все 6 пунктов; ревью НЕ гонялось, по команде владельца):**
+    (3.1) **РЕПЛЕЙ ПРЕЖДЕ ПЕТЛИ**: REPLAY_SAFE расширен (+ui.invoke/ui.ground/app.launch/browser.open/
+    input.mouse/ground/verify); needsLlm-шаги ЗАПОЛНЯЮТСЯ дешёвым тиром ОДНИМ вызовом ДО реплея
+    (`agent/skill-prefill.ts prefillNeedsLlmSteps` — TODO M4+ закрыт; не заполнилось → реплей честно
+    отменяется, обычная петля); recall-кэш греется на boot (server.ts, DEV_USER + «прогрев») и фоновый
+    путь ждёт recall дольше (`JARVIS_RECALL_TIMEOUT_MS` деф 2500 — живой эпизод срывался на холодных 700мс).
+    (3.2) **EXECUTOR-СТУПЕНЬ ВНИЗ** (planner↔executor): §7-эскалация помнит `escalatedFrom`; при известной
+    процедуре (recall) и ≥2 ЧИСТЫХ раундах подряд — откат на прежний дешёвый тир (новый провал снова
+    эскалирует штатно). `strongLocked` (trading/анти-капитуляция — осознанная сила) вниз НЕ спускается;
+    одна попытка на задачу (анти-пинг-понг кеша); anti-runaway-нуджи сбрасывают чистую серию; выкл
+    `JARVIS_EXECUTOR_TIER=0`.
+    (3.3) **PRECONDITIONS (паттерн UFO2)**: `SkillStep.precondition {role,name?}` — живой UIA-стейт
+    проверяется ПЕРЕД шагом (runSkill), mismatch → честный стоп «дошёл до шага N» без слепых кликов
+    по изменившемуся экрану; поле в схеме input_batch (валидируется в inputBatch).
+    (3.4) **WATCH-ПРЕДИКАТЫ + GSI**: `Watch.predicate` (форма wait_for.condition) — проверка НА КЛИЕНТЕ
+    владельца ($0, мин. интервал 5с против 30с LLM-чекера; `service.checkPredicate` шлёт короткий
+    wait.for через реестр `registerActions` — router-ws регистрирует sendAction сессии); «скажи когда
+    матч найдётся» = watch с предикатом, петля агента свободна сразу. + generic GSI-канал: клиентский
+    HTTP-листенер `sensors/gsi-listener.ts` (127.0.0.1:`JARVIS_GSI_PORT` деф 3730, 0=выкл; тело ≤256KB)
+    принимает JSON-пуши игр/программ (Dota GSI-конфиг пишет сам Джарвис по просьбе, НЕ хардкод);
+    условие `{kind:"gsi", source?, path, equals/contains, gone?}` в wait_for/predicate.
+    (3.5) **СТРИМ-TTS (опт-ин `TTS_PROVIDER=yandex3`)**: `integrations/yandex-tts-v3.ts` — REST v3
+    utteranceSynthesis (grpc-gateway, БЕЗ gRPC-зависимостей), сырой LINEAR16_PCM 22050 чанками по мере
+    синтеза (живой зонд: первый аудио-чанк 143мс); `TtsChunk/SpeakChunk` += `format:"pcm16"/sampleRate`;
+    рендерер `audio.ts`: `PcmLivePlayer` (WebAudio, чанки по мере прихода, когда канал свободен) +
+    занятый канал собирает PCM в WAV (`wavFromPcm16`) в обычную очередь; barge-in цел. Боевой дефолт
+    остаётся v1 (`yandex`) — свап осознанно после живого прослушивания.
+    (3.6) **ЛЕСТНИЦА НАБЛЮДЕНИЯ — ЗАКОН**: verify-нуджи петли называют порядок ui_snapshot →
+    browser_read/inspect → screen_read_text → screen_capture (последний резерв); `context_read`
+    переописан как «дешёвая текстовая сверка активного окна», не только дейксис.
   - **ПАМЯТЬ+КОНТЕКСТ уровень А + Б4а/Б5 (2026-07-10, отчёт `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md`;
     диагноз: facts:0 навсегда — 3 структурных разрыва; контекст ПК замораживался; 39-мин STT-ход):**
     ПАМЯТЬ: (А1) баг спреда — retrieval-facts затирал профильные, теперь merge+dedup; (А2/А9) единый
