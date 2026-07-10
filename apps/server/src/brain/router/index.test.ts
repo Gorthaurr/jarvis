@@ -196,6 +196,13 @@ describe("classifyTier", () => {
     }
   });
 
+  it("живой тест 2026-07-10: предложный обрывок («в доте», «на ютубе») → clarify, не фоновая петля", () => {
+    expect(classifyTier("в доте").local?.kind).toBe("clarify");
+    expect(classifyTier("на ютубе").local?.kind).toBe("clarify");
+    // ≥2 значимых слов после предлога — уже содержательная фраза, решает модель
+    expect(classifyTier("в москву билеты").local?.kind).not.toBe("clarify");
+  });
+
   it("ВОПРОС → conversational (синхронный разговор, НЕ фоновая задача); фикс «каждый вопрос как задача»", () => {
     for (const q of [
       "какая столица Франции",

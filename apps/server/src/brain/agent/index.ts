@@ -15,7 +15,7 @@
  */
 import type { ActionCommand, TaskStatus } from "@jarvis/protocol";
 import { actionTimeoutMs, newId } from "@jarvis/protocol";
-import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, sleep } from "@jarvis/shared";
+import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, foldText, sleep } from "@jarvis/shared";
 import { COLD_TOOL_NAMES, TOOL_SCHEMAS, type ToolSchema, toolCatalogLine } from "@jarvis/tools";
 import type { McpManager } from "../mcp/manager.js";
 import { toolNeedsInput } from "../tools/input-kinds.js";
@@ -254,20 +254,29 @@ function extractName(text: string): string | null {
 }
 
 /**
- * Порог семантического дубля §20. Консервативный 0.9 (план предлагал 0.83, но ложный «Уже делаю»
- * молча глотает РЕАЛЬНО НОВУЮ команду без пути возражения — цена ошибки асимметрична; лексический
- * слой уже ловит наблюдавшийся класс STT-обрывков, семантика — только бэкстоп парафраза).
+ * Порог семантического дубля §20. Откалиброван ЖИВЫМ замером e5 (2026-07-10, sim-check):
+ * истинные фрагмент-дубли — 0.863–0.933 («в доте»⟷research-цель 0.863, «в dot'е.»⟷цель эпизода
+ * 0.911); ложные пары того же домена — 0.886–0.949 («напиши кате что опоздаю»⟷«…что приду вовремя»
+ * 0.949!). Разделения НЕТ → слой применяется ТОЛЬКО к коротким фрагментам (см. findSemanticDuplicate),
+ * где ложная пара не несёт нового содержания, с порогом 0.86 (ниже минимума истинных).
  */
 function dupSemanticMin(): number {
   const n = Number.parseFloat(process.env.JARVIS_DUP_SEMANTIC_MIN ?? "");
-  return Number.isFinite(n) && n >= 0.5 && n <= 1 ? n : 0.9;
+  return Number.isFinite(n) && n >= 0.5 && n <= 1 ? n : 0.86;
 }
+
+/** Фрагмент ли реплика (≤3 токенов) — только такие пускаем в семантический дубль-слой. */
+const DUP_FRAGMENT_MAX_TOKENS = 3;
 
 /**
  * Семантический слой дубль-гейта §20 (Волна 1): реплика против целей ЖИВЫХ задач сессии (e5-косинус).
+ * ТОЛЬКО для КОРОТКИХ фрагментов (≤3 токенов): живой замер показал, что e5-small НЕ разделяет
+ * «другую команду в том же домене» от повтора (ложная пара 0.949 > истинных дублей) — а фраза
+ * подлиннее может нести НОВОЕ содержание («напиши кате что ОПОЗДАЮ»), которое ложный «Уже делаю»
+ * молча проглотит. Фрагмент же («в доте») нового содержания не несёт — цена ложного дубля мала.
  * Бюджет жёсткий (400мс на ВСЕ эмбеддинги — гейт стоит на пути приёмки команды); сбой/таймаут/null →
  * undefined (работает лексический слой, честная деградация). Полярность-гард (start↔stop) отсекает
- * противоположное намерение: «останови поиск» не матчится дублем цели «запусти поиск» (sim высокий!).
+ * противоположное намерение: «закрой доту» (sim 0.897!) не матчится дублем цели «запусти поиск».
  */
 async function findSemanticDuplicate(
   embedder: IEmbeddingProvider,
@@ -275,6 +284,8 @@ async function findSemanticDuplicate(
   tasks: readonly Task[],
 ): Promise<Task | undefined> {
   if (tasks.length === 0) return undefined;
+  const tokenCount = foldText(text).split(" ").filter(Boolean).length;
+  if (tokenCount === 0 || tokenCount > DUP_FRAGMENT_MAX_TOKENS) return undefined;
   try {
     // Все эмбеддинги ПАРАЛЛЕЛЬНО под ОДНИМ бюджетом (ревью 2026-07-10: последовательные await при
     // 3 задачах давали до 1.4с worst-case на пути приёмки каждой реплики). Сбой/таймаут одной цели

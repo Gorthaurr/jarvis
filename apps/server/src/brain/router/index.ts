@@ -218,6 +218,9 @@ const CONFIRM_WORDS = new Set(["да", "нет", "ага", "угу", "не", "н
  * МЕЖтокенный микс НЕ считается обрывком (ревью D+E: «wifi отруби», «steam обнови» — живые команды,
  * глагол которых не входит в ACTION_VERB_RE); одиночное осмысленное слово («погода») — тоже не обрывок.
  */
+/** Предлоги — зачин ОБОРВАННОЙ фразы («в доте», «на ютубе»: начало съедено STT). */
+const PREPOSITIONS = new Set(["в", "на", "под", "за", "у", "о", "об", "про", "с", "со", "к", "ко", "из", "по", "от", "до", "при"]);
+
 export function looksLikeGarbledFragment(text: string): boolean {
   const tokens = foldText(String(text ?? "").replace(/['’ʼ`]/gu, ""))
     .split(" ")
@@ -227,7 +230,12 @@ export function looksLikeGarbledFragment(text: string): boolean {
   const significant = tokens.filter((t) => t.length >= 3);
   if (significant.length === 0) return !tokens.every((t) => CONFIRM_WORDS.has(t));
   const intraMixed = tokens.some((t) => /[a-z]/.test(t) && /[а-я]/.test(t));
-  return intraMixed && significant.length <= 2; // микс-обрывок STT («в dotе»)
+  if (intraMixed && significant.length <= 2) return true; // микс-обрывок STT («в dotе»)
+  // Предложный обрывок (живой тест 2026-07-10): фраза НАЧИНАЕТСЯ с предлога и несёт ≤1 значимое
+  // слово («в доте» — начало «запусти поиск…» съедено STT). Сам по себе такой фрагмент — не задача;
+  // если это повтор при активной задаче — его ловит дубль-гейт РАНЬШЕ роутинга, сюда доходит
+  // только бессмыслица без контекста → честный переспрос дешевле фоновой петли с GUI-действиями.
+  return PREPOSITIONS.has(tokens[0] ?? "") && significant.length <= 1;
 }
 
 /**
