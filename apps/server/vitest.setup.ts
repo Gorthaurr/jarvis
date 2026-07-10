@@ -14,3 +14,8 @@ import { join } from "node:path";
 if (!process.env.JARVIS_DATA_DIR || !process.env.JARVIS_DATA_DIR.trim()) {
   process.env.JARVIS_DATA_DIR = mkdtempSync(join(tmpdir(), "jarvis-test-data-"));
 }
+
+// Рефлекс-бэкстоп памяти (А3, 2026-07-10) в юнит-тестах ВЫКЛ: fire-and-forget LLM-вызов на реплике
+// с маркером («я люблю…») молча съедал бы скриптованные ответы MockLlmProvider → флаки. Тесты самого
+// рефлекса включают его локально (переопределить env — их право, как у crypto/credentials).
+if (process.env.JARVIS_MEMORY_REFLECT === undefined) process.env.JARVIS_MEMORY_REFLECT = "0";

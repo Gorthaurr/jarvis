@@ -13,23 +13,27 @@ const win = (over: Partial<WindowSnap>): WindowSnap => ({
   jarvis: false,
   foreground: false,
   minimized: false,
+  fullscreen: false,
   ...over,
 });
 
 describe("system-snapshot — формат live-контекста ПК", () => {
-  it("foreground выделяется, мониторы и свёрнутые помечаются", () => {
+  it("foreground выделяется, мониторы и свёрнутые помечаются; заголовки у ВСЕХ окон (А4)", () => {
     const s = formatAmbient(
       [
-        win({ process: "dota2", title: "Dota 2", foreground: true, primary: true, monitorIndex: 0 }),
+        win({ process: "dota2", title: "Dota 2", foreground: true, primary: true, monitorIndex: 0, fullscreen: true }),
         win({ process: "chrome", title: "YouTube", primary: false, monitorIndex: 1, monitorLabel: "Монитор 2" }),
+        win({ process: "chrome", title: "Gmail", primary: false, monitorIndex: 1, monitorLabel: "Монитор 2" }),
         win({ process: "calc", title: "Калькулятор", minimized: true }),
       ],
       2,
     );
     expect(s).toContain("На переднем плане: dota2");
+    expect(s).toContain("(полный экран)"); // А5: полноэкранность видна
     expect(s).toContain("осн. монитор"); // Dota на основном
-    expect(s).toContain("chrome (монитор 2)"); // другой монитор по индексу
-    expect(s).toContain("свёрнуто"); // calc помечен свёрнутым
+    // А4: заголовки у фоновых окон, группировка по процессу, монитор — маркером [М2].
+    expect(s).toContain("chrome: «YouTube» [М2], «Gmail» [М2]");
+    expect(s).toContain("«Калькулятор» (свёрнуто)");
     expect(s).toContain("мониторов: 2");
   });
 

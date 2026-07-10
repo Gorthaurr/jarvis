@@ -63,7 +63,9 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   }
 
   // cancel/pause/resume/status осмысленны только при активной задаче.
-  const active = ctx.agentDeps.tasks.active(ctx.session.sessionId);
+  // Б4а (форензика 2026-07-10): адресация по USERID, не sessionId — после обрыва/reconnect sessionId
+  // новый, задачи привязаны к старому → «отмени» их не видел и агент заводил НОВУЮ задачу «отменить».
+  const active = ctx.agentDeps.tasks.activeForUser(ctx.session.userId)[0];
   if (!active) return false;
   if (decision.confidence === "low") {
     // §20: спорная формулировка — действуем по наиболее вероятному kind (Haiku-доуточнение — TODO).
@@ -93,10 +95,10 @@ export function handleTaskControl(
   const tasks = ctx.agentDeps.tasks;
   if (!tasks) return;
 
-  // «отмени» без явного taskId → снять ВСЕ задачи сессии (параллельный режим §20). С
-  // явным taskId (кнопка в UI на конкретной задаче) — гранулярная отмена ниже.
+  // «отмени» без явного taskId → снять ВСЕ задачи ПОЛЬЗОВАТЕЛЯ (Б4а: по userId — переживает
+  // reconnect со сменой sessionId). С явным taskId (кнопка в UI) — гранулярная отмена ниже.
   if (action === "cancel" && !taskId) {
-    const cancelled = tasks.cancelSession(ctx.session.sessionId);
+    const cancelled = tasks.cancelUser(ctx.session.userId);
     ctx.voice.clearPendingSpeech(); // отменил всё → отложенные фоновые итоги тоже не нужны (ack — ПОСЛЕ сброса)
     for (const t of cancelled) emitTaskStatus(ctx.session, t);
     // Аудит лога 2026-07-03: отмена/пауза не оставляли НИ СТРОКИ в файловом логе — разбор «почему
@@ -111,10 +113,14 @@ export function handleTaskControl(
     return;
   }
 
-  const task = taskId ? tasks.get(taskId) : tasks.active(ctx.session.sessionId);
-  // Защита от кросс-сессионного управления: явный taskId должен принадлежать ЭТОЙ сессии.
-  if (task && task.sessionId !== ctx.session.sessionId) {
-    log.warn("task.control на задачу чужой сессии — игнор", { taskId, session: ctx.session.sessionId });
+  // HIGH-4 (ревью 2026-07-10): адресация и гвард — по ВЛАДЕЛЬЦУ (userId), не по sessionId. После
+  // reconnect sessionId новый, а задача жива в старой сессии: прежний гвард молча `return` — «пауза»/
+  // «что делаешь» умирали В ПОЛНОЙ ТИШИНЕ (живой пробник: перехвачено=true, озвучено=0). Пользователь
+  // один — его команды применимы к его задачам из любой сессии; отказ ВСЕГДА озвучивается, не молчит.
+  const task = taskId ? tasks.get(taskId) : tasks.activeForUser(ctx.session.userId)[0];
+  if (task && task.userId !== ctx.session.userId) {
+    log.warn("task.control на задачу ЧУЖОГО пользователя — отказ", { taskId, userId: ctx.session.userId });
+    ackControl(ctx, "Эта задача не ваша, сэр.", source);
     return;
   }
   if (!task) {

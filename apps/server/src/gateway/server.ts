@@ -34,7 +34,7 @@ import { McpManager } from "../brain/mcp/manager.js";
 import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
-import { getProfile, loadProfile } from "../brain/profile.js";
+import { getProfile, loadProfile, setLastGreeted } from "../brain/profile.js";
 import { ReminderService } from "../proactive/reminders/service.js";
 import { createWatchChecker } from "../proactive/watch/checker.js";
 import { WatchService } from "../proactive/watch/service.js";
@@ -782,12 +782,36 @@ async function doHandshake(
   // Онбординг (§11): на свежую (не возобновлённую) сессию Джарвис здоровается голосом —
   // КОНТЕКСТНО (время суток + что помнит о пользователе), при уместности с проактивным
   // вопросом. На resume — молчит (уже знакомы).
-  if (!resumed) startOnboarding(ctx, session, brain, log);
+  if (!resumed) startOnboarding(ctx, session, brain, log, hello.clientVersion);
 
   return ctx;
 }
 
-function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProviders, log: Logger): void {
+function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProviders, log: Logger, clientVersion?: string): void {
+  // А6 (ревью 2026-07-10): раньше приветствие звучало на КАЖДЫЙ не-resumed коннект — 7×/день (одно
+  // посреди игры): registry в ОЗУ → каждый рестарт сервера/клиента = «свежая» сессия. Гейты:
+  // (а) dev-сессии текст-драйвера не здороваются (и не съедают кулдаун живого клиента);
+  // (б) кулдаун JARVIS_GREETING_COOLDOWN_MS (деф 6ч) от последнего произнесённого приветствия;
+  // (в) диалог шёл меньше часа назад (восстановленная working memory) → уже общаемся, не здороваемся.
+  if (/cmd|test|driver/i.test(clientVersion ?? "")) {
+    log.info("онбординг: пропущен (dev-сессия текст-драйвера)");
+    return;
+  }
+  const cooldownMs = (() => {
+    const n = Number.parseInt(process.env.JARVIS_GREETING_COOLDOWN_MS ?? "", 10);
+    return Number.isFinite(n) && n >= 0 ? n : 6 * 3_600_000;
+  })();
+  const p0 = getProfile(session.userId);
+  if (cooldownMs > 0 && p0.lastGreetedAt && Date.now() - p0.lastGreetedAt < cooldownMs) {
+    log.info("онбординг: пропущен (недавно здоровались)", { agoMin: Math.round((Date.now() - p0.lastGreetedAt) / 60_000) });
+    return;
+  }
+  const turns = ctx.memory.recentTurns();
+  const lastTurnTs = turns.length > 0 ? (turns[turns.length - 1]?.ts ?? 0) : 0;
+  if (lastTurnTs && Date.now() - lastTurnTs < 3_600_000) {
+    log.info("онбординг: пропущен (разговор шёл меньше часа назад)");
+    return;
+  }
   // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.
   const t = setTimeout(() => {
     // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript — иначе на
@@ -800,6 +824,7 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
     )
       .then((line) => {
         ctx.voice.speak(line);
+        void setLastGreeted(session.userId); // кулдаун А6 — от факта ПРОИЗНЕСЁННОГО приветствия
         log.info("онбординг: приветствие произнесено");
       })
       .catch((e) => log.warn("онбординг не удался", e instanceof Error ? e.message : String(e)));

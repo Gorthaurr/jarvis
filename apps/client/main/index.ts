@@ -438,14 +438,18 @@ function registerIpc(): void {
 // ── жизненный цикл приложения ──────────────────────────────────
 
 /** Поднять win-сайдкар (UIA+SendInput, §6), если exe доступен (extraResources). */
-// §9: авто-профиль окружения (браузер/приложения) — собираем один раз, шлём агенту при
-// каждом подключении (после reconnect тоже — resumed-сессия должна знать окружение).
+// §9: авто-профиль окружения (браузер/приложения) — шлём агенту при каждом подключении (после
+// reconnect тоже). Ревью 2026-07-10 (А7): раньше собирался ОДИН раз на процесс Electron и застывал —
+// поставленная сегодня игра/CLI не появлялась в окружении до перезапуска клиента. Теперь TTL 6ч.
 let envSummary: string | undefined;
+let envBuiltAt = 0;
+const ENV_TTL_MS = 6 * 3_600_000;
 async function sendEnvProfile(): Promise<void> {
   try {
-    if (envSummary === undefined) {
+    if (envSummary === undefined || Date.now() - envBuiltAt > ENV_TTL_MS) {
       const profile = await buildSystemProfile();
       envSummary = formatProfileSummary(profile);
+      envBuiltAt = Date.now();
       log.info("окружение определено (авто)", { summary: envSummary });
     }
     if (envSummary) transport?.sendEnv(envSummary);
@@ -458,10 +462,28 @@ async function sendEnvProfile(): Promise<void> {
 // окружения, обновляется периодически (отдельный таймер, НЕ на горячем sensors-такте). Так Джарвис
 // каждый ход знает, что запущено и где (фикс two-monitor слепоты), без tool-call и round-trip.
 let ambientTimer: ReturnType<typeof setInterval> | undefined;
+let emptyAmbientStreak = 0; // А8: пустой снимок N раз подряд = мёртвый сенсор, а не «нечего показать»
 async function sendAmbient(): Promise<void> {
   try {
-    const summary = await captureAmbient();
-    if (summary) transport?.sendSystem(summary);
+    const { summary, foreground } = await captureAmbient();
+    // А5 (ревью 2026-07-10): живая ЗАНЯТОСТЬ пользователя — из уже собираемого (fg-окно + idle),
+    // ноль новых проб. Одной строкой в снимок (модель знает занятость ДО действия, а не постфактум
+    // через denied:USER_BUSY) и в сенсоры §9 (гейт проактива «не мешать в игре» оживает).
+    sensors?.setActiveApp(foreground?.process ?? "unknown");
+    sensors?.setFullscreen(Boolean(foreground?.fullscreen));
+    const idleSec = powerMonitor.getSystemIdleTime();
+    const presence =
+      `Пользователь: ${idleSec < 60 ? "за ПК" : `отошёл (~${Math.round(idleSec / 60)} мин)`}` +
+      `${foreground?.fullscreen ? `; полноэкранно: ${foreground.process}` : ""}.`;
+    const combined = [summary, presence].filter((s) => s && s.trim()).join(" ");
+    if (summary) {
+      emptyAmbientStreak = 0;
+      transport?.sendSystem(combined);
+    } else {
+      emptyAmbientStreak += 1;
+      // А8: 5 пустых подряд (=1 минута слепоты) — WARN один раз на серию, не спам.
+      if (emptyAmbientStreak === 5) log.warn("ambient-снимок пуст 5 циклов подряд — сенсор окон/звука, похоже, мёртв");
+    }
   } catch (e) {
     log.warn("ambient-снимок не отправлен", e instanceof Error ? e.message : String(e));
   }

@@ -64,6 +64,38 @@ export function isWakeAddressed(text: string): boolean {
 }
 
 /**
+ * Near-miss ПЕРВОГО токена до «джарвис»/«jarvis» (Б5, форензика 2026-07-10): «Дарья, запусти поиск
+ * в доте» (lev 4) молча тонула в игноре — оба слоя матчера бессильны, а дроп был неотличим от трёпа.
+ * Обращение обычно первым словом → меряем только его. 99 = заведомо не обращение (короткий/длинный
+ * токен, пусто). Диагностика (в лог игнора) + вход second-chance («Вы мне, сэр?») — НЕ пробуждение.
+ */
+export function wakeNearMissScore(text: string): number {
+  const tokens = text.match(TOKEN_RE);
+  const t = (tokens?.[0] ?? "").toLowerCase();
+  if (t.length < 4 || t.length > 11) return 99;
+  return Math.min(levenshtein(t, "джарвис"), levenshtein(t, "jarvis"));
+}
+
+/** Словарь подтверждений «Вы мне, сэр?» — узкий, чтобы трёп («да, объективно») не проходил. */
+const SECOND_CHANCE_VOCAB = new Set(["да", "ага", "угу", "конечно", "тебе", "мне", "вам", "говорю"]);
+
+/**
+ * Подтверждение second-chance (Б5, ревью 2026-07-10): ≤2 токенов и ВСЕ из словаря подтверждений
+ * («да», «тебе», «да, тебе»). Ревью показало: открывать окно разговора на near-miss НЕЛЬЗЯ («давай»
+ * lev 4 — любая следующая фраза трёпа уходила бы командой); принимаем только явное короткое «да».
+ */
+export function isSecondChanceConfirm(text: string): boolean {
+  const tokens = text.match(TOKEN_RE);
+  if (!tokens || tokens.length === 0 || tokens.length > 2) return false;
+  return tokens.every((t) => SECOND_CHANCE_VOCAB.has(t.toLowerCase()));
+}
+
+/** Срезать первый токен (псевдо-имя «Дарья»/«Гуляю») с пунктуацией — остаток = исходная команда. */
+export function stripLeadingToken(text: string): string {
+  return text.replace(/^[\s,.!?:;—-]*[\p{L}\p{N}]+[\s,.!?:;—-]*/u, "").trim();
+}
+
+/**
  * Чистые междометия/филлеры, на которые Джарвис НЕ должен встревать (§3). Это не команды и не
  * ответы — короткие выдохи/хмыки, что Deepgram ловит из фонового шума («ах», «ох», «хм»…).
  * НЕ включаем «да/нет/ок/угу/ага/ладно» — это валидные ответы в активном разговоре (нельзя глушить).

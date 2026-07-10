@@ -1,5 +1,19 @@
 import { describe, it, expect } from "vitest";
-import { isNoiseOnly, isWakeAddressed, stripWake } from "./wake.js";
+import { isNoiseOnly, isWakeAddressed, stripWake, wakeNearMissScore } from "./wake.js";
+
+describe("wakeNearMissScore — near-miss обращения (Б5, форензика 2026-07-10)", () => {
+  it("живой случай «Дарья, запусти поиск в доте» — near-miss ≤4 (кандидат second-chance)", () => {
+    expect(wakeNearMissScore("Дарья, запусти поиск в доте")).toBeLessThanOrEqual(4);
+  });
+
+  it("точное обращение — 0; трёп/короткие слова — далеко (≥5 или 99)", () => {
+    expect(wakeNearMissScore("джарвис включи музыку")).toBe(0);
+    expect(wakeNearMissScore("да, объективно")).toBe(99); // «да» короче 4 букв
+    expect(wakeNearMissScore("котла тоже в мидии не боимся")).toBeGreaterThanOrEqual(5);
+    expect(wakeNearMissScore("чем якорь плох")).toBe(99); // «чем» короче 4 букв
+    expect(wakeNearMissScore("")).toBe(99);
+  });
+});
 
 describe("wake word «Джарвис»", () => {
   it("распознаёт обращение в разных формах и позициях", () => {

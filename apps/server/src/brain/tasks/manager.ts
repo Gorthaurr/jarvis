@@ -171,6 +171,26 @@ export class TaskManager {
     return cancelled;
   }
 
+  /**
+   * Снять ВСЕ активные задачи ПОЛЬЗОВАТЕЛЯ (Б4а, форензика 2026-07-10): после обрыва/reconnect у
+   * сессии НОВЫЙ sessionId, а задачи привязаны к старому — голосовое «отмени» по sessionId их не
+   * видело, и вместо отмены агент дважды заводил НОВУЮ задачу («Отмени поиск в доте» → задача
+   * «Отменить поиск», убивать пришлось кнопками UI). Пользователь один: «останови всё, что
+   * делаешь» = все его задачи, из какой бы сессии они ни стартовали.
+   */
+  cancelUser(userId: string): Task[] {
+    const cancelled: Task[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.userId !== userId || isTerminalState(task.state)) continue;
+      task.cancel.cancelled = true;
+      task.state = "cancelled";
+      task.finishedAt = this.now();
+      cancelled.push(task);
+    }
+    if (cancelled.length > 0) this.onChange?.();
+    return cancelled;
+  }
+
   /** §20: «пауза» — running/queued → paused. false для прочих состояний. */
   pause(taskId: string): boolean {
     const task = this.tasks.get(taskId);

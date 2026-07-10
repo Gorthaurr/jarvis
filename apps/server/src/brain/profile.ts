@@ -35,6 +35,8 @@ export interface UserProfile {
   language?: string;
   /** Свободный контекст о пользователе из настроек UI (стиль, привычки, как обращаться). */
   context?: string;
+  /** Когда последний раз звучало приветствие-онбординг (unix ms) — кулдаун А6, ревью 2026-07-10. */
+  lastGreetedAt?: number;
 }
 
 const cache = new Map<string, UserProfile>();
@@ -115,7 +117,16 @@ export async function setContext(userId: string, context: string): Promise<void>
   log.info("профиль: контекст сохранён", { userId, len: c.length });
 }
 
-/** Добавить факт о пользователе (без дублей). */
+/** Отметить произнесённое приветствие (кулдаун онбординга А6, ревью 2026-07-10). */
+export async function setLastGreeted(userId: string): Promise<void> {
+  entry(userId).lastGreetedAt = Date.now();
+  await persist(userId);
+}
+
+/** Кап курируемых фактов профиля (ревью памяти 2026-07-10, А2): профиль — выжимка, не дамп. */
+const MAX_PROFILE_FACTS = 20;
+
+/** Добавить факт о пользователе (без дублей; при переполнении вытесняется старейший). */
 export async function addFact(userId: string, fact: string): Promise<void> {
   const f = fact.trim();
   if (!f) return;
@@ -123,7 +134,9 @@ export async function addFact(userId: string, fact: string): Promise<void> {
   p.facts = p.facts ?? [];
   if (p.facts.includes(f)) return;
   p.facts.push(f);
+  while (p.facts.length > MAX_PROFILE_FACTS) p.facts.shift(); // FIFO: старейшее уступает свежему
   await persist(userId);
+  log.info("профиль: факт добавлен", { userId, count: p.facts.length, preview: f.slice(0, 60) });
 }
 
 /** Сериализация записей НА ПОЛЬЗОВАТЕЛЯ: setX зовутся fire-and-forget (void) — без цепочки два

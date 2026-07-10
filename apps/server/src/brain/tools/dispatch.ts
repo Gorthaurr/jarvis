@@ -15,6 +15,7 @@ import type { ResolutionMemory } from "../../memory/resolution-memory.js";
 import type { ToolResultContent } from "../../integrations/llm.js";
 import { ACTUATOR_TOOL_BY_KIND, COLD_TOOL_NAMES, TOOLS_BY_NAME } from "@jarvis/tools";
 import type { EpisodicMemory } from "../../memory/episodic.js";
+import { writeUserMemory } from "../../memory/user-memory.js";
 import { knowledgeConsult, memorySearch, webFetch, webSearch } from "./handlers/info.js";
 import type { IWebProvider } from "../../integrations/web.js";
 /** Инструменты, навигирующие браузер по URL → SSRF-гард обязателен (C5: web_* раньше его обходили). */
@@ -402,8 +403,10 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   // Схема инструмента (§8) объявляет поле `content`; принимаем и `text` для совместимости.
   const text = String(input.content ?? input.text ?? "").trim();
   if (!text) return err("memory_write: пустой content");
-  await ctx.episodic.write({ userId: ctx.userId, kind: normalizeEpisodeKind(input.kind), text, ts: Date.now() });
-  return ok("Запомнил.");
+  // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
+  // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
+  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text);
+  return ok(outcome === "duplicate" ? "Уже помню это, сэр." : "Запомнил.");
 }
 
 /**

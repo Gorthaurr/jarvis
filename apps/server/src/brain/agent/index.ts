@@ -28,6 +28,7 @@ import { type GestureEvent, compileReplayLines } from "../../memory/skill-macro.
 import { SentenceChunker, splitIntoSentences } from "../nlu/sentences.js";
 import type { IWebProvider } from "../../integrations/web.js";
 import { type EpisodicMemory, cosine, memoryMinScore } from "../../memory/episodic.js";
+import { hasStableFactMarker, reflectFactFromUtterance } from "./memory-reflect.js";
 import type { IEmbeddingProvider } from "../../integrations/openai-embeddings.js";
 import { polarityConflict } from "../../memory/intent-polarity.js";
 import type { WorkingMemory } from "../../memory/working.js";
@@ -430,7 +431,9 @@ export async function handleUserText(
   // СВЕЖИМ контекстом (не тянем диалог текущей задачи) → «обособленная» задача не путается с
   // текущей. Правка — наследует контекст (продолжение). Только при активной задаче; env-выключатель.
   const scopeEnabled = (process.env.JARVIS_TASK_SCOPE ?? "1") !== "0";
-  const activeTask = scopeEnabled ? deps.tasks?.active(session.sessionId) : undefined;
+  // HIGH-3 (ревью 2026-07-10): активная задача — по USERID, не sessionId: после reconnect sessionId
+  // новый, и scope/steer/дубль-гейт не видели живую задачу старой сессии (реплики плодили дубли).
+  const activeTask = scopeEnabled ? deps.tasks?.activeForUser(deps.userId)[0] : undefined;
   const freshContext = Boolean(activeTask) && classifyTaskScope(clean) === "new";
   if (activeTask) {
     log.info("§20 область реплики при активной задаче", {
@@ -447,9 +450,10 @@ export async function handleUserText(
     //     которое лексика не взяла. Порог консервативный (JARVIS_DUP_SEMANTIC_MIN, деф 0.9) +
     //     полярность-гард (start↔stop): «останови поиск» НИКОГДА не матчится дублем «запусти поиск».
     if (freshContext && deps.tasks) {
+      // HIGH-3: живые задачи ПОЛЬЗОВАТЕЛЯ (не сессии) — дубль ловится и после reconnect.
       const live = deps.tasks
         .list(deps.userId)
-        .filter((t) => (t.state === "running" || t.state === "paused") && t.sessionId === session.sessionId);
+        .filter((t) => t.state === "running" || t.state === "paused");
       let dup = live.find((t) => isDuplicateGoal(clean, t.goal));
       // Полярность-гард и на ЛЕКСИЧЕСКОМ слое (ревью 2026-07-10): «останови запуск поиска в доте»
       // лексически перекрывается с целью «запусти поиск в доте», но это команда ОСТАНОВКИ, не повтор.
@@ -475,6 +479,21 @@ export async function handleUserText(
       deps.memory.pushTurn("assistant", reply.voice);
       return finishReply(reply);
     }
+  }
+
+  // Рефлекс-бэкстоп памяти (ревью 2026-07-10, А3): реплика с маркером УСТОЙЧИВОГО факта («я всегда…»,
+  // «мой брат…», «у меня аллергия…») → фоновая рефлексия на дешёвом тире (fire-and-forget, ход не
+  // ждёт). Диагноз: facts:0 за 15 дней — сама модель memory_write не звала; это зеркало самообучения
+  // навыков, но для фактов о владельце. Кап/дедуп/выключатель — внутри модуля.
+  if (hasStableFactMarker(clean)) {
+    void reflectFactFromUtterance({
+      llm: deps.llm,
+      model: deps.models.sonnet,
+      episodic: deps.episodic,
+      userId: deps.userId,
+      utterance: clean,
+      spend: deps.spend, // §14: фоновый вызов виден гварду трат
+    });
   }
 
   // Консьерж (§): висит уточнение → пробуем реплику как ОТВЕТ на него (мгновенно, без LLM).
@@ -730,9 +749,15 @@ async function runAgentLoop(
   ]
     .filter(Boolean)
     .join("\n\n");
+  // Ревью памяти 2026-07-10 (А1): `facts` после спреда БЕЗУСЛОВНО затирал курируемые факты профиля
+  // пустым retrieval-результатом — профильные факты не доходили до промпта ни при каком наполнении.
+  // Мерж с дедупом: стабильные факты профиля + эпизодический recall. Профиль читаем ЖИВЬЁМ из кеша
+  // (не deps.userContext — тот снапшот момента коннекта: факты, записанные В ЭТОЙ сессии мостом/
+  // рефлексом, до reconnect не попадали бы в промпт — второе ревью).
+  const mergedFacts = [...new Set([...(getProfile(deps.userId).facts ?? []), ...facts])];
   const sys = buildSystemPrompt({
     ...deps.userContext,
-    facts,
+    facts: mergedFacts,
     personaTone,
     ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
     ...(skillCatalog ? { skillCatalog } : {}),

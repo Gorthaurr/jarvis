@@ -13,7 +13,7 @@ import { runPsJson } from "./system-profiler.js";
 
 const log = createLogger("sensors:snapshot");
 
-/** Сырое окно от PowerShell (rect — ФИЗИЧЕСКИЕ пиксели Win32). */
+/** Сырое окно от PowerShell (rect — ФИЗИЧЕСКИЕ пиксели Win32; full — fullscreen из того же процесса). */
 interface RawWindow {
   proc: string;
   title: string;
@@ -23,6 +23,7 @@ interface RawWindow {
   h: number;
   fg: boolean;
   min: boolean;
+  full: boolean;
 }
 
 /** Окно с привязкой к монитору Electron. */
@@ -35,10 +36,17 @@ export interface WindowSnap {
   jarvis: boolean;
   foreground: boolean;
   minimized: boolean;
+  /** Окно занимает ВЕСЬ монитор (игра/видео без рамки) — ревью 2026-07-10 (А5): раньше стаб. */
+  fullscreen: boolean;
 }
 
 // EnumWindows через Add-Type user32: видимые верхнеуровневые окна с заголовком (без tool-window'ов).
 // Unicode GetWindowTextW (иначе кириллица в «?»). $procId — НЕ $pid (зарезервирована в PowerShell).
+// Fullscreen считается ЗДЕСЬ ЖЕ (MonitorFromWindow + GetMonitorInfo.rcMonitor vs GetWindowRect):
+// одно координатное пространство одного процесса — DPI-виртуализация сокращается сама. Ревью
+// 2026-07-10: формула bounds×scaleFactor на mixed-DPI мультимониторе расходилась на сотни px
+// (Electron DIP-origin вторичного монитора ≠ физический/scale) → fullscreen на втором мониторе
+// не срабатывал никогда. Допуск 4px: развёрнутое окно шире монитора на невидимые рамки ~8px.
 const WINDOWS_PS = `Add-Type @"
 using System;using System.Text;using System.Runtime.InteropServices;
 public class JWin{
@@ -51,8 +59,11 @@ public class JWin{
  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out RECT r);
  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h,int i);
+ [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h,uint f);
+ [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr m,ref MONITORINFO mi);
  public delegate bool EnumWindowsProc(IntPtr h,IntPtr p);
  [StructLayout(LayoutKind.Sequential)] public struct RECT{public int L,T,R,B;}
+ [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO{public int cb;public RECT rcMonitor;public RECT rcWork;public uint flags;}
 }
 "@
 $fg=[JWin]::GetForegroundWindow()
@@ -66,8 +77,17 @@ $cb=[JWin+EnumWindowsProc]{ param($h,$p)
  $procId=0; [void][JWin]::GetWindowThreadProcessId($h,[ref]$procId)
  if($procId -eq 0){return $true}
  $r=New-Object 'JWin+RECT'; [void][JWin]::GetWindowRect($h,[ref]$r)
+ $full=$false
+ $mon=[JWin]::MonitorFromWindow($h,2)
+ if($mon -ne [IntPtr]::Zero){
+  $mi=New-Object 'JWin+MONITORINFO'; $mi.cb=[Runtime.InteropServices.Marshal]::SizeOf($mi)
+  if([JWin]::GetMonitorInfo($mon,[ref]$mi)){
+   $m=$mi.rcMonitor
+   $full=([Math]::Abs($r.L-$m.L) -le 2) -and ([Math]::Abs($r.T-$m.T) -le 2) -and ([Math]::Abs(($r.R-$r.L)-($m.R-$m.L)) -le 4) -and ([Math]::Abs(($r.B-$r.T)-($m.B-$m.T)) -le 4)
+  }
+ }
  $pname=try{(Get-Process -Id $procId -ErrorAction Stop).ProcessName}catch{'?'}
- [void]$res.Add([pscustomobject]@{proc=$pname;title=$title;x=$r.L;y=$r.T;w=($r.R-$r.L);h=($r.B-$r.T);fg=($h -eq $fg);min=[JWin]::IsIconic($h)})
+ [void]$res.Add([pscustomobject]@{proc=$pname;title=$title;x=$r.L;y=$r.T;w=($r.R-$r.L);h=($r.B-$r.T);fg=($h -eq $fg);min=[JWin]::IsIconic($h);full=($full -and -not [JWin]::IsIconic($h))})
  return $true
 }
 [void][JWin]::EnumWindows($cb,[IntPtr]::Zero)
@@ -91,6 +111,10 @@ export async function enumWindows(): Promise<WindowSnap[]> {
     const title = String(w.title ?? "").trim();
     if (!proc || isNoise(proc, title)) continue;
     const m = monitors.displayForRect({ x: w.x, y: w.y, width: w.w, height: w.h });
+    // Полноэкранность (А5) приезжает ИЗ PS-скрипта (MonitorFromWindow, одно координатное
+    // пространство) — ревью 2026-07-10: пересчёт через Electron bounds×scaleFactor ломался на
+    // mixed-DPI мультимониторе (расхождение в сотни px на вторичном экране).
+    const fullscreen = Boolean(w.full);
     out.push({
       process: proc,
       title,
@@ -100,6 +124,7 @@ export async function enumWindows(): Promise<WindowSnap[]> {
       jarvis: m.jarvis,
       foreground: Boolean(w.fg),
       minimized: Boolean(w.min),
+      fullscreen,
     });
   }
   return out;
@@ -118,18 +143,43 @@ function shortMon(w: WindowSnap): string {
  * распознаёт границу тем же обученным механизмом, а не самодельной текстовой пометкой на клиенте.
  */
 
-/** Компактная live-сводка для промпта (чистая — для теста). Заголовки — сырые (untrusted-обёртка на сервере). */
+/**
+ * Компактная live-сводка для промпта (чистая — для теста). Заголовки — сырые (untrusted-обёртка на
+ * сервере). Ревью 2026-07-10 (А4): заголовки теперь у ВСЕХ окон (раньше — только у переднего плана,
+ * остальные шли голыми именами процессов: два Chrome неразличимы, «закрой окно с ютубом» требовало
+ * screen_capture ~2K токенов). Группировка по процессу, кап 14 окон, title 40 символов.
+ */
 export function formatAmbient(wins: readonly WindowSnap[], monitorCount: number): string {
   if (wins.length === 0) return monitorCount > 1 ? `Мониторов: ${monitorCount}.` : "";
-  const cut = (s: string): string => (s.length > 50 ? `${s.slice(0, 49)}…` : s);
+  const cut = (s: string, n = 40): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
   const parts: string[] = [];
   const fg = wins.find((w) => w.foreground);
-  if (fg) parts.push(`На переднем плане: ${fg.process}${fg.title ? ` ${cut(fg.title)}` : ""} — ${shortMon(fg)}`);
-  // Остальные окна — по процессу, с монитором; свёрнутые помечаем.
-  const others = wins.filter((w) => w !== fg).slice(0, 10);
+  if (fg) {
+    parts.push(
+      `На переднем плане: ${fg.process}${fg.title ? ` «${cut(fg.title, 50)}»` : ""}` +
+        `${fg.fullscreen ? " (полный экран)" : ""} — ${shortMon(fg)}`,
+    );
+  }
+  const others = wins.filter((w) => w !== fg).slice(0, 14);
   if (others.length) {
-    const items = others.map((w) => `${w.process} (${shortMon(w)}${w.minimized ? ", свёрнуто" : ""})`);
-    parts.push(`Открыто: ${items.join(", ")}`);
+    // Группировка по процессу (порядок появления сохраняем): chrome: «YouTube…», «Gmail» [М2].
+    const byProc = new Map<string, WindowSnap[]>();
+    for (const w of others) {
+      const list = byProc.get(w.process) ?? [];
+      list.push(w);
+      byProc.set(w.process, list);
+    }
+    const items = [...byProc].map(([proc, ws]) => {
+      const titles = ws
+        .map(
+          (w) =>
+            `«${cut(w.title)}»${w.minimized ? " (свёрнуто)" : ""}` +
+            `${monitorCount > 1 && !w.primary ? ` [М${w.monitorIndex + 1}]` : ""}`,
+        )
+        .join(", ");
+      return `${proc}: ${titles}`;
+    });
+    parts.push(`Открыто: ${items.join("; ")}`);
   }
   if (monitorCount > 1) parts.push(`мониторов: ${monitorCount}`);
   return `${parts.join(". ")}.`;
@@ -202,16 +252,23 @@ export async function captureAudioSources(): Promise<string> {
   }
 }
 
-/** Полный цикл: окна + источник звука → строка для агента. Ошибка/пусто → пустая (мягкая деградация). */
-export async function captureAmbient(): Promise<string> {
+/** Результат полного снимка: сводка для промпта + окно переднего плана (питает сенсоры занятости, А5). */
+export interface AmbientSnapshot {
+  summary: string;
+  foreground?: WindowSnap;
+}
+
+/** Полный цикл: окна + источник звука → сводка + fg-окно. Ошибка/пусто → пустая (мягкая деградация). */
+export async function captureAmbient(): Promise<AmbientSnapshot> {
   try {
-    const [windowsLine, audioLine] = await Promise.all([
-      enumWindows().then((wins) => formatAmbient(wins, monitors.displays().length)),
-      captureAudioSources(),
-    ]);
-    return [windowsLine, audioLine].filter((s) => s && s.trim()).join(" ");
+    const [wins, audioLine] = await Promise.all([enumWindows(), captureAudioSources()]);
+    const windowsLine = formatAmbient(wins, monitors.displays().length);
+    return {
+      summary: [windowsLine, audioLine].filter((s) => s && s.trim()).join(" "),
+      foreground: wins.find((w) => w.foreground),
+    };
   } catch (e) {
     log.warn("снимок окон не собран", e instanceof Error ? e.message : String(e));
-    return "";
+    return { summary: "" };
   }
 }

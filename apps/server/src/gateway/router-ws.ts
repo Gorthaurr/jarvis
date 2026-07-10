@@ -279,6 +279,8 @@ export function makeSessionContext(
     stt: providers.stt,
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
+    // Б5 second-chance (форензика 2026-07-10): near-miss обращения при живой задаче → «Вы мне, сэр?».
+    hasActiveTask: () => brain.tasks.activeForUser(session.userId).length > 0,
     // §10 realtime: прекеш-филлер «Секунду, сэр.» маскировал пол латентности Opus, НО на
     // каждую реплику (включая болтовню) звучал как деферрал «погоди, занят» → Джарвис будто
     // отделывается, а не разговаривает (фидбэк пользователя). С быстрым STT (deepgram) пауза
@@ -327,14 +329,26 @@ export function makeSessionContext(
       return Boolean(c && (c.micBusyByOtherApp || c.fullscreen || c.locked));
     },
     // brain на финальном тексте реплики (§21: {voice, display?}).
-    onUserTurn: (text) => handleUserText(session, text, agentDeps),
+    // HIGH-3 (ревью 2026-07-10): детерминированный перехват УПРАВЛЕНИЯ задачами («отмени/пауза/
+    // что делаешь») раньше стоял ТОЛЬКО на текстовом канале (onDevText) — живой ГОЛОС уходил в
+    // агент, и «отмени» после reconnect плодил задачу «Отменить поиск» (форензика вечера). Теперь
+    // перехват на обоих каналах; ctxForBusy замыкается после создания ctx (как для isUserBusy).
+    onUserTurn: (text) => {
+      if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) return Promise.resolve({ voice: "" });
+      return handleUserText(session, text, agentDeps);
+    },
     // §10 realtime: пофразный стрим реплики (token-streaming → первый звук раньше). Включён
     // по умолчанию; аварийный выключатель JARVIS_VOICE_STREAMING=0 → классический onUserTurn.
     ...(process.env.JARVIS_VOICE_STREAMING === "0"
       ? {}
       : {
-          onUserTurnStream: (text: string, sink: ReplySink): Promise<void> =>
-            handleUserText(session, text, agentDeps, sink).then(() => undefined),
+          onUserTurnStream: (text: string, sink: ReplySink): Promise<void> => {
+            if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) {
+              sink.done(""); // ack уже озвучен внутри handleTaskControl; ход закрывается тихо
+              return Promise.resolve();
+            }
+            return handleUserText(session, text, agentDeps, sink).then(() => undefined);
+          },
         }),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
     sendSpeakChunk: (c: TtsChunk) =>
@@ -472,7 +486,14 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
         } catch {
           /* расширение не ответило — окна/звук всё равно в контексте */
         }
+      } else {
+        // А10 (ревью 2026-07-10): деградация ВИДИМА — иначе модель молча не знает про вкладки и гадает.
+        combined = [summary, "Вкладки браузера недоступны (расширение не подключено)."].filter((s) => s && s.trim()).join(" · ");
       }
+      // А8: переход пусто↔непусто — единственный info-лог (каждые 12с логать нельзя); содержимое — debug.
+      const wasEmpty = !(ctx.agentDeps.userContext?.systemContext ?? "").trim();
+      const nowEmpty = !combined.trim();
+      if (wasEmpty !== nowEmpty) log.info("client.system: live-контекст " + (nowEmpty ? "ПРОПАЛ (пустые снимки)" : "появился"), { len: combined.length });
       ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, systemContext: combined };
       break;
     }

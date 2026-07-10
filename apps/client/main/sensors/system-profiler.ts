@@ -65,6 +65,8 @@ export interface SystemProfile {
   tools: ToolCap[];
   /** Конфигурация железа/устройств (CPU/GPU/мать/ОЗУ/диски/мониторы/звук). */
   hardware?: HardwareInfo;
+  /** Установленные Steam-игры (имена из appmanifest, кап 12) — А7, ревью 2026-07-10. */
+  games?: string[];
 }
 
 interface BrowserSpec {
@@ -334,14 +336,41 @@ export function formatHardwareSummary(h: HardwareInfo): string {
 }
 
 /** Полный профиль окружения (для агента и браузерной автоматизации). */
+// Steam-библиотека (А7, ревью 2026-07-10): libraryfolders.vdf → appmanifest_*.acf → имена игр.
+// Раньше env знал только 9 хардкодных APP_SPECS — Дота, в которую владелец играет каждый вечер,
+// в окружении отсутствовала как понятие. Тот же источник истины, что у app-resolve (скан манифестов).
+const STEAM_GAMES_PS = `$junk='redistributable|runtime|proton|steamworks common|dedicated server|sdk|soundtrack'
+$names=New-Object System.Collections.ArrayList
+$sp=(Get-ItemProperty 'HKCU:\\Software\\Valve\\Steam' -ErrorAction SilentlyContinue).SteamPath
+if($sp){
+  $vdf=Join-Path $sp 'steamapps\\libraryfolders.vdf'
+  $libs=@($sp)
+  if(Test-Path $vdf){ $libs += ((Select-String -Path $vdf -Pattern '"path"\\s+"([^"]+)"' -AllMatches).Matches | ForEach-Object { $_.Groups[1].Value -replace '\\\\\\\\','\\' }) }
+  foreach($l in ($libs | Select-Object -Unique)){
+    $sa=Join-Path $l 'steamapps'; if(-not(Test-Path $sa)){continue}
+    Get-ChildItem $sa -Filter 'appmanifest_*.acf' -ErrorAction SilentlyContinue | ForEach-Object {
+      $m=Get-Content $_.FullName -Encoding UTF8 | Select-String -Pattern '"name"\\s+"([^"]+)"' | Select-Object -First 1
+      if($m){ $nm=$m.Matches[0].Groups[1].Value; if($nm -and ($nm -notmatch $junk)){ [void]$names.Add($nm) } }
+    }
+  }
+}
+ConvertTo-Json -Compress -InputObject @($names | Select-Object -Unique | Select-Object -First 12)`;
+
+/** Установленные Steam-игры (имена из манифестов, кап 12). Ошибка/нет Steam → []. */
+export async function detectSteamGames(): Promise<string[]> {
+  const raw = await runPsJson<string[]>(STEAM_GAMES_PS, 8000);
+  if (!Array.isArray(raw)) return [];
+  return raw.map((s) => String(s).trim()).filter(Boolean);
+}
+
 export async function buildSystemProfile(): Promise<SystemProfile> {
   const progId = await readDefaultBrowserProgId();
   const defaultId = progId ? progIdToBrowserId(progId) : undefined;
   const browsers = detectBrowsers(defaultId);
   const defaultBrowser = browsers.find((b) => b.isDefault) ?? browsers[0];
-  // Железо — параллельно (WMI медленный ~1-3с), не блокируем браузерный профиль.
-  const hardware = await detectHardware();
-  return { os: `${process.platform} ${process.arch}`, defaultBrowser, browsers, apps: detectApps(), tools: detectAutomationTools(), hardware };
+  // Железо и Steam-игры — параллельно (WMI/скан медленные), не блокируем браузерный профиль.
+  const [hardware, games] = await Promise.all([detectHardware(), detectSteamGames()]);
+  return { os: `${process.platform} ${process.arch}`, defaultBrowser, browsers, apps: detectApps(), tools: detectAutomationTools(), hardware, games };
 }
 
 /**
@@ -363,6 +392,7 @@ export function formatProfileSummary(p: SystemProfile): string {
   const others = p.browsers.filter((b) => !b.isDefault).map((b) => b.name);
   if (others.length) parts.push(`ещё установлены браузеры: ${others.join(", ")}`);
   if (p.apps.length) parts.push(`установленные приложения: ${p.apps.map((a) => a.name).join(", ")}`);
+  if (p.games?.length) parts.push(`Steam-игры: ${p.games.join(", ")}`);
   let summary = parts.length ? `${parts.join("; ")}.` : "";
   // Арсенал «программного пути» (§ правило v21: API/CLI первым, GUI последним). Перечисляем КАК
   // драйвить — чтобы модель тянулась к надёжному пути, а не кликала по интерфейсу.

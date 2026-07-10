@@ -32,7 +32,7 @@ import {
   reduce,
 } from "./state.js";
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
-import { isNoiseOnly, isWakeAddressed, stripWake } from "./wake.js";
+import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWake, wakeNearMissScore } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
@@ -147,6 +147,11 @@ export interface VoicePipelineDeps {
   /** Верификация диктора (§3): реагировать только на свои голоса. undefined → гейт выключен. */
   speaker?: SpeakerGateDeps;
   /**
+   * Идёт ли сейчас активная §20-задача пользователя (Б5 second-chance: near-miss обращения при
+   * живой задаче → «Вы мне, сэр?» вместо тихого дропа). undefined → second-chance выключен.
+   */
+  hasActiveTask?: () => boolean;
+  /**
    * §9 «уважительная проактивность» (не мешать): занят ли пользователь СЕЙЧАС (звонок/полный экран/
    * блокировка) — из client.context. НЕсрочную проактивную речь (итоги фоновых задач) держим, пока
    * занят, и отдаём, когда освободится; срочную (напоминания-будильники) — пропускаем всегда.
@@ -165,6 +170,10 @@ export class VoicePipeline {
   private phraseSpeaker: PhraseSpeaker | null = null;
   /** Таймер прекеш-филлера (§10): «Секунду, сэр.» пока Opus думает. */
   private fillerTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Когда последний раз переспрашивали «Вы мне, сэр?» (Б5 second-chance, кулдаун 2 мин). */
+  private lastSecondChanceAt = 0;
+  /** Висящий переспрос second-chance: исходная реплика + дедлайн подтверждения (окно НЕ открывается). */
+  private pendingSecondChance: { original: string; until: number } | null = null;
   private followupTimer: ReturnType<typeof setTimeout> | null = null;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -232,18 +241,53 @@ export class VoicePipeline {
     }
     const t = raw.trim();
     if (!this.requireWake || t.length === 0) return t;
+    // Second-chance протух — сбрасываем (ревью 2026-07-10: никаких «тихих» окон дольше 15с).
+    if (this.pendingSecondChance && this.now() > this.pendingSecondChance.until) this.pendingSecondChance = null;
     let cmd: string | null = null;
     if (isWakeAddressed(t)) {
       this.awake = true;
+      this.pendingSecondChance = null; // штатное обращение перекрывает висящий переспрос
       const c = stripWake(t);
       cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
+    } else if (this.pendingSecondChance && isSecondChanceConfirm(t)) {
+      // Б5 second-chance, шаг 2 (ревью 2026-07-10): на «Вы мне, сэр?» пришло ЯВНОЕ короткое «да/тебе»
+      // (≤2 токенов из узкого словаря — «да, объективно» НЕ проходит) → исполняем СОХРАНЁННУЮ
+      // исходную реплику без первого псевдо-имени («Дарья, запусти поиск…» → «запусти поиск…»).
+      // Повторять команду пользователю не нужно. Окно разговора при этом НЕ открывалось — трёп
+      // с тиммейтами между вопросом и ответом никуда не утекал.
+      const original = stripLeadingToken(this.pendingSecondChance.original);
+      this.pendingSecondChance = null;
+      if (original) {
+        this.awake = true;
+        this.log.info("wake second-chance: подтверждено — исполняю исходную реплику", { original: original.slice(0, 50) });
+        cmd = original;
+      }
     } else if (this.awake && this.now() - this.lastActiveAt < this.convWindowMs) {
       // Без обращения — принимаем в КАТЯЩЕМСЯ окне активного разговора (см. lastActiveAt),
       // НО игнорируем чистые междометия («ах», «ох», «хм»…): это фоновый шум, не продолжение.
       if (!isNoiseOnly(t)) cmd = t;
+      this.pendingSecondChance = null; // содержательная реплика в окне — переспрос неактуален
     }
     if (cmd === null) {
-      this.log.info("реплика без обращения «Джарвис» — игнор", { text: t.slice(0, 50) });
+      // Б5 (форензика 2026-07-10): near-miss в лог — «Дарья, запусти поиск в доте» (lev 4 от
+      // «джарвис») тонула молча, дроп был неотличим от трёпа. SECOND-CHANCE, шаг 1: первый токен
+      // ПОХОЖ на обращение (lev ≤4) И идёт активная §20-задача → переспрос «Вы мне, сэр?» (urgent —
+      // должен прозвучать И в fullscreen-игре, это целевой сценарий) + флаг ожидания подтверждения.
+      // ⚠️ Окно разговора НЕ открываем (ревью: «давай»/«держи» дают lev 4 — любая следующая фраза
+      // трёпа ушла бы командой); принимается ТОЛЬКО явное «да/тебе» (см. ветку выше). Кулдаун 2 мин.
+      const near = wakeNearMissScore(t);
+      this.log.info("реплика без обращения «Джарвис» — игнор", { text: t.slice(0, 50), nearMiss: near });
+      if (
+        near <= 4 &&
+        (this.deps.hasActiveTask?.() ?? false) &&
+        this.now() - this.lastSecondChanceAt > 120_000 &&
+        process.env.JARVIS_WAKE_SECOND_CHANCE !== "0"
+      ) {
+        this.lastSecondChanceAt = this.now();
+        this.pendingSecondChance = { original: t, until: this.now() + 15_000 };
+        this.speakQueued("Вы мне, сэр?", true); // urgent: в игре и должен прозвучать
+        this.log.info("wake second-chance: похоже на обращение — переспросил, жду короткое «да»", { nearMiss: near });
+      }
       return "";
     }
     // Анти-дубль: ту же команду не исполняем дважды в коротком окне (повтор пользователя / эхо /

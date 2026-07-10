@@ -68,3 +68,62 @@ describe("EnergyVad (§3/§10)", () => {
     expect(vad.process(LOUD)).toBe("speech_start");
   });
 });
+
+describe("EnergyVad — потолок «вечной речи» (Б5, форензика 2026-07-10: 39-минутный ход под звук игры)", () => {
+  const CFG = { threshold: 700, hangoverFrames: 3, onsetFrames: 2, maxSpeechFrames: 10 };
+  const BG = frame(2000); // громкий фон (игра из колонок)
+
+  it("громкий фон дольше потолка → форс speech_end + адаптивный порог выше фона", () => {
+    const vad = new EnergyVad(CFG);
+    expect(vad.process(BG)).toBeNull();
+    expect(vad.process(BG)).toBe("speech_start");
+    let signal: string | null = null;
+    for (let i = 0; i < CFG.maxSpeechFrames; i += 1) signal = vad.process(BG);
+    expect(signal).toBe("speech_end"); // потолок финализировал ход — команда не тонет в «вечной речи»
+    expect(vad.speaking).toBe(false);
+    expect(vad.effectiveThreshold).toBeGreaterThan(2000); // порог перекалиброван ПОД фон (avg × 1.15)
+    // Тот же фон больше НЕ считается речью (иначе следующий ход снова длился бы вечность).
+    for (let i = 0; i < 5; i += 1) expect(vad.process(BG)).toBeNull();
+    expect(vad.speaking).toBe(false);
+  });
+
+  it("адаптивный порог спадает на тихих кадрах — слух возвращается", () => {
+    const vad = new EnergyVad(CFG);
+    vad.process(BG);
+    vad.process(BG);
+    for (let i = 0; i < CFG.maxSpeechFrames; i += 1) vad.process(BG);
+    expect(vad.effectiveThreshold).toBeGreaterThan(CFG.threshold);
+    for (let i = 0; i < 400; i += 1) vad.process(QUIET); // полураспад ~3с → к базовому
+    expect(vad.effectiveThreshold).toBe(CFG.threshold);
+    vad.process(BG);
+    expect(vad.process(BG)).toBe("speech_start"); // обычная речь снова детектится
+  });
+
+  it("ревью: ПРОДОЛЖАЮЩИЙСЯ громкий фон НЕ съедает адаптивный порог (нет циклов «вечной речи» по 20с)", () => {
+    const vad = new EnergyVad(CFG);
+    vad.process(BG);
+    vad.process(BG);
+    for (let i = 0; i < CFG.maxSpeechFrames; i += 1) vad.process(BG);
+    const raised = vad.effectiveThreshold;
+    expect(raised).toBeGreaterThan(2000);
+    // Симуляция ревью: раньше 35 кадров фона (0.7с) роняли порог под фон → снова speech_start.
+    for (let i = 0; i < 500; i += 1) vad.process(BG);
+    expect(vad.speaking).toBe(false); // фон так и не стал «речью»
+    expect(vad.effectiveThreshold).toBeGreaterThan(2000); // порог держится НАД фоном (спад ×0.9999)
+  });
+
+  it("обычная короткая речь потолка не касается; maxSpeechFrames=0 — потолок выключен", () => {
+    const vad = new EnergyVad(CFG);
+    vad.process(BG);
+    vad.process(BG);
+    vad.process(QUIET);
+    vad.process(QUIET);
+    expect(vad.process(QUIET)).toBe("speech_end"); // штатный hangover
+    expect(vad.effectiveThreshold).toBe(CFG.threshold); // порог не тронут
+    const off = new EnergyVad({ ...CFG, maxSpeechFrames: 0 });
+    off.process(BG);
+    off.process(BG);
+    for (let i = 0; i < 100; i += 1) expect(off.process(BG)).toBeNull();
+    expect(off.speaking).toBe(true); // прежнее поведение
+  });
+});
