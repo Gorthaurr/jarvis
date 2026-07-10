@@ -25,7 +25,11 @@ export function isLoopbackHost(host: string): boolean {
  * reverse-proxy перед сервером (отдельно). Инвариант: remote ⇒ strict auth.
  */
 export function resolveBindHost(config: Pick<ServerConfig, "host" | "allowRemote" | "authStrict">, log: Logger): string {
-  if (isLoopbackHost(config.host)) return config.host;
+  if (isLoopbackHost(config.host)) {
+    // Пустой/пробельный host в Node = bind на ВСЕ интерфейсы. Гард сам нормализует его в loopback,
+    // чтобы «loopback»-ветка НИКОГДА не отдала wildcard (не полагаемся на то, что env() свернёт "" выше).
+    return config.host.trim() === "" ? "127.0.0.1" : config.host;
+  }
   if (!config.allowRemote) {
     log.error("ОТКАЗ: HOST не loopback без JARVIS_ALLOW_REMOTE — принудительно слушаю 127.0.0.1", {
       host: config.host,

@@ -13,7 +13,7 @@
  * клиент генерит+хранит стабильный UUID на первом запуске и шлёт его как token (ОПТ-ИН за
  * JARVIS_CLIENT_IDENTITY; дефолт «dev-token» → DEV_USER, нулевая потеря данных существующей установки).
  */
-import { type Logger, createLogger } from "@jarvis/shared";
+import { type Logger, createLogger, envBool } from "@jarvis/shared";
 import { ensureUser, findUserByTokenHash, recordToken, sha256hex } from "../db/users.js";
 
 const log: Logger = createLogger("identity");
@@ -23,12 +23,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export function isUuid(s: string): boolean {
   return UUID_RE.test(s.trim());
-}
-
-/** Булев флаг из переданного env (для тестируемости без мутации process.env). */
-function flag(env: NodeJS.ProcessEnv, name: string): boolean {
-  const v = (env[name] ?? "").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
 /** Резолв userId из токена (ЧИСТЫЙ, без БД). UUID → раздел клиента; иначе JARVIS_DEV_USER_ID (UUID) → он; иначе seed. */
@@ -57,7 +51,7 @@ export async function resolveAndProvision(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
   const t = (token ?? "").trim();
-  const strict = flag(env, "JARVIS_AUTH_STRICT");
+  const strict = envBool("JARVIS_AUTH_STRICT", false, env);
 
   if (isUuid(t)) {
     const userId = t.toLowerCase();
@@ -75,7 +69,9 @@ export async function resolveAndProvision(
       return null; // handshake закроет 4003
     }
     await ensureUser(userId);
-    await recordToken(userId, hash); // TOFU: запоминаем/обновляем токен
+    // TOFU last_seen — best-effort, результат не нужен; не блокируем handshake (как strict-ветка выше).
+    // FK-родитель уже закоммичен awaited ensureUser, поэтому fire-and-forget безопасен.
+    void recordToken(userId, hash);
     return userId;
   }
 

@@ -24,6 +24,14 @@ describe("bind-гард (§6B/безопасность)", () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
+  it("пустой/пробельный host (в Node = bind-all) нормализуется в 127.0.0.1, wildcard не отдаём", () => {
+    const log = capturingLog();
+    for (const h of ["", "   "]) {
+      expect(resolveBindHost({ host: h, allowRemote: false, authStrict: false }, log)).toBe("127.0.0.1");
+    }
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
   it("не-loopback БЕЗ JARVIS_ALLOW_REMOTE → принудительно 127.0.0.1 + error (сервер не падает)", () => {
     const log = capturingLog();
     const cfg: Cfg = { host: "0.0.0.0", allowRemote: false, authStrict: false };
