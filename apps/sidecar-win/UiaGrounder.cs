@@ -47,16 +47,18 @@ public sealed class UiaGrounder : IDisposable
             throw new ArgumentException($"Неизвестная роль: {role}");
 
         bool substring = nameMode == "substring" && !string.IsNullOrEmpty(name);
-        foreach (AutomationElement root in CandidateRoots(scope))
+        foreach ((AutomationElement root, bool isDesktop) in CandidateRoots(scope))
         {
-            AutomationElement? found = FindIn(root, ct, name, substring, automationId);
+            AutomationElement? found = FindIn(root, ct, name, substring, automationId, isDesktop);
             if (found is not null) return RegisterElement(found);
         }
         return null;
     }
 
-    /// <summary>Корни поиска по scope: pid → окно процесса; null/"" → активное окно, затем весь стол.</summary>
-    private static IEnumerable<AutomationElement> CandidateRoots(string? scope)
+    /// <summary>Корни поиска по scope: pid → окно процесса; null/"" → активное окно, затем весь стол.
+    /// Флаг isDesktop передаётся ЯВНО: AutomationElement.RootElement — НОВЫЙ инстанс на каждый доступ,
+    /// ReferenceEquals с ним всегда false (живой прогон: substring падал в полный UIA-обход стола).</summary>
+    private static IEnumerable<(AutomationElement root, bool isDesktop)> CandidateRoots(string? scope)
     {
         if (!string.IsNullOrEmpty(scope) && scope != "desktop" && int.TryParse(scope, out int pid))
         {
@@ -65,15 +67,15 @@ public sealed class UiaGrounder : IDisposable
             try { win = AutomationElement.RootElement.FindFirst(TreeScope.Children, pidCond); } catch { /* окна нет */ }
             // Ревью Волны 2: явный pid БЕЗ окна → пусто → честное «не найдено».
             // Молчаливое расширение на весь стол грундило бы ЧУЖОЕ приложение.
-            if (win is not null) yield return win;
+            if (win is not null) yield return (win, false);
             yield break;
         }
         if (string.IsNullOrEmpty(scope))
         {
             AutomationElement? fg = ForegroundWindowElement();
-            if (fg is not null) yield return fg;
+            if (fg is not null) yield return (fg, false);
         }
-        yield return AutomationElement.RootElement;
+        yield return (AutomationElement.RootElement, true);
     }
 
     /// <summary>Активное (foreground) окно как AutomationElement; null при сбое (защищённое окно/десктоп).</summary>
@@ -91,7 +93,7 @@ public sealed class UiaGrounder : IDisposable
     }
 
     /// <summary>Поиск в корне: точное имя — через PropertyCondition; substring — перебор кандидатов роли.</summary>
-    private static AutomationElement? FindIn(AutomationElement root, ControlType ct, string? name, bool substring, string? automationId)
+    private static AutomationElement? FindIn(AutomationElement root, ControlType ct, string? name, bool substring, string? automationId, bool isDesktop)
     {
         var conds = new List<Condition> { new PropertyCondition(AutomationElement.ControlTypeProperty, ct) };
         if (!string.IsNullOrEmpty(automationId))
@@ -102,8 +104,26 @@ public sealed class UiaGrounder : IDisposable
 
         try
         {
+            // Поиск ОКНА по имени на корне РАБОЧЕГО СТОЛА (exact И substring): UIA-обход стола
+            // опрашивает провайдер КАЖДОГО окна и блокируется на зависшем — без таймаута (живой
+            // смоук: 40с+ и на промахе exact). Окна ищем БЕЗ UIA — EnumWindows (миллисекунды) →
+            // FromHandle только по попаданию.
+            if (isDesktop && ct == ControlType.Window && !string.IsNullOrEmpty(name))
+            {
+                WindowInfo? hit = WindowManager.List().Windows.FirstOrDefault(w =>
+                    substring
+                        ? w.Title.Contains(name, StringComparison.OrdinalIgnoreCase)
+                        : string.Equals(w.Title, name, StringComparison.OrdinalIgnoreCase));
+                if (hit is null) return null;
+                try { return AutomationElement.FromHandle(new IntPtr(hit.Hwnd)); }
+                catch { return null; }
+            }
             if (!substring) return root.FindFirst(TreeScope.Descendants, cond);
-            // Substring-перебор: ВИДИМЫЙ кандидат приоритетнее (ревью: offscreen-дубль перехватывал матч).
+            // Substring НЕ-оконной роли по всему столу не поддерживаем (честный промах; активное
+            // окно уже пробовалось предыдущим кандидатом CandidateRoots).
+            if (isDesktop) return null;
+            // Substring-перебор ВНУТРИ окна (дерево обозримо): видимый кандидат приоритетнее
+            // (ревью: offscreen-дубль перехватывал матч).
             AutomationElementCollection all = root.FindAll(TreeScope.Descendants, cond);
             AutomationElement? offscreenHit = null;
             foreach (AutomationElement el in all)
@@ -214,7 +234,7 @@ public sealed class UiaGrounder : IDisposable
     public SnapshotResult Snapshot(int? pid, int? maxItems)
     {
         AutomationElement root = pid.HasValue
-            ? CandidateRoots(pid.Value.ToString()).FirstOrDefault()
+            ? CandidateRoots(pid.Value.ToString()).FirstOrDefault().root
               ?? throw new InvalidOperationException($"У процесса pid={pid} нет окна верхнего уровня — снапшот невозможен")
             : ForegroundWindowElement() ?? AutomationElement.RootElement;
 
