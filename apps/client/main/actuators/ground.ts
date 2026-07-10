@@ -46,11 +46,52 @@ function asGroundResult(data: unknown): GroundResult {
   };
 }
 
-/** Найти элемент по роли/имени в активном окне (a11y-first, §6). */
-export async function ground(query: { role: string; name?: string }): Promise<GroundResult> {
+/** Найти элемент по роли/имени в активном окне (a11y-first, §6). §Волна2 (2.4): nameMode="substring"
+ *  — матч имени по вхождению; automationId — устойчивый id. Scope в сайдкаре: активное окно → фолбэк
+ *  на весь рабочий стол. */
+export async function ground(query: {
+  role: string;
+  name?: string;
+  nameMode?: "exact" | "substring";
+  automationId?: string;
+}): Promise<GroundResult> {
   ensure();
   log.debug("ui.ground", query);
-  return asGroundResult(await sidecar().request("ground", { role: query.role, name: query.name }, UIA_TIMEOUT_MS));
+  return asGroundResult(
+    await sidecar().request(
+      "ground",
+      { role: query.role, name: query.name, nameMode: query.nameMode, automationId: query.automationId },
+      UIA_TIMEOUT_MS,
+    ),
+  );
+}
+
+/** §Волна2 (2.4): интерактивные элементы окна одним списком (set-of-marks) — дешёвые «глаза». */
+export interface UiSnapshotItem {
+  handle: number;
+  role: string;
+  name: string;
+  automationId?: string | null;
+  value?: string | null;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export interface UiSnapshot {
+  window: string;
+  pid: number;
+  items: UiSnapshotItem[];
+  truncated: boolean;
+}
+
+/** §Волна2 (2.4): снапшот интерактивных элементов окна (pid не задан → активное окно). */
+export async function uiSnapshot(pid?: number, maxItems?: number): Promise<UiSnapshot> {
+  ensure();
+  log.debug("ui.snapshot", { pid, maxItems });
+  const data = (await sidecar().request("ui.snapshot", { pid, maxItems }, UIA_TIMEOUT_MS)) as UiSnapshot;
+  if (!data || !Array.isArray(data.items)) throw new Error("ui.snapshot: сайдкар вернул пустой снапшот");
+  return data;
 }
 
 /** §бесшумный-ввод: элемент под ТОЧКОЙ (логические virtual-desktop координаты, как у click) → handle

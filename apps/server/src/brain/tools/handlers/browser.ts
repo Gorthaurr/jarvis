@@ -226,14 +226,27 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         already?: boolean;
         playing?: boolean;
         currentTime?: number;
+        changed?: boolean;
+        method?: string;
         error?: string;
       };
       const diagObj: Record<string, unknown> = {};
-      for (const k of ["note", "navigated", "already", "playing", "currentTime"] as const) {
+      // §Волна2 (2.1): + changed (DOM-диф клика) и method — честный readback в том же ответе.
+      for (const k of ["note", "navigated", "already", "playing", "currentTime", "changed", "method"] as const) {
         if (r[k] !== undefined) diagObj[k] = r[k];
       }
       const diag = Object.keys(diagObj).length ? ` Результат: ${JSON.stringify(diagObj)}` : "";
-      return ok(`Сделал «${intent}» в браузере.${diag}`);
+      const out = ok(
+        `Сделал «${intent}» в браузере.${diag}` +
+          (r.changed === false ? " ВНИМАНИЕ: контент страницы НЕ изменился — действие могло не дать эффекта, сверь (browser_read/inspect) прежде чем говорить «готово»." : ""),
+      );
+      // §Волна2 (2.1) fused observe: реальный readback состояния (звук пошёл/время/навигация/DOM
+      // изменился) = сверка в том же раунде. changed:false наблюдением УСПЕХА не считаем —
+      // verify-долг остаётся, модель обязана посмотреть, что произошло.
+      if (r.playing !== undefined || r.currentTime !== undefined || r.navigated !== undefined || r.changed === true) {
+        out.observed = true;
+      }
+      return out;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       markBrowserActMiss(ctx); // P2.1: DOM-путь исчерпан (нет элемента/исключение/autoplay-гейт) → разрешаем координатный клик

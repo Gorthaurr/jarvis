@@ -35,6 +35,35 @@ export type CodeLang = "python" | "node" | "powershell";
 /** Канал переписки от лица пользователя (§12). */
 export type MessageChannel = "vk" | "telegram";
 
+/** Кнопка мыши (§Волна2 2.4). */
+export type MouseButton = "left" | "right" | "middle";
+
+/**
+ * Регион экрана (§Волна2 2.3): по умолчанию — в координатах ПОСЛЕДНЕГО полного screen_capture
+ * (как Target.coords); space="screen" — абсолютные экранные DIP virtual-desktop без маппинга.
+ */
+export interface ScreenRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  space?: "screen";
+}
+
+/**
+ * Условие клиентского ожидания wait.for (§Волна2 2.3) — проверяется поллингом НА КЛИЕНТЕ,
+ * без LLM-раундов. gone=true — ждать ИСЧЕЗНОВЕНИЯ (окно закрылось, спиннер пропал).
+ *  - ui: элемент в UIA-дереве (роль+имя, nameMode как у ui.ground);
+ *  - window: окно верхнего уровня по подстроке заголовка / имени процесса;
+ *  - text: текст на экране через локальный OCR (регион/монитор — как screen.ocr);
+ *  - sound: системный звук идёт/нет (WASAPI peak, как system.media state).
+ */
+export type WaitCondition =
+  | { kind: "ui"; role: string; name?: string; nameMode?: "exact" | "substring"; gone?: boolean }
+  | { kind: "window"; titleContains?: string; process?: string; gone?: boolean }
+  | { kind: "text"; text: string; monitor?: string | number; rect?: ScreenRect; gone?: boolean }
+  | { kind: "sound"; playing: boolean };
+
 /**
  * Операции питания ОС. shutdown/restart/logoff необратимы → confirm (§4).
  * shutdown/restart исполняются С ЗАДЕРЖКОЙ и предупреждением ОС (окно отмены), а не мгновенно;
@@ -85,9 +114,33 @@ type ActionCommandKind =
   // input.click — §6 клик. method (клиент выбирает лестницу деградации): "silent" (дефолт на десктопе) =
   // без движения физ.курсора (UIA-invoke по handle/координатам → оконное сообщение → физ.клик С ВОЗВРАТОМ
   // курсора); "physical" = сразу SendInput (игры/canvas, где silent заведомо не сработает — не тратим round-trip).
-  | { kind: "input.click"; target: Target; method?: "silent" | "physical" }
+  // §Волна2 (2.4): button (right/middle — контекстные меню), count=2 (дабл-клик).
+  | { kind: "input.click"; target: Target; method?: "silent" | "physical"; button?: MouseButton; count?: number }
+  // §Волна2 (2.4): полная мышь — hover/удержание/колесо/перетаскивание (игры, DnD, контекст-меню).
+  // Координаты — как у input.click coords (vision-координаты последнего screen_capture; space:"screen" = абсолютные DIP).
+  | {
+      kind: "input.mouse";
+      op: "move" | "down" | "up" | "wheel" | "drag";
+      x?: number;
+      y?: number;
+      toX?: number; // drag: куда
+      toY?: number;
+      button?: MouseButton;
+      dy?: number; // wheel: вертикальные тики (+вверх/−вниз)
+      dx?: number; // wheel: горизонтальные тики
+      space?: "screen"; // как у Target.coords: абсолютные экранные DIP без маппинга снимка
+    }
   | { kind: "ui.invoke"; target: Target; pattern: UiPattern; value?: string } // UIA-паттерны — ОСНОВНОЙ путь
-  | { kind: "ui.ground"; query: { role: string; name?: string } } // -> возвращает handle/bbox в ActionResult.data
+  // §Волна2 (2.4): nameMode="substring" — матч имени по вхождению; automationId — устойчивый id элемента.
+  | { kind: "ui.ground"; query: { role: string; name?: string; nameMode?: "exact" | "substring"; automationId?: string } } // -> handle/bbox в ActionResult.data
+  // §Волна2 (2.4): set-of-marks — интерактивные элементы окна {handle, role, name, automationId, bbox}
+  // одним дешёвым списком (~сотни токенов текста вместо 2K-скрина). pid не задан → активное окно.
+  | { kind: "ui.snapshot"; pid?: number; maxItems?: number }
+  // §Волна2 (2.4): окна верхнего уровня on-demand (hwnd/pid/process/title/foreground/minimized).
+  | { kind: "window.list" }
+  // §Волна2 (2.4): фокус окна по hwnd (из window.list) или подстроке заголовка/имени процесса —
+  // SetForegroundWindow с ЧЕСТНЫМ readback (focused=false → фокус реально не взят).
+  | { kind: "window.focus"; hwnd?: number; query?: string }
   | { kind: "app.launch"; app: string }
   | { kind: "app.focus"; app: string }
   // Закрыть приложение ПО ПРОЦЕССУ (§6). graceful (CloseMainWindow, как клик по крестику) по
@@ -110,7 +163,15 @@ type ActionCommandKind =
       steps: SkillStep[];
       params?: Record<string, unknown>;
     } // клиентский skill-runner, §8
-  | { kind: "screen.capture"; monitor?: string | number } // monitor: "active"(дефолт, под курсором)|"primary"|"jarvis"|индекс
+  // §Волна2 (2.3): rect — кроп региона (координаты ПОСЛЕДНЕГО полного снимка; space:"screen" = DIP
+  // virtual-desktop); scale — доп. масштаб кропа (1 = как есть). Сверка кнопки ~50-200 ток вместо 2K.
+  | { kind: "screen.capture"; monitor?: string | number; rect?: ScreenRect; scale?: number } // monitor: "active"(дефолт, под курсором)|"primary"|"jarvis"|индекс
+  // §Волна2 (2.3): локальный OCR (Windows.Media.Ocr в сайдкаре) — текст с canvas/игр БЕЗ vision-раунда.
+  | { kind: "screen.ocr"; monitor?: string | number; rect?: ScreenRect; lang?: string }
+  // §Волна2 (2.3): $0-проба «изменилось ли» — перцептивный хеш региона (сравнивать между вызовами).
+  | { kind: "screen.probe"; rect?: ScreenRect; monitor?: string | number }
+  // §Волна2 (2.3): клиентское ОЖИДАНИЕ события без LLM-поллинга — один tool-вызов вместо N vision-раундов.
+  | { kind: "wait.for"; condition: WaitCondition; timeoutMs?: number; pollMs?: number }
   | { kind: "context.read"; scope: "selection" | "active_window" | "screen" } // дейксис, §19
   | { kind: "demo.record"; op: "start" | "stop" } // обучение демонстрацией, §8
   | { kind: "message.send"; channel: MessageChannel; to: string; body: string } // ТРЕБУЕТ confirm + cadence guard

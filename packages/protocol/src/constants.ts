@@ -30,6 +30,12 @@ export function actionTimeoutMs(kind: string): number {
     case "app.focus":
     case "browser.open":
       return 20_000; // close: Start-Sleep 1.2с + скан процессов; focus/open: резолв окна/shell-fallback
+    case "wait.for":
+      return 130_000; // §Волна2 (2.3): клиентское ожидание — до 120с поллинга + запас на транспорт
+    case "screen.ocr":
+      return 25_000; // §Волна2 (2.3): захват + OCR в сайдкаре (его внутренний таймаут 20с)
+    case "ui.snapshot":
+      return 20_000; // §Волна2 (2.4): обход UIA-дерева сложного окна дольше дефолтных 15с
     default:
       return DEFAULT_ACTION_TIMEOUT_MS;
   }

@@ -809,6 +809,7 @@ class PersistentDeepgramConnection {
     let m: {
       type?: string;
       is_final?: boolean;
+      speech_final?: boolean; // §Волна2 (2.6): endpointing=300 Deepgram — «фраза кончилась»
       start?: number;
       duration?: number;
       channel?: { alternatives?: Array<{ transcript?: string; confidence?: number }> };
@@ -848,7 +849,17 @@ class PersistentDeepgramConnection {
       // Волна 1: confidence больше НЕ выбрасывается (legacy-путь его отдавал, персистентный — нет):
       // потребители (гейт обрывков/будущий clarify по неуверенности) видят уверенность Deepgram.
       const confidence = m?.channel?.alternatives?.[0]?.confidence;
-      if (live) this.currentLease?.emitPartial({ text: live, final: false, ...(typeof confidence === "number" ? { confidence } : {}) });
+      // §Волна2 (2.6): speech_final (endpointing=300) больше НЕ выбрасывается — пайплайн по нему
+      // делает РАННИЙ серверный эндпоинт (~350-400мс от конца речи против ~520+150 клиентского пути).
+      // Прошёл гейт границы хода выше (rStart≥turnStartSec) → хвост прошлого хода новый не эндпоинтит.
+      const speechFinal = m.is_final === true && m.speech_final === true && this.turnState === "active";
+      if (live)
+        this.currentLease?.emitPartial({
+          text: live,
+          final: false,
+          ...(typeof confidence === "number" ? { confidence } : {}),
+          ...(speechFinal ? { speechFinal: true } : {}),
+        });
     }
     // ПЕЧАТЬ, когда Deepgram обработал ВСЮ длительность хода (надёжнее таймера тишины — не зависит от
     // лага). Не дотянул — пинаем фолбэк-таймер тишины (на случай, если хвост хода был тишиной без Results).

@@ -73,7 +73,12 @@ export function maskedFailureReply(spokeAny: boolean): string {
 }
 
 // VERIFY-ПЕТЛЯ (анти-конфабуляция). Сверка глазами — читает реальное состояние страницы/экрана.
-const VERIFY_TOOLS = new Set(["browser_read", "browser_inspect", "screen_capture", "web_read", "context_read"]);
+// Волна 2 (2.3/2.4): ui_snapshot (живое UIA-дерево окна) и screen_read_text (локальный OCR реальных
+// пикселей) — полноценные ДЕШЁВЫЕ сверки: читают фактическое состояние, а не доверяют «ok» действия.
+const VERIFY_TOOLS = new Set([
+  "browser_read", "browser_inspect", "screen_capture", "web_read", "context_read",
+  "ui_snapshot", "screen_read_text",
+]);
 // Нейтральные — не меняют наблюдаемый результат на экране (поиск/память/навыки/служебные).
 const NEUTRAL_TOOLS = new Set([
   "web_search", "web_fetch", "memory_write", "memory_search", "skill_save", "skill_list", "skill_execute",
@@ -90,6 +95,10 @@ const NEUTRAL_TOOLS = new Set([
   // числился слепым mutate → успешный грундинг взводил verify-нудж («сверь глазами») и КАРАЛ дешёвый
   // UIA-путь лишним vision-раундом — модель закономерно предпочитала сразу screen_capture.
   "ui_ground",
+  // Волна 2 (2.3/2.4): чтения нового дешёвого слоя. window_list — список окон; screen_probe — детектор
+  // перемен (НЕ verify: хеш не доказывает исход — план §4.2); wait_for — ожидание (его met:true за
+  // сверку зачитывает agent-петля по data.met, не статический класс — см. dispatch/observed).
+  "window_list", "screen_probe", "wait_for",
 ]);
 
 // H3: у MCP-инструментов (mcp__server__tool) эффект не известен заранее. Читающее ИМЯ (get/list/
@@ -117,6 +126,11 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
 // ui_ground здесь НЕ значится — это чтение (см. NEUTRAL_TOOLS выше).
 const BLIND_MUTATE_TOOLS = new Set([
   "input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke",
+  // Волна 2 (2.4): input_mouse — тот же слепой SendInput (drag/удержание/колесо без обратной связи).
+  // window_focus сюда НЕ входит: он самоподтверждается честным readback focused (как system_volume).
+  "input_mouse",
+  // Волна 2 (2.2): берст шагов — слепой по умолчанию; приложенное наблюдение (observed) снимает долг.
+  "input_batch",
 ]);
 
 /** Слепое ли это меняющее действие — то, чей успех надо подтвердить наблюдением, не доверяя «ok». */

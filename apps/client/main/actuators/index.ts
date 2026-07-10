@@ -18,10 +18,13 @@ import { createLogger } from "@jarvis/shared";
 import * as apps from "./apps.js";
 import * as input from "./input.js";
 import * as ground from "./ground.js";
+import * as windows from "./windows.js";
 import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
 import * as fs from "./fs.js";
-import { captureScreen } from "./screen.js";
+import { type CaptureRect, captureScreen, getLastCaptureMapping, probeScreen } from "./screen.js";
+import { screenOcr, waitFor } from "./sensors-cheap.js";
+import { observeAfterAction } from "./observe.js";
 import * as system from "./system.js";
 import * as office from "./office.js";
 import * as obs from "./obs.js";
@@ -47,7 +50,7 @@ const JARVIS_INPUT_TOLERANCE_MS = 900;
 /** Когда Джарвис последний раз сам инжектил ввод (для отсечки собственного ввода из детекта активности). */
 let lastJarvisInputAt = 0;
 /** Команды, которые ФИЗИЧЕСКИ инжектят ввод в сессию пользователя (в отличие от UIA-invoke/CDP). */
-const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key"]);
+const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key", "input.mouse"]);
 
 /**
  * Активен ли пользователь ПРЯМО СЕЙЧАС (недавно вводил сам, а не Джарвис). Логика — в user-presence.
@@ -182,29 +185,94 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         }
       }
 
-      // ── СТАБЫ (бросают NotImplementedError) ──────────────────
-      case "input.type":
+      // ── Синтетический ввод (§Волна2 2.1: fused act+observe — наблюдение в ТОМ ЖЕ результате) ──
+      case "input.type": {
         await input.typeText(cmd.text);
         lastJarvisInputAt = Date.now(); // наш ввод сбросит системный idle — пометим, чтобы не счесть «юзер активен»
-        return okResult(commandId, startedAt);
-      case "input.key":
+        const observation = await observeAfterAction({ settleMs: 150 });
+        return okResult(commandId, startedAt, observation ? { observation } : undefined);
+      }
+      case "input.key": {
         await input.pressKey(cmd.combo, cmd.mode, cmd.scancode);
         lastJarvisInputAt = Date.now();
-        return okResult(commandId, startedAt);
+        // Игровое удержание (down/up) — середина жеста, наблюдение неуместно (см. Волна2 2.1).
+        const observation = cmd.mode === "down" || cmd.mode === "up" ? undefined : await observeAfterAction({ settleMs: 250 });
+        return okResult(commandId, startedAt, observation ? { observation } : undefined);
+      }
       case "input.click": {
         // §бесшумный-ввод: по умолчанию silent (без курсора); физ.клик-фолбэк возвращает курсор, ЕСЛИ юзер
         // сейчас НЕ двигает мышь сам (иначе не дёргаем — оставляем курсор там, где он у него).
         // Разрешённые экранные координаты возвращаем в data — сервер компилирует из них реплей-макрос (§8).
-        const clicked = await input.click(cmd.target, cmd.method ?? "silent", !userActiveNow());
+        const clicked = await input.click(cmd.target, cmd.method ?? "silent", !userActiveNow(), {
+          button: cmd.button,
+          count: cmd.count,
+        });
         lastJarvisInputAt = Date.now();
-        return okResult(commandId, startedAt, clicked);
+        // §Волна2 (2.1): наблюдение после клика — a11y-выжимка / OCR региона вокруг точки.
+        const observation = await observeAfterAction({
+          settleMs: 400,
+          clickPoint: clicked ? { x: clicked.screenX, y: clicked.screenY } : undefined,
+        });
+        return okResult(commandId, startedAt, observation ? { ...clicked, observation } : clicked);
       }
-      case "ui.invoke":
+      case "input.mouse": {
+        // §Волна2 (2.4): полная мышь — hover/удержание/колесо/перетаскивание (DnD, контекст-меню, игры).
+        await input.mouse(cmd);
+        lastJarvisInputAt = Date.now();
+        // Наблюдение — для завершённых жестов (drag/wheel/up); move/down — середина жеста.
+        const wantsObserve = cmd.op === "drag" || cmd.op === "wheel" || cmd.op === "up";
+        // Точка для OCR-региона — конец drag в экранных DIP (координаты команды — vision-координаты
+        // последнего снимка, кроме space:"screen"; маппинг тот же, что внутри input.mouse).
+        const dragEnd = (() => {
+          if (cmd.op !== "drag" || cmd.toX === undefined || cmd.toY === undefined) return undefined;
+          if (cmd.space === "screen") return { x: cmd.toX, y: cmd.toY };
+          const m = getLastCaptureMapping();
+          return m ? { x: m.boundsX + cmd.toX / m.scale, y: m.boundsY + cmd.toY / m.scale } : { x: cmd.toX, y: cmd.toY };
+        })();
+        const observation = wantsObserve
+          ? await observeAfterAction({ settleMs: 400, clickPoint: dragEnd })
+          : undefined;
+        return okResult(commandId, startedAt, observation ? { op: cmd.op, observation } : { op: cmd.op });
+      }
+      case "ui.invoke": {
         await ground.invoke(cmd.target, cmd.pattern, cmd.value);
-        return okResult(commandId, startedAt);
+        const observation = await observeAfterAction({ settleMs: 350 });
+        return okResult(commandId, startedAt, observation ? { observation } : undefined);
+      }
       case "ui.ground": {
         const g = await ground.ground(cmd.query);
         return okResult(commandId, startedAt, g);
+      }
+      case "ui.snapshot": {
+        // §Волна2 (2.4): set-of-marks — интерактивные элементы окна одним дешёвым списком.
+        const snap = await ground.uiSnapshot(cmd.pid, cmd.maxItems);
+        return okResult(commandId, startedAt, snap);
+      }
+      case "window.list": {
+        // §Волна2 (2.4): окна верхнего уровня on-demand («появилось ли окно» за миллисекунды).
+        return okResult(commandId, startedAt, { windows: await windows.listWindows() });
+      }
+      case "window.focus": {
+        // §Волна2 (2.4): фокус через сайдкар (SetForegroundWindow+AttachThreadInput, честный readback);
+        // провал → фолбэк на старый AppActivate-путь по query (замена PowerShell — но не выбрасываем его).
+        const r = await windows.focusWindow({ hwnd: cmd.hwnd, query: cmd.query });
+        if (r.focused) {
+          lastJarvisInputAt = Date.now();
+          return okResult(commandId, startedAt, r);
+        }
+        if (cmd.query) {
+          const legacy = await apps.focusApp(cmd.query);
+          if (legacy.focused) {
+            lastJarvisInputAt = Date.now();
+            return okResult(commandId, startedAt, { ...r, focused: true, via: "AppActivate" });
+          }
+        }
+        return errResult(
+          commandId,
+          startedAt,
+          "runtime",
+          `окно найдено («${r.title}»), но фокус не перешёл (foreground-lock). Попробуй app_focus или проверь, не заблокирован ли рабочий стол.`,
+        );
       }
       case "browser.act":
         await browser.act(cmd.intent, cmd.params);
@@ -248,11 +316,41 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           // needsLlm-шаг (не исполняет вслепую с незаполненным плейсхолдером). Детерминированные шаги
           // (в т.ч. со слотами, заполненными сервером в cmd.params) исполняются как прежде, $0/без LLM.
         });
-        return outcomeToActionResult(commandId, outcome, Date.now() - startedAt);
+        const skillRes = outcomeToActionResult(commandId, outcome, Date.now() - startedAt);
+        // §Волна2 (2.1/2.2): успешный реплей/берст — приложить наблюдение итогового состояния
+        // (fused observe): сервер увидит реальный экран в том же tool_result.
+        if (skillRes.ok) {
+          const observation = await observeAfterAction({ settleMs: 400 });
+          if (observation) skillRes.data = { observation };
+        }
+        return skillRes;
       }
       case "screen.capture":
         // Зрение (§): снять активный монитор (под курсором) / выбранный → base64 PNG в ActionResult.data.
-        return okResult(commandId, startedAt, await captureScreen(cmd.monitor));
+        // §Волна2 (2.3): rect/scale — кроп региона (~50-200 ток) вместо полного кадра.
+        return okResult(
+          commandId,
+          startedAt,
+          await captureScreen(cmd.monitor, {
+            rect: cmd.rect as CaptureRect | undefined,
+            scale: cmd.scale,
+          }),
+        );
+      case "screen.ocr": {
+        // §Волна2 (2.3): локальный OCR (Windows.Media.Ocr в сайдкаре) — текст с экрана без vision-раунда.
+        const ocr = await screenOcr(cmd.monitor, cmd.rect as CaptureRect | undefined, cmd.lang);
+        return okResult(commandId, startedAt, ocr);
+      }
+      case "screen.probe": {
+        // §Волна2 (2.3): $0-проба «изменилось ли» — перцептивный хеш региона (НЕ доказательство успеха).
+        return okResult(commandId, startedAt, await probeScreen(cmd.monitor, cmd.rect as CaptureRect | undefined));
+      }
+      case "wait.for": {
+        // §Волна2 (2.3): клиентское ожидание события (UIA/окно/OCR-текст/звук) — без LLM-поллинга.
+        // met:false по таймауту — ЧЕСТНЫЙ исход в data (модель решает сама), не ошибка транспорта.
+        const w = await waitFor(cmd.condition, cmd.timeoutMs, cmd.pollMs);
+        return okResult(commandId, startedAt, w);
+      }
       case "context.read": {
         // Дейксис (§19): selection/active_window через сайдкар (TextPattern); screen — vision (позже).
         const text = await ground.readContext(cmd.scope);

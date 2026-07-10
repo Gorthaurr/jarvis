@@ -163,8 +163,11 @@ export async function click(
   target: Target,
   method: "silent" | "physical" = "silent",
   restoreCursor = true,
+  opts?: { button?: "left" | "right" | "middle"; count?: number },
 ): Promise<{ screenX: number; screenY: number } | undefined> {
   ensure();
+  const button = opts?.button ?? "left";
+  const count = Math.max(1, Math.min(3, opts?.count ?? 1));
   // coords приходят в координатах ПОСЛЕДНЕГО screen_capture (thumbnail монитора) → логические virtual-desktop.
   // space="screen" (§8 реплей-макрос) — уже АБСОЛЮТНЫЕ экранные DIP: маппинг снимка не применяем.
   const coords =
@@ -179,7 +182,9 @@ export async function click(
   const resolved = coords ? { screenX: coords.x, screenY: coords.y } : undefined;
 
   // БЕСШУМНАЯ лестница (ступени 1-2). Провал ступени → честный фолбэк на физ.клик ниже (не молча).
-  if (method !== "physical") {
+  // §Волна2 (2.4): правый/средний/дабл-клик UIA-invoke не выразить — сразу физический путь.
+  const silentPossible = button === "left" && count === 1;
+  if (method !== "physical" && silentPossible) {
     try {
       if (target.by === "handle" || target.by === "role") {
         await invoke(target, "invoke"); // UIA invoke — курсор не двигается, окно не в фокусе
@@ -198,14 +203,59 @@ export async function click(
 
   // ФИЗ.КЛИК (method=physical ИЛИ фолбэк бесшумного): SendInput; курсор возвращаем при простое юзера (§бесшумный-ввод).
   if (target.by === "coords") {
-    await sidecar().request("click", { x: coords!.x, y: coords!.y, restoreCursor });
+    await sidecar().request("click", { x: coords!.x, y: coords!.y, restoreCursor, button, count });
   } else if (target.by === "handle") {
-    await sidecar().request("click", { handle: target.handle, restoreCursor });
+    await sidecar().request("click", { handle: target.handle, restoreCursor, button, count });
   } else {
     const g = await ground({ role: target.role, name: target.name }); // role → handle → физ.клик по центру
-    await sidecar().request("click", { handle: g.handle, restoreCursor });
+    await sidecar().request("click", { handle: g.handle, restoreCursor, button, count });
   }
   return resolved;
+}
+
+/** Параметры полной мыши (§Волна2 2.4) — зеркало ActionCommand input.mouse без kind. */
+export interface MouseParams {
+  op: "move" | "down" | "up" | "wheel" | "drag";
+  x?: number;
+  y?: number;
+  toX?: number;
+  toY?: number;
+  button?: "left" | "right" | "middle";
+  dy?: number;
+  dx?: number;
+  space?: "screen";
+}
+
+/**
+ * §Волна2 (2.4): полная мышь — hover/удержание/колесо/перетаскивание (контекстные меню, DnD,
+ * игровые механики). Координаты — как у click: vision-координаты последнего screen_capture
+ * (space:"screen" — абсолютные DIP virtual-desktop без маппинга).
+ */
+export async function mouse(params: MouseParams): Promise<void> {
+  ensure();
+  const m = params.space === "screen" ? null : getLastCaptureMapping();
+  const map = (x?: number, y?: number): { x?: number; y?: number } => {
+    if (x === undefined || y === undefined) return { x, y };
+    if (!m) return { x, y };
+    return { x: m.boundsX + x / m.scale, y: m.boundsY + y / m.scale };
+  };
+  const from = map(params.x, params.y);
+  const to = map(params.toX, params.toY);
+  log.debug("input.mouse", { op: params.op, button: params.button });
+  await sidecar().request(
+    "mouse",
+    {
+      op: params.op,
+      x: from.x,
+      y: from.y,
+      toX: to.x,
+      toY: to.y,
+      button: params.button,
+      dy: params.dy,
+      dx: params.dx,
+    },
+    15_000, // drag с интерполяцией — сотни мс; запас на медленный UI
+  );
 }
 
 /** Единый маркер «не реализовано/недоступно» — dispatch маппит его в error.runtime. */

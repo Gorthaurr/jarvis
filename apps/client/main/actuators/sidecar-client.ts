@@ -111,12 +111,25 @@ export class JsonLineRpc {
   }
 }
 
+/** §Волна2 (2.4): бэкофф авто-рестарта сайдкара — 1с → ×2 → потолок 30с; сбрасывается аптаймом. */
+const RESTART_BASE_MS = 1_000;
+const RESTART_MAX_MS = 30_000;
+/** Прожил дольше — считаем запуск здоровым, бэкофф сбрасывается (не копится от давних падений). */
+const HEALTHY_UPTIME_MS = 60_000;
+
 /** Управляет процессом сайдкара и предоставляет RPC. */
 export class SidecarClient {
   private child: ChildProcess | null = null;
   private rpc: JsonLineRpc | null = null;
   private _ready = false;
   private pushHandler: PushHandler | null = null;
+  // §Волна2 (2.4): авто-рестарт при падении процесса (раньше падение = «оглох навсегда» до
+  // перезапуска клиента). stop() — намеренная остановка, рестарт не планирует.
+  private exePath: string | null = null;
+  private restartDelayMs = RESTART_BASE_MS;
+  private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private startedAt = 0;
+  private stopped = false;
 
   get ready(): boolean {
     return this._ready;
@@ -127,11 +140,18 @@ export class SidecarClient {
     this.pushHandler = cb;
   }
 
-  /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false. */
+  /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false (+ авто-ретрай с бэкоффом). */
   start(exePath: string): void {
+    this.exePath = exePath;
+    this.stopped = false;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     try {
       const child = spawn(exePath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       this.child = child;
+      this.startedAt = Date.now();
       this.rpc = new JsonLineRpc(
         (line) => child.stdin?.write(line),
         (msg) => this.pushHandler?.(msg),
@@ -144,18 +164,36 @@ export class SidecarClient {
         log.warn(`sidecar не запустился: ${e.message}`);
         this._ready = false;
         this.rpc?.rejectAll("sidecar process error");
+        this.scheduleRestart();
       });
       child.on("exit", (code) => {
         log.warn(`sidecar завершился: code=${code}`);
         this._ready = false;
         this.rpc?.rejectAll("sidecar exited");
+        this.scheduleRestart();
       });
       this._ready = true;
       log.info(`sidecar запущен: ${exePath}`);
     } catch (e) {
       log.warn(`не удалось запустить sidecar: ${e instanceof Error ? e.message : String(e)}`);
       this._ready = false;
+      this.scheduleRestart();
     }
+  }
+
+  /** §Волна2 (2.4): перезапуск упавшего сайдкара с экспоненциальным бэкоффом (не при stop()). */
+  private scheduleRestart(): void {
+    if (this.stopped || !this.exePath || this.restartTimer) return;
+    // Здоровый аптайм сбрасывает бэкофф: редкое падение стартует ретраи заново с 1с.
+    if (Date.now() - this.startedAt > HEALTHY_UPTIME_MS) this.restartDelayMs = RESTART_BASE_MS;
+    const delay = this.restartDelayMs;
+    this.restartDelayMs = Math.min(RESTART_MAX_MS, this.restartDelayMs * 2);
+    log.info(`sidecar: авто-рестарт через ${Math.round(delay / 1000)}с`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (!this.stopped && this.exePath) this.start(this.exePath);
+    }, delay);
+    this.restartTimer.unref?.();
   }
 
   /** Выполнить RPC-операцию. Бросает, если сайдкар не готов. */
@@ -180,6 +218,11 @@ export class SidecarClient {
   }
 
   stop(): void {
+    this.stopped = true; // намеренная остановка — авто-рестарт не планируем
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     this.child?.kill();
     this.child = null;
     this.rpc?.rejectAll("sidecar stopped");

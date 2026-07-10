@@ -207,9 +207,10 @@ export class Transport extends EventEmitter {
     this.send(makeEnvelope<Takeover>("client.takeover", { active }));
   }
 
-  /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту. */
-  sendEnv(summary: string): void {
-    this.send(makeEnvelope<ClientEnv>("client.env", { summary }));
+  /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту.
+   *  §Волна2 (2.6): + структурные списки приложений/игр — лексикон STT-нормализатора. */
+  sendEnv(summary: string, apps?: string[], games?: string[]): void {
+    this.send(makeEnvelope<ClientEnv>("client.env", { summary, ...(apps?.length ? { apps } : {}), ...(games?.length ? { games } : {}) }));
   }
 
   /** Живой системный снимок (§контекст): что открыто/на переднем плане/мониторы → хвост промпта. */

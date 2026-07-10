@@ -191,6 +191,28 @@ export class TaskManager {
     return cancelled;
   }
 
+  /**
+   * §Волна2 (2.5) admission-очередь: свежесозданная задача (0 шагов) → "queued" — честный чип
+   * «в очереди» вместо вранья «running», пока GUI-задача стоит за арендой ввода. Только running
+   * без прогресса (не даунгрейдим реально идущую работу).
+   */
+  markQueued(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || task.state !== "running" || task.stepsDone > 0) return false;
+    task.state = "queued";
+    this.onChange?.();
+    return true;
+  }
+
+  /** §Волна2 (2.5): очередь дождалась аренды — queued → "running". resume() не трогаем (он paused-специфичен). */
+  start(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task || task.state !== "queued") return false;
+    task.state = "running";
+    this.onChange?.();
+    return true;
+  }
+
   /** §20: «пауза» — running/queued → paused. false для прочих состояний. */
   pause(taskId: string): boolean {
     const task = this.tasks.get(taskId);

@@ -21,10 +21,12 @@ export const INPUT_BEARING_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>(
   "input.type",
   "input.key",
   "input.click",
+  "input.mouse", // §Волна2 (2.4): SendInput — та же мышь, тот же арбитраж
   "ui.invoke",
   "app.launch",
   "app.focus",
   "app.close",
+  "window.focus", // §Волна2 (2.4): кража фокуса — сериализуется как app.focus
   "browser.open",
   "browser.act",
   "skill.execute",
@@ -42,6 +44,9 @@ export function kindNeedsInput(kind: ActionKind): boolean {
  * самописные инструменты резолвятся в code.run (песочница, без GUI) → тоже нет.
  */
 export function toolNeedsInput(name: string): boolean {
+  // §Волна2 (2.2): input_batch — серверный инструмент (не в карте актуаторов), но эмитит
+  // skill.execute (серия GUI-шагов) → аренда ввода обязательна.
+  if (name === "input_batch") return true;
   const kind = ACTUATOR_KIND_BY_TOOL[name];
   return kind ? kindNeedsInput(kind) : false;
 }

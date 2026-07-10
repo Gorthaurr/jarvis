@@ -442,6 +442,10 @@ function registerIpc(): void {
 // reconnect тоже). Ревью 2026-07-10 (А7): раньше собирался ОДИН раз на процесс Electron и застывал —
 // поставленная сегодня игра/CLI не появлялась в окружении до перезапуска клиента. Теперь TTL 6ч.
 let envSummary: string | undefined;
+// §Волна2 (2.6): структурные списки приложений/игр — лексикон STT-нормализатора на сервере
+// (строку summary там не парсим — хрупко).
+let envApps: string[] = [];
+let envGames: string[] = [];
 let envBuiltAt = 0;
 const ENV_TTL_MS = 6 * 3_600_000;
 async function sendEnvProfile(): Promise<void> {
@@ -449,10 +453,12 @@ async function sendEnvProfile(): Promise<void> {
     if (envSummary === undefined || Date.now() - envBuiltAt > ENV_TTL_MS) {
       const profile = await buildSystemProfile();
       envSummary = formatProfileSummary(profile);
+      envApps = profile.apps.map((a) => a.name);
+      envGames = [...(profile.games ?? [])];
       envBuiltAt = Date.now();
       log.info("окружение определено (авто)", { summary: envSummary });
     }
-    if (envSummary) transport?.sendEnv(envSummary);
+    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames);
   } catch (e) {
     log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
   }
@@ -516,6 +522,9 @@ function startSidecar(): void {
   // В dev C#-сайдкар может быть не собран — тогда ready=false, актуаторы UIA деградируют.
   const candidates = [
     join(process.resourcesPath ?? "", "sidecar-win.exe"),
+    // §Волна2 (2.3): TFM сайдкара поднят до net8.0-windows10.0.19041.0 (WinRT OCR); старый путь —
+    // фолбэк для несобранной новой версии.
+    join(__dirname, "../../../sidecar-win/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/SidecarWin.exe"),
     join(__dirname, "../../../sidecar-win/bin/Release/net8.0-windows/win-x64/publish/SidecarWin.exe"),
   ];
   const exe = candidates.find((p) => p && existsSync(p));

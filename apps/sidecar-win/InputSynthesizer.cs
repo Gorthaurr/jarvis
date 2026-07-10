@@ -29,6 +29,9 @@ public static class InputSynthesizer
     // -----------------------------------------------------------------------
     private static readonly object _heldLock = new();
     private static readonly Dictionary<ushort, bool> _held = new(); // vk → отправлен ли сканкодом
+    // §Волна2 (2.4): зажатые КНОПКИ МЫШИ (down без up) — тот же класс риска, что клавиши:
+    // «перетаскивание залипло навсегда». Watchdog и ReleaseAllHeld отпускают и их.
+    private static readonly HashSet<string> _heldMouse = new();
     private static long _heldDeadlineMs;
     private static System.Threading.Timer? _watchdog;
     /// <summary>Авто-release удержаний, не продлённых дольше этого срока (страховка от залипания).</summary>
@@ -87,8 +90,13 @@ public static class InputSynthesizer
     private const uint MOUSEEVENTF_RIGHTUP     = 0x0010;
     private const uint MOUSEEVENTF_MIDDLEDOWN  = 0x0020;
     private const uint MOUSEEVENTF_MIDDLEUP    = 0x0040;
+    private const uint MOUSEEVENTF_WHEEL       = 0x0800; // §Волна2 (2.4): вертикальное колесо
+    private const uint MOUSEEVENTF_HWHEEL      = 0x1000; // §Волна2 (2.4): горизонтальное колесо
     private const uint MOUSEEVENTF_ABSOLUTE    = 0x8000;
     private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+
+    /// <summary>Один «тик» колеса (WHEEL_DELTA).</summary>
+    private const int WheelDelta = 120;
 
     // dwFlags для клавиатуры
     private const uint KEYEVENTF_KEYDOWN     = 0x0000;
@@ -168,11 +176,12 @@ public static class InputSynthesizer
     /// <summary>
     /// Нажать левую (или правую/среднюю) кнопку мыши по логическим координатам (96 dpi).
     /// §18 — маппинг vision-координат на физические пиксели с учётом DPI монитора.
+    /// count=2 — дабл-клик (§Волна2 2.4).
     /// </summary>
-    public static void Click(double logicalX, double logicalY, string button = "left", bool restoreCursor = false)
+    public static void Click(double logicalX, double logicalY, string button = "left", bool restoreCursor = false, int count = 1)
     {
         (int px, int py) = LogicalToAbsolute(logicalX, logicalY);
-        ClickAbsolute(px, py, button, restoreCursor);
+        ClickAbsolute(px, py, button, restoreCursor, count);
     }
 
     /// <summary>
@@ -180,10 +189,119 @@ public static class InputSynthesizer
     /// UIA BoundingRectangle/GetClickablePoint в Per-Monitor-V2 процессе уже в физических
     /// пикселях — DPI-масштабирование тут НЕ применяем (иначе двойной масштаб).
     /// </summary>
-    public static void ClickPhysical(double physX, double physY, string button = "left", bool restoreCursor = false)
+    public static void ClickPhysical(double physX, double physY, string button = "left", bool restoreCursor = false, int count = 1)
     {
         (int ax, int ay) = PhysicalToAbsolute(physX, physY);
-        ClickAbsolute(ax, ay, button, restoreCursor);
+        ClickAbsolute(ax, ay, button, restoreCursor, count);
+    }
+
+    // -----------------------------------------------------------------------
+    // §Волна2 (2.4) — Полная мышь: move / down / up / wheel / drag
+    // -----------------------------------------------------------------------
+
+    private static (uint down, uint up) ButtonFlags(string? button) => (button ?? "left").ToLowerInvariant() switch
+    {
+        "right"  => (MOUSEEVENTF_RIGHTDOWN,  MOUSEEVENTF_RIGHTUP),
+        "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        _        => (MOUSEEVENTF_LEFTDOWN,   MOUSEEVENTF_LEFTUP),
+    };
+
+    /// <summary>Переместить курсор (hover) в логические координаты — тултипы/ховер-меню/игры.</summary>
+    public static void MouseMove(double logicalX, double logicalY)
+    {
+        (int ax, int ay) = LogicalToAbsolute(logicalX, logicalY);
+        SendMouseMove(ax, ay);
+    }
+
+    /// <summary>
+    /// Нажать/отпустить кнопку мыши. С координатами — сперва move туда; без — по текущей позиции
+    /// курсора. down регистрируется в реестре удержаний (watchdog авто-отпустит по TTL — «залипшее
+    /// перетаскивание» не переживает таймаут; повторный down = keepalive).
+    /// </summary>
+    public static void MouseButton(string? button, bool down, double? logicalX = null, double? logicalY = null)
+    {
+        (uint downFlag, uint upFlag) = ButtonFlags(button);
+        string key = (button ?? "left").ToLowerInvariant();
+        if (logicalX.HasValue && logicalY.HasValue)
+        {
+            (int ax, int ay) = LogicalToAbsolute(logicalX.Value, logicalY.Value);
+            SendMouseMove(ax, ay);
+            System.Threading.Thread.Sleep(30);
+            SendInputs([BuildMouseInput(ax, ay, (down ? downFlag : upFlag) | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+        }
+        else
+        {
+            SendInputs([BuildMouseInput(0, 0, down ? downFlag : upFlag)]);
+        }
+        lock (_heldLock)
+        {
+            if (down)
+            {
+                _heldMouse.Add(key);
+                _heldDeadlineMs = NowMs() + HoldTtlMs;
+            }
+            else
+            {
+                _heldMouse.Remove(key);
+            }
+        }
+        if (down) EnsureWatchdog();
+    }
+
+    /// <summary>Прокрутка колесом: dy тики вертикально (+вверх/−вниз), dx — горизонтально.</summary>
+    public static void MouseWheel(int dy, int dx = 0)
+    {
+        var inputs = new List<INPUT>(2);
+        if (dy != 0) inputs.Add(BuildWheelInput(MOUSEEVENTF_WHEEL, dy * WheelDelta));
+        if (dx != 0) inputs.Add(BuildWheelInput(MOUSEEVENTF_HWHEEL, dx * WheelDelta));
+        if (inputs.Count == 0) throw new ArgumentException("wheel: нужен dy и/или dx (тики)");
+        SendInputs(inputs.ToArray());
+    }
+
+    private static INPUT BuildWheelInput(uint flag, int delta) => new()
+    {
+        type = INPUT_MOUSE,
+        u = new INPUT_UNION
+        {
+            mi = new MOUSEINPUT
+            {
+                dx = 0,
+                dy = 0,
+                mouseData = unchecked((uint)delta),
+                dwFlags = flag,
+                time = 0,
+                dwExtraInfo = SyntheticMarker,
+            }
+        }
+    };
+
+    /// <summary>
+    /// Перетаскивание (DnD): move(from) → down → ПЛАВНОЕ движение с промежуточными точками
+    /// (DnD-приёмники и игровые механики требуют WM_MOUSEMOVE между down и up) → up.
+    /// Координаты логические (96 dpi), как у Click.
+    /// </summary>
+    public static void MouseDrag(double fromX, double fromY, double toX, double toY, string? button = null)
+    {
+        (uint downFlag, uint upFlag) = ButtonFlags(button);
+        (int ax0, int ay0) = LogicalToAbsolute(fromX, fromY);
+        (int ax1, int ay1) = LogicalToAbsolute(toX, toY);
+
+        SendMouseMove(ax0, ay0);
+        System.Threading.Thread.Sleep(40);
+        SendInputs([BuildMouseInput(ax0, ay0, downFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+        System.Threading.Thread.Sleep(60);
+
+        const int steps = 14;
+        for (int i = 1; i <= steps; i++)
+        {
+            int mx = ax0 + (int)Math.Round((ax1 - ax0) * (double)i / steps);
+            int my = ay0 + (int)Math.Round((ay1 - ay0) * (double)i / steps);
+            SendMouseMove(mx, my);
+            System.Threading.Thread.Sleep(15);
+        }
+
+        System.Threading.Thread.Sleep(60);
+        SendInputs([BuildMouseInput(ax1, ay1, upFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
     }
 
     /// <summary>Логические (96dpi virtual-desktop) координаты → ФИЗИЧЕСКИЕ пиксели (для UIA FromPoint). §18.</summary>
@@ -196,7 +314,7 @@ public static class InputSynthesizer
         return (logX * (dpiX / 96.0), logY * (dpiY / 96.0));
     }
 
-    private static void ClickAbsolute(int absX, int absY, string button, bool restoreCursor = false)
+    private static void ClickAbsolute(int absX, int absY, string button, bool restoreCursor = false, int count = 1)
     {
         // §бесшумный-ввод: запомнить позицию курсора, чтобы вернуть после клика (клик С ВОЗВРАТОМ).
         POINT saved = default;
@@ -213,16 +331,18 @@ public static class InputSynthesizer
         // Для пользователя это незаметно (<0.1с), обычным приложениям безвредно.
         System.Threading.Thread.Sleep(40);
 
-        (uint downFlag, uint upFlag) = button.ToLowerInvariant() switch
-        {
-            "right"  => (MOUSEEVENTF_RIGHTDOWN,  MOUSEEVENTF_RIGHTUP),
-            "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
-            _        => (MOUSEEVENTF_LEFTDOWN,   MOUSEEVENTF_LEFTUP),
-        };
+        (uint downFlag, uint upFlag) = ButtonFlags(button);
 
-        SendInputs([BuildMouseInput(absX, absY, downFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
-        System.Threading.Thread.Sleep(25);
-        SendInputs([BuildMouseInput(absX, absY, upFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+        // §Волна2 (2.4): count=2 — дабл-клик. Интервал 70мс — внутри GetDoubleClickTime (деф 500мс),
+        // ОС склеивает пары в WM_LBUTTONDBLCLK.
+        int clicks = Math.Clamp(count, 1, 3);
+        for (int i = 0; i < clicks; i++)
+        {
+            if (i > 0) System.Threading.Thread.Sleep(70);
+            SendInputs([BuildMouseInput(absX, absY, downFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+            System.Threading.Thread.Sleep(25);
+            SendInputs([BuildMouseInput(absX, absY, upFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+        }
 
         // Телепортируем курсор обратно (без промежуточного движения) — юзер не видит смещения.
         if (restore)
@@ -366,9 +486,18 @@ public static class InputSynthesizer
         INPUT[] inputs;
         lock (_heldLock)
         {
-            if (_held.Count == 0) return;
-            inputs = _held.Select(kv => BuildKey(kv.Key, down: false, kv.Value)).ToArray();
+            if (_held.Count == 0 && _heldMouse.Count == 0) return;
+            var list = new List<INPUT>(_held.Count + _heldMouse.Count);
+            foreach (KeyValuePair<ushort, bool> kv in _held) list.Add(BuildKey(kv.Key, down: false, kv.Value));
+            // §Волна2 (2.4): зажатые кнопки мыши отпускаем тем же страховочным путём (по текущей позиции).
+            foreach (string b in _heldMouse)
+            {
+                (_, uint upFlag) = ButtonFlags(b);
+                list.Add(BuildMouseInput(0, 0, upFlag));
+            }
             _held.Clear();
+            _heldMouse.Clear();
+            inputs = list.ToArray();
         }
         try { SendInputs(inputs); } catch { /* best-effort: отпускаем что можем */ }
     }
@@ -386,7 +515,7 @@ public static class InputSynthesizer
     private static void WatchdogTick()
     {
         bool expired;
-        lock (_heldLock) { expired = _held.Count > 0 && NowMs() > _heldDeadlineMs; }
+        lock (_heldLock) { expired = (_held.Count > 0 || _heldMouse.Count > 0) && NowMs() > _heldDeadlineMs; }
         if (expired) ReleaseAllHeld();
     }
 
@@ -601,6 +730,12 @@ public static class InputSynthesizer
         "right"     => 0x27,
         "down"      => 0x28,
         "printscreen" => 0x2C,
+        // §Волна2 (2.4): модификатор как ОДИНОЧНАЯ клавиша (ALT-нудж фокуса окна: голое нажатие Alt
+        // снимает foreground-lock). Раньше «alt» без основной клавиши бросал «Неизвестная клавиша».
+        "alt"       => 0x12,
+        "ctrl"      => 0x11,
+        "shift"     => 0x10,
+        "win"       => 0x5B,
         "capslock"  => 0x14,
         "numlock"   => 0x90,
         "scrolllock"=> 0x91,

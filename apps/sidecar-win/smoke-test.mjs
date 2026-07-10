@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const exe = join(__dirname, "bin", "Release", "net8.0-windows", "win-x64", "SidecarWin.exe");
+const exe = join(__dirname, "bin", "Release", "net8.0-windows10.0.19041.0", "win-x64", "SidecarWin.exe");
 
 const child = spawn(exe, [], { stdio: ["pipe", "pipe", "pipe"] });
 let buf = "";
@@ -63,6 +63,26 @@ try {
   // 4) Клик по несуществующему handle → ошибка (а не падение процесса).
   const badClick = await rpc("4", "click", { handle: 999999 });
   check("click по битому handle → ошибка, процесс жив", badClick.ok === false);
+
+  // 5) §Волна2 (2.4): window.list — окна верхнего уровня с pid/process/title.
+  const wl = await rpc("5", "window.list", {});
+  check("window.list → окна", wl.ok === true && Array.isArray(wl.data?.windows) && wl.data.windows.length > 0,
+    wl.ok ? `${wl.data.windows.length} окон, fg="${wl.data.windows.find((w) => w.foreground)?.title ?? "?"}"` : wl.error);
+
+  // 6) §Волна2 (2.4): ui.snapshot — интерактивные элементы активного окна (set-of-marks).
+  const snap = await rpc("6", "ui.snapshot", { maxItems: 30 }, 15000);
+  check("ui.snapshot → items", snap.ok === true && Array.isArray(snap.data?.items),
+    snap.ok ? `"${snap.data.window}" → ${snap.data.items.length} элементов${snap.data.truncated ? " (усечено)" : ""}` : snap.error);
+
+  // 7) §Волна2 (2.4): mouse с кривым op → корректная ошибка (мышь юзера НЕ трогаем в смоуке).
+  const badMouse = await rpc("7", "mouse", { op: "nonsense" });
+  check("mouse с кривым op → ошибка", badMouse.ok === false);
+
+  // 8) §Волна2 (2.3): ocr — распознание 1x1 PNG (валидный путь декодера; текста нет = честно пусто).
+  const tinyPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const ocr = await rpc("8", "ocr", { imageB64: tinyPng }, 15000);
+  check("ocr → text (движок жив)", ocr.ok === true && typeof ocr.data?.text === "string",
+    ocr.ok ? `"${ocr.data.text}" (${ocr.data.lines.length} строк)` : ocr.error);
 } catch (e) {
   check("RPC", false, e.message);
 } finally {

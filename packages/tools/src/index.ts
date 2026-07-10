@@ -81,6 +81,22 @@ const TARGET_SCHEMA: Record<string, unknown> = {
 /** UIA-паттерны для ui_invoke — основной путь действия (§6). */
 const UI_PATTERN_ENUM = ["invoke", "setValue", "select", "toggle", "expand", "scroll"] as const;
 
+/** Регион экрана (§Волна2 2.3): координаты ПОСЛЕДНЕГО полного screen_capture; space="screen" — DIP. */
+const SCREEN_RECT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  description:
+    "Регион экрана. По умолчанию x/y/w/h — в координатах ПОСЛЕДНЕГО полного screen_capture (как клики by:'coords'); space:'screen' — абсолютные экранные координаты.",
+  properties: {
+    x: { type: "number" },
+    y: { type: "number" },
+    w: { type: "number" },
+    h: { type: "number" },
+    space: { type: "string", enum: ["screen"], description: "Абсолютные экранные координаты (без маппинга снимка)." },
+  },
+  required: ["x", "y", "w", "h"],
+  additionalProperties: false,
+};
+
 /** Языки ограниченного раннера кода (§6). */
 const CODE_LANG_ENUM = ["python", "node", "powershell"] as const;
 
@@ -113,9 +129,16 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "app.close": "app_close",
   "ui.ground": "ui_ground",
   "ui.invoke": "ui_invoke",
+  "ui.snapshot": "ui_snapshot", // §Волна2 (2.4): set-of-marks окна — дешёвые «глаза»
+  "window.list": "window_list", // §Волна2 (2.4): окна верхнего уровня on-demand
+  "window.focus": "window_focus", // §Волна2 (2.4): фокус по hwnd/подстроке с честным readback
   "input.type": "input_type",
   "input.key": "input_key",
   "input.click": "input_click",
+  "input.mouse": "input_mouse", // §Волна2 (2.4): полная мышь (hover/удержание/колесо/drag)
+  "screen.ocr": "screen_read_text", // §Волна2 (2.3): локальный OCR — текст с экрана без vision
+  "screen.probe": "screen_probe", // §Волна2 (2.3): $0-проба «изменилось ли» (перцептивный хеш)
+  "wait.for": "wait_for", // §Волна2 (2.3): клиентское ожидание события без LLM-поллинга
   "browser.open": "browser_open",
   "browser.act": "browser_act",
   "browser.read": "browser_read",
@@ -206,18 +229,50 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "ui_ground",
     description:
-      "Найти элемент UI по роли/имени в a11y-дереве и получить его handle/bbox (ActionCommand ui.ground, §6). Результат (handle) возвращается в ActionResult.data и переиспользуется в ui_invoke/input_click через Target by:\"handle\". Это предпочтительный способ адресации перед действием — без координат и CSS-селекторов.",
+      "Найти элемент UI по роли/имени в a11y-дереве и получить его handle/bbox (ActionCommand ui.ground, §6). Результат (handle) возвращается в ActionResult.data и переиспользуется в ui_invoke/input_click через Target by:\"handle\". Это предпочтительный способ адресации перед действием — без координат и CSS-селекторов. Ищет сперва в АКТИВНОМ окне, затем по всему рабочему столу. Не знаешь точное имя — nameMode:\"substring\" (матч по вхождению) или сперва ui_snapshot (все элементы окна списком).",
     input_schema: obj(
       {
         query: obj(
           {
             role: { type: "string", description: "Роль элемента в a11y-дереве." },
             name: { type: "string", description: "Видимое имя/label (необязательно)." },
+            nameMode: { type: "string", enum: ["exact", "substring"], description: "substring — имя по вхождению (без регистра); дефолт exact." },
+            automationId: { type: "string", description: "AutomationId элемента (устойчивее имени, если известен из ui_snapshot)." },
           },
           ["role"],
         ),
       },
       ["query"],
+    ),
+  },
+  {
+    name: "ui_snapshot",
+    description:
+      "ДЕШЁВЫЕ ГЛАЗА для нативных окон (§Волна2): список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name, automationId, value, bbox} одним вызовом (~сотни токенов текста вместо 2K-токенного скриншота). Предпочитай его screen_capture для обычных приложений (проводник, настройки, плееры, IDE): осмотрел список → действуй точно по handle (ui_invoke / input_click by:\"handle\"). Пусто/мало элементов = окно UIA-слепое (игра/canvas) → тогда screen_capture. По умолчанию активное окно; pid — конкретный процесс (из window_list).",
+    input_schema: obj(
+      {
+        pid: { type: "integer", description: "PID процесса окна (из window_list). Без него — активное окно." },
+        maxItems: { type: "integer", minimum: 1, maximum: 200, description: "Кап элементов (деф 60)." },
+      },
+      [],
+    ),
+  },
+  {
+    name: "window_list",
+    description:
+      "Список ОКОН верхнего уровня прямо сейчас (§Волна2): {hwnd, pid, process, title, foreground, minimized} за миллисекунды. Дешёвый ответ на «появилось ли окно / что открыто / какое активно» — вместо скриншота. Дальше: window_focus (сфокусировать по hwnd), ui_snapshot (элементы окна по pid).",
+    input_schema: obj({}, []),
+  },
+  {
+    name: "window_focus",
+    description:
+      "Сфокусировать КОНКРЕТНОЕ окно: по hwnd (из window_list — точно) или по подстроке заголовка/имени процесса (§Волна2). Надёжнее app_focus, когда у приложения несколько окон или нужно окно по заголовку. ЧЕСТНОСТЬ: возвращает реальный readback — focused=false значит фокус НЕ перешёл (не ложный успех).",
+    input_schema: obj(
+      {
+        hwnd: { type: "integer", description: "hwnd окна из window_list (приоритетно, точно)." },
+        query: { type: "string", description: "Подстрока заголовка окна или имя процесса (без hwnd)." },
+      },
+      [],
     ),
   },
   {
@@ -282,7 +337,8 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
       "Клик по цели (ActionCommand input.click, §6). По умолчанию БЕСШУМНО (без движения курсора юзера): " +
       "клиент сам пробует UIA-invoke по элементу под точкой, физ.курсор — только фолбэк (с возвратом на место). " +
       "FALLBACK: предпочитай ui_invoke (pattern=invoke) для явных a11y-элементов. Цель по coords — vision-fallback. " +
-      "method=\"physical\" ставь ТОЛЬКО для игр/canvas (Dota и т.п.), где UIA слепа и бесшумный путь заведомо не сработает.",
+      "method=\"physical\" ставь ТОЛЬКО для игр/canvas (Dota и т.п.), где UIA слепа и бесшумный путь заведомо не сработает. " +
+      "button=\"right\" — контекстное меню; count=2 — дабл-клик (оба идут физическим кликом).",
     input_schema: obj(
       {
         target: TARGET_SCHEMA,
@@ -291,8 +347,85 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
           enum: ["silent", "physical"],
           description: "silent (по умолч.) — без курсора; physical — сразу физ.клик SendInput (игры/canvas).",
         },
+        button: {
+          type: "string",
+          enum: ["left", "right", "middle"],
+          description: "Кнопка мыши (деф left). right — контекстное меню.",
+        },
+        count: { type: "integer", minimum: 1, maximum: 3, description: "Число кликов: 2 = дабл-клик (открыть файл/папку)." },
       },
       ["target"],
+    ),
+  },
+  {
+    name: "input_mouse",
+    description:
+      "ПОЛНАЯ мышь (§Волна2, ActionCommand input.mouse): op=move (hover — тултипы/ховер-меню/прицел в играх), " +
+      "down/up (удержание кнопки — игровые механики; НЕ забывай парный up), wheel (прокрутка: dy тики, +вверх/−вниз), " +
+      "drag (перетаскивание x,y → toX,toY с плавным движением — DnD файлов, слайдеры, камера в играх). " +
+      "Координаты — как у input_click coords: с последнего screen_capture. Для обычного клика используй input_click, не down+up.",
+    input_schema: obj(
+      {
+        op: { type: "string", enum: ["move", "down", "up", "wheel", "drag"], description: "Операция мыши." },
+        x: { type: "number", description: "Точка (move/down/up/drag-старт). Для down/up без координат — текущая позиция." },
+        y: { type: "number" },
+        toX: { type: "number", description: "drag: куда тащить." },
+        toY: { type: "number" },
+        button: { type: "string", enum: ["left", "right", "middle"], description: "Кнопка (down/up/drag), деф left." },
+        dy: { type: "integer", description: "wheel: вертикальные тики (+вверх/−вниз)." },
+        dx: { type: "integer", description: "wheel: горизонтальные тики." },
+      },
+      ["op"],
+    ),
+  },
+  {
+    name: "input_batch",
+    description:
+      "СЕРИЯ механических шагов ОДНИМ вызовом (§Волна2): клиент исполняет их подряд под одной арендой ввода — форма/цепочка хоткеев/несколько кликов = 1 твой раунд вместо N. Шаг: {action, target?, params?, expect?}. Действия: input.click/input.key/input.type/input.mouse/ui.invoke/ui.ground/app.focus/app.launch/browser.open/wait (params.ms — пауза). БАТЧЬ ТОЛЬКО САМОДОСТАТОЧНУЮ цепочку, где следующий шаг не зависит от непредсказуемого исхода предыдущего; на слепых шагах ставь expect (a11y-постусловие: role/name — клиент дождётся его сам). Стоп на первой ошибке → честный «выполнено k из n» (сделанное не откатывается). Финальная сверка результата глазами — как обычно.",
+    input_schema: obj(
+      {
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          description: "Шаги по порядку.",
+          items: {
+            type: "object",
+            properties: {
+              action: {
+                type: "string",
+                enum: [
+                  "input.click", "input.key", "input.type", "input.mouse",
+                  "ui.invoke", "ui.ground", "app.focus", "app.launch", "browser.open", "wait",
+                ],
+                description: "Действие шага.",
+              },
+              target: TARGET_SCHEMA,
+              params: {
+                type: "object",
+                additionalProperties: true,
+                description: "Параметры действия: text (type), combo (key), app/url (focus/launch/open), ms (wait), op/x/y/toX/toY/dy (mouse), pattern/value (ui.invoke).",
+              },
+              expect: {
+                type: "object",
+                description: "Постусловие шага — клиент ждёт его сам (auto-wait): a11y role/name или visual text (OCR).",
+                properties: {
+                  kind: { type: "string", enum: ["a11y", "visual"] },
+                  role: { type: "string" },
+                  name: { type: "string" },
+                  text: { type: "string", description: "visual: текст, который должен появиться на экране." },
+                },
+                additionalProperties: false,
+              },
+              timeoutMs: { type: "integer", minimum: 100, maximum: 30000, description: "Потолок ожидания expect шага." },
+              retries: { type: "integer", minimum: 0, maximum: 3, description: "Повторы шага при неудаче expect (деф 2)." },
+            },
+            required: ["action"],
+            additionalProperties: false,
+          },
+        },
+      },
+      ["steps"],
     ),
   },
   {
@@ -412,13 +545,102 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "screen_capture",
     description:
-      "ПОСМОТРЕТЬ на экран и УВИДЕТЬ его (vision, ActionCommand screen.capture, §6). По умолчанию снимает АКТИВНЫЙ монитор (под курсором) — там, где игра/окно, с которым работает пользователь. Возвращает ИЗОБРАЖЕНИЕ, которое ты видишь напрямую. Зови, когда задача требует ГЛАЗ: ИГРЫ (Dota и т.п., где a11y/UIA не работает — это ЕДИНСТВЕННЫЙ путь: посмотреть → input_click {by:'coords', x, y} по увиденным координатам → пересмотреть и сверить), GUI-программы (видеоредактор/монтаж), куда кликнуть, прочитать нетекстовое, проверить результат. Если на снимке не то окно — укажи monitor: 'primary' или индекс. Стоит ~1.5–2K токенов — зови ПО НЕОБХОДИМОСТИ. Для чистого ТЕКСТА активного окна дешевле context_read; для веб-страницы — browser_read.",
+      "ПОСМОТРЕТЬ на экран и УВИДЕТЬ его (vision, ActionCommand screen.capture, §6). По умолчанию снимает АКТИВНЫЙ монитор (под курсором) — там, где игра/окно, с которым работает пользователь. Возвращает ИЗОБРАЖЕНИЕ, которое ты видишь напрямую. Зови, когда задача требует ГЛАЗ: ИГРЫ (Dota и т.п., где a11y/UIA не работает — это ЕДИНСТВЕННЫЙ путь: посмотреть → input_click {by:'coords', x, y} по увиденным координатам → пересмотреть и сверить), GUI-программы (видеоредактор/монтаж), куда кликнуть, прочитать нетекстовое, проверить результат. Если на снимке не то окно — укажи monitor: 'primary' или индекс. Полный кадр стоит ~1.5–2K токенов — зови ПО НЕОБХОДИМОСТИ; для ПОВТОРНОЙ сверки известного места дешевле rect (кроп региона вокруг цели, ~50-200 ток). Лестница дешевле: ui_snapshot (нативные окна) / screen_read_text (текст с canvas/игр) / browser_read (веб) — vision как последний резерв.",
     input_schema: obj(
       {
         note: { type: "string", description: "Коротко: что ищешь на экране (для фокуса внимания)." },
         monitor: { type: "string", description: "Какой монитор снять: 'active' (дефолт, под курсором) | 'primary' | 'jarvis' | индекс (число строкой). Укажи 'primary', если игра/нужное окно не на снимке." },
+        rect: SCREEN_RECT_SCHEMA,
+        scale: { type: "number", minimum: 0.25, maximum: 2, description: "Доп. масштаб кропа (>1 — «лупа» для мелкого текста). Только с rect." },
       },
       [],
+    ),
+  },
+  {
+    name: "screen_read_text",
+    description:
+      "ПРОЧИТАТЬ ТЕКСТ с экрана локальным OCR (§Волна2, ActionCommand screen.ocr) — БЕЗ дорогого vision-раунда: текст с canvas/игр/видео, где UIA слепа, за ~50-200 токенов. Возвращает text + строки с bbox (координаты изображения → клик по ним через input_click coords). rect — читать только регион (быстрее и точнее); monitor — как у screen_capture. OCR может ошибаться на стилизованных шрифтах — не нашёл ожидаемое ≠ его нет: сверься screen_capture (глазами).",
+    input_schema: obj(
+      {
+        rect: SCREEN_RECT_SCHEMA,
+        monitor: { type: "string", description: "'active' (дефолт) | 'primary' | 'jarvis' | индекс строкой." },
+        lang: { type: "string", description: "Язык OCR BCP-47 ('ru'/'en'). Без него — язык профиля Windows." },
+      },
+      [],
+    ),
+  },
+  {
+    name: "screen_probe",
+    description:
+      "$0-ПРОБА «изменилось ли на экране» (§Волна2, ActionCommand screen.probe): перцептивный хеш региона (8×8) + средняя яркость. Сравни hash двух вызовов: совпал — картинка та же, отличился — что-то поменялось. Это ДЕТЕКТОР ПЕРЕМЕН, НЕ доказательство результата: что именно изменилось — сверяй ui_snapshot/screen_read_text/screen_capture. Полезно в циклах ожидания и как быстрый чек «кадр застыл/ожил».",
+    input_schema: obj(
+      {
+        rect: SCREEN_RECT_SCHEMA,
+        monitor: { type: "string", description: "'active' (дефолт) | 'primary' | 'jarvis' | индекс строкой." },
+      },
+      [],
+    ),
+  },
+  {
+    name: "wait_for",
+    description:
+      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text' — реально наблюдённое состояние.",
+    input_schema: obj(
+      {
+        condition: {
+          type: "object",
+          description: "Условие ожидания (discriminated по kind).",
+          oneOf: [
+            {
+              type: "object",
+              properties: {
+                kind: { const: "window" },
+                titleContains: { type: "string", description: "Подстрока заголовка окна." },
+                process: { type: "string", description: "Имя процесса (напр. 'dota2')." },
+                gone: { type: "boolean", description: "true — ждать ИСЧЕЗНОВЕНИЯ окна." },
+              },
+              required: ["kind"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "ui" },
+                role: { type: "string", description: "Роль UIA-элемента (button/edit/…)." },
+                name: { type: "string", description: "Имя элемента." },
+                nameMode: { type: "string", enum: ["exact", "substring"] },
+                gone: { type: "boolean", description: "true — ждать исчезновения элемента." },
+              },
+              required: ["kind", "role"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "text" },
+                text: { type: "string", description: "Текст, который должен появиться на экране (OCR)." },
+                monitor: { type: "string" },
+                rect: SCREEN_RECT_SCHEMA,
+                gone: { type: "boolean", description: "true — ждать исчезновения текста." },
+              },
+              required: ["kind", "text"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "sound" },
+                playing: { type: "boolean", description: "true — ждать появления звука; false — тишины." },
+              },
+              required: ["kind", "playing"],
+              additionalProperties: false,
+            },
+          ],
+        },
+        timeoutMs: { type: "integer", minimum: 1000, maximum: 120000, description: "Потолок ожидания (деф 30000)." },
+        pollMs: { type: "integer", minimum: 150, description: "Шаг опроса (деф 600; text — 1200)." },
+      },
+      ["condition"],
     ),
   },
   {
@@ -1396,6 +1618,10 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   // через сайдкар, ~сотни токенов) должен вытеснять screen_capture (~2K токенов картинки/взгляд), но
   // в COLD его схем модель не видела: в живом логе 0 вызовов ui_* против 9 screen_capture на задачу.
   // Тот же прецедент, что watch_*: Reliability > микро-токены (cold-танец load→call = промах пути).
+  // ⚠️ Волна 2 (2.3/2.4): ui_snapshot/window_list/window_focus/input_mouse/screen_read_text/wait_for —
+  // тоже ГОРЯЧИЕ (это и есть новый дешёвый путь наблюдения/действия; в COLD он мёртв по тому же
+  // прецеденту). Холодный из новых только screen_probe (нишевый детектор перемен):
+  "screen_probe",
   "telegram_read",
   // §15 расширение cold-набора (2026-06-22, замер `_tool_audit.ts`): заведомо РЕДКИЕ инструменты —
   // полная схема в каждый ход раздувала горячий префикс (~8.9K→~7K ток), а нужны они эпизодически.

@@ -13,12 +13,12 @@
  * если сложность всплыла в петле — это место для филлера «секунду» и продолжения на
  * старшем тире (// TODO: динамическая эскалация).
  */
-import type { ActionCommand, TaskStatus } from "@jarvis/protocol";
+import type { ActionCommand, ActionKind, TaskStatus } from "@jarvis/protocol";
 import { actionTimeoutMs, newId } from "@jarvis/protocol";
 import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, foldText, sleep } from "@jarvis/shared";
 import { COLD_TOOL_NAMES, TOOL_SCHEMAS, type ToolSchema, toolCatalogLine } from "@jarvis/tools";
 import type { McpManager } from "../mcp/manager.js";
-import { toolNeedsInput } from "../tools/input-kinds.js";
+import { kindNeedsInput, toolNeedsInput } from "../tools/input-kinds.js";
 import { cleanDisfluency } from "../nlu/disfluency.js";
 import { buildActionLogEntry, insertActionLog } from "../../db/action-log.js";
 import type { Session } from "../../gateway/session.js";
@@ -38,6 +38,7 @@ import { getProfile, setDisplayName, setEmotion, setMode } from "../profile.js";
 import { getMode, matchModeCommand } from "../persona/modes.js";
 import { emotionName, emotionOverlay, matchEmotionCommand } from "../persona/emotion.js";
 import { claimsObservedResult, isBlindMutate, isHollowSuccess, looksLikeGiveUp, maskedFailureReply, toolEffect } from "./error-voice.js";
+import { decideRoundThinking, stripThinkingBlocks, thinkingEnabled } from "./thinking-policy.js";
 import { type LocalIntent, classifyTier, resolveClarifyAnswer } from "../router/index.js";
 import { cap, failurePhrase, pick, successPhrase } from "../verbalize/action-phrases.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
@@ -451,9 +452,11 @@ export async function handleUserText(
     //     полярность-гард (start↔stop): «останови поиск» НИКОГДА не матчится дублем «запусти поиск».
     if (freshContext && deps.tasks) {
       // HIGH-3: живые задачи ПОЛЬЗОВАТЕЛЯ (не сессии) — дубль ловится и после reconnect.
+      // §Волна2 (2.5): + queued — повтор команды, пока задача стоит в admission-очереди,
+      // не должен плодить ВТОРУЮ queued-задачу (иначе смысл очереди теряется).
       const live = deps.tasks
         .list(deps.userId)
-        .filter((t) => t.state === "running" || t.state === "paused");
+        .filter((t) => t.state === "running" || t.state === "paused" || t.state === "queued");
       let dup = live.find((t) => isDuplicateGoal(clean, t.goal));
       // Полярность-гард и на ЛЕКСИЧЕСКОМ слое (ревью 2026-07-10): «останови запуск поиска в доте»
       // лексически перекрывается с целью «запусти поиск в доте», но это команда ОСТАНОВКИ, не повтор.
@@ -844,6 +847,12 @@ async function runAgentLoop(
   let limited = false;
   let timedOut = false;
   let earlyWrap = false; // подвид timedOut: свернулись ЗАРАНЕЕ (остаток < среднего раунда), потолок не превышен
+  // §Волна2 (2.5): admission-очередь не дождалась аренды ввода → честный провал БЕЗ единого LLM-раунда.
+  let queueTimedOut = false;
+  const QUEUE_WAIT_MS = (() => {
+    const n = Number.parseInt(process.env.JARVIS_QUEUE_WAIT_MS ?? "", 10);
+    return Number.isFinite(n) && n >= 5_000 ? n : 90_000;
+  })();
   let round = 0; // число завершённых tool-use раундов (= прогресс задачи)
   // Волна 1 (1.5, «видимый бюджет»): на 70% потолка времени — ОДИН впрыск «сворачивайся» (graceful
   // wrap-up c честным частичным итогом вместо невидимого обрыва «251с работы → „затянулось" без итога»).
@@ -962,6 +971,13 @@ async function runAgentLoop(
   // задачи (клики/скрины по навыку) ехала на Opus в 2–3 раза медленнее по времени раунда (живой
   // замер «поиск в доте»: ~15с/раунд). Новые провалы после отката снова эскалируют штатно (§7).
   let familyBoost: { tier: Exclude<Tier, "tier0">; model: string; roundsLeft: number } | null = null;
+  // §Волна2 (2.7) пер-раундовый thinking: nudgeBoostNextRound — следующий раунд идёт сразу после
+  // нуджа/эскалации/поправки (переосмысление → полное рассуждение); prevThinkingOn — с каким thinking
+  // сгенерирован ПРОШЛЫЙ раунд (off→on легально только на текстовой границе — см. thinking-policy).
+  // Выключатель всей механики: JARVIS_ROUND_THINKING=0 (всегда базовый эффорт тира, как раньше).
+  let nudgeBoostNextRound = false;
+  let prevThinkingOn = thinkingEnabled(deps.tierThinking?.[tier]);
+  const roundThinkingEnabled = process.env.JARVIS_ROUND_THINKING !== "0";
   // Докрутка обрыва по лимиту вывода: модель не закончила (stop_reason=max_tokens) → продолжаем
   // генерацию с места обрыва, а не отдаём огрызок (большой код/реферат/курсовая). Кап продолжений
   // + общие потолки задачи (токены/шаги/время) защищают от runaway. Env JARVIS_MAX_CONTINUATIONS.
@@ -1008,6 +1024,42 @@ async function runAgentLoop(
   // Любое исключение из шага (брошенный dispatchTool, reject провайдера) НЕ должно
   // оставить задачу в running и подвесить счётчик SpendGuard — ловим и финализируем.
   try {
+  // ── §Волна2 (2.5) ADMISSION-ОЧЕРЕДЬ GUI-задач: заранее ИЗВЕСТНО (по recall-навыку), что задача
+  // начнётся с GUI-шагов, а аренда ввода ЗАНЯТА другой задачей → НЕ жжём LLM-раунды стоя в очереди:
+  // честный state=queued (чип «в очереди»), ОДИН ack голосом («Сначала закончу текущее»), ожидание
+  // аренды ДО первого раунда — потолок задачи тикает с реальной работы. Детекция эвристична (нет
+  // навыка → признак молчит → страховка Волны 1: queue-aware дедлайн внутри ensureInput). Только
+  // фоновый путь (!sink): синхронный чат/dev.text очередью не блокируем. Cancel в очереди работает:
+  // «отмени» мутирует task.cancel — по получении аренды сразу отдаём её, петля выйдет по cancel.
+  {
+    const guiBoundByRecall = Boolean(recalled?.steps?.some((s) => kindNeedsInput(s.action as ActionKind)));
+    if (arbiter?.locked && guiBoundByRecall && !sink && !task.cancel.cancelled) {
+      tasks.markQueued(taskId);
+      showStatus(); // чип «в очереди» сразу — панель видит честное состояние, не «running»
+      log.info("§Волна2 admission: GUI-задача встала в очередь за арендой ввода", { taskId, title: task.title });
+      if (deps.speakResult && !deps.isClosed?.()) {
+        spokeAny = true;
+        deps.speakResult({ voice: verbalize("Сначала закончу текущее, сэр.") });
+      }
+      const t0 = Date.now();
+      const got = await arbiter.acquireWithTimeout(QUEUE_WAIT_MS);
+      const waited = Date.now() - t0;
+      queueWaitMs += waited;
+      loopStartMs += waited; // очередь не сжигает потолок задачи (механика Волны 1)
+      if (!got) {
+        queueTimedOut = true;
+      } else if (task.cancel.cancelled) {
+        arbiter.release(); // отменили, пока стояли в очереди — аренду не держим, петля выйдет по cancel
+      } else {
+        holdsInput = true;
+        // Форс свежего взгляда: после долгой очереди экран устарел — слепые действия ждут сверки (Волна 1).
+        lastAcquireWaitMs = waited;
+        tasks.start(taskId); // queued → running
+        emitTaskStatus(session, task);
+        log.info("§Волна2 admission: аренда получена, задача стартует", { taskId, waitedMs: waited });
+      }
+    }
+  }
   // ── §8 МАКРОС, быстрый путь: у recall'нутого навыка есть авто-реплей → гоним ЕГО ($0, секунды),
   // LLM остаётся одна сверка глазами. Провал реплея — честный откат на полную процедуру. Гейты:
   // только СВОЙ навык, только безопасные действия (фокус/клик/клавиши/пауза — никаких guard-шагов),
@@ -1058,6 +1110,8 @@ async function runAgentLoop(
     }
   }
   for (let step = 0; step < HARD_STEP_CAP; step += 1) {
+    // §Волна2 (2.5): очередь не дождалась аренды — ни одного LLM-раунда, честный терминал ниже.
+    if (queueTimedOut) break;
     // Отмена ≤1 шага (§20): cancel-флаг проверяется ПЕРЕД каждым шагом. Команда
     // «отмени» из router мутирует ТОТ ЖЕ флаг между await'ами петли.
     if (task.cancel.cancelled) {
@@ -1086,6 +1140,7 @@ async function runAgentLoop(
             `что нет (частичный результат лучше молчаливого обрыва).`,
         );
         log.info("§20 бюджет-нудж: 70% потолка времени — прошу сворачиваться", { taskId, leftSec });
+        nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
       }
       if (round > 0 && roundDurTotalMs > 0) {
         const avgRoundMs = roundDurTotalMs / round;
@@ -1144,6 +1199,7 @@ async function runAgentLoop(
       goalCheckDone = false;
       verifyNudges = 0;
       log.info("§20 правка на ходу впрыснута в петлю", { taskId, count: steers.length });
+      nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
     }
 
     const guard = deps.spend.check(taskId, 0.01, 2000);
@@ -1184,6 +1240,38 @@ async function runAgentLoop(
     const cachePrefix = true;
     if (cachePrefix) markCacheBreakpoint(convo);
 
+    // §Волна2 (2.7) ПЕР-РАУНДОВЫЙ THINKING: план/нудж/эскалация думают полноценно, механические
+    // раунды (реплей известной процедуры, сверка после слепого действия) — без рассуждения
+    // (−2-5с и сотни output-токенов на раунд). Opus/fable не глушится (грабля §4.7).
+    const baseThinking = deps.tierThinking?.[currentTier];
+    let roundThinking = roundThinkingEnabled
+      ? decideRoundThinking({
+          step,
+          base: baseThinking,
+          tier: currentTier,
+          hasRecalledSkill: recalled !== null,
+          blindMutatePending,
+          nudgeBoost: nudgeBoostNextRound,
+        })
+      : baseThinking;
+    nudgeBoostNextRound = false;
+    if (roundThinkingEnabled) {
+      // API-легальность off→on: при включённом thinking assistant-ход с tool_use обязан нести свои
+      // thinking-блоки — раунд, сгенерированный с off, их не имеет → на хвосте tool_result включать
+      // нельзя (HTTP 400). Остаёмся off ещё раунд; поднимемся на ближайшей текстовой границе (нудж).
+      const tail = convo[convo.length - 1];
+      const tailIsToolResult = Boolean(
+        tail && tail.role === "user" && Array.isArray(tail.content) && tail.content.some((b) => b.type === "tool_result"),
+      );
+      if (thinkingEnabled(roundThinking) && !prevThinkingOn && tailIsToolResult) roundThinking = "off";
+      // Выключение после thinking-раундов: реплеенные thinking-блоки истории стрипаются (иначе 400).
+      // Разовая перезапись префикса — политика липкая по фазам, не тумблер (WARN 1.8 покажет причину).
+      if (!thinkingEnabled(roundThinking) && prevThinkingOn) {
+        const removed = stripThinkingBlocks(convo);
+        if (removed > 0) log.debug("§2.7: thinking off — реплеенные thinking-блоки вырезаны", { removed, step });
+      }
+      prevThinkingOn = thinkingEnabled(roundThinking);
+    }
     const llmReq = {
       tier: currentTier,
       model,
@@ -1194,9 +1282,9 @@ async function runAgentLoop(
       messages: convo,
       tools,
       cachePrefix,
-      // §7 «эффорт» по тиру → thinking (модель-aware в anthropic). При эскалации currentTier меняется →
-      // меняется и эффорт (Opus=adaptive deep). off → без размышления (быстро).
-      thinking: deps.tierThinking?.[currentTier],
+      // §7 «эффорт» по тиру → thinking (модель-aware в anthropic); §Волна2 (2.7) — с пер-раундовым
+      // override (off на механике). При эскалации currentTier меняется → меняется и эффорт.
+      thinking: roundThinking,
     };
     // §10 realtime: на ПЕРВОМ ходе с sink стримим текст пофразно (token-streaming) — НО ТОЛЬКО
     // для многопредложенных конверсационных реплик (как в плане: «пофразный — для много-
@@ -1342,6 +1430,7 @@ async function runAgentLoop(
             "СТОП. Ты НЕ говоришь «не могу/не умею» и НЕ перекладываешь на меня — это запрещённый ответ на выполнимую задачу. Задача на ЭТОМ ПК выполнима — СДЕЛАЙ её. Веб → через browser_open/browser_act (НЕ физический input, он не нужен). Не знаешь КАК → web_search найди способ. Нет инструмента → code_run (полный Windows) или построй свой (tool_create). Сделай ход ПРЯМО СЕЙЧАС и проверь результат глазами. Отказ — только после РЕАЛЬНЫХ попыток разными способами, и тогда это отчёт «пробовал A,B,C — упёрся в X», а не «не могу».",
         });
         log.info("анти-капитуляция: нудж на попытку через инструменты", { retryNudges, tier: currentTier });
+        nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         finalText = ""; // resp.text уже добавлен в finalText выше — сбрасываем, иначе отказ просочится в финал
         continue;
       }
@@ -1367,6 +1456,7 @@ async function runAgentLoop(
             : "Стоп. Ты сделал действие, но НЕ проверил исход — клик/ввод/команда могли не сработать (регион, нет элемента, потерян фокус). Прежде чем сказать «готово», СВЕРЬ РЕАЛЬНЫЙ результат: прочитай страницу/экран (browser_read / browser_inspect / screen_capture). Цель достигнута → подтверди фактом, что увидел. НЕ достигнута → зайди другим способом и доведи, не сдавайся.",
         });
         log.info("verify-петля: нудж на сверку результата глазами", { verifyNudges, claimed });
+        nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         finalText = "";
         continue;
       }
@@ -1391,6 +1481,7 @@ async function runAgentLoop(
             `подтверди коротко, ничего не повторяя.`,
         });
         log.info("goal-check: сверка терминала с исходной целью", { round });
+        nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         finalText = "";
         continue;
       }
@@ -1404,6 +1495,7 @@ async function runAgentLoop(
             "Ты закрыл ход БЕЗ финальной реплики. Ответь сейчас ОДНИМ содержательным сообщением: сам ответ/итог по исходной задаче (не «Готово» и не пересказ действий).",
         });
         log.info("пустой финал после инструментов — нудж на содержательный ответ");
+        nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         continue;
       }
       if (!finalText) finalText = "Готово.";
@@ -1425,6 +1517,27 @@ async function runAgentLoop(
 
     const resultBlocks: LlmContentBlock[] = [];
     let sawVerifyThisRound = false; // §адаптация к цели: был ли в раунде успешный verify-инструмент
+    // §Волна2 (2.2): раунд целиком из НЕ-GUI ЧИТАЮЩИХ вызовов (без аренды ввода, toolEffect
+    // neutral/verify — web_search×3, market_*, чтения) → диспатчим ПАРАЛЛЕЛЬНО: wall-clock = max,
+    // не сумма (research-раунды в 2-3× быстрее). Любой mutate/GUI в раунде → строго последовательный
+    // путь как раньше (порядок побочных эффектов свят — fs_write→fs_read не переставляем).
+    // Реджекты конвертируются в значения (нет unhandled rejection при раннем break по отмене) и
+    // перебрасываются в точке потребления — семантика ошибок 1:1 с последовательным путём.
+    const parallelSafe =
+      resp.toolUses.length > 1 &&
+      resp.toolUses.every((tu) => !toolNeedsInput(tu.name) && toolEffect(tu.name) !== "mutate");
+    const prefetched = parallelSafe
+      ? new Map(
+          resp.toolUses.map((tu) => [
+            tu.id,
+            dispatchTool(tu.name, tu.input, toolCtx).then(
+              (r) => ({ ok: true as const, r }),
+              (e: unknown) => ({ ok: false as const, e }),
+            ),
+          ]),
+        )
+      : null;
+    if (parallelSafe) log.debug("§Волна2: параллельный не-GUI раунд", { tools: resp.toolUses.map((t) => t.name) });
     for (const tu of resp.toolUses) {
       // GUI-команда (клик/печать/фокус/окно/скилл) → берём аренду ввода ДО исполнения,
       // чтобы не столкнуться с параллельной задачей за курсор (§20). Держим до конца задачи.
@@ -1468,7 +1581,13 @@ async function runAgentLoop(
           continue;
         }
       }
-      const r = await dispatchTool(tu.name, tu.input, toolCtx);
+      const settled = prefetched?.get(tu.id);
+      const r = settled
+        ? await settled.then((s) => {
+            if (s.ok) return s.r;
+            throw s.e; // семантика 1:1 с последовательным путём (исключение → внешний try петли)
+          })
+        : await dispatchTool(tu.name, tu.input, toolCtx);
       log.info("tool", { name: tu.name, isError: r.isError });
       // §20 чип «по смыслу»: на первом значимом действии переименовываем задачу из сырой фразы
       // в суть («Яндекс Музыка», «Запуск OBS»). emitTaskStatus в конце раунда обновит чип.
@@ -1490,18 +1609,24 @@ async function runAgentLoop(
       // VERIFY-петля: классифицируем эффект успешного инструмента. Сверка глазами (read/inspect/capture)
       // → verifiedSinceMutate=true. Меняющее действие → didMutate=true и сбрасываем verifiedSinceMutate
       // (значит после него ещё НЕ смотрели). Нейтральные (поиск/память/навыки/load) не трогают флаги.
+      // §Волна2 (2.1) fused act+observe: r.observed — актуатор приложил РЕАЛЬНОЕ наблюдение состояния
+      // в ЭТОТ ЖЕ tool_result (a11y/OCR после действия, DOM-диф браузера, met:true у wait_for) →
+      // сверка состоялась в том же раунде: verify-долг не взводится/снимается БЕЗ отдельного раунда.
+      // Строгость verify-LAW не ослаблена — наблюдение реальное, а не доверие к «ok» действия.
       if (!r.isError) {
         const eff = toolEffect(tu.name);
-        if (eff === "verify") {
+        const observed = r.observed === true;
+        if (eff === "verify" || observed) {
           blindMutatePending = false; // сверились глазами — слепое действие подтверждено
           sawVerifyThisRound = true;
           lastAcquireWaitMs = 0; // свежий взгляд снимает гард протухшего клика (Волна 1)
         }
-        else if (eff === "mutate") {
+        if (eff === "mutate") {
           anyMutateSucceeded = true; // P0.1: реальное дело сделано (не просто нейтральный поиск)
           // P0.2: слепое действие (клик/ввод/act/фокус) → исход неизвестен, требуется сверка перед «готово».
           // Самоподтверждающийся mutate (code_run/fs/office/system/launch/open) флаг НЕ ставит.
-          if (isBlindMutate(tu.name)) blindMutatePending = true;
+          // 2.1: наблюдение уже приложено → сверка в этом же раунде, долг не взводим.
+          if (isBlindMutate(tu.name) && !observed) blindMutatePending = true;
         }
       }
       if (tu.name === "skill_save" && !r.isError) {
@@ -1598,6 +1723,7 @@ async function runAgentLoop(
           if (last && last.role === "user" && Array.isArray(last.content)) last.content.push({ type: "text", text: nudge });
           else convo.push({ role: "user", content: nudge });
           log.warn("anti-runaway: повтор одинакового действия — нудж на сверку/смену подхода", { tool: toolSig.slice(0, 80) });
+          nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         } else {
           log.warn("повтор одного успешного действия после нуджа — обрыв петли (честный провал)", { tool: toolSig.slice(0, 80) });
           runawayStuck = true;
@@ -1624,6 +1750,7 @@ async function runAgentLoop(
         if (last && last.role === "user" && Array.isArray(last.content)) last.content.push({ type: "text", text: nudge });
         else convo.push({ role: "user", content: nudge });
         log.warn("anti-runaway (семейство): интервент-нудж — смени подход", { tool: worst[0], count: worst[1], familyNudges });
+        nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         if (currentTier !== "fable" && deps.models.fable !== model) {
           // §скорость: усиление КОРОТКОЕ — 2 раунда переосмысления на сильной модели, затем откат
           // (см. familyBoost в шапке петли). Липкий Opus замедлял всю оставшуюся механику; но 1 раунд
@@ -1786,6 +1913,12 @@ async function runAgentLoop(
     // возвращала «Хорошо, остановил.» → speakResult → на двух задачах звучало дважды (живой случай:
     // «продолжи/продолжу видео на ютубе» → две петли → «Хорошо, остановил.» ×2). Терминал молчит.
     return terminal("");
+  }
+  // §Волна2 (2.5): очередь не дождалась аренды — честный «не приступил», без вранья про шаги/время.
+  if (queueTimedOut) {
+    tasks.fail(taskId, `ввод занят другой задачей — очередь не дождалась аренды за ${Math.round(QUEUE_WAIT_MS / 1000)}с`);
+    if (shown) emitTaskStatus(session, task);
+    return terminal(verbalize("Так и не приступил, сэр — мышь и клавиатура остались заняты другой задачей. Повторить, когда освобожусь?"));
   }
   if (failed) {
     tasks.fail(taskId, "ошибка выполнения задачи");

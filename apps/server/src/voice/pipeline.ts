@@ -158,6 +158,12 @@ export interface VoicePipelineDeps {
    * undefined → считаем не занятым (поведение как раньше).
    */
   isUserBusy?: () => boolean;
+  /**
+   * §Волна2 (2.6): пост-STT нормализатор лексики (доменная латиница → кириллица: «в dot'е»→«в доте»)
+   * — СИНХРОННЫЙ, применяется в gateWake ко ВСЕМ входам (спекулятивный эндпоинт и поздний финал).
+   * undefined → без нормализации (как раньше).
+   */
+  normalizeTranscript?: (text: string) => string;
   now?: () => number;
   log?: Logger;
 }
@@ -176,6 +182,8 @@ export class VoicePipeline {
   private pendingSecondChance: { original: string; until: number } | null = null;
   private followupTimer: ReturnType<typeof setTimeout> | null = null;
   private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** §Волна2 (2.6): ранний эндпоинт по speech_final STT-провайдера (выключатель JARVIS_STT_ENDPOINT=0). */
+  private readonly sttEndpointEnabled = process.env.JARVIS_STT_ENDPOINT !== "0";
 
   private readonly turn: TurnDetector;
   private readonly latency: LatencyTracker;
@@ -239,7 +247,11 @@ export class VoicePipeline {
       this.log.info("реплика отклонена верификацией диктора (не свой голос) — игнор");
       return "";
     }
-    const t = raw.trim();
+    // §Волна2 (2.6): нормализуем доменную латиницу STT ДО wake-гейта/анти-дубля/роутера — одна точка
+    // кроет оба входа (спекулятивный эндпоинт и поздний финал); анти-дубль дальше сравнивает уже
+    // нормализованные формы (консистентно). Wake-матч цел: latinToCyrillic('jarvis')='джарвис'.
+    const normalized = this.deps.normalizeTranscript?.(raw) ?? raw;
+    const t = normalized.trim();
     if (!this.requireWake || t.length === 0) return t;
     // Second-chance протух — сбрасываем (ревью 2026-07-10: никаких «тихих» окон дольше 15с).
     if (this.pendingSecondChance && this.now() > this.pendingSecondChance.until) this.pendingSecondChance = null;
@@ -589,7 +601,25 @@ export class VoicePipeline {
       this.turn.onInterim(p.text);
       this.latency.mark("stt_first");
       this.deps.sendTranscript?.({ text: p.text, final: p.final });
-      if (!p.final) return;
+      if (!p.final) {
+        // §Волна2 (2.6) СЕРВЕРНЫЙ ENDPOINTING: Deepgram speech_final = «речь + ~300мс тишины» —
+        // эндпоинтим ход РАНЬШЕ клиентской цепочки VAD (hangover 240мс + minSilence 280мс + опрос).
+        // Семантическое вето (onProviderEndpoint): висящий союз/одиночное слово не рубим — их
+        // дорешает штатный путь. Только в listening (после эндпоинта state уже thinking — поздние
+        // speech_final/speech_end станут no-op). Выключатель: JARVIS_STT_ENDPOINT=0.
+        if (
+          p.speechFinal === true &&
+          this.sttEndpointEnabled &&
+          this.ctx.state === "listening" &&
+          !streamSpeakerRejected &&
+          this.turn.onProviderEndpoint(p.text) === "endpoint"
+        ) {
+          this.log.info("эндпоинт по speech_final STT-провайдера (§Волна2 2.6)", { text: p.text.slice(0, 50) });
+          this.clearSilenceTimer();
+          this.endpointTurn();
+        }
+        return;
+      }
       // §3: ход уже признан «не своим» — режем и спекулятивный (через speakerRejected), и ПОЗДНИЙ
       // реальный финал (через streamSpeakerRejected — глобальный флаг к этому моменту мог сброситься).
       if (streamSpeakerRejected) {

@@ -19,6 +19,12 @@ export interface SttPartial {
   final: boolean;
   /** Уверенность 0..1, если провайдер отдаёт. */
   confidence?: number;
+  /**
+   * §Волна2 (2.6): провайдер сам зафиксировал КОНЕЦ ФРАЗЫ (Deepgram speech_final: речь + ~300мс
+   * тишины по его VAD) — сигнал раннего серверного эндпоинта (быстрее клиентской цепочки
+   * hangover+minSilence ~520мс). Провайдеры без сигнала поле не ставят (поведение как раньше).
+   */
+  speechFinal?: boolean;
 }
 
 export interface SttOpts {

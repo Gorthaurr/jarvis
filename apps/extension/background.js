@@ -348,7 +348,10 @@ async function robustClickMain(params) {
     const m = document.querySelector("main,[class*='Vibe'],[role=main]") || document.body;
     return ((m && m.innerText) || "").replace(/[\d:.,]+/g, "").replace(/\s+/g, " ").trim().slice(0, 4000);
   };
-  const before = P.expectChange ? sigOf() : null;
+  // §Волна2 (2.1) fused act+observe: сигнатуру контента снимаем ВСЕГДА — обычный клик тоже честно
+  // рапортует changed:true/false (страница отреагировала или нет) в том же ответе, без отдельного
+  // раунда сверки. expectChange-режим (жёсткий: не изменилось = провал) не тронут.
+  const before = sigOf();
 
   const reactClick = () => {
     for (let n = target; n; n = n.parentElement) {
@@ -409,7 +412,11 @@ async function robustClickMain(params) {
       await new Promise((r) => setTimeout(r, 700));
       if (sigOf() !== before) return { ok: true, method: m.name, changed: true };
     } else if (fired) {
-      return { ok: true, method: m.name }; // без проверки исхода — первый сработавший способ
+      // §Волна2 (2.1): DOM-диф в том же ответе — подождать реакцию страницы и честно доложить,
+      // изменился ли контент (changed:false = клик прошёл, но страница не отреагировала — модель
+      // видит это сразу и не ждёт отдельного verify-раунда, чтобы узнать).
+      await new Promise((r) => setTimeout(r, 500));
+      return { ok: true, method: m.name, changed: sigOf() !== before };
     }
   }
   if (P.expectChange) {

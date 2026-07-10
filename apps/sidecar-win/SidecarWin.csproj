@@ -2,7 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <!--
+      §Волна2 (2.3): TFM с версией Windows SDK — даёт WinRT-проекции (Windows.Media.Ocr для
+      локального OCR). 10.0.19041 = Win10 2004, ниже Win10 сайдкар и так не работает.
+      Публикация складывается в bin/Release/net8.0-windows10.0.19041.0/... — путь поиска exe
+      в клиенте (apps/client/main/index.ts startSidecar) обновлён соответственно.
+    -->
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

@@ -212,6 +212,10 @@ export interface Takeover {
  */
 export interface ClientEnv {
   summary: string;
+  /** §Волна2 (2.6): СТРУКТУРНЫЕ имена приложений — лексикон STT-нормализатора (строку summary не парсим). */
+  apps?: string[];
+  /** §Волна2 (2.6): имена установленных Steam-игр (из манифестов) — туда же. */
+  games?: string[];
 }
 
 /**

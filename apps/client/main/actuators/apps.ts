@@ -152,6 +152,23 @@ export interface FocusOutcome {
 
 export async function focusApp(app: string): Promise<FocusOutcome> {
   const target = resolveAppTarget(app);
+
+  // §Волна2 (2.4, закрывает TODO M3): ОСНОВНОЙ путь — сайдкар window.focus (SetForegroundWindow+
+  // AttachThreadInput, <50мс, честный readback). PowerShell AppActivate ниже — фолбэк (сайдкар не
+  // поднят / окно не нашёл / фокус не перешёл): ловит UWP-края и держит обратную совместимость.
+  try {
+    const { focusWindow } = await import("./windows.js");
+    const probe = target.replace(/\.exe$/i, "").replace(/:$/, "");
+    const r = await focusWindow({ query: probe });
+    if (r.focused) {
+      log.info(`focus (sidecar): "${app}" -> "${r.title}"`);
+      return { resolved: target, focused: true };
+    }
+    log.debug(`focus: сайдкар не сфокусировал «${probe}» — фолбэк на AppActivate`);
+  } catch (e) {
+    log.debug(`focus: сайдкар недоступен (${e instanceof Error ? e.message : String(e)}) — фолбэк на AppActivate`);
+  }
+
   log.info(`focus (AppActivate fallback): "${app}" -> "${target}"`);
 
   // Имя процесса без расширения и без URI-схемы — то, что AppActivate сможет сопоставить.

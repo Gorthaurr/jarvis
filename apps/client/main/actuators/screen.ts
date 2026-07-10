@@ -52,7 +52,31 @@ function pickDisplay(which?: string | number): Display {
   }
 }
 
-export async function captureScreen(which?: string | number): Promise<ScreenShot> {
+/** Регион для кропа (§Волна2 2.3): по умолчанию — координаты ПОСЛЕДНЕГО полного снимка; space="screen" — DIP. */
+export interface CaptureRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  space?: "screen";
+}
+
+export interface CaptureOpts {
+  /** Кроп региона (§Волна2 2.3) — сверка кнопки за ~50-200 токенов вместо полного 2K-кадра. */
+  rect?: CaptureRect;
+  /** Доп. масштаб кропа (0.25..2; >1 — «лупа» для мелкого текста). */
+  scale?: number;
+}
+
+/** rect (image-координаты последнего снимка ИЛИ DIP) → DIP virtual-desktop. */
+function rectToDip(rect: CaptureRect): { x: number; y: number; w: number; h: number } {
+  if (rect.space === "screen") return { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
+  const m = lastMapping;
+  if (!m) return { x: rect.x, y: rect.y, w: rect.w, h: rect.h }; // без прежнего снимка считаем DIP (честная деградация)
+  return { x: m.boundsX + rect.x / m.scale, y: m.boundsY + rect.y / m.scale, w: rect.w / m.scale, h: rect.h / m.scale };
+}
+
+export async function captureScreen(which?: string | number, opts?: CaptureOpts): Promise<ScreenShot> {
   const display = pickDisplay(which);
   const { width, height } = display.size;
   const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
@@ -62,6 +86,31 @@ export async function captureScreen(which?: string | number): Promise<ScreenShot
   if (sources.length === 0) throw new Error("нет источников экрана для захвата");
   // Сопоставляем источник выбранному монитору по display_id; иначе — первый доступный.
   const src = sources.find((s) => s.display_id === String(display.id)) ?? sources[0]!;
+
+  // §Волна2 (2.3): кроп региона. Маппинг НЕ обновляем (клики по vision-координатам продолжают
+  // считаться от последнего ПОЛНОГО снимка — кроп не сбивает систему координат модели).
+  if (opts?.rect) {
+    const dip = rectToDip(opts.rect);
+    const ix = Math.round((dip.x - display.bounds.x) * scale);
+    const iy = Math.round((dip.y - display.bounds.y) * scale);
+    const iw = Math.round(dip.w * scale);
+    const ih = Math.round(dip.h * scale);
+    const cx = Math.max(0, Math.min(thumbnailSize.width - 1, ix));
+    const cy = Math.max(0, Math.min(thumbnailSize.height - 1, iy));
+    const cw = Math.max(1, Math.min(thumbnailSize.width - cx, iw));
+    const ch = Math.max(1, Math.min(thumbnailSize.height - cy, ih));
+    let img = src.thumbnail.crop({ x: cx, y: cy, width: cw, height: ch });
+    const extra = opts.scale !== undefined ? Math.max(0.25, Math.min(2, opts.scale)) : 1;
+    if (extra !== 1) {
+      img = img.resize({ width: Math.max(1, Math.round(cw * extra)), height: Math.max(1, Math.round(ch * extra)) });
+    }
+    const png = img.toPNG();
+    if (png.length === 0) throw new Error("пустой кадр кропа экрана");
+    const size = img.getSize();
+    log.info("screen.capture (crop)", { display: display.id, w: size.width, h: size.height, bytes: png.length });
+    return { image: png.toString("base64"), mediaType: "image/png", width: size.width, height: size.height };
+  }
+
   const png = src.thumbnail.toPNG();
   if (png.length === 0) throw new Error("пустой кадр захвата экрана");
   // Запоминаем маппинг для клика по vision-координатам (image → логические virtual-desktop).
@@ -74,4 +123,41 @@ export async function captureScreen(which?: string | number): Promise<ScreenShot
     bytes: png.length,
   });
   return { image: png.toString("base64"), mediaType: "image/png", width: thumbnailSize.width, height: thumbnailSize.height };
+}
+
+// ─────────────────────────── §Волна2 (2.3): $0-проба региона ───────────────────────────
+
+export interface ScreenProbe {
+  /** 64-битный перцептивный хеш (average-hash 8×8) hex-строкой — сравнивать между вызовами. */
+  hash: string;
+  /** Средняя яркость региона 0..255 (грубый сигнал «тёмный/светлый»). */
+  mean: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Перцептивная проба региона (§Волна2 2.3): «изменилось ли на экране» за $0 — 8×8 average-hash по
+ * яркости. НЕ доказательство результата (закон честности: probe ≠ «готово») — только детектор перемен;
+ * сверка исхода остаётся за snapshot/OCR/vision.
+ */
+export async function probeScreen(which?: string | number, rect?: CaptureRect): Promise<ScreenProbe> {
+  const shot = await captureScreen(which, rect ? { rect } : undefined);
+  const { nativeImage } = await import("electron");
+  const img = nativeImage.createFromBuffer(Buffer.from(shot.image, "base64"));
+  const bitmap = img.resize({ width: 8, height: 8 }).toBitmap(); // BGRA 8×8
+  const luma: number[] = [];
+  for (let i = 0; i + 3 < bitmap.length && luma.length < 64; i += 4) {
+    const b = bitmap[i]!;
+    const g = bitmap[i + 1]!;
+    const r = bitmap[i + 2]!;
+    luma.push(0.299 * r + 0.587 * g + 0.114 * b);
+  }
+  if (luma.length === 0) throw new Error("screen.probe: пустой битмап региона");
+  const mean = luma.reduce((a, v) => a + v, 0) / luma.length;
+  let hash = 0n;
+  for (let i = 0; i < luma.length; i += 1) {
+    hash = (hash << 1n) | (luma[i]! >= mean ? 1n : 0n);
+  }
+  return { hash: hash.toString(16).padStart(16, "0"), mean: Math.round(mean), width: shot.width, height: shot.height };
 }

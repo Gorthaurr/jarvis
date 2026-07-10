@@ -62,6 +62,8 @@ import type { KnowledgeBase } from "../brain/knowledge/index.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
 import { type SkillProvider, hasGuardSteps, isLearnedMd, listSkills } from "../memory/skills.js";
 import { type ReplySink, type VoicePipeline, createVoicePipeline } from "../voice/index.js";
+import { TranscriptNormalizer } from "../voice/lexicon.js";
+import { routerLexicon } from "../brain/router/index.js";
 import type { FillerCache } from "../voice/filler-cache.js";
 import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
 import type { VoiceProfileStore } from "../voice/speaker/store.js";
@@ -146,6 +148,8 @@ export interface SessionContext {
   agentDeps: AgentDeps;
   /** Последний полученный ClientContext — вход для proactive (§9). */
   lastContext?: ClientContext;
+  /** §Волна2 (2.6): структурные списки из client.env — источник лексикона STT-нормализатора. */
+  envLexicon?: { apps: string[]; games: string[] };
   /** §3 верификация диктора: общие на gateway движок + хранилище голосов (для enrollment). */
   speakerVerifier?: ISpeakerVerifier;
   speakerStore?: VoiceProfileStore;
@@ -275,6 +279,18 @@ export function makeSessionContext(
   };
   // §9 «не мешать»: поздняя привязка к ctx — пайплайн читает занятость пользователя из client.context.
   let ctxForBusy: SessionContext | undefined;
+  // §Волна2 (2.6): пост-STT нормализатор лексики. Источники: статика роутера (сервисы/алиасы),
+  // приложения/игры из client.env (объект мутируется хендлером client.env ниже), имена/триггеры
+  // выученных навыков. Сборка ленивая/фоновая — normalize синхронный (gateWake).
+  const envLexicon = { apps: [] as string[], games: [] as string[] };
+  const transcriptNormalizer = new TranscriptNormalizer([
+    () => routerLexicon(),
+    () => [...envLexicon.apps, ...envLexicon.games],
+    async () => {
+      const cat = (await brain.skills?.learnedCatalog?.(session.userId)) ?? [];
+      return cat.flatMap((c) => [c.name, c.when]);
+    },
+  ]);
   const voice = createVoicePipeline({
     stt: providers.stt,
     tts: providers.tts,
@@ -328,6 +344,8 @@ export function makeSessionContext(
       const c = ctxForBusy?.lastContext;
       return Boolean(c && (c.micBusyByOtherApp || c.fullscreen || c.locked));
     },
+    // §Волна2 (2.6): доменная латиница STT → кириллица до wake/роутера («в dot'е»→«в доте»).
+    normalizeTranscript: (text) => transcriptNormalizer.normalize(text),
     // brain на финальном тексте реплики (§21: {voice, display?}).
     // HIGH-3 (ревью 2026-07-10): детерминированный перехват УПРАВЛЕНИЯ задачами («отмени/пауза/
     // что делаешь») раньше стоял ТОЛЬКО на текстовом канале (onDevText) — живой ГОЛОС уходил в
@@ -411,6 +429,7 @@ export function makeSessionContext(
     heartbeat,
     voice,
     agentDeps,
+    envLexicon, // §Волна2 (2.6): client.env-хендлер мутирует списки → лексикон нормализатора живой
     disposeAgent,
     speakerVerifier: providers.speakerVerifier,
     speakerStore: providers.speakerStore,
@@ -465,9 +484,20 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "client.env": {
       // §9: авто-профиль окружения (браузер/приложения) → в системный промпт сессии,
       // чтобы агент адаптировался под конкретного пользователя (не хардкод).
-      const summary = (env.payload as ClientEnv).summary;
+      const payload = env.payload as ClientEnv;
+      const summary = payload.summary;
       ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, environment: summary };
-      log.info("client.env: профиль окружения получен", { len: summary?.length ?? 0 });
+      // §Волна2 (2.6): структурные списки → лексикон STT-нормализатора (мутируем объект-держатель,
+      // который замкнут в источниках TranscriptNormalizer этой сессии).
+      if (ctx.envLexicon) {
+        if (Array.isArray(payload.apps)) ctx.envLexicon.apps = payload.apps.map(String);
+        if (Array.isArray(payload.games)) ctx.envLexicon.games = payload.games.map(String);
+      }
+      log.info("client.env: профиль окружения получен", {
+        len: summary?.length ?? 0,
+        apps: payload.apps?.length ?? 0,
+        games: payload.games?.length ?? 0,
+      });
       break;
     }
     case "client.system": {

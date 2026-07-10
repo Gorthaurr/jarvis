@@ -143,6 +143,21 @@ export class TurnDetector {
     return decision;
   }
 
+  /**
+   * §Волна2 (2.6): STT-провайдер САМ зафиксировал конец фразы (Deepgram speech_final = речь +
+   * ~300мс тишины по его VAD) — это авторитетный сигнал тишины, но СЕМАНТИЧЕСКОЕ вето сохраняем:
+   * «висящий союз/предлог» (TRAILING_INCOMPLETE → 0.15) и одиночное слово (0.4) не рубим — их
+   * дорешает клиентский VAD-путь/потолок, как раньше (иначе вернётся жалоба «не дослушивает»).
+   * Порог мягче штатного completeThreshold: тишину провайдер уже подтвердил.
+   */
+  onProviderEndpoint(text?: string): EndpointDecision {
+    const t = (text ?? this.lastText).trim();
+    if (!t) return "wait";
+    const decision: EndpointDecision = this.detector.predictComplete(t) >= 0.5 ? "endpoint" : "wait";
+    if (decision === "endpoint") this.reset();
+    return decision;
+  }
+
   reset(): void {
     this.lastText = "";
     this.silenceStartedAt = null;

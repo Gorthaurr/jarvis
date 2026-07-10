@@ -78,7 +78,81 @@ public static class ArgsHelper
 public sealed record GroundArgs(
     [property: JsonPropertyName("role")]    string Role,
     [property: JsonPropertyName("name")]    string? Name,
-    [property: JsonPropertyName("scope")]   string? Scope   // pid или "" = весь рабочий стол
+    // §Волна2 (2.4): scope null/"" = АКТИВНОЕ ОКНО с фолбэком на весь стол; pid = окно процесса; "desktop" = весь стол.
+    [property: JsonPropertyName("scope")]   string? Scope,
+    // §Волна2 (2.4): "substring" — матч имени по вхождению (без регистра); дефолт — точное совпадение.
+    [property: JsonPropertyName("nameMode")] string? NameMode,
+    // §Волна2 (2.4): AutomationId — устойчивый идентификатор элемента (точнее имени, если известен).
+    [property: JsonPropertyName("automationId")] string? AutomationId
+);
+
+// §Волна2 (2.4): снапшот интерактивных элементов окна (set-of-marks) — дешёвые «глаза» для нативных окон.
+public sealed record SnapshotArgs(
+    [property: JsonPropertyName("pid")]      int? Pid,      // null = активное (foreground) окно
+    [property: JsonPropertyName("maxItems")] int? MaxItems
+);
+
+public sealed record SnapshotItem(
+    [property: JsonPropertyName("handle")]       int Handle,
+    [property: JsonPropertyName("role")]         string Role,
+    [property: JsonPropertyName("name")]         string Name,
+    [property: JsonPropertyName("automationId")] string? AutomationId,
+    [property: JsonPropertyName("value")]        string? Value,
+    [property: JsonPropertyName("x")]            double X,
+    [property: JsonPropertyName("y")]            double Y,
+    [property: JsonPropertyName("w")]            double W,
+    [property: JsonPropertyName("h")]            double H
+);
+
+public sealed record SnapshotResult(
+    [property: JsonPropertyName("window")]    string Window,
+    [property: JsonPropertyName("pid")]       int Pid,
+    [property: JsonPropertyName("items")]     IReadOnlyList<SnapshotItem> Items,
+    [property: JsonPropertyName("truncated")] bool Truncated
+);
+
+// §Волна2 (2.4): окна верхнего уровня (window.list / window.focus).
+public sealed record WindowInfo(
+    [property: JsonPropertyName("hwnd")]       long Hwnd,
+    [property: JsonPropertyName("pid")]        int Pid,
+    [property: JsonPropertyName("process")]    string Process,
+    [property: JsonPropertyName("title")]      string Title,
+    [property: JsonPropertyName("foreground")] bool Foreground,
+    [property: JsonPropertyName("minimized")]  bool Minimized
+);
+
+public sealed record WindowListResult(
+    [property: JsonPropertyName("windows")] IReadOnlyList<WindowInfo> Windows
+);
+
+public sealed record WindowFocusArgs(
+    [property: JsonPropertyName("hwnd")]  long? Hwnd,
+    [property: JsonPropertyName("query")] string? Query    // подстрока заголовка или имя процесса
+);
+
+public sealed record WindowFocusResult(
+    [property: JsonPropertyName("focused")] bool Focused,  // ЧЕСТНЫЙ readback GetForegroundWindow
+    [property: JsonPropertyName("hwnd")]    long Hwnd,
+    [property: JsonPropertyName("title")]   string Title
+);
+
+// §Волна2 (2.3): локальный OCR (Windows.Media.Ocr) — текст с canvas/игр без vision-раунда LLM.
+public sealed record OcrArgs(
+    [property: JsonPropertyName("imageB64")] string ImageB64, // PNG/JPEG base64 (клиент снимает экран сам)
+    [property: JsonPropertyName("lang")]     string? Lang     // BCP-47, напр. "ru"/"en"; null = язык профиля
+);
+
+public sealed record OcrLineDto(
+    [property: JsonPropertyName("text")] string Text,
+    [property: JsonPropertyName("x")]    double X,   // bbox строки В КООРДИНАТАХ ИЗОБРАЖЕНИЯ
+    [property: JsonPropertyName("y")]    double Y,
+    [property: JsonPropertyName("w")]    double W,
+    [property: JsonPropertyName("h")]    double H
+);
+
+public sealed record OcrReadResult(
+    [property: JsonPropertyName("text")]  string Text,
+    [property: JsonPropertyName("lines")] IReadOnlyList<OcrLineDto> Lines
 );
 
 // §бесшумный-ввод: грунд по КООРДИНАТАМ (логические 96dpi, как у click) → handle actionable-элемента.
@@ -99,7 +173,21 @@ public sealed record ClickArgs(
     [property: JsonPropertyName("handle")]  int? Handle,    // fallback: грунд уже есть
     [property: JsonPropertyName("button")]  string? Button, // "left"|"right"|"middle", по умолчанию "left"
     // §бесшумный-ввод: вернуть курсор на прежнее место после физ.клика (клиент ставит true при простое юзера).
-    [property: JsonPropertyName("restoreCursor")] bool? RestoreCursor
+    [property: JsonPropertyName("restoreCursor")] bool? RestoreCursor,
+    // §Волна2 (2.4): число кликов (2 = дабл-клик; интервал внутри GetDoubleClickTime — ОС склеит).
+    [property: JsonPropertyName("count")]   int? Count
+);
+
+// §Волна2 (2.4): полная мышь — move/down/up/wheel/drag (координаты ЛОГИЧЕСКИЕ 96dpi, как у click).
+public sealed record MouseArgs(
+    [property: JsonPropertyName("op")]      string Op,      // "move"|"down"|"up"|"wheel"|"drag"
+    [property: JsonPropertyName("x")]       double? X,
+    [property: JsonPropertyName("y")]       double? Y,
+    [property: JsonPropertyName("toX")]     double? ToX,    // drag: конечная точка
+    [property: JsonPropertyName("toY")]     double? ToY,
+    [property: JsonPropertyName("button")]  string? Button, // "left"|"right"|"middle" (down/up/drag)
+    [property: JsonPropertyName("dy")]      int? Dy,        // wheel: вертикальные тики (+вверх, −вниз)
+    [property: JsonPropertyName("dx")]      int? Dx         // wheel: горизонтальные тики
 );
 
 public sealed record TypeArgs(

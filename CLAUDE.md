@@ -130,6 +130,66 @@
     (1.8) наблюдаемость: пер-раундовые строки `type:"round"` в metrics.jsonl (`metrics.recordRound`) +
     WARN «перезапись префикса» с причиной (model-switched/pruned-images/prefix-changed) + latency-марки
     на earcon (метрика «конец речи → первая обратная связь» существует).
+  - **ВОЛНА 2 «структурные» (2026-07-10, план `docs/HARNESS_PLAN_2026-07-10.md` §Волна2 — все 7 пунктов):**
+    (2.1) **FUSED ACT+OBSERVE** — актуаторы input_click/type/key/mouse/ui_invoke/skill.execute САМИ прикладывают
+    дешёвое наблюдение ПОСЛЕ действия в ТОТ ЖЕ tool_result (клиент `actuators/observe.ts`: пауза стабилизации →
+    a11y-выжимка активного окна; окно UIA-слепое → OCR региона вокруг точки; выкл `JARVIS_FUSED_OBSERVE=0`);
+    сервер (`dispatch.ts` generic-путь) форматирует его untrusted-блоком и ставит `ToolResult.observed` → агент
+    снимает verify-долг в ТОМ ЖЕ раунде (`blindMutatePending` не взводится при observed — строгость LAW цела,
+    сверка реальная, не доверие «ok»); `browser_act`: клик ВСЕГДА DOM-диф (`changed:true/false` от инжектора;
+    changed:false наблюдением успеха НЕ считается), observed при playing/currentTime/navigated/changed:true.
+    Паттерн «клик→скрин→клик→скрин» схлопнут — экономика −35-50% раундов GUI-задач.
+    (2.2) **`input_batch`** (HOT): ≤12 механических шагов одним вызовом → `skill.execute` с синтетическим id
+    (`adhoc-batch-*`) → готовый runSkill под одной арендой, стоп на первой ошибке, честный «выполнено k из n»
+    (`handlers/skills.ts inputBatch`; валидация действий ДО отправки — молчаливый no-op клиента не маскируется
+    успехом; needsLlm запрещён); + петля: раунд целиком из не-GUI ЧИТАЮЩИХ вызовов (toolEffect neutral/verify)
+    диспатчится ПАРАЛЛЕЛЬНО (research 2-3× быстрее; mutate/GUI — строго последовательно). Persona v72:
+    «батчь механику, независимые чтения — вместе».
+    (2.3) **ДЕШЁВЫЕ СЕНСОРЫ**: `screen_capture{rect,scale}` (кроп ~50-200 ток; lastMapping НЕ трогается —
+    клики продолжают считаться от последнего ПОЛНОГО кадра); `screen_read_text` (HOT; ЛОКАЛЬНЫЙ OCR
+    Windows.Media.Ocr в сайдкаре — клиент снимает кадр, сайдкар отдаёт текст+bbox строк, `OcrService.cs`);
+    `screen_probe` (COLD; перцептивный 8×8-хеш — детектор перемен, НЕ доказательство успеха, план §4.2);
+    `wait_for{condition,timeoutMs}` (HOT; клиентский поллинг БЕЗ LLM-раундов: window/ui/text(OCR)/sound(WASAPI),
+    gone:true = ждать исчезновения; met:false — честный исход, met:true = observed) — `actuators/sensors-cheap.ts`;
+    visual-expect макросов ОЖИЛ (client-actuator: OCR вместо безусловного false → $0-реплей для игр работает).
+    (2.4) **САЙДКАР** (TFM → `net8.0-windows10.0.19041.0` ради WinRT OCR; путь exe в client/index.ts обновлён;
+    смоук-тест 9/9 живьём): `ui.snapshot`→`ui_snapshot` (HOT; set-of-marks: интерактивные элементы окна
+    {handle,role,name,automationId,value,bbox} ~сотни токенов вместо 2K-скрина, элементы сразу в реестре
+    хендлов → ui_invoke по handle); `window.list`/`window.focus`→`window_list`/`window_focus` (HOT; EnumWindows
+    без DWM-клоак; SetForegroundWindow+AttachThreadInput+ALT-нудж с ЧЕСТНЫМ readback focused; `apps.focusApp`
+    теперь сайдкар-first с фолбэком на AppActivate — TODO M3 закрыт); ПОЛНАЯ МЫШЬ `input.mouse`→`input_mouse`
+    (HOT; move/down/up/wheel/drag с интерполяцией, right/middle; `input_click{button,count}` — контекст-меню/
+    дабл-клик; зажатые кнопки мыши в реестре удержаний watchdog'а); ground: scope дефолт АКТИВНОЕ ОКНО→фолбэк
+    весь стол + nameMode="substring" + automationId; READ-опы сайдкара — в Task.Run-пуле (не блокируют ввод);
+    `SidecarClient` — авто-рестарт с бэкоффом 1с→30с (сброс по аптайму 60с; stop() не рестартит).
+    Классификация: ui_snapshot/screen_read_text = VERIFY; window_list/screen_probe/wait_for = NEUTRAL;
+    input_mouse/input_batch = BLIND_MUTATE (+ input_mouse в MOUSE_TOOLS); input.mouse/window.focus/input_batch
+    — под арендой ввода. OCR/снапшот/окна оборачиваются `<untrusted_content>` (M11: влияемые данные).
+    (2.5) **ADMISSION-ОЧЕРЕДЬ GUI-задач**: GUI-boundness известна ДО петли (по recall-навыку: kindNeedsInput
+    на шагах) + арбитр занят + фоновый путь → `tasks.markQueued` (честный чип «в очереди»; narrate/панель
+    уже умели) + ОДИН ack «Сначала закончу текущее, сэр» + ожидание аренды ДО первого LLM-раунда
+    (`JARVIS_QUEUE_WAIT_MS` деф 90с; таймаут → честный терминал «так и не приступил», НИ ОДНОГО раунда не
+    сожжено); после аренды `tasks.start` (queued→running) + гард протухшего клика (форс свежего взгляда);
+    дубль-гейт видит queued (повтор в очереди не плодит вторую). Без навыка признак молчит → страховка
+    Волны 1 (queue-aware дедлайн в ensureInput) остаётся.
+    (2.6) **STT**: (а) НОРМАЛИЗАТОР ЛЕКСИКИ `voice/lexicon.ts` (`TranscriptNormalizer`): доменная латиница →
+    кириллица С СОХРАНЕНИЕМ словоформы («в dot'е.»→«в доте.»); лексикон = `routerLexicon()`
+    (QUICK_ALIASES+WEB_SERVICES) ∪ client.env apps/games (ClientEnv расширен структурными списками — строку
+    summary не парсим) ∪ имена/when навыков; заменяются ТОЛЬКО exact/lev≤1-узнанные токены (GitHub/ffmpeg
+    не трогаются — §13-принцип «recall, не исправление»); сборка фоновая TTL 60с, normalize СИНХРОННЫЙ;
+    врезка ОДНА — `pipeline.gateWake` (кроет спекулятивный эндпоинт и поздний финал; анти-дубль сравнивает
+    нормализованное). (б) СЕРВЕРНЫЙ ENDPOINTING: `speech_final` Deepgram (endpointing=300) больше не
+    выбрасывается → `SttPartial.speechFinal` → pipeline эндпоинтит через `turn.onProviderEndpoint`
+    (семантическое вето: висящий союз/одиночное слово не рубим, порог 0.5 — тишину провайдер уже подтвердил)
+    — ~350-400мс от конца речи против 520+150мс клиентского пути (тот остаётся фолбэком); выкл
+    `JARVIS_STT_ENDPOINT=0`.
+    (2.7) **ПЕР-РАУНДОВЫЙ THINKING** `agent/thinking-policy.ts` (`decideRoundThinking`/`stripThinkingBlocks`):
+    план (step 0)/нудж/эскалация — базовый эффорт тира; механика (recall-навык, follow-up после blind-mutate)
+    — off (−2-5с и сотни output-ток/раунд); fable/Opus НЕ глушится НИКОГДА (грабля §4.7); off→on ТОЛЬКО на
+    текстовой границе (на хвосте tool_result включать нельзя — HTTP 400: assistant-ход с tool_use обязан
+    нести свои thinking-блоки), иначе off до ближайшего нуджа; при off реплеенные thinking-блоки стрипаются
+    (разовая перезапись префикса — WARN 1.8 покажет причиной prefix-changed); все 8 нудж-сайтов ставят
+    `nudgeBoostNextRound`; выкл `JARVIS_ROUND_THINKING=0`. Persona v72: «между tool-вызовами текст не пиши».
   - **ПАМЯТЬ+КОНТЕКСТ уровень А + Б4а/Б5 (2026-07-10, отчёт `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md`;
     диагноз: facts:0 навсегда — 3 структурных разрыва; контекст ПК замораживался; 39-мин STT-ход):**
     ПАМЯТЬ: (А1) баг спреда — retrieval-facts затирал профильные, теперь merge+dedup; (А2/А9) единый

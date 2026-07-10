@@ -36,6 +36,15 @@ DemoRecorder? recorder = null;
 // Арбитр ввода (§6, user-takeover) — создаётся лениво по raw-input.subscribe enable.
 InputArbiter? arbiter = null;
 
+// §Волна2 (2.4): ЧИТАЮЩИЕ опы (UIA-обход/OCR/список окон) уходят в thread-pool — долгий обход
+// дерева сложного окна (секунды) не блокирует синтез ввода. Мутирующие (click/type/key/mouse/
+// invoke/window.focus) остаются СТРОГО последовательными в главном цикле — порядок жестов важен.
+HashSet<string> readOps = new()
+{
+    "ground", "ground.at", "read.selection", "read.window", "read.screen",
+    "ui.snapshot", "window.list", "ocr",
+};
+
 // -----------------------------------------------------------------------
 // Главный цикл: каждая строка stdin — один IpcRequest
 // -----------------------------------------------------------------------
@@ -57,7 +66,16 @@ while ((line = Console.ReadLine()) is not null)
         continue;
     }
 
-    await HandleRequestAsync(req);
+    if (readOps.Contains(req.Op))
+    {
+        // Fire-and-forget: HandleRequestAsync сам try/catch'ит и пишет ответ (под stdoutLock).
+        IpcRequest reqCopy = req;
+        _ = Task.Run(() => HandleRequestAsync(reqCopy));
+    }
+    else
+    {
+        await HandleRequestAsync(req);
+    }
 }
 
 // Снимаем глобальные хуки и отпускаем зажатые клавиши перед выходом.
@@ -111,6 +129,19 @@ async Task HandleRequestAsync(IpcRequest req)
 
             // §8 — обучение демонстрацией: запись/останов глобального UIA-хука
             "demo.record" => HandleDemoRecord(req),
+
+            // §Волна2 (2.4) — снапшот интерактивных элементов окна (set-of-marks, дешёвые «глаза»)
+            "ui.snapshot" => HandleSnapshot(req),
+
+            // §Волна2 (2.4) — окна верхнего уровня: список / фокус (замена PowerShell AppActivate)
+            "window.list" => WindowManager.List(),
+            "window.focus" => HandleWindowFocus(req),
+
+            // §Волна2 (2.4) — полная мышь: move / down / up / wheel / drag
+            "mouse" => HandleMouse(req),
+
+            // §Волна2 (2.3) — локальный OCR (Windows.Media.Ocr): текст с canvas/игр без vision-раунда
+            "ocr" => await OcrService.RecognizeAsync(ArgsHelper.Deserialize<OcrArgs>(req.Args)),
 
             _ => throw new InvalidOperationException($"Неизвестная операция: {req.Op}"),
         };
@@ -166,19 +197,20 @@ object? HandleClick(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<ClickArgs>(req.Args);
     string button = args.Button ?? "left";
+    int count = args.Count ?? 1; // §Волна2 (2.4): 2 = дабл-клик
 
     bool restore = args.RestoreCursor == true; // §бесшумный-ввод: вернуть курсор после физ.клика
     if (args.X.HasValue && args.Y.HasValue)
     {
         // Прямые координаты от vision-движка — ЛОГИЧЕСКИЕ (96dpi), масштабируем через DPI (§18).
-        InputSynthesizer.Click(args.X.Value, args.Y.Value, button, restore);
+        InputSynthesizer.Click(args.X.Value, args.Y.Value, button, restore, count);
     }
     else if (args.Handle.HasValue)
     {
         // Fallback-клик по a11y-элементу (§6): точка клика из UIA — уже ФИЗИЧЕСКАЯ,
         // поэтому ClickPhysical (без повторного DPI-масштаба).
         (double cx, double cy) = grounder.GetClickPoint(args.Handle.Value);
-        InputSynthesizer.ClickPhysical(cx, cy, button, restore);
+        InputSynthesizer.ClickPhysical(cx, cy, button, restore, count);
     }
     else
     {
@@ -186,6 +218,50 @@ object? HandleClick(IpcRequest req)
     }
 
     return new { success = true };
+}
+
+// "ui.snapshot" — интерактивные элементы окна одним списком (§Волна2 2.4)
+object? HandleSnapshot(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<SnapshotArgs>(req.Args);
+    return grounder.Snapshot(args.Pid, args.MaxItems);
+}
+
+// "window.focus" — SetForegroundWindow с AttachThreadInput и честным readback (§Волна2 2.4)
+object? HandleWindowFocus(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<WindowFocusArgs>(req.Args);
+    return WindowManager.Focus(args.Hwnd, args.Query);
+}
+
+// "mouse" — полная мышь: move / down / up / wheel / drag (§Волна2 2.4)
+object? HandleMouse(IpcRequest req)
+{
+    var args = ArgsHelper.Deserialize<MouseArgs>(req.Args);
+    switch ((args.Op ?? "").ToLowerInvariant())
+    {
+        case "move":
+            if (!(args.X.HasValue && args.Y.HasValue)) throw new ArgumentException("mouse.move: нужны x+y");
+            InputSynthesizer.MouseMove(args.X.Value, args.Y.Value);
+            break;
+        case "down":
+            InputSynthesizer.MouseButton(args.Button, down: true, args.X, args.Y);
+            break;
+        case "up":
+            InputSynthesizer.MouseButton(args.Button, down: false, args.X, args.Y);
+            break;
+        case "wheel":
+            InputSynthesizer.MouseWheel(args.Dy ?? 0, args.Dx ?? 0);
+            break;
+        case "drag":
+            if (!(args.X.HasValue && args.Y.HasValue && args.ToX.HasValue && args.ToY.HasValue))
+                throw new ArgumentException("mouse.drag: нужны x+y (откуда) и toX+toY (куда)");
+            InputSynthesizer.MouseDrag(args.X.Value, args.Y.Value, args.ToX.Value, args.ToY.Value, args.Button);
+            break;
+        default:
+            throw new ArgumentException($"mouse: неизвестный op '{args.Op}' (ожидалось move|down|up|wheel|drag)");
+    }
+    return new { success = true, op = args.Op };
 }
 
 // "type" — набор текста (§6)

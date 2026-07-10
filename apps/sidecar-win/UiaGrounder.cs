@@ -32,30 +32,91 @@ public sealed class UiaGrounder : IDisposable
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Найти элемент по роли UIA и (опционально) имени.
-    /// <paramref name="scope"/>: null / "" = рабочий стол; иначе — pid процесса-владельца окна.
+    /// Найти элемент по роли UIA и (опционально) имени/AutomationId.
+    /// <paramref name="scope"/> (§Волна2 2.4): null/"" = АКТИВНОЕ окно, при промахе — фолбэк на весь
+    /// рабочий стол (exact-поиск по всему столу медленный и ловит чужие окна); "desktop" = сразу весь
+    /// стол; pid = окно процесса. <paramref name="nameMode"/>="substring" — матч имени по вхождению.
     /// Возвращает null если элемент не найден.
     /// </summary>
-    public GroundResult? Ground(string role, string? name, string? scope)
+    public GroundResult? Ground(string role, string? name, string? scope, string? nameMode = null, string? automationId = null)
     {
-        AutomationElement root = ResolveRoot(scope);
-
         ControlType? ct = RoleToControlType(role);
         if (ct is null)
             throw new ArgumentException($"Неизвестная роль: {role}");
 
-        // Строим условие поиска.
-        Condition cond = string.IsNullOrEmpty(name)
-            ? new PropertyCondition(AutomationElement.ControlTypeProperty, ct)
-            : new AndCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ct),
-                new PropertyCondition(AutomationElement.NameProperty, name, PropertyConditionFlags.IgnoreCase));
+        bool substring = nameMode == "substring" && !string.IsNullOrEmpty(name);
+        foreach (AutomationElement root in CandidateRoots(scope))
+        {
+            AutomationElement? found = FindIn(root, ct, name, substring, automationId);
+            if (found is not null) return RegisterElement(found);
+        }
+        return null;
+    }
 
-        AutomationElement? found = root.FindFirst(TreeScope.Descendants, cond);
-        if (found is null)
+    /// <summary>Корни поиска по scope: pid → окно процесса; null/"" → активное окно, затем весь стол.</summary>
+    private static IEnumerable<AutomationElement> CandidateRoots(string? scope)
+    {
+        if (!string.IsNullOrEmpty(scope) && scope != "desktop" && int.TryParse(scope, out int pid))
+        {
+            Condition pidCond = new PropertyCondition(AutomationElement.ProcessIdProperty, pid);
+            AutomationElement? win = null;
+            try { win = AutomationElement.RootElement.FindFirst(TreeScope.Children, pidCond); } catch { /* фолбэк ниже */ }
+            if (win is not null)
+            {
+                yield return win;
+                yield break;
+            }
+        }
+        if (string.IsNullOrEmpty(scope))
+        {
+            AutomationElement? fg = ForegroundWindowElement();
+            if (fg is not null) yield return fg;
+        }
+        yield return AutomationElement.RootElement;
+    }
+
+    /// <summary>Активное (foreground) окно как AutomationElement; null при сбое (защищённое окно/десктоп).</summary>
+    private static AutomationElement? ForegroundWindowElement()
+    {
+        try
+        {
+            IntPtr h = WindowManager.Foreground();
+            return h == IntPtr.Zero ? null : AutomationElement.FromHandle(h);
+        }
+        catch
+        {
             return null;
+        }
+    }
 
-        return RegisterElement(found);
+    /// <summary>Поиск в корне: точное имя — через PropertyCondition; substring — перебор кандидатов роли.</summary>
+    private static AutomationElement? FindIn(AutomationElement root, ControlType ct, string? name, bool substring, string? automationId)
+    {
+        var conds = new List<Condition> { new PropertyCondition(AutomationElement.ControlTypeProperty, ct) };
+        if (!string.IsNullOrEmpty(automationId))
+            conds.Add(new PropertyCondition(AutomationElement.AutomationIdProperty, automationId));
+        if (!substring && !string.IsNullOrEmpty(name))
+            conds.Add(new PropertyCondition(AutomationElement.NameProperty, name, PropertyConditionFlags.IgnoreCase));
+        Condition cond = conds.Count == 1 ? conds[0] : new AndCondition(conds.ToArray());
+
+        try
+        {
+            if (!substring) return root.FindFirst(TreeScope.Descendants, cond);
+            AutomationElementCollection all = root.FindAll(TreeScope.Descendants, cond);
+            foreach (AutomationElement el in all)
+            {
+                try
+                {
+                    if ((el.Current.Name ?? "").Contains(name!, StringComparison.OrdinalIgnoreCase)) return el;
+                }
+                catch { /* элемент исчез между FindAll и чтением — пропускаем */ }
+            }
+            return null;
+        }
+        catch
+        {
+            return null; // сбой поиска в этом корне → пробуем следующий (фолбэк на весь стол)
+        }
     }
 
     /// <summary>
@@ -95,13 +156,19 @@ public sealed class UiaGrounder : IDisposable
             || el.TryGetCurrentPattern(SelectionItemPattern.Pattern, out _);
     }
 
-    /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.</summary>
-    private GroundResult RegisterElement(AutomationElement el)
+    /// <summary>Зарегистрировать элемент в реестре дескрипторов (handle для последующего invoke/click).</summary>
+    private int RegisterHandle(AutomationElement el)
     {
         int handle = System.Threading.Interlocked.Increment(ref _nextHandle);
         _registry[handle] = el;
         TrimRegistry();
+        return handle;
+    }
 
+    /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.</summary>
+    private GroundResult RegisterElement(AutomationElement el)
+    {
+        int handle = RegisterHandle(el);
         System.Windows.Rect bbox = el.Current.BoundingRectangle;
         return new GroundResult(
             Handle: handle,
@@ -112,6 +179,98 @@ public sealed class UiaGrounder : IDisposable
             Name: el.Current.Name ?? "",
             Role: el.Current.ControlType.ProgrammaticName
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // §Волна2 (2.4) — Снапшот интерактивных элементов окна (set-of-marks)
+    // -----------------------------------------------------------------------
+
+    /// <summary>ControlType, интересные для снапшота (интерактив), даже без Invoke/Toggle-паттерна.</summary>
+    private static readonly ControlType[] InteractiveTypes =
+    [
+        ControlType.Button, ControlType.Edit, ControlType.ComboBox, ControlType.CheckBox,
+        ControlType.RadioButton, ControlType.ListItem, ControlType.MenuItem, ControlType.TabItem,
+        ControlType.Hyperlink, ControlType.Slider, ControlType.Spinner, ControlType.SplitButton,
+        ControlType.TreeItem,
+    ];
+
+    /// <summary>Глубина обхода снапшота — глубже грундинга (вложенные панели современных UI).</summary>
+    private const int SnapshotMaxDepth = 14;
+
+    /// <summary>
+    /// §Волна2 (2.4): индексированный список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name,
+    /// automationId, value, bbox} — «дешёвые глаза» (~сотни токенов текста вместо 2K-скрина).
+    /// Каждый элемент регистрируется в реестре — следующий ui.invoke/click бьёт точно по handle.
+    /// pid=null → активное (foreground) окно. bbox — ФИЗИЧЕСКИЕ пиксели экрана (как GroundResult).
+    /// </summary>
+    public SnapshotResult Snapshot(int? pid, int? maxItems)
+    {
+        AutomationElement root = pid.HasValue
+            ? CandidateRoots(pid.Value.ToString()).First()
+            : ForegroundWindowElement() ?? AutomationElement.RootElement;
+
+        int cap = Math.Clamp(maxItems ?? 60, 1, 200);
+        var items = new List<SnapshotItem>(Math.Min(cap, 64));
+        bool truncated = false;
+        CollectInteractive(root, items, cap, ref truncated, depth: 0);
+
+        string title = "";
+        int rootPid = 0;
+        try
+        {
+            title = root.Current.Name ?? "";
+            rootPid = root.Current.ProcessId;
+        }
+        catch { /* окно исчезло — снапшот всё равно отдаём */ }
+        return new SnapshotResult(title, rootPid, items, truncated);
+    }
+
+    private void CollectInteractive(AutomationElement el, List<SnapshotItem> items, int cap, ref bool truncated, int depth)
+    {
+        if (items.Count >= cap) { truncated = true; return; }
+        if (depth > SnapshotMaxDepth) return;
+
+        try
+        {
+            AutomationElement.AutomationElementInformation cur = el.Current;
+            // Невидимое (offscreen) пропускаем целиком по узлу, но потомков всё же смотрим на
+            // корневом уровне не надо — offscreen-контейнер обычно держит offscreen-потомков.
+            if (!cur.IsOffscreen && depth > 0 && (IsActionable(el) || InteractiveTypes.Contains(cur.ControlType)))
+            {
+                string? value = null;
+                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
+                    value = vp.Current.Value;
+                System.Windows.Rect b = cur.BoundingRectangle;
+                items.Add(new SnapshotItem(
+                    Handle: RegisterHandle(el),
+                    Role: ShortRole(cur.ControlType.ProgrammaticName),
+                    Name: cur.Name ?? "",
+                    AutomationId: string.IsNullOrEmpty(cur.AutomationId) ? null : cur.AutomationId,
+                    Value: string.IsNullOrEmpty(value) ? null : value,
+                    X: double.IsInfinity(b.X) ? 0 : b.X,
+                    Y: double.IsInfinity(b.Y) ? 0 : b.Y,
+                    W: double.IsInfinity(b.Width) ? 0 : b.Width,
+                    H: double.IsInfinity(b.Height) ? 0 : b.Height));
+            }
+        }
+        catch { /* проблемный узел не рушит снапшот */ }
+
+        AutomationElementCollection children;
+        try { children = el.FindAll(TreeScope.Children, Condition.TrueCondition); }
+        catch { return; }
+        foreach (AutomationElement child in children)
+        {
+            if (items.Count >= cap) { truncated = true; return; }
+            CollectInteractive(child, items, cap, ref truncated, depth + 1);
+        }
+    }
+
+    /// <summary>"ControlType.Button" → "button" — токен-экономия снапшота.</summary>
+    private static string ShortRole(string programmatic)
+    {
+        int dot = programmatic.LastIndexOf('.');
+        string s = dot >= 0 ? programmatic[(dot + 1)..] : programmatic;
+        return s.ToLowerInvariant();
     }
 
     /// <summary>Вытеснить самые старые дескрипторы (handle монотонно растёт) сверх лимита.</summary>

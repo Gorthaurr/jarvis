@@ -72,8 +72,30 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         case "input.click":
           if (!step.target) throw new Error("input.click без target");
           // method из шага (§8 реплей-макрос пишет physical для игр/canvas — silent там заведомо слеп).
-          await input.click(step.target, p.method === "physical" ? "physical" : "silent");
+          await input.click(step.target, p.method === "physical" ? "physical" : "silent", true, {
+            button: p.button === "right" || p.button === "middle" ? p.button : undefined,
+            count: typeof p.count === "number" ? p.count : undefined,
+          });
           return;
+        case "input.mouse": {
+          // §Волна2 (2.2/2.4): полная мышь в шаге берста/навыка (drag/wheel/hover/down-up).
+          const op = String(p.op ?? "");
+          if (op !== "move" && op !== "down" && op !== "up" && op !== "wheel" && op !== "drag") {
+            throw new Error(`input.mouse: неизвестный op «${op}»`);
+          }
+          await input.mouse({
+            op,
+            x: typeof p.x === "number" ? p.x : undefined,
+            y: typeof p.y === "number" ? p.y : undefined,
+            toX: typeof p.toX === "number" ? p.toX : undefined,
+            toY: typeof p.toY === "number" ? p.toY : undefined,
+            button: p.button === "right" || p.button === "middle" ? p.button : undefined,
+            dy: typeof p.dy === "number" ? p.dy : undefined,
+            dx: typeof p.dx === "number" ? p.dx : undefined,
+            space: p.space === "screen" ? "screen" : undefined,
+          });
+          return;
+        }
         case "wait": {
           // Реальная пауза (§8 реплей-макрос: дать UI перерисоваться между кликами). Кламп — защита
           // от абсурдного ms в контенте навыка. Без ms — no-op (совместимость со старым смыслом wait).
@@ -92,10 +114,23 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
     },
 
     async checkExpect(expect): Promise<boolean> {
-      // VISUAL-постусловие (canvas/игры/видео без a11y): локальной OCR-сверки пока нет → НЕ
-      // подтверждаем локально (иначе ложный успех) → false ведёт к retry→эскалации к LLM,
-      // который ВИДИТ экран через screen_capture и сверяет. TODO: локальный OCR/template-матч.
-      if (expect.kind === "visual") return false;
+      // VISUAL-постусловие (canvas/игры/видео без a11y): §Волна2 (2.3) — ЖИВАЯ локальная сверка
+      // через OCR сайдкара (Windows.Media.Ocr): expect.text виден на экране → подтверждено.
+      // Раньше был безусловный false → $0-реплей для игр был мёртв by design (каждый visual-шаг
+      // эскалировал к LLM). ЧЕСТНОСТЬ цела: OCR не нашёл текст (или text не задан/сайдкар молчит)
+      // → false → retry→эскалация к LLM с настоящими глазами, НЕ ложный успех.
+      if (expect.kind === "visual") {
+        const needle = (expect.text ?? "").trim().toLowerCase();
+        if (!needle) return false;
+        try {
+          const { screenOcr } = await import("../actuators/sensors-cheap.js");
+          const ocr = await screenOcr();
+          return ocr.text.toLowerCase().includes(needle);
+        } catch (e) {
+          log.debug(`visual-expect: OCR недоступен (${e instanceof Error ? e.message : String(e)}) — эскалация к LLM`);
+          return false;
+        }
+      }
       // Постусловие a11y: элемент с ролью/именем присутствует в UIA-дереве (§6 auto-wait).
       if (!expect.role) return true;
       try {

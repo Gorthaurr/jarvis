@@ -129,6 +129,15 @@ const WEB_SERVICES: Record<string, string> = {
   тикток: "https://tiktok.com",
   tiktok: "https://tiktok.com",
 };
+/**
+ * §Волна2 (2.6): статичная часть лексикона нормализатора STT — имена сервисов/алиасы роутера.
+ * Нормализатор (voice/lexicon.ts) приводит латинские STT-рендеринги этих слов к кириллице
+ * ДО gateWake/роутера (youtube→ютуб узнаётся, «в dot'е»→«в доте» и т.п.).
+ */
+export function routerLexicon(): string[] {
+  return [...Object.keys(QUICK_ALIASES), ...Object.keys(WEB_SERVICES)];
+}
+
 /** Паттерны фокуса: «переключись на <app>», «перейди в <app>». */
 const FOCUS_RE = /^\s*(?:переключись на|перейди в|перейди к|фокус на)\s+(?<app>.+?)\s*[.!?]?\s*$/iu;
 
