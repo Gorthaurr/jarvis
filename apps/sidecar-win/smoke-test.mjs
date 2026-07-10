@@ -83,6 +83,34 @@ try {
   const ocr = await rpc("8", "ocr", { imageB64: tinyPng }, 15000);
   check("ocr → text (движок жив)", ocr.ok === true && typeof ocr.data?.text === "string",
     ocr.ok ? `"${ocr.data.text}" (${ocr.data.lines.length} строк)` : ocr.error);
+
+  // 9) §Волна2 (2.4): ground с nameMode:"substring" находит окно по заведомо ЧАСТИЧНОМУ имени
+  // (ревью: Program.cs терял nameMode/automationId → substring молча работал как exact → «не найдено»).
+  // Кандидаты — из window.list (п.5); частичное имя не должно совпадать с чьим-то ПОЛНЫМ заголовком,
+  // иначе негативный exact-контроль ниже ловил бы честное совпадение вместо регрессии.
+  const winTitles = (wl.ok ? wl.data.windows : []).map((w) => (w.title ?? "").trim());
+  const allTitlesLc = winTitles.map((t) => t.toLowerCase());
+  const partials = winTitles
+    .filter((t) => t.length >= 5)
+    .map((t) => t.slice(1, -1).toLowerCase()) // строгая подстрока; lower — заодно проверяем IgnoreCase
+    .filter((p) => p.length >= 3 && !allTitlesLc.includes(p))
+    .slice(0, 3);
+  let subHit = null;
+  let subErr = "нет подходящего окна (заголовок ≥5 симв.) в window.list";
+  for (const [i, partial] of partials.entries()) {
+    const g9 = await rpc(`9-${i}`, "ground", { role: "window", name: partial, nameMode: "substring", scope: "desktop" }, 15000);
+    if (g9.ok === true && (g9.data?.name ?? "").toLowerCase().includes(partial)) { subHit = { partial, found: g9.data.name }; break; }
+    subErr = g9.ok ? `нашлось "${g9.data?.name}" без вхождения "${partial}"` : g9.error;
+  }
+  check("ground nameMode:substring по частичному имени", subHit !== null,
+    subHit ? `"${subHit.partial}" → "${subHit.found}"` : subErr);
+  // 9b) Негативный контроль: то же частичное имя БЕЗ nameMode (exact) → честное «не найдено».
+  // Если бы nameMode снова терялся, п.9 и п.9b стали бы неразличимы — вместе они ловят регрессию.
+  if (subHit) {
+    const g9b = await rpc("9b", "ground", { role: "window", name: subHit.partial, scope: "desktop" }, 15000);
+    check("ground exact по тому же частичному имени → не найдено", g9b.ok === false,
+      g9b.ok === false ? "" : `неожиданно нашлось "${g9b.data?.name}"`);
+  }
 } catch (e) {
   check("RPC", false, e.message);
 } finally {

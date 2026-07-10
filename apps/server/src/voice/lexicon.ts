@@ -99,6 +99,11 @@ export function normalizeTranscript(text: string, lexicon: ReadonlySet<string>):
     const tail = m?.[2] ?? "";
     const stripped = core.replace(APOSTROPHES, "");
     if (!stripped || !HAS_LATIN.test(stripped)) return part;
+    // Ревью Волны 2: токен, который САМ ПО СЕБЕ известен лексикону латиницей («youtube», «dota»),
+    // НЕ трогаем — даунстрим-матчеры (QUICK_ALIASES/WEB_SERVICES/резолвер) знают эти написания, а
+    // фонетический рендеринг («ёутубе») их ломал. Конвертируем только НЕузнанную латиницу.
+    const rawKey = foldText(stripped).replace(/\s+/g, "");
+    if (rawKey && lexicon.has(rawKey)) return part;
     const cyr = latinToCyrillic(stripped);
     const key = foldText(cyr).replace(/\s+/g, "");
     if (key.length < MIN_KEY_LEN) return part;
@@ -157,15 +162,26 @@ export class TranscriptNormalizer {
         const all: string[] = [];
         for (const src of this.sources) {
           try {
-            const terms = await src();
+            // Ревью Волны 2: зависший источник (БД) не должен навсегда запереть пересборку —
+            // потолок 3с на источник, дальше строим из остальных.
+            const terms = await Promise.race<readonly string[]>([
+              Promise.resolve(src()),
+              new Promise<readonly string[]>((_, rej) => {
+                const t = setTimeout(() => rej(new Error("lexicon source timeout")), 3_000);
+                (t as { unref?: () => void }).unref?.();
+              }),
+            ]);
             all.push(...terms);
           } catch {
-            /* источник упал (БД/сеть) — строим из остальных */
+            /* источник упал/завис (БД/сеть) — строим из остальных */
           }
         }
         this.lexicon = buildLexicon(all);
         this.builtAt = Date.now();
         log.debug("лексикон собран", { keys: this.lexicon.size });
+      } catch (e) {
+        // Ревью: throw из buildLexicon не должен стать unhandled rejection у void-промиса.
+        log.warn("сборка лексикона упала", { error: e instanceof Error ? e.message : String(e) });
       } finally {
         this.building = false;
       }

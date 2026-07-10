@@ -254,9 +254,16 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
       case "window.focus": {
         // §Волна2 (2.4): фокус через сайдкар (SetForegroundWindow+AttachThreadInput, честный readback);
-        // провал → фолбэк на старый AppActivate-путь по query (замена PowerShell — но не выбрасываем его).
-        const r = await windows.focusWindow({ hwnd: cmd.hwnd, query: cmd.query });
-        if (r.focused) {
+        // провал ЛЮБОЙ ветки (не сфокусировал / окно не найдено / сайдкар лежит — ревью: раньше throw
+        // проскакивал мимо фолбэка) → AppActivate-путь по query, затем честная ошибка.
+        let r: Awaited<ReturnType<typeof windows.focusWindow>> | null = null;
+        let sidecarErr = "";
+        try {
+          r = await windows.focusWindow({ hwnd: cmd.hwnd, query: cmd.query });
+        } catch (e) {
+          sidecarErr = e instanceof Error ? e.message : String(e);
+        }
+        if (r?.focused) {
           lastJarvisInputAt = Date.now();
           return okResult(commandId, startedAt, r);
         }
@@ -264,14 +271,16 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           const legacy = await apps.focusApp(cmd.query);
           if (legacy.focused) {
             lastJarvisInputAt = Date.now();
-            return okResult(commandId, startedAt, { ...r, focused: true, via: "AppActivate" });
+            return okResult(commandId, startedAt, { focused: true, hwnd: r?.hwnd ?? 0, title: r?.title ?? cmd.query, via: "AppActivate" });
           }
         }
         return errResult(
           commandId,
           startedAt,
           "runtime",
-          `окно найдено («${r.title}»), но фокус не перешёл (foreground-lock). Попробуй app_focus или проверь, не заблокирован ли рабочий стол.`,
+          r
+            ? `окно найдено («${r.title}»), но фокус не перешёл (foreground-lock). Попробуй app_focus или проверь, не заблокирован ли рабочий стол.`
+            : `фокус не взят: ${sidecarErr || "окно не найдено"}. Проверь имя/hwnd через window_list.`,
         );
       }
       case "browser.act":

@@ -32,6 +32,9 @@ export interface CaptureMapping {
   boundsY: number;
   /** thumbnail_px / monitor_dip (image-координату делим на scale → DIP внутри монитора). */
   scale: number;
+  /** Дисплей последнего ПОЛНОГО снимка — кроп по image-координатам должен сниматься с НЕГО же
+   *  (ревью Волны 2: «active» под курсором мог смениться → кроп молча резал не тот монитор). */
+  displayId?: number;
 }
 let lastMapping: CaptureMapping | null = null;
 /** Маппинг последнего screen.capture — input.click по coords переводит vision-координаты в экранные. */
@@ -66,6 +69,12 @@ export interface CaptureOpts {
   rect?: CaptureRect;
   /** Доп. масштаб кропа (0.25..2; >1 — «лупа» для мелкого текста). */
   scale?: number;
+  /**
+   * Ревью Волны 2: обновлять ли lastMapping этим захватом. true (деф) — ТОЛЬКО для кадров,
+   * которые модель реально ВИДИТ (screen.capture). Внутренние сенсорные захваты (OCR/probe/
+   * observe/wait_for) ставят false — иначе они молча сдвигали систему координат кликов модели.
+   */
+  updateMapping?: boolean;
 }
 
 /** rect (image-координаты последнего снимка ИЛИ DIP) → DIP virtual-desktop. */
@@ -77,7 +86,13 @@ function rectToDip(rect: CaptureRect): { x: number; y: number; w: number; h: num
 }
 
 export async function captureScreen(which?: string | number, opts?: CaptureOpts): Promise<ScreenShot> {
-  const display = pickDisplay(which);
+  // Кроп по image-координатам ПРОШЛОГО снимка обязан сниматься с ТОГО ЖЕ дисплея (ревью Волны 2):
+  // «active» (под курсором) мог смениться — тогда rect молча резал бы не тот монитор.
+  let display = pickDisplay(which);
+  if (opts?.rect && opts.rect.space !== "screen" && which === undefined && lastMapping?.displayId !== undefined) {
+    const same = screen.getAllDisplays().find((d) => d.id === lastMapping!.displayId);
+    if (same) display = same;
+  }
   const { width, height } = display.size;
   const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
   const thumbnailSize = { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
@@ -113,8 +128,11 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
 
   const png = src.thumbnail.toPNG();
   if (png.length === 0) throw new Error("пустой кадр захвата экрана");
-  // Запоминаем маппинг для клика по vision-координатам (image → логические virtual-desktop).
-  lastMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale };
+  // Запоминаем маппинг для клика по vision-координатам (image → логические virtual-desktop) —
+  // ТОЛЬКО для кадров, которые видит модель (updateMapping !== false, ревью Волны 2).
+  if (opts?.updateMapping !== false) {
+    lastMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale, displayId: display.id };
+  }
   log.info("screen.capture", {
     display: display.id,
     which: which ?? "active",
@@ -142,7 +160,8 @@ export interface ScreenProbe {
  * сверка исхода остаётся за snapshot/OCR/vision.
  */
 export async function probeScreen(which?: string | number, rect?: CaptureRect): Promise<ScreenProbe> {
-  const shot = await captureScreen(which, rect ? { rect } : undefined);
+  // updateMapping:false — сенсорный захват не сдвигает систему координат кликов (ревью Волны 2).
+  const shot = await captureScreen(which, { rect, updateMapping: false });
   const { nativeImage } = await import("electron");
   const img = nativeImage.createFromBuffer(Buffer.from(shot.image, "base64"));
   const bitmap = img.resize({ width: 8, height: 8 }).toBitmap(); // BGRA 8×8

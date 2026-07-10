@@ -40,14 +40,22 @@ export interface OcrOutcome {
 /** Локальный OCR экрана (полного или региона) через сайдкар. */
 export async function screenOcr(which?: string | number, rect?: CaptureRect, lang?: string): Promise<OcrOutcome> {
   if (!sidecar().ready) throw new NotImplementedError("OCR-сайдкар не запущен");
-  const shot = await captureScreen(which, rect ? { rect } : undefined);
+  // updateMapping:false — сенсорный захват не сдвигает систему координат кликов модели (ревью Волны 2).
+  const shot = await captureScreen(which, { rect, updateMapping: false });
   const data = (await sidecar().request("ocr", { imageB64: shot.image, lang }, 20_000)) as {
     text?: string;
     lines?: OcrLine[];
   };
+  let lines = Array.isArray(data?.lines) ? data.lines : [];
+  // Ревью Волны 2: bbox строк OCR — в координатах КРОПА; описание инструмента предлагает кликать
+  // по ним (координаты модели = последний ПОЛНЫЙ снимок). Для image-rect сдвигаем к системе
+  // полного снимка; для space:"screen"-rect система другая — честно оставляем как есть.
+  if (rect && rect.space !== "screen") {
+    lines = lines.map((l) => ({ ...l, x: l.x + rect.x, y: l.y + rect.y }));
+  }
   return {
     text: String(data?.text ?? ""),
-    lines: Array.isArray(data?.lines) ? data.lines : [],
+    lines,
     width: shot.width,
     height: shot.height,
   };
@@ -69,21 +77,34 @@ function defaultPollMs(cond: WaitCondition): number {
   return cond.kind === "text" ? 1_200 : 600;
 }
 
-/** Один опрос условия → [выполнено?, что видели]. Бросает только на непригодном условии. */
+/** Валидация условия ДО поллинга — непригодное условие валится сразу честной ошибкой. */
+function validateCondition(cond: WaitCondition): void {
+  if (cond.kind === "window" && !(cond.titleContains ?? "").trim() && !(cond.process ?? "").trim()) {
+    throw new Error("wait_for window: нужен titleContains и/или process");
+  }
+  if (cond.kind === "text" && !cond.text.trim()) throw new Error("wait_for text: пустой текст");
+}
+
+/** Один опрос условия → [выполнено?, что видели]. Сенсорные сбои НЕ бросают (описываются в detail). */
 async function checkOnce(cond: WaitCondition): Promise<[boolean, string]> {
   switch (cond.kind) {
     case "ui": {
+      // Ревью Волны 2: лежащий сайдкар ≠ «элемент исчез» — gone:true при недоступном сенсоре
+      // давал бы ЛОЖНЫЙ met:true. Недоступность — честное «не выполнено» с причиной в detail.
+      if (!sidecar().ready) return [false, "сайдкар недоступен — UIA-условие не проверить"];
       try {
         const g = await ground({ role: cond.role, name: cond.name, nameMode: cond.nameMode });
         return [!cond.gone, `элемент найден (handle=${g.handle})`];
-      } catch {
-        return [Boolean(cond.gone), "элемент не найден"];
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Различаем «не найден» (легитимный исход для gone) и сбой сенсора (RPC/таймаут).
+        if (/не найден|пустой handle/iu.test(msg)) return [Boolean(cond.gone), "элемент не найден"];
+        return [false, `сбой UIA-опроса: ${msg}`];
       }
     }
     case "window": {
       const title = (cond.titleContains ?? "").trim().toLowerCase();
       const proc = (cond.process ?? "").trim().toLowerCase();
-      if (!title && !proc) throw new Error("wait_for window: нужен titleContains и/или process");
       const wins = await listWindows();
       const hit = wins.find(
         (w) =>
@@ -95,7 +116,6 @@ async function checkOnce(cond: WaitCondition): Promise<[boolean, string]> {
     }
     case "text": {
       const needle = cond.text.trim().toLowerCase();
-      if (!needle) throw new Error("wait_for text: пустой текст");
       const ocr = await screenOcr(cond.monitor, cond.rect as CaptureRect | undefined);
       const found = ocr.text.toLowerCase().includes(needle);
       const seen = ocr.text.replace(/\s+/g, " ").trim();
@@ -119,6 +139,7 @@ async function checkOnce(cond: WaitCondition): Promise<[boolean, string]> {
  * Сбой отдельного опроса (сайдкар моргнул) не роняет ожидание — считается «не выполнено».
  */
 export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: number): Promise<WaitOutcome> {
+  validateCondition(cond); // непригодное условие — честная ошибка СРАЗУ, не 30с пустого ожидания
   const timeout = Math.min(WAIT_MAX_TIMEOUT_MS, Math.max(1_000, timeoutMs ?? WAIT_DEFAULT_TIMEOUT_MS));
   const poll = Math.max(150, pollMs ?? defaultPollMs(cond));
   const startedAt = Date.now();
@@ -133,8 +154,8 @@ export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: 
       detail = seen;
       if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail };
     } catch (e) {
-      // Непригодное условие (валидация) — честная ошибка сразу, не 30с пустого ожидания.
-      if (polls === 1) throw e;
+      // Транзиентный сбой сенсора (в т.ч. на ПЕРВОМ опросе, ревью Волны 2) не роняет ожидание —
+      // условие могло ещё не наступить; сбой виден в detail, честный met:false по таймауту.
       detail = e instanceof Error ? e.message : String(e);
     }
     if (Date.now() - startedAt + poll > timeout) {

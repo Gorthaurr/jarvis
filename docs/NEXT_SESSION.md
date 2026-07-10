@@ -28,6 +28,21 @@
 
 ## Что сделано 2026-07-10 (всё закоммичено, работает живьём, сервер+клиент на этом коде)
 
+0. **Волна 2 harness'а ЦЕЛИКОМ** (все 7 пунктов плана `docs/HARNESS_PLAN_2026-07-10.md` §Волна2;
+   карта — в CLAUDE.md, блок «ВОЛНА 2 „структурные"»): fused act+observe (наблюдение в том же
+   tool_result, observed снимает verify-долг), `input_batch` + параллель не-GUI раундов,
+   дешёвые сенсоры (`screen_capture{rect}`, `screen_read_text` WinRT-OCR, `screen_probe`, `wait_for`),
+   сайдкар-апгрейд (`ui_snapshot` set-of-marks, `window_list`/`window_focus`, полная мышь
+   right/middle/double/drag/wheel, ground scope/substring, авто-рестарт, TFM 10.0.19041),
+   admission-очередь GUI-задач (честный queued-чип, ни одного LLM-раунда в очереди),
+   STT-нормализатор лексики («в dot'е»→«в доте») + серверный endpointing по speech_final (−120-300мс),
+   пер-раундовый thinking (механика off, план/нудж/Opus думают). Сайдкар-смоук 9/9 живьём,
+   сервер 1163 теста / клиент 163, персона v72. ⚠️ Живьём НЕ проверены (нужен голос/реальная
+   GUI-задача): fused-observe на живом клике, admission-очередь, speech_final-эндпоинт — смотреть
+   при первом живом использовании; выключатели: JARVIS_FUSED_OBSERVE / JARVIS_STT_ENDPOINT /
+   JARVIS_ROUND_THINKING = 0. Волна 3 (реплей прежде петли, planner/executor, watch-предикаты,
+   стрим-TTS) — НЕ начата.
+
 1. **Волна 1 harness'а** (план+аудит 38 агентов: `docs/HARNESS_PLAN_2026-07-10.md`): earcon-приёмка
    (<0.5с вместо 8с тишины), дубль-гейт STT-обрывков (полные токены + e5 на фрагментах ≤3 токенов,
    порог 0.86 ПО ЖИВЫМ ЗАМЕРАМ — e5 НЕ разделяет команды одного домена, порог общего вида опасен),

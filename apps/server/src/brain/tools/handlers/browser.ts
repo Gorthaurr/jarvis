@@ -240,10 +240,11 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         `Сделал «${intent}» в браузере.${diag}` +
           (r.changed === false ? " ВНИМАНИЕ: контент страницы НЕ изменился — действие могло не дать эффекта, сверь (browser_read/inspect) прежде чем говорить «готово»." : ""),
       );
-      // §Волна2 (2.1) fused observe: реальный readback состояния (звук пошёл/время/навигация/DOM
-      // изменился) = сверка в том же раунде. changed:false наблюдением УСПЕХА не считаем —
-      // verify-долг остаётся, модель обязана посмотреть, что произошло.
-      if (r.playing !== undefined || r.currentTime !== undefined || r.navigated !== undefined || r.changed === true) {
+      // §Волна2 (2.1) fused observe: verify-долг снимает только СОДЕРЖАТЕЛЬНЫЙ readback состояния
+      // (звук пошёл / позиция / навигация). Булев changed — лишь индикатор для модели: true на
+      // динамических страницах почти всегда (таймеры/лента) и НЕ доказывает нужный исход (ревью
+      // Волны 2 — иначе ослабление verify-петли), false — честный сигнал «эффекта не видно».
+      if (r.playing !== undefined || r.currentTime !== undefined || r.navigated !== undefined) {
         out.observed = true;
       }
       return out;

@@ -123,6 +123,8 @@ export class SidecarClient {
   private rpc: JsonLineRpc | null = null;
   private _ready = false;
   private pushHandler: PushHandler | null = null;
+  /** §Волна2 (2.4): колбэк после АВТО-рестарта — восстановить подписки (raw-input.subscribe и т.п.). */
+  private restartHandler: (() => void) | null = null;
   // §Волна2 (2.4): авто-рестарт при падении процесса (раньше падение = «оглох навсегда» до
   // перезапуска клиента). stop() — намеренная остановка, рестарт не планирует.
   private exePath: string | null = null;
@@ -138,6 +140,11 @@ export class SidecarClient {
   /** Подписаться на push-сообщения сайдкара (демо-события записи навыка, §8). */
   onPush(cb: PushHandler): void {
     this.pushHandler = cb;
+  }
+
+  /** §Волна2 (2.4): после авто-рестарта восстановить состояние нового процесса (подписки/хуки). */
+  onRestarted(cb: () => void): void {
+    this.restartHandler = cb;
   }
 
   /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false (+ авто-ретрай с бэкоффом). */
@@ -160,13 +167,18 @@ export class SidecarClient {
       child.stdout?.on("data", (d: string) => this.rpc?.feed(d));
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (d: string) => log.debug(`sidecar stderr: ${d.trim()}`));
+      // Гард поколения (ревью Волны 2): exit/error СТАРОГО процесса не должны гасить ЗДОРОВЫЙ
+      // новый инстанс после рестарта (поздний exit прилетал бы уже чужому поколению).
+      const self = child;
       child.on("error", (e) => {
+        if (this.child !== self) return;
         log.warn(`sidecar не запустился: ${e.message}`);
         this._ready = false;
         this.rpc?.rejectAll("sidecar process error");
         this.scheduleRestart();
       });
       child.on("exit", (code) => {
+        if (this.child !== self) return;
         log.warn(`sidecar завершился: code=${code}`);
         this._ready = false;
         this.rpc?.rejectAll("sidecar exited");
@@ -191,7 +203,10 @@ export class SidecarClient {
     log.info(`sidecar: авто-рестарт через ${Math.round(delay / 1000)}с`);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      if (!this.stopped && this.exePath) this.start(this.exePath);
+      if (this.stopped || !this.exePath) return;
+      this.start(this.exePath);
+      // Новый процесс не помнит подписок старого (raw-input.subscribe/LL-хуки) — восстанавливаем.
+      if (this._ready) this.restartHandler?.();
     }, delay);
     this.restartTimer.unref?.();
   }

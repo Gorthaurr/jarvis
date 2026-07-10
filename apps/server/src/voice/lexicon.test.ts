@@ -39,6 +39,12 @@ describe("normalizeTranscript", () => {
     expect(normalizeTranscript(t, lex)).toBe(t);
   });
 
+  it("ИЗВЕСТНАЯ лексикону латиница не корёжится («youtube» ≠ «ёутубе» — ревью Волны 2)", () => {
+    const l = buildLexicon(["ютуб", "youtube", "Dota 2"]);
+    expect(normalizeTranscript("открой youtube", l)).toBe("открой youtube");
+    expect(normalizeTranscript("запусти dota", l)).toBe("запусти dota");
+  });
+
   it("чисто-кириллический текст не меняется вовсе", () => {
     const t = "запусти поиск в доте";
     expect(normalizeTranscript(t, lex)).toBe(t);

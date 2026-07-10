@@ -111,11 +111,20 @@ public static class WindowManager
         bool focused = GetForegroundWindow() == target;
         if (!focused)
         {
-            // ALT-нудж: нажатие Alt снимает foreground-lock (классический обход ограничения
-            // SetForegroundWindow для процессов не на переднем плане). Затем повторная попытка.
-            InputSynthesizer.SendKeyCombo("alt");
-            TrySetForeground(target);
-            System.Threading.Thread.Sleep(80);
+            // ALT-нудж: удержание Alt снимает foreground-lock (классический обход ограничения
+            // SetForegroundWindow). Ревью Волны 2: ДЕРЖИМ Alt ВОКРУГ SetForegroundWindow (down →
+            // set → up), а не полный press ДО него — голое нажатие-отпускание Alt в чужом окне
+            // взводит menu-mode/KeyTips (Office/Explorer), и следующий ввод уходил бы в меню.
+            InputSynthesizer.HoldCombo("alt", scancode: false);
+            try
+            {
+                TrySetForeground(target);
+                System.Threading.Thread.Sleep(80);
+            }
+            finally
+            {
+                InputSynthesizer.ReleaseCombo("alt", scancode: false);
+            }
             focused = GetForegroundWindow() == target;
         }
 

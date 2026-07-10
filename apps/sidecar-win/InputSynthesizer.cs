@@ -283,25 +283,45 @@ public static class InputSynthesizer
     public static void MouseDrag(double fromX, double fromY, double toX, double toY, string? button = null)
     {
         (uint downFlag, uint upFlag) = ButtonFlags(button);
+        string key = (button ?? "left").ToLowerInvariant();
         (int ax0, int ay0) = LogicalToAbsolute(fromX, fromY);
         (int ax1, int ay1) = LogicalToAbsolute(toX, toY);
 
         SendMouseMove(ax0, ay0);
         System.Threading.Thread.Sleep(40);
         SendInputs([BuildMouseInput(ax0, ay0, downFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
-        System.Threading.Thread.Sleep(60);
-
-        const int steps = 14;
-        for (int i = 1; i <= steps; i++)
+        // Ревью Волны 2: down зарегистрирован в реестре удержаний СРАЗУ — если интерполяция/up
+        // упадут (исключение SendInput посреди drag), watchdog/ReleaseAllHeld отпустят кнопку,
+        // а не оставят «вечное перетаскивание».
+        lock (_heldLock)
         {
-            int mx = ax0 + (int)Math.Round((ax1 - ax0) * (double)i / steps);
-            int my = ay0 + (int)Math.Round((ay1 - ay0) * (double)i / steps);
-            SendMouseMove(mx, my);
-            System.Threading.Thread.Sleep(15);
+            _heldMouse.Add(key);
+            _heldDeadlineMs = NowMs() + HoldTtlMs;
         }
+        EnsureWatchdog();
+        try
+        {
+            System.Threading.Thread.Sleep(60);
 
-        System.Threading.Thread.Sleep(60);
-        SendInputs([BuildMouseInput(ax1, ay1, upFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+            const int steps = 14;
+            for (int i = 1; i <= steps; i++)
+            {
+                int mx = ax0 + (int)Math.Round((ax1 - ax0) * (double)i / steps);
+                int my = ay0 + (int)Math.Round((ay1 - ay0) * (double)i / steps);
+                SendMouseMove(mx, my);
+                System.Threading.Thread.Sleep(15);
+            }
+
+            System.Threading.Thread.Sleep(60);
+            SendInputs([BuildMouseInput(ax1, ay1, upFlag | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK)]);
+            lock (_heldLock) { _heldMouse.Remove(key); }
+        }
+        catch
+        {
+            // Кнопка осталась зажатой — отпускаем немедленно (страховка), затем пробрасываем ошибку.
+            ReleaseAllHeld();
+            throw;
+        }
     }
 
     /// <summary>Логические (96dpi virtual-desktop) координаты → ФИЗИЧЕСКИЕ пиксели (для UIA FromPoint). §18.</summary>

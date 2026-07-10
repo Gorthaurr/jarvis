@@ -148,12 +148,14 @@ export class TurnDetector {
    * ~300мс тишины по его VAD) — это авторитетный сигнал тишины, но СЕМАНТИЧЕСКОЕ вето сохраняем:
    * «висящий союз/предлог» (TRAILING_INCOMPLETE → 0.15) и одиночное слово (0.4) не рубим — их
    * дорешает клиентский VAD-путь/потолок, как раньше (иначе вернётся жалоба «не дослушивает»).
-   * Порог мягче штатного completeThreshold: тишину провайдер уже подтвердил.
+   * Порог мягче штатного completeThreshold (тишину провайдер уже подтвердил), но НЕ хардкод —
+   * env-ручка как у остальных порогов эндпоинта (ревью Волны 2): JARVIS_STT_ENDPOINT_PCT, деф 60.
    */
   onProviderEndpoint(text?: string): EndpointDecision {
     const t = (text ?? this.lastText).trim();
     if (!t) return "wait";
-    const decision: EndpointDecision = this.detector.predictComplete(t) >= 0.5 ? "endpoint" : "wait";
+    const threshold = envInt("JARVIS_STT_ENDPOINT_PCT", 60, 30, 95) / 100;
+    const decision: EndpointDecision = this.detector.predictComplete(t) >= threshold ? "endpoint" : "wait";
     if (decision === "endpoint") this.reset();
     return decision;
   }

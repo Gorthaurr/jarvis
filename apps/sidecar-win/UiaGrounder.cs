@@ -25,7 +25,9 @@ public sealed class UiaGrounder : IDisposable
     private const int DefaultMaxChars = 8_000;
     // Граница реестра дескрипторов: AutomationElement держит нативные/COM-ресурсы,
     // без вытеснения долгая сессия копит тысячи ссылок (утечка). Храним последние N.
-    private const int MaxRegistry = 512;
+    // §Волна2: 512→2048 — снапшоты регистрируют до 60 хендлов за вызов; при бурсте снапшотов
+    // старый кап вытеснял handle, который модель ещё держала в контексте (ревью).
+    private const int MaxRegistry = 2048;
 
     // -----------------------------------------------------------------------
     // Грундинг
@@ -60,12 +62,11 @@ public sealed class UiaGrounder : IDisposable
         {
             Condition pidCond = new PropertyCondition(AutomationElement.ProcessIdProperty, pid);
             AutomationElement? win = null;
-            try { win = AutomationElement.RootElement.FindFirst(TreeScope.Children, pidCond); } catch { /* фолбэк ниже */ }
-            if (win is not null)
-            {
-                yield return win;
-                yield break;
-            }
+            try { win = AutomationElement.RootElement.FindFirst(TreeScope.Children, pidCond); } catch { /* окна нет */ }
+            // Ревью Волны 2: явный pid БЕЗ окна → пусто → честное «не найдено».
+            // Молчаливое расширение на весь стол грундило бы ЧУЖОЕ приложение.
+            if (win is not null) yield return win;
+            yield break;
         }
         if (string.IsNullOrEmpty(scope))
         {
@@ -102,16 +103,20 @@ public sealed class UiaGrounder : IDisposable
         try
         {
             if (!substring) return root.FindFirst(TreeScope.Descendants, cond);
+            // Substring-перебор: ВИДИМЫЙ кандидат приоритетнее (ревью: offscreen-дубль перехватывал матч).
             AutomationElementCollection all = root.FindAll(TreeScope.Descendants, cond);
+            AutomationElement? offscreenHit = null;
             foreach (AutomationElement el in all)
             {
                 try
                 {
-                    if ((el.Current.Name ?? "").Contains(name!, StringComparison.OrdinalIgnoreCase)) return el;
+                    if (!(el.Current.Name ?? "").Contains(name!, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!el.Current.IsOffscreen) return el;
+                    offscreenHit ??= el;
                 }
                 catch { /* элемент исчез между FindAll и чтением — пропускаем */ }
             }
-            return null;
+            return offscreenHit;
         }
         catch
         {
@@ -165,17 +170,20 @@ public sealed class UiaGrounder : IDisposable
         return handle;
     }
 
-    /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.</summary>
+    /// <summary>Зарегистрировать уже известный элемент и вернуть GroundResult.
+    /// Ревью Волны 2: Rect.Empty/offscreen даёт Infinity — System.Text.Json падает на сериализации
+    /// («Infinity» не представим) и вместо результата уходила ошибка. Санируем в 0.</summary>
     private GroundResult RegisterElement(AutomationElement el)
     {
         int handle = RegisterHandle(el);
         System.Windows.Rect bbox = el.Current.BoundingRectangle;
+        static double San(double v) => double.IsFinite(v) ? v : 0;
         return new GroundResult(
             Handle: handle,
-            X: bbox.X,
-            Y: bbox.Y,
-            W: bbox.Width,
-            H: bbox.Height,
+            X: San(bbox.X),
+            Y: San(bbox.Y),
+            W: San(bbox.Width),
+            H: San(bbox.Height),
             Name: el.Current.Name ?? "",
             Role: el.Current.ControlType.ProgrammaticName
         );
@@ -206,7 +214,8 @@ public sealed class UiaGrounder : IDisposable
     public SnapshotResult Snapshot(int? pid, int? maxItems)
     {
         AutomationElement root = pid.HasValue
-            ? CandidateRoots(pid.Value.ToString()).First()
+            ? CandidateRoots(pid.Value.ToString()).FirstOrDefault()
+              ?? throw new InvalidOperationException($"У процесса pid={pid} нет окна верхнего уровня — снапшот невозможен")
             : ForegroundWindowElement() ?? AutomationElement.RootElement;
 
         int cap = Math.Clamp(maxItems ?? 60, 1, 200);

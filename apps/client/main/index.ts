@@ -554,11 +554,17 @@ function startSidecar(): void {
     sc.start(exe);
     // §6: включить арбитраж ввода (LL-хуки), чтобы ловить «пользователь взял управление».
     // Сайдкару нужен момент на подъём — подписываемся чуть погодя, best-effort.
-    setTimeout(() => {
-      sc.request("raw-input.subscribe", { enable: true }).catch(() => {
-        log.warn("raw-input.subscribe не удался — user-takeover недоступен");
-      });
-    }, 2500);
+    const subscribeRawInput = (): void => {
+      setTimeout(() => {
+        sc.request("raw-input.subscribe", { enable: true }).catch(() => {
+          log.warn("raw-input.subscribe не удался — user-takeover недоступен");
+        });
+      }, 2500);
+    };
+    subscribeRawInput();
+    // §Волна2 (2.4): авто-рестарт сайдкара поднимает НОВЫЙ процесс — подписку надо восстановить,
+    // иначе user-takeover молча умирает до перезапуска клиента.
+    sc.onRestarted(subscribeRawInput);
   } else {
     log.warn("win-сайдкар не найден — UIA-актуаторы и запись навыков недоступны (соберите apps/sidecar-win)");
   }

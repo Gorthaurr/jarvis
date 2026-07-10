@@ -28,6 +28,11 @@ export interface Observation {
   window?: string;
   /** Что реально видно (усечено). */
   text: string;
+  /**
+   * Ревью Волны 2: СЛАБОЕ наблюдение (OCR ничего не распознал) — информация для модели есть,
+   * но verify-долг оно НЕ снимает (dispatch не ставит observed): «ничего не видно» ≠ сверка исхода.
+   */
+  weak?: boolean;
 }
 
 /** Выключатель fused-наблюдения (диагностика/откат): JARVIS_FUSED_OBSERVE=0. */
@@ -62,15 +67,48 @@ async function foregroundTitle(): Promise<string | undefined> {
 }
 
 /**
+ * Жёсткий бюджет наблюдения (ревью Волны 2): серверный actionTimeoutMs у input-команд — 15с;
+ * хвост наблюдения (a11y до 4с + OCR до 20с) мог его пробить → УСПЕШНЫЙ клик рапортовался бы
+ * таймаутом, а ретрай модели ПОВТОРИЛ бы действие. Не уложились — честно без наблюдения.
+ */
+const OBSERVE_BUDGET_MS = 6_000;
+
+function withBudget<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(undefined), ms);
+    (t as { unref?: () => void }).unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(t);
+        resolve(undefined);
+      },
+    );
+  });
+}
+
+/**
  * Снять дешёвое наблюдение после действия. clickPoint — экранные DIP-координаты действия
  * (для OCR-региона); settleMs — пауза стабилизации (клик 350мс, печать 150мс).
  * undefined = наблюдение недоступно (вызывающий возвращает результат без него).
+ * ⚠️ Известное ограничение: смотрим АКТИВНОЕ окно — фоновое ui.invoke по handle другого окна
+ * наблюдается «не тем» окном; заголовок окна в наблюдении виден модели — ей и сверять.
  */
 export async function observeAfterAction(opts?: {
   settleMs?: number;
   clickPoint?: { x: number; y: number };
 }): Promise<Observation | undefined> {
   if (!enabled() || !sidecar().ready) return undefined;
+  return withBudget(observeInner(opts), OBSERVE_BUDGET_MS + (opts?.settleMs ?? DEFAULT_SETTLE_MS));
+}
+
+async function observeInner(opts?: {
+  settleMs?: number;
+  clickPoint?: { x: number; y: number };
+}): Promise<Observation | undefined> {
   try {
     await sleep(opts?.settleMs ?? DEFAULT_SETTLE_MS);
 
@@ -99,11 +137,17 @@ export async function observeAfterAction(opts?: {
       : undefined;
     const ocr = await screenOcr("active", rect);
     const text = ocr.text.trim();
-    return {
-      via: "ocr",
-      window: await foregroundTitle(),
-      text: text ? clip(text) : "(распознаваемого текста в области действия не видно)",
-    };
+    // Пустой OCR — СЛАБОЕ наблюдение (weak): модель видит «пусто», но verify-долг не снимается
+    // (ревью Волны 2: «ничего не распознано» — не подтверждение исхода).
+    if (!text) {
+      return {
+        via: "ocr",
+        window: await foregroundTitle(),
+        text: "(распознаваемого текста в области действия не видно)",
+        weak: true,
+      };
+    }
+    return { via: "ocr", window: await foregroundTitle(), text: clip(text) };
   } catch (e) {
     log.debug(`observe: наблюдение недоступно (${e instanceof Error ? e.message : String(e)})`);
     return undefined;

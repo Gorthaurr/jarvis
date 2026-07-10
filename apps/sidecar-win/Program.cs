@@ -161,11 +161,11 @@ async Task HandleRequestAsync(IpcRequest req)
 // Обработчики операций
 // -----------------------------------------------------------------------
 
-// "ground" — резолв контрола (§6)
+// "ground" — резолв контрола (§6). §Волна2 (2.4): + nameMode/automationId (ревью: раньше терялись).
 object? HandleGround(IpcRequest req)
 {
     var args = ArgsHelper.Deserialize<GroundArgs>(req.Args);
-    GroundResult? result = grounder.Ground(args.Role, args.Name, args.Scope);
+    GroundResult? result = grounder.Ground(args.Role, args.Name, args.Scope, args.NameMode, args.AutomationId);
     if (result is null)
         throw new InvalidOperationException(
             $"Элемент не найден: role={args.Role}, name={args.Name ?? "<any>"}");
@@ -251,6 +251,13 @@ object? HandleMouse(IpcRequest req)
             InputSynthesizer.MouseButton(args.Button, down: false, args.X, args.Y);
             break;
         case "wheel":
+            // Ревью Волны 2: с координатами — сперва подвинуть курсор (Windows шлёт wheel окну ПОД
+            // курсором) — иначе скролл уходил произвольному окну, а мы честно рапортовали success.
+            if (args.X.HasValue && args.Y.HasValue)
+            {
+                InputSynthesizer.MouseMove(args.X.Value, args.Y.Value);
+                System.Threading.Thread.Sleep(30);
+            }
             InputSynthesizer.MouseWheel(args.Dy ?? 0, args.Dx ?? 0);
             break;
         case "drag":

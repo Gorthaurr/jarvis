@@ -99,6 +99,14 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "monitor.assign",
       "obs.request",
       "system.layout",
+      // §Волна2 (2.3/2.4): дешёвые сенсоры + окна/снапшот/полная мышь.
+      "ui.snapshot",
+      "window.list",
+      "window.focus",
+      "input.mouse",
+      "screen.ocr",
+      "screen.probe",
+      "wait.for",
     ];
     for (const kind of expectedKinds) {
       const toolName = ACTUATOR_TOOL_BY_KIND[kind];

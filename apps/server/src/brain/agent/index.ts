@@ -122,6 +122,21 @@ const TRADING_TOOLS: ReadonlySet<string> = new Set([
   "trade_predictions",
 ]);
 
+/**
+ * §Волна2 (2.2): ЯВНЫЙ allowlist инструментов, которые можно диспатчить параллельно внутри одного
+ * раунда — только чистые чтения без durable-записи и без GUI. «Нейтральность» для verify-петли
+ * (error-voice) — НЕ то же самое: memory_write/skill_save/set_reminder нейтральны для экрана, но
+ * пишут состояние → параллелить их с чтениями того же состояния нельзя (ревью Волны 2).
+ */
+const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
+  "web_search", "web_fetch", "memory_search", "knowledge_consult",
+  "fs_read", "fs_list", "fs_search", "telegram_read",
+  "market_quote", "market_candles", "market_analyze", "market_backtest", "market_news",
+  "tinkoff_portfolio", "trade_winrate", "trade_predictions",
+  "monitor_list", "window_list", "screen_probe", "browser_tabs",
+  "skill_list", "tool_list", "list_reminders", "watch_list", "obligation_list",
+]);
+
 /** Зависимости агента (инъекция для тестируемости и разделения слоёв). */
 export interface AgentDeps {
   memory: WorkingMemory;
@@ -1071,6 +1086,10 @@ async function runAgentLoop(
       recalled &&
       !recalled.fromShared &&
       !recalled.needsReview &&
+      // §Волна2 (2.5, ревью): очередь не дождалась аренды / отменили в очереди → НИКАКИХ реальных
+      // GUI-действий (реплей под терминалом «так и не приступил» был бы ложью в обе стороны).
+      !queueTimedOut &&
+      !task.cancel.cancelled &&
       replaySteps.length >= 2 &&
       replaySteps.every((s) => REPLAY_SAFE.has(s.action)) &&
       replaySteps.some((s) => s.action.startsWith("input.")) &&
@@ -1110,14 +1129,14 @@ async function runAgentLoop(
     }
   }
   for (let step = 0; step < HARD_STEP_CAP; step += 1) {
-    // §Волна2 (2.5): очередь не дождалась аренды — ни одного LLM-раунда, честный терминал ниже.
-    if (queueTimedOut) break;
-    // Отмена ≤1 шага (§20): cancel-флаг проверяется ПЕРЕД каждым шагом. Команда
-    // «отмени» из router мутирует ТОТ ЖЕ флаг между await'ами петли.
+    // Отмена ≤1 шага (§20): cancel-флаг проверяется ПЕРЕД каждым шагом (и РАНЬШЕ queueTimedOut:
+    // «отмени» во время очереди — тихий cancelled-терминал, а не вторая фраза про таймаут очереди).
     if (task.cancel.cancelled) {
       cancelled = true;
       break;
     }
+    // §Волна2 (2.5): очередь не дождалась аренды — ни одного LLM-раунда, честный терминал ниже.
+    if (queueTimedOut) break;
     // Защитный потолок времени: задача не висит в «выполняю» бесконечно (§20).
     if (Date.now() - loopStartMs > loopMaxMs) {
       log.warn("agent-loop: превышен потолок времени задачи — финализирую", { taskId, ms: loopMaxMs });
@@ -1254,7 +1273,6 @@ async function runAgentLoop(
           nudgeBoost: nudgeBoostNextRound,
         })
       : baseThinking;
-    nudgeBoostNextRound = false;
     if (roundThinkingEnabled) {
       // API-легальность off→on: при включённом thinking assistant-ход с tool_use обязан нести свои
       // thinking-блоки — раунд, сгенерированный с off, их не имеет → на хвосте tool_result включать
@@ -1263,7 +1281,11 @@ async function runAgentLoop(
       const tailIsToolResult = Boolean(
         tail && tail.role === "user" && Array.isArray(tail.content) && tail.content.some((b) => b.type === "tool_result"),
       );
-      if (thinkingEnabled(roundThinking) && !prevThinkingOn && tailIsToolResult) roundThinking = "off";
+      const forcedOff = thinkingEnabled(roundThinking) && !prevThinkingOn && tailIsToolResult;
+      if (forcedOff) roundThinking = "off";
+      // Ревью Волны 2 (анти-рэчет): желание «подумать» (нудж/эскалация), сорванное API-ограничением,
+      // ДЕФЕРИТСЯ — не потребляем nudgeBoost, поднимем thinking на ближайшей легальной границе.
+      if (!forcedOff) nudgeBoostNextRound = false;
       // Выключение после thinking-раундов: реплеенные thinking-блоки истории стрипаются (иначе 400).
       // Разовая перезапись префикса — политика липкая по фазам, не тумблер (WARN 1.8 покажет причину).
       if (!thinkingEnabled(roundThinking) && prevThinkingOn) {
@@ -1271,6 +1293,8 @@ async function runAgentLoop(
         if (removed > 0) log.debug("§2.7: thinking off — реплеенные thinking-блоки вырезаны", { removed, step });
       }
       prevThinkingOn = thinkingEnabled(roundThinking);
+    } else {
+      nudgeBoostNextRound = false;
     }
     const llmReq = {
       tier: currentTier,
@@ -1517,15 +1541,16 @@ async function runAgentLoop(
 
     const resultBlocks: LlmContentBlock[] = [];
     let sawVerifyThisRound = false; // §адаптация к цели: был ли в раунде успешный verify-инструмент
-    // §Волна2 (2.2): раунд целиком из НЕ-GUI ЧИТАЮЩИХ вызовов (без аренды ввода, toolEffect
-    // neutral/verify — web_search×3, market_*, чтения) → диспатчим ПАРАЛЛЕЛЬНО: wall-clock = max,
-    // не сумма (research-раунды в 2-3× быстрее). Любой mutate/GUI в раунде → строго последовательный
-    // путь как раньше (порядок побочных эффектов свят — fs_write→fs_read не переставляем).
+    // §Волна2 (2.2): раунд целиком из ЯВНО READ-ONLY вызовов → диспатчим ПАРАЛЛЕЛЬНО: wall-clock =
+    // max, не сумма (research-раунды в 2-3× быстрее). Любой прочий вызов в раунде → строго
+    // последовательный путь как раньше (порядок побочных эффектов свят — fs_write→fs_read не
+    // переставляем; «нейтральные» с durable-записью — memory_write/skill_save/set_reminder —
+    // в allowlist НЕ входят, ревью: write→read гонка внутри раунда).
     // Реджекты конвертируются в значения (нет unhandled rejection при раннем break по отмене) и
     // перебрасываются в точке потребления — семантика ошибок 1:1 с последовательным путём.
     const parallelSafe =
       resp.toolUses.length > 1 &&
-      resp.toolUses.every((tu) => !toolNeedsInput(tu.name) && toolEffect(tu.name) !== "mutate");
+      resp.toolUses.every((tu) => PARALLEL_READONLY_TOOLS.has(tu.name));
     const prefetched = parallelSafe
       ? new Map(
           resp.toolUses.map((tu) => [
@@ -1840,7 +1865,8 @@ async function runAgentLoop(
     cacheCreationTokens,
   };
   // H2/H4: стаб LLM и топтание на одном действии — тоже НЕ успех (метрики ok=false, макрос не пишем).
-  const taskOk = !failed && !limited && !timedOut && !cancelled && !maskedFailure && !llmStubbed && !runawayStuck;
+  // §Волна2 (2.5, ревью): таймаут admission-очереди — тоже провал (иначе метрики ok:true на «не приступил»).
+  const taskOk = !failed && !limited && !timedOut && !cancelled && !maskedFailure && !llmStubbed && !runawayStuck && !queueTimedOut;
   const latencyMs = Date.now() - loopStartMs;
 
   // P2.3 НАДЁЖНОСТЬ НАВЫКА: задача шла с recall'нутым выученным навыком → записываем исход. Провал копит
@@ -1848,7 +1874,7 @@ async function runAgentLoop(
   // не трогаем — это админ-решение §мультитенант). Отмену/лимит/таймаут НЕ считаем провалом навыка (не его
   // вина) — учитываем лишь реальный исход (успех / failed / маскированный провал).
   // H2: стаб LLM — не вина навыка, исход не записываем (иначе сетевой блип копит fail_count).
-  if (recalled && !recalled.fromShared && deps.skills?.recordOutcome && !cancelled && !limited && !timedOut && !llmStubbed) {
+  if (recalled && !recalled.fromShared && deps.skills?.recordOutcome && !cancelled && !limited && !timedOut && !llmStubbed && !queueTimedOut) {
     void deps.skills.recordOutcome(deps.userId, recalled.id, taskOk).catch((e) =>
       log.debug("recordOutcome навыка пропущен", e instanceof Error ? e.message : String(e)),
     );

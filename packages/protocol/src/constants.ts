@@ -36,6 +36,13 @@ export function actionTimeoutMs(kind: string): number {
       return 25_000; // §Волна2 (2.3): захват + OCR в сайдкаре (его внутренний таймаут 20с)
     case "ui.snapshot":
       return 20_000; // §Волна2 (2.4): обход UIA-дерева сложного окна дольше дефолтных 15с
+    case "input.click":
+    case "input.type":
+    case "input.mouse":
+    case "ui.invoke":
+      // §Волна2 (2.1, ревью): бесшумная лестница клика (UIA до 12с) + fused-наблюдение (бюджет ~6.4с)
+      // не влезали в дефолтные 15с → УСПЕШНОЕ действие рапортовалось таймаутом, ретрай ДУБЛИРОВАЛ клик.
+      return 30_000;
     default:
       return DEFAULT_ACTION_TIMEOUT_MS;
   }

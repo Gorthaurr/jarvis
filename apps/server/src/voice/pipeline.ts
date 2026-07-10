@@ -583,6 +583,10 @@ export class VoicePipeline {
     // §3: вердикт диктора ДЛЯ ЭТОГО стрима — переживает сброс speakerRejected следующим ensureStt,
     // поэтому поздний реальный финал отклонённого хода тоже зарежется (фикс протечки гейта).
     let streamSpeakerRejected = false;
+    // §Волна2 (2.6, ревью): speech_final-эндпоинт стреляет РОВНО РАЗ на стрим — повторный
+    // speech_final, пока checkSpeaker первого ещё в полёте (state всё ещё listening), не должен
+    // обойти гейт диктора вторым endpointTurn.
+    let providerEndpointFired = false;
     this.rejectActiveStream = () => {
       streamSpeakerRejected = true;
     };
@@ -610,10 +614,12 @@ export class VoicePipeline {
         if (
           p.speechFinal === true &&
           this.sttEndpointEnabled &&
+          !providerEndpointFired &&
           this.ctx.state === "listening" &&
           !streamSpeakerRejected &&
           this.turn.onProviderEndpoint(p.text) === "endpoint"
         ) {
+          providerEndpointFired = true; // один выстрел на стрим (гейт диктора не обходится повтором)
           this.log.info("эндпоинт по speech_final STT-провайдера (§Волна2 2.6)", { text: p.text.slice(0, 50) });
           this.clearSilenceTimer();
           this.endpointTurn();
