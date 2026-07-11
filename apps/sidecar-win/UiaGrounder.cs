@@ -70,6 +70,16 @@ public sealed class UiaGrounder : IDisposable
             if (win is not null) yield return (win, false);
             yield break;
         }
+        // Ревью Волны 3 (#6): scope="active" — ТОЛЬКО активное окно, БЕЗ фолбэка на весь стол. Для
+        // ПРЕДУСЛОВИЙ шага навыка: элемент обязан быть в текущем активном окне, иначе кнопка с той же
+        // ролью/именем в ЛЮБОМ фоновом окне давала бы ложный pass предусловия → слепой клик по
+        // изменившемуся экрану. Промах в активном окне = честный «не выполнено» (без обхода стола).
+        if (scope == "active")
+        {
+            AutomationElement? fgOnly = ForegroundWindowElement();
+            if (fgOnly is not null) yield return (fgOnly, false);
+            yield break;
+        }
         if (string.IsNullOrEmpty(scope))
         {
             AutomationElement? fg = ForegroundWindowElement();

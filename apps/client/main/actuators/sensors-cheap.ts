@@ -67,6 +67,14 @@ export interface WaitOutcome {
   polls: number;
   /** Что реально наблюдали в последний опрос (для честного отчёта модели). */
   detail: string;
+  /**
+   * Только для kind:"gsi" (ревью фиксов, 2-й проход R4): состояние источника в последний опрос —
+   * fresh (пушит) / stale (запись есть, но протухла — вкл. старше окна recentlyGone) / none (записи
+   * нет: не пушил или клиент перезапущен). Серверный watch по нему ведёт STATEFUL-детект исчезновения
+   * («видел живым в рамках этого наблюдения → теперь stale = исчез»), не завися от лотереи
+   * «попал ли редкий тик в окно recentlyGone».
+   */
+  gsiState?: "fresh" | "stale" | "none";
 }
 
 const WAIT_DEFAULT_TIMEOUT_MS = 30_000;
@@ -86,8 +94,8 @@ function validateCondition(cond: WaitCondition): void {
   if (cond.kind === "text" && !cond.text.trim()) throw new Error("wait_for text: пустой текст");
 }
 
-/** Один опрос условия → [выполнено?, что видели]. Сенсорные сбои НЕ бросают (описываются в detail). */
-async function checkOnce(cond: WaitCondition): Promise<[boolean, string]> {
+/** Один опрос условия → [выполнено?, что видели, gsi-состояние?]. Сенсорные сбои НЕ бросают (описываются в detail). */
+async function checkOnce(cond: WaitCondition): Promise<[boolean, string, WaitOutcome["gsiState"]?]> {
   switch (cond.kind) {
     case "ui": {
       // Ревью Волны 2: лежащий сайдкар ≠ «элемент исчез» — gone:true при недоступном сенсоре
@@ -132,13 +140,27 @@ async function checkOnce(cond: WaitCondition): Promise<[boolean, string]> {
       // §Волна3 (3.4): состояние, запушенное программой на локальный GSI-листенер (Dota GSI и т.п.).
       const { gsiValue } = await import("../sensors/gsi-listener.js");
       const got = gsiValue(cond.source, cond.path);
-      if (!got) return [false, `GSI: источник «${cond.source ?? "default"}» ещё ничего не пушил`];
-      if (!got.fresh) return [false, "GSI: данные протухли (источник замолчал — игра закрыта?)"];
+      if (!got) return [false, `GSI: источник «${cond.source ?? "default"}» ещё ничего не пушил`, "none"];
+      if (!got.fresh) {
+        // §Волна3 ревью (#13): источник ЗАМОЛЧАЛ (игра закрыта) = значение ИСЧЕЗЛО. Для gone:true это и
+        // есть выполнение условия («скажи, когда матч закончится» → пуши прекратились → met). Раньше
+        // ранний return [false] стоял ДО инверсии gone → one-shot молчал вечно. Для обычного (ждём
+        // появления/значения) — честный «не выполнено», как прежде. (!got «никогда не пушил» ≠ исчезновение.)
+        // Ревью фиксов (#3): «исчез» засчитывается ТОЛЬКО недавнему протуханию (recentlyGone, окно
+        // ~4×STALE_MS в листенере) — стор без TTL хранит запись прошлой сессии часами, и gone-условие,
+        // поставленное ПОСЛЕ закрытия игры, мгновенно давало ложный met («матч закончился» до его начала).
+        if (got.recentlyGone) return [cond.gone === true, "GSI: источник замолчал (протух) — значение исчезло", "stale"];
+        return [false, "GSI: запись давно протухла — источник молчит с прошлой сессии (данных нет)", "stale"];
+      }
       const v = got.value === undefined ? "" : String(got.value);
+      // Ревью фиксов (#9): критерий коэрсим в строку — watch-предикат мог принести boolean/number
+      // (equals:true для boolean-поля GSI-JSON); строгое v === true не матчилось бы никогда.
+      const wantEquals = cond.equals !== undefined ? String(cond.equals) : undefined;
+      const wantContains = cond.contains !== undefined ? String(cond.contains) : undefined;
       const matched =
-        cond.equals !== undefined ? v === cond.equals : cond.contains !== undefined ? v.toLowerCase().includes(cond.contains.toLowerCase()) : v !== "";
+        wantEquals !== undefined ? v === wantEquals : wantContains !== undefined ? v.toLowerCase().includes(wantContains.toLowerCase()) : v !== "";
       const detail = `GSI ${cond.path} = «${v.slice(0, 80)}»`;
-      return [cond.gone ? !matched : matched, detail];
+      return [cond.gone === true ? !matched : matched, detail, "fresh"];
     }
     default: {
       const _exhaustive: never = cond;
@@ -158,21 +180,23 @@ export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: 
   const startedAt = Date.now();
   let polls = 0;
   let detail = "";
+  let gsiState: WaitOutcome["gsiState"];
   log.info("wait.for", { kind: cond.kind, timeout, poll });
 
   for (;;) {
     polls += 1;
     try {
-      const [met, seen] = await checkOnce(cond);
+      const [met, seen, state] = await checkOnce(cond);
       detail = seen;
-      if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail };
+      if (state) gsiState = state; // R4: состояние источника последнего опроса — серверному watch
+      if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}) };
     } catch (e) {
       // Транзиентный сбой сенсора (в т.ч. на ПЕРВОМ опросе, ревью Волны 2) не роняет ожидание —
       // условие могло ещё не наступить; сбой виден в detail, честный met:false по таймауту.
       detail = e instanceof Error ? e.message : String(e);
     }
     if (Date.now() - startedAt + poll > timeout) {
-      return { met: false, elapsedMs: Date.now() - startedAt, polls, detail };
+      return { met: false, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}) };
     }
     await sleep(poll);
   }

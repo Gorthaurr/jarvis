@@ -5,19 +5,73 @@
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { err, ok } from "../dispatch-util.js";
 
+/**
+ * §Волна3 ревью (#12): валидация предиката ПО СТРУКТУРЕ на постановке. Раньше проверялось лишь
+ * typeof kind === 'string' → опечатка в kind ({kind:'windows'}) или gsi без path принимались с ответом
+ * «Поставил наблюдение», но на клиенте вечно давали met:false (неотличимо от «условие не наступило») —
+ * ложный успех постановки: уведомление невозможно в принципе. Возвращаем причину, чтобы модель поправила.
+ */
+function validatePredicate(raw: unknown): { ok: true; predicate: Record<string, unknown> } | { ok: false; reason: string } {
+  if (!raw || typeof raw !== "object") return { ok: false, reason: "predicate должен быть объектом-условием (как у wait_for)." };
+  const p = { ...(raw as Record<string, unknown>) };
+  const kind = p.kind;
+  const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const scalar = (v: unknown): v is string | number | boolean =>
+    typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+  // Ревью фиксов Волны 3 (#9): gone не-булевым («gone:"true"») давал ПОЛУмёртвый предикат — одна ветка
+  // клиента брала truthy-строку, другая строгий ===true. Тип проверяем на постановке для всех kind.
+  if (p.gone !== undefined && typeof p.gone !== "boolean") {
+    return { ok: false, reason: "predicate: gone должен быть булевым true/false." };
+  }
+  switch (kind) {
+    case "window":
+      if (!s(p.titleContains) && !s(p.process)) return { ok: false, reason: "predicate window: нужен titleContains и/или process." };
+      return { ok: true, predicate: p };
+    case "ui":
+      if (!s(p.role)) return { ok: false, reason: "predicate ui: нужен role." };
+      return { ok: true, predicate: p };
+    case "text":
+      if (!s(p.text)) return { ok: false, reason: "predicate text: нужен непустой text." };
+      return { ok: true, predicate: p };
+    case "sound":
+      if (typeof p.playing !== "boolean") return { ok: false, reason: "predicate sound: нужен playing (true/false)." };
+      return { ok: true, predicate: p };
+    case "gsi": {
+      if (!s(p.path)) return { ok: false, reason: "predicate gsi: нужен path (точка в JSON, напр. «map.game_state»)." };
+      // Ревью фиксов (#9): критерий НОРМАЛИЗУЕМ к строке на постановке — клиент сравнивает
+      // String(value) со строкой, и boolean/number-критерий (естественный для GSI-JSON:
+      // {equals:true}) иначе не матчился бы никогда — тот же класс «мёртвый предикат принят»,
+      // что и опечатка в kind. Не-скаляр (объект/массив) — честный отказ.
+      if (p.equals !== undefined) {
+        if (!scalar(p.equals)) return { ok: false, reason: "predicate gsi: equals должен быть строкой/числом/булевым." };
+        p.equals = String(p.equals);
+      }
+      if (p.contains !== undefined) {
+        if (!scalar(p.contains)) return { ok: false, reason: "predicate gsi: contains должен быть строкой/числом." };
+        p.contains = String(p.contains);
+      }
+      return { ok: true, predicate: p };
+    }
+    default:
+      return { ok: false, reason: `predicate: неизвестный kind «${String(kind)}» (ожидается window|ui|text|sound|gsi).` };
+  }
+}
+
 export function watchCreate(ctx: ToolContext, input: Record<string, unknown>): ToolResult {
   if (!ctx.watch || !ctx.sessionId) return err("Наблюдение сейчас недоступно (нет канала озвучки).");
   const what = String(input.what ?? "").trim();
   const condition = String(input.condition ?? "").trim();
   if (!what || !condition) return err("watch_create: нужны и what (что отслеживать), и condition (при каком условии уведомить).");
   // §Волна3 (3.4): локальный предикат (форма wait_for.condition) — проверка на КЛИЕНТЕ ($0, каждые
-  // ~5с), без LLM-чекера. Валидируем минимально (kind обязателен) — полную проверку делает клиент.
+  // ~5с), без LLM-чекера. §Волна3 ревью (#12): валидируем ПО СТРУКТУРЕ — мёртвый предикат не примется
+  // «в тишину» (иначе наблюдение тикало бы вечно, а уведомление было бы невозможно).
   const rawPredicate = input.predicate;
-  const predicate =
-    rawPredicate && typeof rawPredicate === "object" && typeof (rawPredicate as { kind?: unknown }).kind === "string"
-      ? rawPredicate
-      : undefined;
-  if (rawPredicate !== undefined && !predicate) return err("watch_create: predicate должен быть объектом-условием с полем kind (как у wait_for).");
+  let predicate: object | undefined;
+  if (rawPredicate !== undefined) {
+    const v = validatePredicate(rawPredicate);
+    if (!v.ok) return err(`watch_create: ${v.reason}`);
+    predicate = v.predicate; // нормализованная копия (#9: gsi-критерий коэрсирован к строке)
+  }
   const everySec = Number(input.every_seconds);
   const intervalMs = Number.isFinite(everySec) && everySec > 0 ? everySec * 1000 : predicate ? 10_000 : 300_000; // деф: предикат 10с, LLM 5 мин
   const continuous = input.continuous === true;

@@ -15,6 +15,27 @@ export const HEARTBEAT_MAX_MISSES = 2;
 export const DEFAULT_ACTION_TIMEOUT_MS = 15_000;
 
 /**
+ * Серверный потолок ожидания ЛЮБОГО skill.execute (реплей навыка, авто-макрос, input_batch).
+ * ИНВАРИАНТ «нет двух писателей в GUI» (ревью Волны 3 #2, ревью фиксов #12): клиентский runSkill
+ * сам укладывается в бюджет (JARVIS_SKILL_REPLAY_BUDGET_MS, деф/кламп ≤80с) с хвостовым перебегом
+ * ≤ ~26с (executeStep ≤25с: hard-таймаут лаунчера app.launch / 2×UIA по 12с; ИЛИ короткий шаг +
+ * один expect-опрос ≤20с OCR; + sleep ретрая ≤1.2с) → сервер обязан ждать СТРОГО дольше (130с),
+ * иначе синтетический timeout запускает LLM-петлю (клики моделью) ПАРАЛЛЕЛЬНО ещё идущему реплею.
+ * Кирпичи инварианта: кламп бюджета (apps/client/main/actuators/index.ts), skip expect-опроса при
+ * исчерпанном бюджете и кламп retries (skill-runner/index.ts), кап текста REPLAY_TYPE_MAX_CHARS.
+ */
+export const SKILL_EXECUTE_SERVER_TIMEOUT_MS = 130_000;
+
+/**
+ * Кап длины текста input.type в ДЕТЕРМИНИРОВАННОМ реплее/берсте (ревью фиксов, 2-й проход #2):
+ * сайдкарный typeText даёт себе люфт 5с + 120мс/символ (до 180с!), а отменить начатую печать нельзя
+ * (cancel-токен — заглушка) — длинный type-шаг жил бы ДОЛЬШЕ серверного потолка 130с и печатал бы в
+ * уже другое окно параллельно LLM-петле. 150 символов ⇒ ≤23с — вписывается в хвостовой перебег.
+ * Длинный текст — не для реплея: fs_write/office_* или обычная петля.
+ */
+export const REPLAY_TYPE_MAX_CHARS = 150;
+
+/**
  * Таймаут отправки действия ПО ВИДУ команды. Корень бага «команда не выполнилась, хотя приложение
  * открылось»: серверный синтетический таймаут (15с) короче РЕАЛЬНОГО окна запуска на клиенте — холодный
  * `smartLaunch` (app-resolve.ts) делает Start-Sleep 1.5с + скан App Paths/Steam-манифестов/рекурсию по
@@ -24,6 +45,8 @@ export const DEFAULT_ACTION_TIMEOUT_MS = 15_000;
  */
 export function actionTimeoutMs(kind: string): number {
   switch (kind) {
+    case "skill.execute":
+      return SKILL_EXECUTE_SERVER_TIMEOUT_MS; // ревью фиксов Волны 3 (#12): строго выше клиентского бюджета реплея
     case "app.launch":
       return 30_000; // холодный резолв + Start-Sleep + поллинг steam/uri; перекрывает hard-25с лаунчера +запас
     case "app.close":

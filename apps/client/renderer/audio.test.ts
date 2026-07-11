@@ -80,6 +80,34 @@ describe("AudioPlayback очередь (§10)", () => {
     expect(players).toHaveLength(2);
     expect(players[1]!.bytes[0]).toBe(2);
   });
+
+  // Ревью Волны 3 (#16): PCM-фраза, чьи чанки копятся, пока играет ПРЕДЫДУЩАЯ, НЕ теряет голову, если
+  // предыдущая доиграла посреди приёма. Раньше следующий чанк создавал новый live-плеер (только хвост);
+  // теперь идёт в накопитель → на last собирается ЦЕЛЬНАЯ WAV-озвучка. (AudioContext в тест-среде нет —
+  // ошибочный путь создал бы live-плеер и упал бы, что само по себе ловит регрессию.)
+  it("(#16) PCM-голова не теряется при доигрывании предыдущей фразы посреди приёма", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // фраза 1 (mp3) играет, current занят
+    expect(players).toHaveLength(1);
+    pb.enqueue({ audio: b64([10, 11]), seq: 0, last: false, format: "pcm16" }); // голова фразы 2 копится
+    players[0]!.onEnded(); // фраза 1 доиграла ПОСРЕДИ приёма фразы 2 → current=null, очередь пуста
+    pb.enqueue({ audio: b64([12, 13]), seq: 1, last: false, format: "pcm16" }); // ещё чанк — в накопитель, не новый плеер
+    pb.enqueue({ audio: "", seq: 2, last: true, format: "pcm16" }); // last → цельная WAV-озвучка в очередь
+    expect(players).toHaveLength(2);
+    const wav = players[1]!.bytes;
+    expect(String.fromCharCode(...wav.slice(0, 4))).toBe("RIFF"); // собрано как WAV
+    expect([...wav.slice(44)]).toEqual([10, 11, 12, 13]); // голова+хвост целиком, ничего не потеряно
+  });
+
+  // Ревью Волны 3 (#18): «отставший» чанк отменённой фразы, пришедший сразу ПОСЛЕ barge-in/stop, не
+  // должен зазвучать (в v3 он создавал новый live-плеер поверх речи юзера). Окно подавления ~400мс.
+  it("(#18) отставший чанк после stop() не запускает воспроизведение", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true });
+    pb.stop(); // barge-in
+    pb.enqueue({ audio: b64([9]), seq: 0, last: true }); // straggler в окне подавления → дропаем
+    expect(players).toHaveLength(1); // новая озвучка не стартовала
+  });
 });
 
 /**
@@ -181,6 +209,106 @@ describe("AudioCapture — само-лечение захвата (H18)", () => 
     await cap.stop(); // пользователь/приложение остановили захват
     await vi.advanceTimersByTimeAsync(60_000);
     expect(getUserMedia).toHaveBeenCalledTimes(calls); // ретраи не тикают после stop()
+  });
+});
+
+/**
+ * Ревью фиксов Волны 3 (#6, #7/#13): PCM-стрим v3 — сироты накопителя и дренаж-вотчдог живого плеера.
+ * AudioContext для PcmLivePlayer — заглушка (WebAudio в тест-среде нет).
+ */
+class FakeBufferSource {
+  buffer: unknown = null;
+  onended: (() => void) | null = null;
+  connect = vi.fn();
+  start = vi.fn();
+}
+
+class FakePcmAudioContext {
+  static instances: FakePcmAudioContext[] = [];
+  currentTime = 0;
+  destination = {};
+  closed = false;
+  sources: FakeBufferSource[] = [];
+  constructor(_opts?: unknown) {
+    FakePcmAudioContext.instances.push(this);
+  }
+  createGain(): { connect: ReturnType<typeof vi.fn>; gain: { value: number } } {
+    return { connect: vi.fn(), gain: { value: 1 } };
+  }
+  createBuffer(_ch: number, len: number, rate: number): { duration: number; copyToChannel: ReturnType<typeof vi.fn> } {
+    return { duration: len / rate, copyToChannel: vi.fn() };
+  }
+  createBufferSource(): FakeBufferSource {
+    const s = new FakeBufferSource();
+    this.sources.push(s);
+    return s;
+  }
+  async close(): Promise<void> {
+    this.closed = true;
+  }
+}
+
+describe("PCM-стрим v3: сироты и дренаж (ревью фиксов #6/#7)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers(); // мокает и Date.now — пауза потока двигается advanceTimersByTime
+    FakePcmAudioContext.instances = [];
+    vi.stubGlobal("AudioContext", FakePcmAudioContext);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("(#6) осиротевшие чанки оборванного стрима НЕ склеиваются со следующей фразой", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // mp3 играет → pcm копится busy-путём
+    pb.enqueue({ audio: b64([101, 102]), seq: 0, last: false, format: "pcm16" }); // фраза A; last потерян (обрыв WS)
+    vi.advanceTimersByTime(13_000); // пауза больше порога сироты (12с) — прошлый стрим мёртв
+    pb.enqueue({ audio: b64([7, 8]), seq: 0, last: false, format: "pcm16" }); // фраза B
+    pb.enqueue({ audio: "", seq: 1, last: true, format: "pcm16" });
+    players[0]!.onEnded(); // mp3 доиграла → из очереди стартует WAV фразы B
+    expect(players).toHaveLength(2);
+    // WAV фразы B — БЕЗ головы мёртвой фразы A (раньше юзер слышал обрывок отменённой реплики).
+    expect([...players[1]!.bytes.slice(44)]).toEqual([7, 8]);
+  });
+
+  it("(#6) живой поток (пауза меньше порога) не трогается — чанки одной фразы склеиваются", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // канал занят
+    pb.enqueue({ audio: b64([10, 11]), seq: 0, last: false, format: "pcm16" });
+    vi.advanceTimersByTime(2_000); // обычная пауза между чанками синтеза
+    pb.enqueue({ audio: b64([12, 13]), seq: 1, last: true, format: "pcm16" });
+    players[0]!.onEnded(); // канал освободился → WAV фразы стартует из очереди
+    expect(players).toHaveLength(2);
+    expect([...players[1]!.bytes.slice(44)]).toEqual([10, 11, 12, 13]);
+  });
+
+  // Ревью 2-го прохода (R5): сервер после своего inactivity-аборта (8с) шлёт ЧЕСТНЫЙ частичный last —
+  // он приходит позже любой паузы, но принадлежит тому же стриму: партиал обязан прозвучать.
+  it("(R5) поздний частичный last после долгой паузы НЕ съедается сиротским сбросом", () => {
+    const { pb, players } = harness();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // канал занят
+    pb.enqueue({ audio: b64([21, 22]), seq: 0, last: false, format: "pcm16" }); // партиал фразы
+    vi.advanceTimersByTime(13_000); // Yandex замолчал; сервер абортится по inactivity и шлёт last
+    pb.enqueue({ audio: "", seq: 1, last: true, format: "pcm16" }); // честный «что успели — то и есть»
+    players[0]!.onEnded();
+    expect(players).toHaveLength(2); // партиал прозвучал (раньше mergeParts([]) молча терял его)
+    expect([...players[1]!.bytes.slice(44)]).toEqual([21, 22]);
+  });
+
+  it("(#7/#13) вырожденный чанк (байт в carry) не снимает дренаж-вотчдог навсегда", () => {
+    const { pb } = harness();
+    // Простой → первый pcm-чанк создаёт живой плеер (заглушка AudioContext).
+    pb.enqueue({ audio: b64([1, 2]), seq: 0, last: false, format: "pcm16" });
+    const ctx = FakePcmAudioContext.instances.at(-1)!;
+    expect(ctx.sources).toHaveLength(1);
+    ctx.sources[0]!.onended?.(); // хвост доигран; last не было → взведён дренаж-вотчдог (#17)
+    // Вырожденный чанк умершего стрима: единственный байт уходит в carry, источник НЕ создаётся —
+    // раньше clearDrainTimer в начале feed() снимал вотчдог БЕЗ повторного взвода → канал зависал.
+    pb.enqueue({ audio: b64([9]), seq: 1, last: false, format: "pcm16" });
+    expect(ctx.sources).toHaveLength(1); // источника из carry-чанка нет
+    vi.advanceTimersByTime(2_600); // > DRAIN_IDLE_MS (2.5с)
+    expect(ctx.closed).toBe(true); // плеер завершился по дренажу — barge-окно не залипло
   });
 });
 

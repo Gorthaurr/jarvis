@@ -19,7 +19,35 @@ const log: Logger = createLogger("voice:filler");
 /** Короткие дворецкие подтверждения-мостики (ротация — чтобы не приедалось). */
 export const DEFAULT_FILLERS = ["Секунду, сэр.", "Одну минуту.", "Сейчас, сэр.", "Минуту."];
 
-/** Собрать полный синтез фразы в один буфер mp3 (TtsStream → bytes). null при ошибке/пустом. */
+/** Обернуть сырой PCM16 (mono LE) в WAV-контейнер (RIFF) — чтобы клиентский плеер сыграл его как
+ *  самодостаточный буфер (он сниффит RIFF). Зеркало renderer/audio.wavFromPcm16, серверная сторона. */
+function wavFromPcm16(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
+  const out = new Uint8Array(44 + pcm.byteLength);
+  const dv = new DataView(out.buffer);
+  const str = (o: number, s: string): void => {
+    for (let i = 0; i < s.length; i += 1) dv.setUint8(o + i, s.charCodeAt(i));
+  };
+  str(0, "RIFF");
+  dv.setUint32(4, 36 + pcm.byteLength, true);
+  str(8, "WAVE");
+  str(12, "fmt ");
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, 1, true); // mono
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * 2, true);
+  dv.setUint16(32, 2, true);
+  dv.setUint16(34, 16, true);
+  str(36, "data");
+  dv.setUint32(40, pcm.byteLength, true);
+  out.set(pcm, 44);
+  return out.buffer;
+}
+
+/** Собрать полный синтез фразы в один буфер (TtsStream → bytes). null при ошибке/пустом.
+ *  §Волна3 ревью (#20): под TTS_PROVIDER=yandex3 чанки — сырой PCM16 (format="pcm16"); тогда оборачиваем
+ *  собранный буфер в WAV, иначе playFiller слал бы его БЕЗ format → клиент декодировал бы как mp3 →
+ *  тишина (филлер молча не играет). Контейнерное аудио (mp3/v1) отдаём как есть. */
 export function synthesizeToBuffer(
   tts: ITtsProvider,
   text: string,
@@ -27,6 +55,8 @@ export function synthesizeToBuffer(
 ): Promise<ArrayBuffer | null> {
   return new Promise((resolve) => {
     const parts: Uint8Array[] = [];
+    let isPcm = false;
+    let pcmRate = 22_050;
     let settled = false;
     const finish = (ok: boolean): void => {
       if (settled) return;
@@ -39,11 +69,17 @@ export function synthesizeToBuffer(
         merged.set(p, off);
         off += p.byteLength;
       }
-      resolve(merged.buffer);
+      resolve(isPcm ? wavFromPcm16(merged, pcmRate) : merged.buffer);
     };
     try {
       const stream = tts.synthesize(text, opts);
-      stream.onChunk((c) => parts.push(new Uint8Array(c.audio)));
+      stream.onChunk((c) => {
+        if (c.format === "pcm16") {
+          isPcm = true;
+          if (c.sampleRate) pcmRate = c.sampleRate;
+        }
+        if (c.audio.byteLength) parts.push(new Uint8Array(c.audio));
+      });
       stream.onError(() => finish(false));
       stream.onDone(() => finish(true));
     } catch {

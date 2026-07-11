@@ -51,4 +51,34 @@ describe("prefillNeedsLlmSteps (§Волна3 3.1)", () => {
     expect(await prefillNeedsLlmSteps({ llm: llmWith('{"1": {}}'), model: "m" }, "t", "n", steps)).toBeNull();
     expect(await prefillNeedsLlmSteps({ llm: llmWith("{}", true), model: "m" }, "t", "n", steps)).toBeNull();
   });
+
+  // Ревью Волны 3 (#7): дешёвый тир НЕ перетирает записанные литеральные params (иначе модель могла бы
+  // подменить combo/method сочинённым значением). Заполняем лишь отсутствующее/пустое.
+  it("(#7) не перетирает записанные литеральные params", async () => {
+    const withLiteral: SkillStep[] = [
+      { action: "input.key", needsLlm: true, params: { combo: "Enter", text: "" } },
+    ];
+    const out = await prefillNeedsLlmSteps(
+      { llm: llmWith('{"0": {"combo": "Ctrl+A", "text": "напечатанное"}}'), model: "m" },
+      "t",
+      "n",
+      withLiteral,
+    );
+    expect(out).not.toBeNull();
+    expect(out![0]!.params).toMatchObject({ combo: "Enter", text: "напечатанное" }); // combo НЕ перетёрт, пустой text заполнен
+  });
+
+  // Ревью Волны 3 (#8): расход префилл-вызова прокидывается в onUsage (учёт SpendGuard/COGS).
+  it("(#8) зовёт onUsage с токенами вызова", async () => {
+    let seen: { inputTokens: number; outputTokens: number } | null = null;
+    await prefillNeedsLlmSteps(
+      { llm: llmWith('{"1": {"text": "x"}}'), model: "m", onUsage: (u) => (seen = u) },
+      "t",
+      "n",
+      steps,
+    );
+    expect(seen).not.toBeNull();
+    expect(seen!.inputTokens).toBe(1);
+    expect(seen!.outputTokens).toBe(1);
+  });
 });

@@ -63,4 +63,62 @@ describe("watch с локальным предикатом (§Волна3 3.4)",
     expect(b.ok && b.watch.intervalMs).toBe(30_000);
     svc.stop();
   });
+
+  // Ревью фиксов, 2-й проход (R4): gsi+gone — stateful-детект исчезновения. Редкий тик (интервал >
+  // клиентского окна recentlyGone ~135с) промахивался мимо окна → one-shot молчал НАВСЕГДА. Теперь
+  // наблюдение помнит «видел живым» (sawFreshAt) и любое последующее stale = исчезновение.
+  it("(R4) gsi+gone: видел fresh → потом stale (за окном) → срабатывает; stale без fresh — нет", async () => {
+    let t = 1_000_000;
+    const svc = new WatchService(vi.fn() as never, mkStore(), { now: () => t });
+    const spoken: string[] = [];
+    svc.registerSpeaker("s1", "u1", (x) => spoken.push(x));
+    // Клиент: 1-й опрос — источник жив (fresh); 2-й — запись давно протухла (за окном recentlyGone).
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, data: { met: false, detail: "GSI map.game_state = «IN_PROGRESS»", gsiState: "fresh" } })
+      .mockResolvedValueOnce({ ok: true, data: { met: false, detail: "GSI: запись давно протухла", gsiState: "stale" } });
+    svc.registerActions("s1", "u1", send);
+    const res = svc.add({
+      sessionId: "s1",
+      userId: "u1",
+      what: "конец матча в доте",
+      condition: "матч закончился",
+      intervalMs: 300_000, // 5 минут — заведомо реже клиентского окна ~135с
+      predicate: { kind: "gsi", path: "map.game_state", gone: true },
+    });
+    expect(res.ok).toBe(true);
+    await svc.tickNow(); // fresh → запомнили живым, тишина
+    expect(spoken).toHaveLength(0);
+    t += 300_001;
+    await svc.tickNow(); // stale ЗА окном — но мы видели живым → исчез → уведомление
+    expect(spoken.join(" ")).toContain("матч закончился");
+    expect(svc.list({ userId: "u1" })).toHaveLength(0); // one-shot сработал и снят (fired)
+    svc.stop();
+  });
+
+  it("(R4) gsi+gone: stale/none БЕЗ виденного fresh — тишина (watch поставлен после закрытия игры)", async () => {
+    let t = 2_000_000;
+    const svc = new WatchService(vi.fn() as never, mkStore(), { now: () => t });
+    const spoken: string[] = [];
+    svc.registerSpeaker("s1", "u1", (x) => spoken.push(x));
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, data: { met: false, detail: "давно протухла", gsiState: "stale" } })
+      .mockResolvedValueOnce({ ok: true, data: { met: false, detail: "ещё ничего не пушил", gsiState: "none" } });
+    svc.registerActions("s1", "u1", send);
+    svc.add({
+      sessionId: "s1",
+      userId: "u1",
+      what: "конец матча",
+      condition: "матч закончился",
+      intervalMs: 10_000,
+      predicate: { kind: "gsi", path: "map.game_state", gone: true },
+    });
+    await svc.tickNow();
+    t += 10_001;
+    await svc.tickNow();
+    expect(spoken).toHaveLength(0); // запись прошлой сессии ≠ «матч закончился»
+    expect(svc.list({ userId: "u1" })[0]?.status).toBe("active");
+    svc.stop();
+  });
 });

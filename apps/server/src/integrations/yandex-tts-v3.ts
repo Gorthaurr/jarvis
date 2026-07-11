@@ -108,6 +108,35 @@ class YandexV3Stream implements TtsStream {
       let bytesTotal = 0;
       const t0 = Date.now();
       let firstAt = 0;
+      // Разобрать одну JSON-строку стрима: эмитить аудио-чанк / бросить на error. Переиспользуется для
+      // построчного разбора И для дренажа хвоста (ревью Волны 3 #19).
+      const handleLine = (line: string): void => {
+        const s = line.trim();
+        if (!s) return;
+        let msg: { result?: { audioChunk?: { data?: string } }; error?: { message?: string } };
+        try {
+          msg = JSON.parse(s);
+        } catch {
+          return; // неполная/служебная строка
+        }
+        if (msg.error) throw new Error(String(msg.error.message ?? "v3 error"));
+        const b64 = msg.result?.audioChunk?.data;
+        if (!b64) return;
+        const audio = Buffer.from(b64, "base64");
+        if (audio.byteLength === 0) return;
+        if (!firstAt) {
+          firstAt = Date.now();
+          log.info("v3: первый аудио-чанк", { ttfbMs: firstAt - t0, voice });
+        }
+        bytesTotal += audio.byteLength;
+        this.chunkCb?.({
+          audio: audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength) as ArrayBuffer,
+          seq: this.seq++,
+          last: false,
+          format: "pcm16",
+          sampleRate: V3_SAMPLE_RATE,
+        });
+      };
       for (;;) {
         const { done, value } = await reader.read();
         if (this._cancelled) return;
@@ -116,36 +145,19 @@ class YandexV3Stream implements TtsStream {
         buf += decoder.decode(value, { stream: true });
         let nl = buf.indexOf("\n");
         while (nl >= 0) {
-          const line = buf.slice(0, nl).trim();
+          const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
           nl = buf.indexOf("\n");
-          if (!line) continue;
-          let msg: { result?: { audioChunk?: { data?: string } }; error?: { message?: string } };
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue; // неполная/служебная строка
-          }
-          if (msg.error) throw new Error(String(msg.error.message ?? "v3 error"));
-          const b64 = msg.result?.audioChunk?.data;
-          if (!b64) continue;
-          const audio = Buffer.from(b64, "base64");
-          if (audio.byteLength === 0) continue;
-          if (!firstAt) {
-            firstAt = Date.now();
-            log.info("v3: первый аудио-чанк", { ttfbMs: firstAt - t0, voice });
-          }
-          bytesTotal += audio.byteLength;
-          this.chunkCb?.({
-            audio: audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength) as ArrayBuffer,
-            seq: this.seq++,
-            last: false,
-            format: "pcm16",
-            sampleRate: V3_SAMPLE_RATE,
-          });
+          handleLine(line);
         }
       }
       if (this._cancelled) return;
+      // Ревью Волны 3 (#19): дренаж ХВОСТА — grpc-gateway обычно \n-терминирует каждую строку, но если
+      // последняя (audioChunk или {"error"}) пришла БЕЗ завершающего \n, она осталась бы в buf и молча
+      // потерялась (усечённое аудио / потерянная ошибка под маской успеха). Разбираем остаток честно;
+      // финальный decode() без stream:true добирает недекодированные байты.
+      buf += decoder.decode();
+      handleLine(buf);
       if (bytesTotal === 0) throw new Error("v3: стрим завершился без аудио");
       // Финальный маркер озвучки (пустой last-чанк — клиентский плеер закрывает utterance).
       this.chunkCb?.({ audio: new ArrayBuffer(0), seq: this.seq++, last: true, format: "pcm16", sampleRate: V3_SAMPLE_RATE });
@@ -154,6 +166,16 @@ class YandexV3Stream implements TtsStream {
     } catch (e) {
       if (this._cancelled) return;
       log.warn("v3 TTS ошибка", e instanceof Error ? e.message : String(e));
+      // Ревью Волны 3 (#17): если часть аудио уже ушла клиенту (seq>0), но стрим упал ДО last=true —
+      // шлём финальный last, чтобы клиентский live-плеер ЗАКРЫЛ utterance (иначе current занят навсегда:
+      // onActive залипает, barge-окно до 90с ловит речь юзера). Честно: «что успели — то и есть».
+      if (this.seq > 0) {
+        try {
+          this.chunkCb?.({ audio: new ArrayBuffer(0), seq: this.seq++, last: true, format: "pcm16", sampleRate: V3_SAMPLE_RATE });
+        } catch {
+          /* канал закрыт — ничего */
+        }
+      }
       this.errorCb?.(e instanceof Error ? e : new Error(String(e)));
       this.finish();
     }

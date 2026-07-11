@@ -45,6 +45,19 @@ const log = createLogger("actuators");
  * простоя (Electron powerMonitor.getSystemIdleTime, секунды с последнего ввода ЛЮБОГО источника).
  */
 const USER_ACTIVE_THRESHOLD_MS = 4000;
+/**
+ * §Волна3 ревью (#2): бюджет времени клиентского реплея навыка. runSkill честно останавливается по его
+ * исчерпании — ДО серверного потолка SKILL_EXECUTE_SERVER_TIMEOUT_MS (130с), чтобы сервер не начал
+ * кликать LLM-петлёй параллельно ещё идущему реплею. Ревью фиксов, 2-й проход (R3): худший перебег
+ * за дедлайн — начатая у границы попытка: executeStep ≤ ~25с (hard-таймаут лаунчера app.launch; или
+ * 2×UIA по 12с) ЛИБО короткий шаг + один expect-опрос ≤ ~20с (visual = скрин+OCR, таймаут сайдкара
+ * 20с; при исчерпанном бюджете опрос теперь пропускается) + sleep ретрая ≤1.2с ≈ 26с → кламп 80с
+ * даёт 80+26=106 < 130 с запасом. Поднимаешь кламп — пересчитай слак (и protocol/constants.ts).
+ */
+const SKILL_REPLAY_BUDGET_MS = (() => {
+  const n = Number.parseInt(process.env.JARVIS_SKILL_REPLAY_BUDGET_MS ?? "", 10);
+  return Number.isFinite(n) && n >= 10_000 && n <= 80_000 ? n : 80_000;
+})();
 /** Ввод САМОГО Джарвиса (SendInput) тоже сбрасывает системный idle — не считаем его «активностью юзера». */
 const JARVIS_INPUT_TOLERANCE_MS = 900;
 /** Когда Джарвис последний раз сам инжектил ввод (для отсечки собственного ввода из детекта активности). */
@@ -319,6 +332,10 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           steps: cmd.steps,
           params: cmd.params,
           cancel,
+          // §Волна3 ревью (#2): реплей САМ укладывается в бюджет и честно возвращается ДО серверного
+          // потолка (REPLAY_MACRO_SERVER_TIMEOUT_MS, строго больше) — чтобы сервер не запустил LLM-петлю
+          // параллельно ещё идущему на клиенте реплею («два писателя в GUI»). Env — на всякий случай.
+          deadlineMs: SKILL_REPLAY_BUDGET_MS,
           actuator: createClientActuator({ isProactive: skillProactive, userActiveNow }),
           // escalate (needs_llm: сочинить значение шага по месту; exhausted: починка) — клиент↔сервер
           // round-trip ещё не подключён (TODO M4+). Пока хук не передаётся → раннер честно ВАЛИТ

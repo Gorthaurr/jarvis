@@ -64,6 +64,11 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
           if (step.target?.by === "role") await ground.ground({ role: step.target.role, name: step.target.name });
           return;
         case "input.type":
+          // Кап длины текста (REPLAY_TYPE_MAX_CHARS) применяется ТОЛЬКО на СЛЕПЫХ путях — авто-реплей до
+          // петли (server replayUnsafe) и берст (server inputBatch), где длинная неотменяемая печать
+          // гоняется в ГОНКЕ с LLM-петлёй. Ревью фиксов, 3-й проход (R6): здесь, в общем runSkill,
+          // капать НЕЛЬЗЯ — тот же путь исполняет ЯВНЫЙ skill_execute записанного показом навыка, где
+          // литеральный длинный текст легитимен и одиночный type-шаг укладывается в бюджет реплея (80с).
           await input.typeText(str(p.text));
           return;
         case "input.key":
@@ -138,6 +143,18 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         return true;
       } catch {
         return false;
+      }
+    },
+
+    async checkPrecondition(pre): Promise<boolean> {
+      // §Волна3 ревью (#6): предусловие ОБЯЗАНО выполняться в АКТИВНОМ окне (scope="active", без
+      // фолбэка на весь стол) — иначе элемент с той же ролью/именем в фоновом окне даёт ложный pass,
+      // и слепой клик уходит по изменившемуся экрану. nameMode прокидываем (протокол его объявляет).
+      try {
+        await ground.ground({ role: pre.role, name: pre.name, nameMode: pre.nameMode, scope: "active" });
+        return true;
+      } catch {
+        return false; // не найден в активном окне → предусловие не выполнено (честный стоп реплея)
       }
     },
   };

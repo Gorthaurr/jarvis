@@ -15,10 +15,34 @@ import type { ILlmProvider } from "../../integrations/llm.js";
 
 const log: Logger = createLogger("skill-prefill");
 
+/** Токены одного вызова — для учёта расхода (SpendGuard/метрики), ревью Волны 3 (#8). */
+export interface PrefillUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
 export interface PrefillDeps {
   llm: ILlmProvider;
   /** Дешёвый исполнительский тир (§Волна3 3.2): заполнение значений — механика, не рассуждение. */
   model: string;
+  /** Ревью Волны 3 (#8): учесть расход префилл-вызова (SpendGuard + COGS-метрики). Опц. */
+  onUsage?: (usage: PrefillUsage) => void;
+}
+
+/**
+ * Ревью Волны 3 (#7): дешёвый тир заполняет ТОЛЬКО «контентные» плейсхолдеры needsLlm-шага и НЕ
+ * перетирает уже записанные литеральные params (иначе модель могла бы подменить combo/method/target —
+ * напр. вписать Enter-«отправку» туда, где записан безопасный литерал). Отсутствующее/пустое поле — заполняем.
+ */
+function mergeFilled(recorded: Record<string, unknown>, filled: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...recorded };
+  for (const [k, v] of Object.entries(filled)) {
+    const existing = recorded[k];
+    if (existing === undefined || existing === null || existing === "") out[k] = v; // не трогаем записанный литерал
+  }
+  return out;
 }
 
 /** Кап шагов на префилл — навык с десятком «сочини по месту» реплеить не стоит вовсе. */
@@ -63,6 +87,7 @@ export async function prefillNeedsLlmSteps(
       tools: [],
       maxTokens: 600,
     });
+    deps.onUsage?.(resp.usage); // ревью Волны 3 (#8): расход вызова — в SpendGuard/метрики
     if (resp.stubbed || resp.stopReason === "stub") return null;
     const m = /\{[\s\S]*\}/.exec(resp.text ?? "");
     if (!m) return null;
@@ -74,7 +99,8 @@ export async function prefillNeedsLlmSteps(
         log.debug("префилл неполный — шаг без значений, реплей отменён", { step: i });
         return null; // ЧЕСТНОСТЬ: частично заполненный план не реплеим
       }
-      out[i] = { ...out[i]!, params: { ...(out[i]!.params ?? {}), ...params }, needsLlm: false };
+      // Ревью Волны 3 (#7): не перетираем записанные литеральные params сочинённым моделью значением.
+      out[i] = { ...out[i]!, params: mergeFilled(out[i]!.params ?? {}, params), needsLlm: false };
     }
     log.info("§Волна3: needsLlm-шаги заполнены дешёвым тиром перед реплеем", { steps: needy.length });
     return out;

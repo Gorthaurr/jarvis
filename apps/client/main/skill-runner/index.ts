@@ -26,6 +26,12 @@ export interface SkillActuator {
   executeStep(step: SkillStep, params?: Record<string, unknown>): Promise<void>;
   /** Проверить постусловие expect через a11y (один опрос; true = выполнено). */
   checkExpect(expect: NonNullable<SkillStep["expect"]>): Promise<boolean>;
+  /**
+   * §Волна3 ревью (#6): проверить ПРЕДУСЛОВИЕ шага — элемент присутствует В АКТИВНОМ ОКНЕ (scope="active",
+   * без фолбэка на весь стол) с учётом nameMode. Отдельный метод от checkExpect: тот падал на весь стол
+   * (кнопка «OK» в фоновом окне давала ложный pass) и терял nameMode из протокола.
+   */
+  checkPrecondition(pre: NonNullable<SkillStep["precondition"]>): Promise<boolean>;
 }
 
 /** Внешний сигнал отмены (§20). Проверяется перед каждым шагом. */
@@ -58,6 +64,15 @@ export interface RunSkillOptions {
   escalate?: EscalateFn;
   /** Инъекция паузы (тесты — мгновенная). */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * §Волна3 ревью (#2): общий БЮДЖЕТ времени на весь реплей (мс от старта). Реплей САМ честно
+   * останавливается по исчерпании — до того, как серверный sendAction-таймаут сдастся и запустит
+   * LLM-петлю ПАРАЛЛЕЛЬНО ещё идущему реплею («два писателя в GUI»). Проверяется перед каждым шагом
+   * и ограничивает auto-wait постусловия остатком бюджета. Без него — как раньше (без границы).
+   */
+  deadlineMs?: number;
+  /** Инъекция часов (тесты). */
+  now?: () => number;
 }
 
 export interface SkillRunOutcome {
@@ -68,31 +83,47 @@ export interface SkillRunOutcome {
 
 const POLL_MS = 100;
 
-/** Auto-wait постусловия (§8): поллим checkExpect до наступления или таймаута. */
+/**
+ * Auto-wait постусловия (§8): поллим checkExpect до наступления или таймаута.
+ * Ревью фиксов Волны 3 (#1): граница — WALL-CLOCK, не число поллов. Один checkExpect на UIA-слепом
+ * окне может занимать до 12с (сайдкар-таймаут): счётчик «timeoutMs/100мс» поллов растягивал ожидание
+ * в десятки раз за бюджет реплея. Минимум один опрос делаем всегда (успевший исполниться шаг честно
+ * подтверждается), дальше — только пока не вышло время; перебег ≤ длительности одного checkExpect.
+ */
 async function waitForExpect(
   actuator: SkillActuator,
   expect: NonNullable<SkillStep["expect"]>,
   timeoutMs: number,
   sleep: (ms: number) => Promise<void>,
+  now: () => number,
 ): Promise<boolean> {
-  const maxPolls = Math.max(1, Math.floor(timeoutMs / POLL_MS));
-  for (let i = 0; i < maxPolls; i += 1) {
+  const startedAt = now();
+  for (;;) {
     if (await actuator.checkExpect(expect)) return true;
+    if (now() - startedAt + POLL_MS >= timeoutMs) return false;
     await sleep(POLL_MS);
   }
-  return actuator.checkExpect(expect);
 }
 
 /** Прогнать навык (§8): cancel → execute → expect(auto-wait) → retry/re-ground → escalate. */
 export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> {
   const { steps, cancel, actuator, onProgress, escalate } = opts;
   const sleep = opts.sleep ?? defaultSleep;
+  const now = opts.now ?? Date.now;
+  const startedAt = now();
+  const budgetLeft = (): number => (opts.deadlineMs ? opts.deadlineMs - (now() - startedAt) : Number.POSITIVE_INFINITY);
   log.info(`runSkill ${opts.skillId}@${opts.version}: ${steps.length} шагов`);
 
   for (let i = 0; i < steps.length; i += 1) {
     if (cancel.cancelled) {
       log.warn(`навык отменён на шаге ${i}`);
       return { ok: false, failedStepIndex: i, message: "cancelled" };
+    }
+    // §Волна3 ревью (#2): исчерпан бюджет реплея → ЧЕСТНЫЙ стоп ДО серверного таймаута (клиент не
+    // остаётся кликать параллельно LLM-петле). Обычная петля добьёт задачу с контекстом «дошёл до N».
+    if (budgetLeft() <= 0) {
+      log.warn(`навык остановлен по бюджету времени на шаге ${i}`);
+      return { ok: false, failedStepIndex: i, message: `реплей не уложился в бюджет времени (шаг ${i})` };
     }
 
     const step = steps[i];
@@ -118,7 +149,9 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
     // клик по ушедшему состоянию; модель получает «дошёл до шага N» и делает один репланинг-раунд.
     if (step.precondition) {
       const pre = step.precondition;
-      const preOk = await actuator.checkExpect({ role: pre.role, name: pre.name });
+      // §Волна3 ревью (#6): проверка В АКТИВНОМ ОКНЕ с nameMode (не checkExpect — тот фолбэкал на весь
+      // стол → ложный pass по фоновому окну, и терял nameMode).
+      const preOk = await actuator.checkPrecondition(pre);
       if (!preOk) {
         log.warn(`шаг ${i}: предусловие не выполнено (${pre.role}${pre.name ? ` «${pre.name}»` : ""}) — стоп`);
         return {
@@ -129,16 +162,28 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
       }
     }
 
-    const retries = step.retries ?? 2;
-    const timeoutMs = step.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
+    // Ревью фиксов, 2-й проход (R3): retries из контента навыка клампим — без капа sleep(200·attempt)
+    // между попытками раздувал хвостовой перебег за серверный потолок 130с.
+    const retries = Math.max(0, Math.min(5, step.retries ?? 2));
     let attempt = 0;
     let stepOk = false;
 
     while (attempt <= retries) {
       if (cancel.cancelled) return { ok: false, failedStepIndex: i, message: "cancelled" };
+      if (budgetLeft() <= 0) return { ok: false, failedStepIndex: i, message: `реплей не уложился в бюджет времени (шаг ${i})` };
       try {
         await actuator.executeStep(step, stepParams); // ground + действие (re-ground при повторе)
-        stepOk = step.expect ? await waitForExpect(actuator, step.expect, timeoutMs, sleep) : true;
+        // §Волна3 ревью (#2) + ревью фиксов (#1): auto-wait постусловия ограничен ОСТАТКОМ бюджета,
+        // пересчитанным ЗДЕСЬ (после executeStep, на каждой попытке) — снапшот с границы шага
+        // устаревал за долгую попытку, и ретрай поллил полный чужой таймаут за пределами бюджета.
+        // Ревью фиксов, 2-й проход (R3): бюджет исчерпан ПОСЛЕ executeStep → опрос НЕ делаем вовсе
+        // (один visual-опрос = скрин+OCR до ~20с — «обязательный опрос» раздувал хвост за потолок);
+        // честный стоп по бюджету, модель всё равно сверяет исход глазами после реплея.
+        const expectTimeoutMs = Math.min(step.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS, budgetLeft());
+        if (step.expect && expectTimeoutMs <= 0) {
+          return { ok: false, failedStepIndex: i, message: `реплей не уложился в бюджет времени (шаг ${i}, сверка постусловия не выполнялась)` };
+        }
+        stepOk = step.expect ? await waitForExpect(actuator, step.expect, expectTimeoutMs, sleep, now) : true;
       } catch (e) {
         log.warn(`шаг ${i} попытка ${attempt} упала: ${e instanceof Error ? e.message : String(e)}`);
         stepOk = false;

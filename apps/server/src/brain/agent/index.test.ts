@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ActionCommand } from "@jarvis/protocol";
+import type { ActionCommand, SkillStep } from "@jarvis/protocol";
+import { type ILlmProvider, type LlmRequest, streamViaComplete } from "../../integrations/llm.js";
 import { SpendGuard } from "../../billing/index.js";
 import { MockLlmProvider } from "../../integrations/llm.js";
 import { HashEmbeddingProvider } from "../../integrations/openai-embeddings.js";
@@ -10,7 +11,7 @@ import type { Session } from "../../gateway/session.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { TaskStatus } from "@jarvis/protocol";
 import type { SkillProvider } from "../../memory/skills.js";
-import { type AgentDeps, handleUserText, waitWhilePaused } from "./index.js";
+import { type AgentDeps, handleUserText, replayUnsafe, waitWhilePaused } from "./index.js";
 import type { Task } from "../tasks/task.js";
 
 /** Заглушка провайдера навыков (§8): по умолчанию пусто; точечно переопределяется в тестах. */
@@ -794,5 +795,109 @@ describe("agent-loop (§7, §8)", () => {
     expect(tasks.list("u1")[0]?.state).toBe("cancelled");
     // Отмена ≤1 шага: после прогресса №1 петля не успевает уйти далеко.
     expect(llm.requests.length).toBeLessThanOrEqual(3);
+  });
+});
+
+/** Не-стабовый скриптовый LLM: MockLlmProvider всегда stubbed:true → префилл честно отменяется,
+ *  а для теста «префилл ЗАПОЛНИЛ и гард перепроверил» нужен живой ответ. */
+function scriptedLlm(texts: string[]): ILlmProvider & { requests: LlmRequest[] } {
+  const requests: LlmRequest[] = [];
+  let i = 0;
+  const self = {
+    live: false,
+    requests,
+    complete: async (req: LlmRequest) => {
+      requests.push(req);
+      const text = texts[Math.min(i, texts.length - 1)] ?? "Готово.";
+      i += 1;
+      return {
+        text,
+        toolUses: [],
+        stopReason: "end_turn" as const,
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        stubbed: false,
+      };
+    },
+    completeStream: (req: LlmRequest, onDelta: (d: { text?: string }) => void) =>
+      streamViaComplete(self, req, onDelta),
+  };
+  return self as unknown as ILlmProvider & { requests: LlmRequest[] };
+}
+
+describe("replayUnsafe — гарды слепого реплея (ревью фиксов Волны 3, #2/#8/#11)", () => {
+  const type = (needsLlm = false): SkillStep => ({ action: "input.type", needsLlm, params: {} });
+
+  it("(#8) compose→click: input.click ПОСЛЕ input.type блокирует реплей", () => {
+    expect(replayUnsafe([type(), { action: "input.click", params: {} }])).toBe(true);
+  });
+
+  it("(#11) compose→invoke: ui.invoke/input.mouse ПОСЛЕ input.type блокируют реплей", () => {
+    expect(replayUnsafe([type(), { action: "ui.invoke", params: { name: "Отправить" } }])).toBe(true);
+    expect(replayUnsafe([type(), { action: "input.mouse", params: { op: "down" } }])).toBe(true);
+  });
+
+  it("клик ДО сочинения текста — безопасен (клик по полю ввода, потом печать)", () => {
+    expect(replayUnsafe([{ action: "input.click", params: {} }, type()])).toBe(false);
+  });
+
+  it("Enter после type — блок; не-коммитная клавиша (Ctrl+A) — нет", () => {
+    expect(replayUnsafe([type(), { action: "input.key", params: { combo: "ctrl+enter" } }])).toBe(true);
+    expect(replayUnsafe([type(), { action: "input.key", params: { combo: "ctrl+a" } }])).toBe(false);
+  });
+
+  it("(#5) опасная URI-схема в browser.open/app.launch — блок; https — нет", () => {
+    expect(replayUnsafe([{ action: "browser.open", params: { url: "file:///c:/x" } }])).toBe(true);
+    expect(replayUnsafe([{ action: "app.launch", params: { app: "ms-msdt:/id x" } }])).toBe(true);
+    expect(replayUnsafe([{ action: "browser.open", params: { url: "https://ya.ru" } }])).toBe(false);
+  });
+
+  // Ревью 2-го прохода (R1): ввод текста — не только input.type; ui.invoke pattern="setValue" пишет
+  // текст в контрол через UIA (demo-запись его легитимно генерит) → после него коммит = та же дыра.
+  it("(R1) ui.invoke setValue → Enter/клик — блок (обход compose-гарда через UIA-ввод)", () => {
+    const setValue: SkillStep = { action: "ui.invoke", params: { pattern: "setValue", value: "текст" } };
+    expect(replayUnsafe([setValue, { action: "input.key", params: { combo: "enter" } }])).toBe(true);
+    expect(replayUnsafe([setValue, { action: "input.click", params: {} }])).toBe(true);
+    // setValue без последующего коммита — безопасен (просто заполнение поля).
+    expect(replayUnsafe([{ action: "app.focus", params: {} }, setValue])).toBe(false);
+  });
+
+  // Ревью 2-го прохода (R2): длинный input.type неотменяем (5с+120мс/символ, до 180с) — не реплеим.
+  it("(R2) input.type/setValue с текстом длиннее капа — блок реплея", () => {
+    const long = "х".repeat(200);
+    expect(replayUnsafe([{ action: "input.type", params: { text: long } }])).toBe(true);
+    expect(replayUnsafe([{ action: "ui.invoke", params: { pattern: "setValue", value: long } }])).toBe(true);
+    expect(replayUnsafe([{ action: "input.type", params: { text: "коротко" } }])).toBe(false);
+  });
+
+  it("(#2) префилл сделал шаги опасными (combo:enter) → реплей ОТМЕНЁН, skill.execute не уходит", async () => {
+    const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+    const session = fakeSession(sendAction);
+    // 1-й вызов = префилл (заполняет text и ОПАСНЫЙ combo), 2-й = обычная петля.
+    const llm = scriptedLlm(['{"1": {"text": "gg wp"}, "2": {"combo": "enter"}}', "Сделал по процедуре, сэр."]);
+    const recall = vi.fn(async () => ({
+      id: "learned__compose-send",
+      ownerId: "u-1",
+      name: "Написать в чат",
+      when: "написать сообщение в чате",
+      procedure: "проза",
+      version: 1,
+      steps: [
+        { action: "app.focus", params: { app: "telegram" } },
+        { action: "input.type", needsLlm: true, params: {} },
+        { action: "input.key", needsLlm: true, params: {} }, // combo пуст → пре-чек молчит
+      ] as SkillStep[],
+      needsReview: false,
+    }));
+    const mock = new MockLlmProvider();
+    const deps = await makeDeps(mock, { skills: fakeSkills({ recall }) });
+    deps.llm = llm;
+    const reply = await handleUserText(session, "запусти поиск в доте", deps);
+    // Реплей НЕ ушёл: после префилла гард перепроверил заполненные шаги и отменил слепой макрос.
+    const kinds = (sendAction.mock.calls as unknown as Array<[{ kind?: string }]>).map((c) => c[0]?.kind);
+    expect(kinds).not.toContain("skill.execute");
+    // Петля получила честную пометку об отмене макроса (идёт по процедуре, где действуют send-гарды).
+    const loopMsgs = JSON.stringify(llm.requests[1]?.messages ?? []);
+    expect(loopMsgs).toContain("не выполнился");
+    expect(reply.voice).toContain("Сделал по процедуре");
   });
 });

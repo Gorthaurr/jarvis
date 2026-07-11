@@ -171,8 +171,20 @@ export class WatchService {
     try {
       const res = await send({ kind: "wait.for", condition: w.predicate, timeoutMs: 1_500, pollMs: 700 }, 8_000);
       if (!res.ok) return { met: false, summary: "", error: res.error?.message ?? res.error?.code ?? "wait.for failed" };
-      const data = res.data as { met?: boolean; detail?: string } | undefined;
-      const met = data?.met === true;
+      const data = res.data as { met?: boolean; detail?: string; gsiState?: "fresh" | "stale" | "none" } | undefined;
+      let met = data?.met === true;
+      // Ревью фиксов, 2-й проход (R4) — STATEFUL-детект исчезновения gsi+gone. Клиентское окно
+      // recentlyGone (~135с) короче произвольного интервала наблюдения: тик реже окна (или даунтайм
+      // сервера поверх события) навсегда пропускал бы исчезновение — one-shot висел бы active в
+      // тишине. Наблюдение само помнит, что видело источник ЖИВЫМ (sawFreshAt, durable), и любое
+      // последующее «запись есть, но протухла» (stale) = исчезновение. «none» (клиент перезапущен,
+      // стор пуст) намеренно НЕ засчитываем — живая игра снова запушит в ≤30с (heartbeat), а met по
+      // пустому стору был бы ложным «закончилось» посреди матча.
+      const pred = w.predicate as { kind?: unknown; gone?: unknown } | undefined;
+      if (pred?.kind === "gsi" && pred.gone === true && data?.gsiState) {
+        if (data.gsiState === "fresh") w.sawFreshAt = this.now(); // персистится store.update в runCheck
+        else if (!met && data.gsiState === "stale" && w.sawFreshAt !== undefined) met = true;
+      }
       return {
         met,
         value: typeof data?.detail === "string" ? data.detail.slice(0, 200) : undefined,
@@ -231,7 +243,11 @@ export class WatchService {
     try {
       const now = this.now();
       const due = this.store.active().filter((w) => dueAt(w, now) <= now);
-      for (const w of due) await this.runCheck(w);
+      // §Волна3 ревью (#14): проверки НЕЗАВИСИМЫ (каждая мутирует свою запись) → гоним ПАРАЛЛЕЛЬНО, а не
+      // последовательно. Раньше один невыполненный предикат держал клиентский wait.for до 1.5с (мёртвый
+      // клиент — до 8с), и N наблюдений сериализовались, ломая каденцию 5-10с и задерживая созревшие
+      // LLM-watch'и того же тика. runCheck ловит свои ошибки внутри — Promise.all не оборвётся.
+      await Promise.all(due.map((w) => this.runCheck(w)));
       this.store.prune(this.now());
     } catch (e) {
       log.warn("ошибка тика наблюдений", e instanceof Error ? e.message : String(e));

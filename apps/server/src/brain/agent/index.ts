@@ -13,8 +13,8 @@
  * если сложность всплыла в петле — это место для филлера «секунду» и продолжения на
  * старшем тире (// TODO: динамическая эскалация).
  */
-import type { ActionCommand, ActionKind, TaskStatus } from "@jarvis/protocol";
-import { actionTimeoutMs, newId } from "@jarvis/protocol";
+import type { ActionCommand, ActionKind, SkillStep, TaskStatus } from "@jarvis/protocol";
+import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, actionTimeoutMs, newId } from "@jarvis/protocol";
 import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, foldText, sleep } from "@jarvis/shared";
 import { COLD_TOOL_NAMES, TOOL_SCHEMAS, type ToolSchema, toolCatalogLine } from "@jarvis/tools";
 import type { McpManager } from "../mcp/manager.js";
@@ -43,6 +43,7 @@ import { prefillNeedsLlmSteps } from "./skill-prefill.js";
 import { type LocalIntent, classifyTier, resolveClarifyAnswer } from "../router/index.js";
 import { cap, failurePhrase, pick, successPhrase } from "../verbalize/action-phrases.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
+import { browserUrlBlocked } from "../tools/dispatch-util.js";
 import type { DynamicToolStore } from "../tools/dynamic.js";
 import type { RecalledSkill, SkillProvider } from "../../memory/skills.js";
 import type { TradingService } from "../trading/index.js";
@@ -353,6 +354,76 @@ function appendUserNote(convo: LlmMessage[], note: string): void {
   } else {
     convo.push({ role: "user", content: note });
   }
+}
+
+/**
+ * Ревью Волны 3 (#5): схемы URI, безопасные для ДЕТЕРМИНИРОВАННОГО реплея app.launch/browser.open
+ * (клиент шелл-открывает их без модели в петле). Всё остальное со схемой (file:/ms-msdt:/search-ms:/
+ * ms-settings:/shell:…) — потенциальный локальный эксплойт из отравленного навыка → реплей отменяем,
+ * задача идёт обычной петлёй через гардированный browser_open. Голое имя приложения (без схемы) — ок.
+ */
+const REPLAY_SAFE_URI_SCHEMES = new Set(["http", "https", "steam", "mailto", "tel"]);
+
+/** URI-значение шага небезопасно для слепого реплея: неизвестная схема ИЛИ приватный/loopback http(s). */
+function replayUriUnsafe(value: unknown): boolean {
+  if (typeof value !== "string" || !value.trim()) return false;
+  const m = /^([a-z][a-z0-9+.-]*):/i.exec(value.trim());
+  if (!m) return false; // нет схемы — голое имя приложения/файла, не URI-хэндлер
+  const scheme = m[1]!.toLowerCase();
+  if (!REPLAY_SAFE_URI_SCHEMES.has(scheme)) return true; // file/ms-msdt/search-ms/… → не реплеим вслепую
+  if (scheme === "http" || scheme === "https") return browserUrlBlocked(value); // приватный/loopback → блок
+  return false;
+}
+
+/**
+ * Ревью Волны 3 (#2): серверный потолок ожидания реплей-макроса. ДОЛЖЕН быть строго больше клиентского
+ * бюджета runSkill (SKILL_REPLAY_BUDGET_MS в actuators, деф 90с) + сетевой запас — тогда клиент ВСЕГДА
+ * успевает вернуть честный результат до таймаута, и «два писателя в GUI» невозможны.
+ * Ревью фиксов (#12): константа общая в @jarvis/protocol — тот же потолок у skill_execute/input_batch.
+ */
+const REPLAY_MACRO_SERVER_TIMEOUT_MS = SKILL_EXECUTE_SERVER_TIMEOUT_MS;
+
+/** Клавиша-«отправка» (Enter/Return, в т.ч. с Ctrl) — коммит сообщения/формы. */
+function isSendKey(combo: unknown): boolean {
+  if (typeof combo !== "string") return false;
+  const last = combo.split("+").pop()?.trim().toLowerCase() ?? "";
+  return last === "enter" || last === "return";
+}
+
+/**
+ * Реплей небезопасен для слепого детерминированного исполнения (ревью Волны 3):
+ *  (#5) есть app.launch/browser.open с подозрительной URI-схемой (обход SSRF/URL-гарда сервера);
+ *  (#7) модель СОЧИНЯЕТ текст (input.type, обычно needsLlm) и следом КОММИТИТ его — отправка мимо
+ *       send-гардов (confirm/cadence/проверка получателя). Коммит — это не только Enter: ревью фиксов
+ *       (#8/#11) показало, что записанный показом навык чаще заканчивается КЛИКОМ по «Отправить»
+ *       (input.click/input.mouse/ui.invoke) — любой такой шаг после сочинённого текста отменяет реплей.
+ *       Ложный позитив (клик после type — не отправка) стоит дёшево: честный откат на обычную петлю.
+ * Ревью фиксов, 2-й проход: (R1) ввод текста — это не только input.type: ui.invoke pattern="setValue"
+ * пишет текст в контрол через UIA (первоклассный путь, demo-запись его генерит) — учитываем как
+ * «сочинение»; (R2) input.type с текстом длиннее REPLAY_TYPE_MAX_CHARS не реплеим вовсе (typeText
+ * даёт себе 5с+120мс/символ и НЕотменяем — ломал бы бюджет-инвариант «нет двух писателей»).
+ * Экспорт — для регресс-тестов гарда (index.test.ts).
+ */
+export function replayUnsafe(steps: readonly SkillStep[]): boolean {
+  for (const s of steps) {
+    const p = s.params ?? {};
+    if (s.action === "browser.open" && replayUriUnsafe(p.url)) return true;
+    if (s.action === "app.launch" && replayUriUnsafe(p.app)) return true;
+    if (s.action === "input.type" && typeof p.text === "string" && p.text.length > REPLAY_TYPE_MAX_CHARS) return true;
+    if (s.action === "ui.invoke" && p.pattern === "setValue" && typeof p.value === "string" && p.value.length > REPLAY_TYPE_MAX_CHARS) return true;
+  }
+  // compose-and-commit: ввод текста (input.type / ui.invoke setValue) → далее Enter ИЛИ клик/инвок.
+  const isComposeStep = (s: SkillStep): boolean =>
+    s.action === "input.type" || (s.action === "ui.invoke" && (s.params ?? {}).pattern === "setValue");
+  const typeIdx = steps.findIndex(isComposeStep);
+  if (typeIdx >= 0) {
+    for (let i = typeIdx + 1; i < steps.length; i += 1) {
+      const s = steps[i]!;
+      if (s.action === "input.key" && isSendKey((s.params ?? {}).combo)) return true;
+      if (s.action === "input.click" || s.action === "input.mouse" || s.action === "ui.invoke") return true;
+    }
+  }
+  return false;
 }
 
 /** Промис под жёстким таймаутом: reject по истечении ms (для НЕОБЯЗАТЕЛЬНЫХ шагов §10). */
@@ -1117,21 +1188,52 @@ async function runAgentLoop(
       replaySteps.length >= 2 &&
       replaySteps.every((s) => REPLAY_SAFE.has(s.action)) &&
       replaySteps.some((s) => s.action.startsWith("input.") || s.action === "ui.invoke") &&
+      // Ревью Волны 3 (#5): детерминированный реплей browser.open/app.launch идёт клиентом через
+      // apps.launchApp → Start-Process ЛЮБОЙ URI-схемы (file:/ms-msdt:/search-ms:) МИМО SSRF/URL-гарда
+      // сервера. Отравленный навык (prompt-injection→skill_save) шелл-открыл бы опасную схему без единого
+      // LLM-раунда. Есть подозрительный URI → реплей отменяем (обычная петля идёт через гардированный
+      // browser_open). Ревью Волны 3 (#7): навык, где модель СОЧИНЯЕТ текст (needsLlm/prefill input.type)
+      // и тут же ШЛЁТ его (Enter/Ctrl+Enter), при слепом реплее отправил бы сообщение мимо send-гардов
+      // (confirm/cadence/получатель) — тоже отменяем реплей, задача идёт через гардированный telegram_send.
+      !replayUnsafe(replaySteps) &&
       !/\{\{\s*[\w-]+\s*\}\}/u.test(JSON.stringify(replaySteps));
     if (replayable && recalled) {
       let note: string;
       try {
         // §Волна3 (3.1): needsLlm-шаги («сочинить по месту») заполняет дешёвый тир ОДНИМ вызовом.
         // null = не заполнилось → реплей отменяем (не исполняем вслепую), идём обычной петлёй.
-        const prefilled = await prefillNeedsLlmSteps({ llm: deps.llm, model: deps.models.sonnet }, text, recalled.name, replaySteps);
+        // Ревью Волны 3 (#8): расход префилл-вызова УЧИТЫВАЕТСЯ в SpendGuard/метриках (иначе COGS и
+        // потолок трат недосчитывали реальные вызовы LLM).
+        const prefilled = await prefillNeedsLlmSteps(
+          {
+            llm: deps.llm,
+            model: deps.models.sonnet,
+            onUsage: (u) => {
+              deps.spend.recordStep(taskId);
+              deps.spend.recordUsage(taskId, u.inputTokens + u.outputTokens, costUsd(deps.models.sonnet, u));
+            },
+          },
+          text,
+          recalled.name,
+          replaySteps,
+        );
         if (!prefilled) throw new Error("needsLlm-шаги не заполнились — реплей вслепую запрещён");
+        // Ревью фиксов (#2): гарды выше проверяли ОРИГИНАЛЬНЫЕ шаги — префилл только что заполнил
+        // пустые params (combo/url/app в том числе) и мог сделать безопасный навык опасным
+        // (needsLlm input.key с пустым combo → «enter»; browser.open с пустым url → «file:///…»).
+        // Перепроверяем ЗАПОЛНЕННЫЕ шаги тем же гардом — иначе оба гарда (#5/#7) обходимы префиллом.
+        if (replayUnsafe(prefilled)) throw new Error("после префилла шаги небезопасны для слепого реплея (URI/отправка)");
         replaySteps = prefilled;
         if (!(await ensureInput())) throw new Error("ввод занят другой задачей (таймаут аренды)");
         if (task.cancel.cancelled) throw new Error("cancelled");
         const t0 = Date.now();
+        // Ревью Волны 3 (#2, «два писателя в GUI»): клиентский runSkill сам укладывается в БЮДЖЕТ
+        // (SKILL_REPLAY_BUDGET_MS, см. actuators) и честно возвращает результат ДО этого таймаута —
+        // серверный потолок держим СТРОГО ВЫШЕ бюджета+сети, чтобы реальный итог клиента ВСЕГДА выиграл
+        // гонку. Иначе таймаут форсил бы обычную петлю (клики моделью) ПАРАЛЛЕЛЬНО ещё идущему реплею.
         const res = await session.sendAction(
           { kind: "skill.execute", skillId: recalled.id, version: recalled.version, steps: replaySteps, params: {} },
-          60_000,
+          REPLAY_MACRO_SERVER_TIMEOUT_MS,
         );
         note = res.ok
           ? `⚙️ Авто-макрос навыка «${recalled.name}» v${recalled.version} уже ОТРАБОТАЛ за ` +
@@ -1290,6 +1392,9 @@ async function runAgentLoop(
       escalatedFrom &&
       !executorReverted &&
       !strongLocked &&
+      // Ревью Волны 3 (#4): не спускаемся, пока висит НЕсверённое слепое действие — иначе даунгрейд
+      // случился бы посреди несведённой verify-сверки (слабый тир добивал бы вслепую).
+      !blindMutatePending &&
       currentTier === "fable" &&
       !familyBoost &&
       recalled !== null &&
@@ -1491,10 +1596,14 @@ async function runAgentLoop(
         // «погуглил → сдался словами» теперь форсит попытку. !anyMutateSucceeded включает и traj===0.
       ) {
         retryNudges += 1;
+        // §Волна3 (3.2) + ревью Волны 3 (#3): капитуляция = ОСОЗНАННЫЙ форс-повтор → executor вниз НЕ
+        // спускает. Флаг ставим БЕЗУСЛОВНО (до ветки эскалации): если §7 УЖЕ подняла на fable, а модель
+        // сдалась текстом на fable, ветка ниже (currentTier!=="fable") не сработает — без этой строки
+        // executor-даунгрейд вернул бы слабый тир ровно там, где повтор должен быть УМНЕЕ. Как в trading.
+        strongLocked = true;
         // На отказе СРАЗУ эскалируем на сильную модель (Opus) — повтор должен быть УМНЕЕ, а не на той же
         // слабой, которая уже спасовала. Так «попробуй ещё» = реальный шанс выполнить, а не отписка.
         if (currentTier !== "fable" && deps.models.fable !== model) {
-          strongLocked = true; // §Волна3 (3.2): анти-капитуляция = осознанная сила, executor вниз не спускает
           currentTier = "fable";
           model = deps.models.fable;
           familyBoost = null; // липкая эскалация перекрывает одноразовый family-boost (откат не нужен)
@@ -1757,8 +1866,13 @@ async function runAgentLoop(
     // вместо того чтобы сдаться на слабой модели. Один успешный инструмент сбрасывает счётчик.
     const allErrored =
       resultBlocks.length > 0 && resultBlocks.every((b) => b.type === "tool_result" && b.is_error === true);
-    // §Волна3 (3.2): счётчик чистых раундов подряд — топливо executor-отката (сброс на провале).
-    cleanRoundsStreak = allErrored ? 0 : cleanRoundsStreak + 1;
+    // §Волна3 (3.2) + ревью Волны 3 (#4): «чистый раунд» для executor-отката = НИ ОДНОГО провалившегося
+    // инструмента. Раньше считалось «не ВСЕ упали» (allErrored) → смешанный раунд (слепой input_click
+    // is_error + screen_read_text ok) РОС streak, хотя КЛЮЧЕВОЕ действие валилось — даунгрейд возвращал
+    // слабый тир под продолжающийся провал (пинг-понг эскалация↔откат). Любая ошибка в раунде = не
+    // «чистая механика» (transient-сбой чтения лишь отложит откат на пару раундов — консервативно/безопасно).
+    const anyErrored = resultBlocks.some((b) => b.type === "tool_result" && b.is_error === true);
+    cleanRoundsStreak = anyErrored ? 0 : cleanRoundsStreak + 1;
     if (allErrored) {
       consecErrorRounds += 1;
       if (consecErrorRounds >= ESCALATE_AFTER && currentTier !== "fable") {

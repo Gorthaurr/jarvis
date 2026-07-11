@@ -32,6 +32,21 @@ function micMakeupCurve(k = MIC_MAKEUP_GAIN, n = 4096): Float32Array<ArrayBuffer
 const RESTART_RETRY_MIN_MS = 1000;
 const RESTART_RETRY_MAX_MS = 30_000;
 
+/** §Волна3 ревью (#18): окно подавления «отставших» аудио-чанков после barge-in/stop (мс). Достаточно
+ *  для in-flight WS-чанков отменённой фразы; новая фраза приходит секундами позже (вне окна). */
+const STRAGGLER_SUPPRESS_MS = 400;
+
+/** §Волна3 ревью (#17): сколько ждать следующий PCM-чанк после доигрывания хвоста, прежде чем счесть
+ *  стрим умершим (last не пришёл) и завершить плеер по дренажу. Больше типовой паузы между чанками. */
+const DRAIN_IDLE_MS = 2500;
+
+/** Ревью фиксов Волны 3 (#6): пауза в PCM-потоке, после которой накопленные без last чанки считаются
+ *  СИРОТОЙ оборванного стрима (v3 синтезирует ~реалтайм — внутри живой фразы таких пауз не бывает).
+ *  Ревью 2-го прохода (R5): порог ОБЯЗАН быть строго больше серверного INACTIVITY_MS v3-стрима (8с,
+ *  yandex-tts-v3.ts) + сеть — иначе честный «частичный last», который сервер шлёт ПОСЛЕ своего
+ *  inactivity-аборта, приходил бы уже за порогом и сброс съедал бы доставленный партиал. */
+const PCM_ORPHAN_MS = 12_000;
+
 /** Захват микрофона → PCM16 кадры. */
 export class AudioCapture {
   private ctx: AudioContext | null = null;
@@ -246,6 +261,15 @@ export class AudioPlayback {
   private live: PcmLivePlayer | null = null;
   private pcmParts: Uint8Array<ArrayBuffer>[] = [];
   private pcmRate = 22_050;
+  // Ревью фиксов Волны 3 (#6): когда в pcmParts последний раз клали чанк — для сброса СИРОТЫ
+  // (last оборванной фразы потерян с WS → накопитель жил бы вечно, гейт #16 уводил бы следующую
+  // фразу в busy-ветку, и её WAV склеивался бы с чужой головой).
+  private pcmPartsAt = 0;
+  // §Волна3 ревью (#18): окно подавления «отставших» чанков после barge-in/stop. Чанк, ушедший с
+  // сервера ДО обработки cancelTts, доезжает через несколько мс ПОСЛЕ stop() — в v3 он немедленно
+  // создавал новый живой плеер и играл обрывок отменённой фразы поверх речи юзера (+ взводил barge-окно
+  // и повисал без last). Новая ЛЕГИТИМНАЯ фраза приходит лишь через секунды (новый ход) — окно её не задевает.
+  private suppressChunksUntil = 0;
 
   // onActive(true/false) — реальный СТАРТ/КОНЕЦ звучания очереди. Нужен main, чтобы перебивание (§10)
   // работало, пока звук ЕЩЁ ИГРАЕТ, даже если сервер уже ушёл из speaking (синтез кончился раньше плеера).
@@ -269,6 +293,10 @@ export class AudioPlayback {
   /** Принять чанк (audio — base64). На последнем — озвучка в очередь и (если простаиваем) старт.
    *  §Волна3 (3.5): чанк format="pcm16" (v3 TTS-стрим) играется ПО МЕРЕ ПРИХОДА (см. enqueuePcm). */
   enqueue(chunk: { audio: string; seq: number; last: boolean; format?: string; sampleRate?: number }): void {
+    // §Волна3 ревью (#18): «отставший» чанк отменённой фразы (пришёл в окне после stop()) — игнорируем,
+    // чтобы он не зазвучал поверх речи юзера и не создал повисший live-плеер. Легитимная новая фраза
+    // приходит секундами позже (новый ход), вне окна.
+    if (Date.now() < this.suppressChunksUntil) return;
     if (chunk.format === "pcm16") {
       this.enqueuePcm(chunk);
       return;
@@ -291,6 +319,17 @@ export class AudioPlayback {
   private enqueuePcm(chunk: { audio: string; last: boolean; sampleRate?: number }): void {
     const rate = chunk.sampleRate ?? this.pcmRate;
     this.pcmRate = rate;
+    // Ревью фиксов (#6): сирота — прошлый стрим оборвался без last (WS-блип; сервер чанки не ресылает,
+    // клиент на reconnect playback не сбрасывает). Пауза в потоке больше порога = это НЕ продолжение
+    // той фразы: сбрасываем, иначе следующая фраза при полном простое ушла бы в busy-ветку (#16-гейт)
+    // и в её WAV склеилась бы голова прошлой (возможно отменённой) реплики.
+    // R5: last НЕ сбрасываем никогда — поздний last принадлежит ТОМУ ЖЕ стриму, что и накопленное
+    // (чанки новой фразы, приди они раньше, сами сбросили бы сироту): это честный «частичный итог»
+    // сервера после его inactivity-аборта, партиал обязан прозвучать, а не молча исчезнуть.
+    if (!chunk.last && this.pcmParts.length > 0 && Date.now() - this.pcmPartsAt > PCM_ORPHAN_MS) {
+      console.warn("[audio] осиротевшие PCM-чанки без last сброшены (прошлый стрим оборвался)");
+      this.pcmParts = [];
+    }
     const bytes = chunk.audio ? base64ToBytes(chunk.audio) : null;
     if (this.live) {
       if (bytes?.length) this.live.feed(bytes, rate);
@@ -300,7 +339,12 @@ export class AudioPlayback {
       }
       return;
     }
-    if (!this.current && this.queue.length === 0) {
+    // §Волна3 ревью (#16): fresh live-плеер стартуем ТОЛЬКО когда реально простаиваем И ничего не
+    // накоплено. Раньше проверки pcmParts.length НЕ было: если фраза 1 доиграла ПОСРЕДИ приёма фразы 2
+    // (current=null, queue пуста), следующий чанк фразы 2 создавал НОВЫЙ плеер, игравший только хвост, —
+    // накопленная голова фразы (pcmParts) терялась и позже склеивалась с ЧУЖОЙ фразой. Есть накопленное →
+    // идём в busy-ветку (копим дальше, на last соберём цельную WAV-озвучку) — ни один сэмпл не теряется.
+    if (!this.current && this.queue.length === 0 && this.pcmParts.length === 0) {
       this.setActive(true);
       const lp = new PcmLivePlayer(rate, () => {
         if (this.current === lp) this.current = null;
@@ -317,7 +361,10 @@ export class AudioPlayback {
       }
       return;
     }
-    if (bytes?.length) this.pcmParts.push(bytes);
+    if (bytes?.length) {
+      this.pcmParts.push(bytes);
+      this.pcmPartsAt = Date.now(); // (#6) отметка живости потока — сирота ловится по паузе
+    }
     if (chunk.last) {
       const merged = mergeParts(this.pcmParts);
       this.pcmParts = [];
@@ -338,6 +385,8 @@ export class AudioPlayback {
       this.current.stop();
       this.current = null;
     }
+    // §Волна3 ревью (#18): подавляем «отставшие» чанки отменённой фразы на короткое окно (см. поле).
+    this.suppressChunksUntil = Date.now() + STRAGGLER_SUPPRESS_MS;
     this.setActive(false); // звук оборван → main снимает barge-окно
   }
 
@@ -434,6 +483,13 @@ class PcmLivePlayer implements Utterance {
   private pendingSources = 0;
   private lastSeen = false;
   private stopped = false;
+  /** §Волна3 ревью (#21): нечётный хвостовой байт чанка — переносим в следующий, а не отбрасываем
+   *  (иначе поток сдвигается на 1 байт → Int16 LE читается со сдвигом = шум до конца фразы). */
+  private carry: Uint8Array<ArrayBuffer> | null = null;
+  /** §Волна3 ревью (#17): дренаж-вотчдог — если last так и не пришёл (стрим v3 умер посреди фразы),
+   *  плеер иначе НИКОГДА не завершится: current занят навсегда → onActive залип → barge-окно до 90с
+   *  ловит речь юзера. Доиграли хвост и тишина дольше таймаута → честно завершаемся (освобождаем канал). */
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     sampleRate: number,
@@ -447,9 +503,25 @@ class PcmLivePlayer implements Utterance {
   /** Скормить очередной PCM16-чанк (mono LE). Планируется встык за уже запланированным. */
   feed(bytes: Uint8Array<ArrayBuffer>, sampleRate: number): void {
     if (this.stopped) return;
-    const n = Math.floor(bytes.byteLength / 2);
-    if (n === 0) return;
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+    this.clearDrainTimer(); // пришли новые данные — стрим жив
+    // §Волна3 ревью (#21): склеиваем перенесённый нечётный байт с текущим чанком, ОБЩИЙ хвост — в carry.
+    let data = bytes;
+    if (this.carry && this.carry.byteLength) {
+      const joined = new Uint8Array(this.carry.byteLength + bytes.byteLength);
+      joined.set(this.carry, 0);
+      joined.set(bytes, this.carry.byteLength);
+      data = joined;
+    }
+    const n = Math.floor(data.byteLength / 2);
+    this.carry = data.byteLength % 2 ? data.slice(n * 2) : null; // нечётный хвост — в следующий чанк
+    if (n === 0) {
+      // Ревью фиксов (#7/#13): clearDrainTimer выше снял вотчдог, а источника этот чанк не породил
+      // (единственный байт ушёл в carry) — если хвост уже доигран и стрим умер на этом вырожденном
+      // чанке, onended больше не случится → без повторного взвода плеер завис бы навсегда (#17 заново).
+      if (this.pendingSources <= 0 && !this.lastSeen) this.armDrainTimer();
+      return;
+    }
+    const dv = new DataView(data.buffer, data.byteOffset, n * 2);
     const f32 = new Float32Array(n);
     for (let i = 0; i < n; i += 1) f32[i] = dv.getInt16(i * 2, true) / 32768;
     const buf = this.ctx.createBuffer(1, n, sampleRate);
@@ -462,7 +534,10 @@ class PcmLivePlayer implements Utterance {
     this.pendingSources += 1;
     src.onended = () => {
       this.pendingSources -= 1;
-      if (this.lastSeen && this.pendingSources <= 0) this.finish();
+      if (this.pendingSources <= 0) {
+        if (this.lastSeen) this.finish();
+        else this.armDrainTimer(); // last не пришёл — ждём ещё чанк, иначе дренаж завершит (#17)
+      }
     };
     try {
       src.start(startAt);
@@ -474,12 +549,33 @@ class PcmLivePlayer implements Utterance {
   /** Стрим кончился (last=true): доигрываем запланированный хвост и завершаемся. */
   markLast(): void {
     this.lastSeen = true;
+    this.clearDrainTimer();
     if (this.pendingSources <= 0) this.finish();
+  }
+
+  /** §Волна3 ревью (#17): взвести таймер завершения-по-тишине (last не пришёл, хвост доигран). */
+  private armDrainTimer(): void {
+    if (this.stopped || this.drainTimer) return;
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = null;
+      if (!this.stopped && this.pendingSources <= 0) {
+        console.warn("[audio] PCM-стрим не прислал last — завершаю по дренажу (освобождаю канал)");
+        this.finish();
+      }
+    }, DRAIN_IDLE_MS);
+  }
+
+  private clearDrainTimer(): void {
+    if (this.drainTimer) {
+      clearTimeout(this.drainTimer);
+      this.drainTimer = null;
+    }
   }
 
   private finish(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.clearDrainTimer();
     void this.ctx.close().catch(() => undefined);
     this.onEnded();
   }
@@ -487,6 +583,7 @@ class PcmLivePlayer implements Utterance {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true; // barge-in: onEnded НЕ зовём (очередь чистит вызывающий)
+    this.clearDrainTimer();
     void this.ctx.close().catch(() => undefined);
   }
 
