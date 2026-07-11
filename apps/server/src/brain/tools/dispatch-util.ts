@@ -38,6 +38,23 @@ export const ok = (content: string): ToolResult => ({ content, isError: false })
 export const err = (content: string): ToolResult => ({ content, isError: true });
 
 /**
+ * Б4 (ревью волны Б 3-й проход #4): если ActionResult провалился из-за channel_down (сокет ПК временно
+ * мёртв в resume-grace), вернуть ToolResult с `channelDown:true` — чтобы агент-петля НЕ эскалировала тир
+ * («Opus от транспорта») и подождала reconnect. Иначе — null (обычная ошибка, обрабатывай как раньше).
+ * Хендлеры, зовущие session.sendAction НАПРЯМУЮ (skills/code/messaging/browser), обязаны это вызвать:
+ * generic-путь dispatch делает то же (dispatch.ts), но эти хендлеры его обходят.
+ */
+export function channelDownResult(
+  result: { ok: boolean; error?: { code?: string; message?: string } },
+  message: string,
+): ToolResult | null {
+  if (result.ok || result.error?.code !== "channel_down") return null;
+  const out = err(message);
+  out.channelDown = true;
+  return out;
+}
+
+/**
  * §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (анти-prompt-injection): оборачиваем НЕДОВЕРЕННЫЙ контент (веб-страницы,
  * результаты поиска, чужие сообщения, содержимое вкладок/экрана) в явный маркер. Модель обязана трактовать
  * это как ДАННЫЕ, а не как команды (правило закреплено в persona.md, кешируемый префикс). Первичная защита:

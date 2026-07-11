@@ -34,7 +34,8 @@ import { McpManager } from "../brain/mcp/manager.js";
 import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
-import { getProfile, loadProfile, setLastGreeted } from "../brain/profile.js";
+import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "../brain/profile.js";
+import { consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
 import { ReminderService } from "../proactive/reminders/service.js";
 import { createWatchChecker } from "../proactive/watch/checker.js";
 import { WatchService } from "../proactive/watch/service.js";
@@ -781,6 +782,16 @@ async function doHandshake(
   });
 
   log.info("handshake завершён", { sessionId: session.sessionId, resumed });
+  // Б4 (б, ревью #3): resume НЕ удался (новый sessionId) → активные задачи userId идут на СТАРОЙ
+  // (мёртвой) сессии, их петли привязаны к её сокету в замыкании — до живой сессии они не доходят.
+  // Честно прерываем осиротевшие (иначе server-side задача запишет ложный success в закрытый сокет);
+  // пользователь переспросит на живой сессии. Задачи ЭТОЙ сессии не трогаем. На resume — no-op.
+  if (!resumed) {
+    // 4-й проход ревью (#2): отменяем ТОЛЬКО задачи МЁРТВЫХ сессий — liveness из registry (channelUp).
+    // Живой параллельный клиент того же userId (текст-драйвер рядом с Electron) не должен потерять работу.
+    const orphaned = brain.tasks.cancelOrphanedTasks(userId, session.sessionId, (sid) => registry.get(sid)?.channelUp() ?? false);
+    if (orphaned.length > 0) log.info("Б4: осиротевшие задачи прерваны (resume не удался, петли на мёртвой сессии)", { count: orphaned.length });
+  }
   const ctx = makeSessionContext(session, heartbeat, providers, brain);
 
   // §8: пробрасываем ранее записанные навыки в UI (список «Навыки» + возможность повтора).
@@ -791,7 +802,44 @@ async function doHandshake(
   // вопросом. На resume — молчит (уже знакомы).
   if (!resumed) startOnboarding(ctx, session, brain, log, hello.clientVersion);
 
+  // Б1 «сон-цикл»: первый коннект нового ДНЯ → фоновая консолидация вчерашнего опыта в устойчивые
+  // факты (fire-and-forget, дешёвый тир, кап 5/день). Ставим ПОСЛЕ онбординга — они независимы.
+  maybeConsolidate(ctx, brain, log, hello.clientVersion);
+
   return ctx;
+}
+
+/**
+ * Б1: раз в КАЛЕНДАРНЫЙ день на пользователя прогнать сон-цикл консолидации памяти. Fire-and-forget:
+ * не держит handshake и не влияет на голосовой путь. Идемпотентно по profile.lastConsolidatedAt; dev-
+ * сессии текст-драйвера пропускаем (как онбординг — не жгут LLM и не «съедают» день живого клиента).
+ */
+function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logger, clientVersion?: string): void {
+  if (!consolidationEnabled()) return;
+  if (/cmd|test|driver/i.test(clientVersion ?? "")) return;
+  const userId = ctx.session.userId;
+  const p = getProfile(userId);
+  const last = p.lastConsolidatedAt ?? 0;
+  // «Новый день» — разные календарные даты (сервер на ПК владельца, локальная дата консистентна с renderNow).
+  if (last && new Date(last).toDateString() === new Date().toDateString()) return;
+  const turns = ctx.memory.recentTurns().map((t) => ({ role: t.role, text: t.text }));
+  // Ревью волны Б 2-й проход (#2): НЕ сжигать дневной слот на ПУСТОЙ памяти. Раньше пометка стояла ДО
+  // проверки реплик → первый коннект дня после >12ч-простоя (working-store вычистил вчерашнее по TTL)
+  // помечал день, а реальный дневной диалог не консолидировался. Реплик пользователя нет → выходим БЕЗ
+  // пометки: следующий коннект (когда диалог накопится) попробует снова. Идемпотентность цела —
+  // проверка+пометка синхронны до fire-and-forget, параллельные коннекты не запустят второй прогон.
+  if (!turns.some((t) => t.role === "user")) return;
+  void setLastConsolidated(userId);
+  const taskTitles = brain.tasks
+    .recentTerminal(userId, { limit: 10, maxAgeMs: 36 * 3_600_000 })
+    .map((t) => t.title)
+    .filter(Boolean);
+  // Пустой день (никто не говорил) отсечёт сам консолидатор — LLM не зовётся.
+  void consolidateMemory(
+    { llm: brain.llm, episodic: brain.episodic, model: brain.models.sonnet, spend: brain.spend.forUser(userId) },
+    userId,
+    { turns, taskTitles, existingFacts: p.facts },
+  ).catch((e) => log.debug("сон-цикл: фоновый прогон упал", { error: e instanceof Error ? e.message : String(e) }));
 }
 
 function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProviders, log: Logger, clientVersion?: string): void {

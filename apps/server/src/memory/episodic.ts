@@ -37,6 +37,13 @@ export interface EpisodicMemory {
   search(userId: string, queryText: string, k: number, minScore?: number): Promise<EpisodeHit[]>;
   write(episode: Omit<Episode, "id">): Promise<void>;
   /**
+   * Б2 (микро-опт латентности): есть ли у пользователя ХОТЬ ОДНА живая запись. Пустой стор (новый
+   * пользователь) → retrieval-поиск на КАЖДОМ голосовом ходе — мёртвая 350мс-гонка (embed+ANN ради
+   * гарантированного []). Дешёвая проверка (LIMIT 1, без эмбеддинга) с process-кэшем позволяет её
+   * пропустить. Опционально — вызывающий деградирует к обычному search, если метода нет.
+   */
+  hasEntries?(userId: string): Promise<boolean>;
+  /**
    * Досчитать эмбеддинги для строк с embedding IS NULL (факты, сохранённые пока эмбеддер был мёртв —
    * иначе они НИКОГДА не вернутся в поиск). Идемпотентно, безопасно звать на каждом boot. Эмбеддер
    * по-прежнему мёртв → 0 исправлено (попробуем в следующий раз). Возвращает счётчики.
@@ -79,7 +86,22 @@ function toVectorLiteral(vec: readonly number[]): string {
 
 /** Прод: Postgres + pgvector (схема §13). Без БД деградирует в []/no-op. */
 export class PgVectorEpisodicMemory implements EpisodicMemory {
+  /** Б2: userId, у которых ТОЧНО есть записи (монотонно: раз true — навсегда true в процессе). */
+  private readonly known = new Set<string>();
+
   constructor(private readonly embedder: IEmbeddingProvider) {}
+
+  async hasEntries(userId: string): Promise<boolean> {
+    if (this.known.has(userId)) return true; // уже знаем — без запроса
+    const res = await query(
+      `select 1 from episodic_memory where user_id = $1 and stale = false limit 1`,
+      [userId],
+    );
+    // Нет БД (res===null) → консервативно true: не глушим retrieval из-за отсутствия сигнала.
+    const has = res === null ? true : res.rows.length > 0;
+    if (has) this.known.add(userId);
+    return has;
+  }
 
   async search(userId: string, queryText: string, k: number, minScore = 0): Promise<EpisodeHit[]> {
     const vec = await this.embedder.embed(queryText, "query");
@@ -112,6 +134,7 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
   }
 
   async write(episode: Omit<Episode, "id">): Promise<void> {
+    this.known.add(episode.userId); // Б2: после записи стор точно не пуст — hasEntries вернёт true без запроса
     const vec = await this.embedder.embed(episode.text, "passage");
     // ГРОМКО, не тихо: без вектора (нет ключа эмбеддера / транзиентный сбой) строка пишется с
     // embedding=NULL, а search фильтрует `embedding is not null` → факт НИКОГДА не вернётся в
@@ -185,6 +208,10 @@ export class InMemoryEpisodicMemory implements EpisodicMemory {
       episode: { ...episode, id: `mem-${this.seq}` },
       vec: vec ?? [],
     });
+  }
+
+  async hasEntries(userId: string): Promise<boolean> {
+    return this.store.some((e) => e.episode.userId === userId);
   }
 
   /** Размер хранилища (диагностика тестов). */

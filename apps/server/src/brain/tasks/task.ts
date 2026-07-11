@@ -54,6 +54,10 @@ export interface Task {
   cancel: CancelFlag;
   /** Канал правок на ходу (§20) — менеджер добавляет в pending, петля сливает перед шагом. */
   steer: SteerChannel;
+  /** Б6: разговорный ход (вопрос/комплимент/smalltalk). Задача существует для механики петли (cancel/
+   *  прогресс), но НЕ содержательная §20-работа: исключается из active()/activeForUser()/recentTerminal()/
+   *  scope — иначе «Да ты молодец» регистрировалось задачей и участвовало в scope-решениях след. реплик. */
+  conversational?: boolean;
 }
 
 /**
@@ -101,7 +105,7 @@ export function isActiveState(state: TaskState): boolean {
  * (панель/чип показываем только на реальном tool-use). Применяется в recentTerminal.
  */
 export function isSubstantiveTask(t: Task): boolean {
-  return t.stepsDone > 0;
+  return t.stepsDone > 0 && !t.conversational; // Б6: разговорный ход не всплывает в «что делал?»
 }
 
 /** Порог нарративности §20: задачи длиннее этого анонсируются и резюмируются. */

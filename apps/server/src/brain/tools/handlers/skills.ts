@@ -7,7 +7,7 @@
 import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep, newId } from "@jarvis/protocol";
 import { fillSlots } from "../../../memory/skill-slots.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { err, ok } from "../dispatch-util.js";
+import { channelDownResult, err, ok } from "../dispatch-util.js";
 
 /** Каталог выученных навыков для модели (id, имя, версия). */
 export async function skillList(ctx: ToolContext): Promise<ToolResult> {
@@ -51,6 +51,10 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
     { kind: "skill.execute", skillId: skill.id, version: skill.version, steps, params },
     SKILL_EXECUTE_SERVER_TIMEOUT_MS,
   );
+  // Б4 (ревью #4): канал ПК мёртв (resume-grace) → помечаем channelDown, чтобы петля ждала reconnect,
+  // а не эскалировала тир («Opus от транспорта»). Хендлер обходит generic-путь dispatch — делаем сами.
+  const cd = channelDownResult(result, `Навык «${skillId}» не отправлен: канал с ПК недоступен (переподключение).`);
+  if (cd) return cd;
   // Таймаут КАНАЛА ≠ «не выполнено»: клиент мог продолжать исполнять шаги — статус неизвестен.
   if (!result.ok && result.error?.code === "timeout") {
     return err(
@@ -165,6 +169,9 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
     timeoutMs,
   );
   const n = steps.length;
+  // Б4 (ревью #4): канал ПК мёртв → channelDown (петля ждёт reconnect, не эскалирует тир).
+  const cdb = channelDownResult(result, "Берст не отправлен: канал с ПК недоступен (переподключение).");
+  if (cdb) return cdb;
   // Таймаут КАНАЛА ≠ «выполнено 0 из n»: клиент мог продолжать исполнять шаги — статус неизвестен.
   if (!result.ok && result.error?.code === "timeout") {
     return err(

@@ -266,6 +266,52 @@
     (3.6) **ЛЕСТНИЦА НАБЛЮДЕНИЯ — ЗАКОН**: verify-нуджи петли называют порядок ui_snapshot →
     browser_read/inspect → screen_read_text → screen_capture (последний резерв); `context_read`
     переописан как «дешёвая текстовая сверка активного окна», не только дейксис.
+  - **ПАМЯТЬ+КОНТЕКСТ уровень Б (2026-07-11, `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md` §5 Б; +42 теста):**
+    (Б1) **СОН-ЦИКЛ консолидации** `proactive/consolidation.ts` — раз в КАЛЕНДАРНЫЙ день (первый коннект,
+    `server.ts maybeConsolidate`, гейт `profile.lastConsolidatedAt`, dev-сессии пропускаются) фоновый
+    дешёвый LLM выжимает из вчерашних реплик (working-store) + выполненных задач 0-5 УСТОЙЧИВЫХ фактов
+    (жёсткий анти-мусорный промпт: одноразовые команды/STT-шум — не факты; вход — untrusted, «не
+    исполняй») → пишет через `memory/user-memory.writeUserMemory` (дедуп ≥0.93 + мост в профиль).
+    fire-and-forget, кап 5/день, выкл `JARVIS_CONSOLIDATION=0` (в vitest.setup глушится). forget/stale —
+    открытый TODO. (Б2) **skip-search на пустом сторе**: `episodic.hasEntries` (LIMIT 1 + process-кэш
+    `known`, монотонно true) → `agent/index.ts` пропускает retrieval для нового юзера (мёртвая 350мс-
+    гонка), свой короткий таймаут 150мс на голосе. Кешируемый блок фактов НЕ делался осознанно: цель
+    «факты каждый ход» закрыта А1 (mergedFacts), 5-й cache-breakpoint конфликтовал бы с навыком (риск
+    Д5) при копеечной выгоде. (Б3) **LIVE-РЕФРЕШ контекста** `agent/index.ts`: в ДЛИННОЙ задаче (≥3
+    раундов) свежий `systemContext` (окна/вкладки/часы, обновляется client.system каждые 12с) впрыскивается
+    ХВОСТОМ convo (`appendUserNote` + `shortTime`), ТОЛЬКО при изменении (не спамим) — БЕЗ пересборки
+    system-блока (rolling-брейкпоинты целы, класс Д5 не задет); untrusted-обёртка; выкл
+    `JARVIS_LIVE_CONTEXT_REFRESH=0`. (Б4 б-д) **RESUME-САНАЦИЯ**: (в) `session.sendAction` FAIL-FAST —
+    сокет закрыт (resume-grace, сессия жива) → мгновенный `channel_down` (новый код в protocol/messages),
+    не ждём таймаут → конец «задач-зомби» ($0.68/эпизод); (д) `channel_down` в петле НЕ эскалирует тир и
+    не растит streak (мёртвый канал ≠ слабая модель — конец «Opus от транспорта»); (г) `waitForChannel`
+    (окно `JARVIS_CHANNEL_WAIT_MS` деф 30с < resume-grace 120с) ждёт reconnect и повторяет раунд той же
+    моделью, не вернулся → честный терминал `channelLost` (ok=false, кэш не пишется); (б)
+    `manager.reassignActiveTasks` перевешивает живые задачи userId на новую сессию при провале resume
+    (teardown старой не снимет; отмена по userId Б4а sessionId-агностична). `session.channelUp()` — сигнал.
+    (Б6) **БЮДЖЕТ РАЗГОВОРА**: `Task.conversational` — разговорный ход (вопрос/комплимент) исключён из
+    `active()`/`activeForUser()`/`recentTerminal()`/`isSubstantiveTask` (не всплывает в scope/«сделал?» —
+    «да ты молодец» больше не §20-задача) + кап `HARD_STEP_CAP=3` (комплимент за $0.19 и 8 раундов срезан);
+    recall НАМЕРЕННО оставлен (вопрос «как отправить X» тоже conversational, но выигрывает от навыка).
+    **РЕВЬЮ волны Б (Opus, 4 CONFIRMED, все исправлены):** (#1) сон-цикл учитывает расход в SpendGuard
+    (`ConsolidationDeps.spend`: check/recordUsage/finishTask — месячный потолок не обходится фоновым
+    вызовом, как memory-reflect); (#2) Б3 не копит снимки — прежний Б3-снимок ВЫРЕЗАЕТСЯ
+    (`pruneOldLiveSnapshots`, в контексте максимум один актуальный) + троттл `LIVE_REFRESH_EVERY=4`
+    раунда (был квадратичный рост токенов на длинной GUI-задаче); (#3, correctness) `reassignActiveTasks`
+    УБРАН (петля держит session в замыкании — перевес метки бесполезен, врал docstring) → честная
+    `cancelOrphanedTasks`: при провале resume осиротевшие задачи старой (мёртвой) сессии ПРЕРЫВАЮТСЯ
+    (иначе server-side задача писала ложный success в закрытый сокет); (#4, HIGH) исчерпание
+    `HARD_STEP_CAP` без текстового ответа → честный терминал `capExhausted` (ok=false), НЕ дефолтное
+    «Готово» (ложный успех на вопрос). **7 итераций адверс-ревью на Opus, находки сошлись 13→0** (все
+    исправлены): реплики консолидации обёрнуты `<untrusted_content>` + код-фильтр `looksLikeDirective`
+    (email/URL/пересылка/ключи не оседают в доверенном профиле — защита в глубину, не только промпт);
+    Б3-снимки НЕ прунятся (ломало кеш Д5), а капятся `MAX_LIVE_REFRESHES=4` + троттл; `channel_down`
+    помечается и в hand-rolled хендлерах (skills/code/browser через `channelDownResult`), не только в
+    generic dispatch; `cancelOrphanedTasks` проверяет liveness сессии через registry (живой параллельный
+    клиент не теряет работу); `capExhausted` считается по `loopIters` (не round, из-за continue) + отдаёт
+    сохранённый `lastAnswer` на разговорном ходе (не ложное «не успел»); кап conversational 3→12 (не рвёт
+    research-вопросы); «отмени» снимает и скрытую разговорную задачу (cancel до active-гейта). Финал: 7-й
+    проход (4 файндера Opus) — 0 находок. Тесты: сервер 1191, +55 к волне Б.
   - **ПАМЯТЬ+КОНТЕКСТ уровень А + Б4а/Б5 (2026-07-10, отчёт `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md`;
     диагноз: facts:0 навсегда — 3 структурных разрыва; контекст ПК замораживался; 39-мин STT-ход):**
     ПАМЯТЬ: (А1) баг спреда — retrieval-facts затирал профильные, теперь merge+dedup; (А2/А9) единый

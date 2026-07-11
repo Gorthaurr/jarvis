@@ -144,6 +144,12 @@ export interface ToolResult {
    * не ослаблен, сверка просто приезжает вместе с действием, а не отдельным раундом.
    */
   observed?: boolean;
+  /**
+   * Б4 (г/д): ActionCommand не ушёл — сокет клиента временно мёртв (обрыв в resume-grace), сессия жива.
+   * Это НЕ провал действия и НЕ повод эскалировать тир (мёртвый канал ≠ слабая модель): петля ждёт
+   * reconnect и повторяет, а не считает раунд «провалившимся» и не жжёт Opus «от транспорта».
+   */
+  channelDown?: boolean;
 }
 
 /** tool name → ActionKind (реверс ACTUATOR_TOOL_BY_KIND). */
@@ -405,6 +411,12 @@ export async function dispatchTool(
   }
   const code = result.error?.code ?? "runtime";
   const msg = result.error?.message ?? "";
+  // Б4 (г/д): канал мёртв (resume-grace) → не «действие не удалось», а «канал недоступен» + флаг для петли.
+  if (code === "channel_down") {
+    const out = err(`Действие ${kind} не отправлено: канал с ПК временно недоступен (переподключение). Не провал — жду восстановления.`);
+    out.channelDown = true;
+    return out;
+  }
   return err(`Действие ${kind} не удалось: ${code} ${msg}${visionFallbackHint(kind, code, msg)}`);
 }
 

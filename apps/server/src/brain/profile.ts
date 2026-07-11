@@ -37,6 +37,8 @@ export interface UserProfile {
   context?: string;
   /** Когда последний раз звучало приветствие-онбординг (unix ms) — кулдаун А6, ревью 2026-07-10. */
   lastGreetedAt?: number;
+  /** Когда последний раз прогонялся «сон-цикл» консолидации памяти (unix ms) — триггер Б1, раз в день. */
+  lastConsolidatedAt?: number;
 }
 
 const cache = new Map<string, UserProfile>();
@@ -120,6 +122,12 @@ export async function setContext(userId: string, context: string): Promise<void>
 /** Отметить произнесённое приветствие (кулдаун онбординга А6, ревью 2026-07-10). */
 export async function setLastGreeted(userId: string): Promise<void> {
   entry(userId).lastGreetedAt = Date.now();
+  await persist(userId);
+}
+
+/** Отметить прогон «сон-цикла» консолидации памяти (Б1, раз в день). */
+export async function setLastConsolidated(userId: string): Promise<void> {
+  entry(userId).lastConsolidatedAt = Date.now();
   await persist(userId);
 }
 

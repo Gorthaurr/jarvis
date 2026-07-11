@@ -117,7 +117,10 @@ export interface ActionResult {
   commandId: string;
   ok: boolean;
   error?: {
-    code: "timeout" | "not_found" | "denied" | "disconnected" | "runtime";
+    // channel_down (Б4): сокет временно недоступен (обрыв в resume-grace), сессия ЖИВА — команда не
+    // выполнена, но это НЕ провал действия и НЕ повод эскалировать тир (мёртвый канал ≠ слабая модель).
+    // Отличается от disconnected (сессия закрыта окончательно).
+    code: "timeout" | "not_found" | "denied" | "disconnected" | "channel_down" | "runtime";
     message: string;
   };
   /** напр. {handle, bbox} от ui.ground, stdout от code.run. */

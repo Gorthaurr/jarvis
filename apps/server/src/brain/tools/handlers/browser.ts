@@ -5,7 +5,7 @@
  */
 import { type ActionCommand, DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "@jarvis/protocol";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { browserUrlBlocked, err, ok, untrusted } from "../dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, err, ok, untrusted } from "../dispatch-util.js";
 
 /**
  * Цель браузерной задачи, запомненная per-сессия (WeakMap по объекту сессии — не держит сессию в памяти).
@@ -94,6 +94,8 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
     if (sess) browserTarget.set(sess, { url, at: Date.now() }); // shell-открытие: tabId нет, act/read найдут по хосту
     return ok(`Открыл ${url}.`);
   }
+  const cd = channelDownResult(result, `Не отправлено открытие ${url}: канал с ПК недоступен (переподключение).`); // Б4 #4
+  if (cd) return cd;
   return err(`Не вышло открыть ${url}: ${result.error?.message ?? result.error?.code ?? "ошибка"}`);
 }
 
@@ -266,5 +268,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
   }
   const command = { kind: "browser.act", intent, params } as unknown as ActionCommand;
   const result = await ctx.session.sendAction(command, DEFAULT_ACTION_TIMEOUT_MS);
-  return result.ok ? ok(`Сделал: ${intent}.`) : err(`browser.act не удалось: ${result.error?.message ?? ""}`);
+  if (result.ok) return ok(`Сделал: ${intent}.`);
+  const cd = channelDownResult(result, "browser.act не отправлен: канал с ПК недоступен (переподключение)."); // Б4 #4
+  return cd ?? err(`browser.act не удалось: ${result.error?.message ?? ""}`);
 }

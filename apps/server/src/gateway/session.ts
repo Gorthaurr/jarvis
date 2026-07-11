@@ -145,6 +145,15 @@ export class Session {
         resolve(this.syntheticResult(commandId, "disconnected", "сессия закрыта", 0));
         return;
       }
+      // Б4 (в) FAIL-FAST: сессия ещё жива (resume-grace, teardown не звался), но СОКЕТ закрыт — команда
+      // физически не ушла. Раньше мы всё равно ставили полный таймаут (15с/130с) и ЖДАЛИ пустоту: петля
+      // §20 слала команды в мёртвый сокет, каждая висела до таймаута → «задачи-зомби» жгли деньги/время
+      // (лог 2026-07-10: ~$0.68 + Opus-эскалации «от транспорта»). Теперь — мгновенный channel_down:
+      // петля различит его (Б4 г/д) и подождёт reconnect вместо слепого продолжения.
+      if (this.socket.readyState !== WS_OPEN) {
+        resolve(this.syntheticResult(commandId, "channel_down", "канал недоступен (ожидание переподключения)", 0));
+        return;
+      }
       const startedAt = Date.now();
       const timer = setTimeout(() => {
         this.inFlight.delete(commandId);
@@ -237,6 +246,12 @@ export class Session {
   /** Сколько действий сейчас в полёте (диагностика/тесты). */
   get inFlightCount(): number {
     return this.inFlight.size;
+  }
+
+  /** Б4 (г): готов ли канал принять команду ПРЯМО СЕЙЧАС (сессия жива И сокет открыт). Петля §20 ждёт
+   *  восстановления по этому сигналу вместо слепого продолжения в мёртвый сокет. */
+  channelUp(): boolean {
+    return this.alive && this.socket.readyState === WS_OPEN;
   }
 
   // ── приватное ──────────────────────────────────────────────
