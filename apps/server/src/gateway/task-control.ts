@@ -42,8 +42,8 @@ function ackControl(ctx: SessionContext, text: string, source: ControlSource): v
  * реплика обработана как управление (агент НЕ вызывается).
  *
  *  - «стоп»/«заткнись» (stop_tts) — рубит ТОЛЬКО озвучку (barge-in), задача живёт;
- *  - «отмени»/«пауза»/«продолжи»/«что делаешь» — действуют на активную задачу сессии;
- *    без активной задачи такие реплики НЕ перехватываются (уходят в агент как контент).
+ *  - «отмени» — снимает ВСЕ задачи userId (вкл. скрытые разговорные, Б6) — перехватывается всегда;
+ *  - «пауза»/«продолжи»/«что делаешь» — по ВИДИМОЙ активной задаче; без неё в агент как контент.
  *
  * `source` (M7): голосовой ввод → "voice" (ack звучит), текст-канал (dev.text/вкладка «Чат») → "text"
  * (ack только в чат, без голоса — §22). По умолчанию "voice" (обратная совместимость).
@@ -62,11 +62,6 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     return true;
   }
 
-  // cancel/pause/resume/status осмысленны только при активной задаче.
-  // Б4а (форензика 2026-07-10): адресация по USERID, не sessionId — после обрыва/reconnect sessionId
-  // новый, задачи привязаны к старому → «отмени» их не видел и агент заводил НОВУЮ задачу «отменить».
-  const active = ctx.agentDeps.tasks.activeForUser(ctx.session.userId)[0];
-  if (!active) return false;
   if (decision.confidence === "low") {
     // §20: спорная формулировка — действуем по наиболее вероятному kind (Haiku-доуточнение — TODO).
     log.info("низкая уверенность классификации управления — действуем по эвристике", {
@@ -74,13 +69,20 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
       reason: decision.reason,
     });
   }
-  // «отмени» голосом → «останови ВСЁ, что делаешь»: при параллельных задачах (§20)
-  // снимаем все, а не только самую свежую (иначе остальные доедут и озвучат итог).
-  // Пауза/возобновление/статус — по самой свежей активной (taskId).
+  // «отмени» голосом → «останови ВСЁ, что делаешь»: cancelUser по USERID (Б4а — переживает reconnect).
+  // Ревью волны Б 6-й проход: cancel идёт РАНЬШЕ проверки видимой active — иначе одинокая РАЗГОВОРНАЯ
+  // задача (Б6: скрыта из activeForUser) была бы НЕотменяема (research-вопрос до 12 раундов web_*).
+  // Интеграционное ревью #6 (РЕГРЕССИЯ): перехватываем cancel ТОЛЬКО если реально есть что отменять
+  // (любая активная задача userId, вкл. скрытую разговорную). Иначе «отмени напоминание/подписку»/«забудь
+  // что просил» БЕЗ §20-задачи должно уйти в АГЕНТ (cancel_reminder и пр.), а не съесться «Нет задачи».
   if (decision.kind === "cancel") {
+    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false; // нечего останавливать — в агент
     handleTaskControl(ctx, "cancel", undefined, source);
     return true;
   }
+  // pause/resume/status осмысленны только при ВИДИМОЙ активной задаче (по самой свежей taskId).
+  const active = ctx.agentDeps.tasks.activeForUser(ctx.session.userId)[0];
+  if (!active) return false;
   handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId, source);
   return true;
 }

@@ -19,3 +19,7 @@ if (!process.env.JARVIS_DATA_DIR || !process.env.JARVIS_DATA_DIR.trim()) {
 // с маркером («я люблю…») молча съедал бы скриптованные ответы MockLlmProvider → флаки. Тесты самого
 // рефлекса включают его локально (переопределить env — их право, как у crypto/credentials).
 if (process.env.JARVIS_MEMORY_REFLECT === undefined) process.env.JARVIS_MEMORY_REFLECT = "0";
+
+// Сон-цикл консолидации (Б1, 2026-07-11) в юнит-тестах ВЫКЛ по той же причине: фоновый LLM-вызов на
+// первом коннекте нового дня жёг бы скриптованные ответы моков. Тест самого сон-цикла включает локально.
+if (process.env.JARVIS_CONSOLIDATION === undefined) process.env.JARVIS_CONSOLIDATION = "0";

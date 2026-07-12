@@ -78,4 +78,19 @@ describe("createClientActuator — USER_BUSY-гейт физ.ввода (§H5)",
     await act.executeStep(step("app.launch", { params: { app: "notepad" } }));
     expect(launchApp).toHaveBeenCalledTimes(1);
   });
+
+  // Интеграционное ревью (2-й проход): длинный литеральный input.type ломает бюджет реплея (typeText
+  // неотменяем, 5с+120мс/символ; бюджет гейтит СТАРТ, не длительность). Кап 150 (~23с). Честный провал.
+  it("input.type длиннее REPLAY_TYPE_MAX_CHARS → честный провал, актуатор НЕ вызван", async () => {
+    const act = createClientActuator();
+    const long = "х".repeat(300);
+    await expect(act.executeStep(step("input.type", { params: { text: long } }))).rejects.toThrow(/не влезает в бюджет/);
+    expect(typeText).not.toHaveBeenCalled();
+  });
+
+  it("input.type в пределах капа (короткая реплика) — исполняется", async () => {
+    const act = createClientActuator();
+    await act.executeStep(step("input.type", { params: { text: "п".repeat(120) } }));
+    expect(typeText).toHaveBeenCalledTimes(1);
+  });
 });

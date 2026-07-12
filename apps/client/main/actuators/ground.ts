@@ -48,19 +48,21 @@ function asGroundResult(data: unknown): GroundResult {
 
 /** Найти элемент по роли/имени в активном окне (a11y-first, §6). §Волна2 (2.4): nameMode="substring"
  *  — матч имени по вхождению; automationId — устойчивый id. Scope в сайдкаре: активное окно → фолбэк
- *  на весь рабочий стол. */
+ *  на весь рабочий стол. §Волна3 ревью (#6): scope="active" — ТОЛЬКО активное окно, без фолбэка на
+ *  стол (для предусловий шага навыка — иначе чужое фоновое окно даёт ложный pass). */
 export async function ground(query: {
   role: string;
   name?: string;
   nameMode?: "exact" | "substring";
   automationId?: string;
+  scope?: "active";
 }): Promise<GroundResult> {
   ensure();
   log.debug("ui.ground", query);
   return asGroundResult(
     await sidecar().request(
       "ground",
-      { role: query.role, name: query.name, nameMode: query.nameMode, automationId: query.automationId },
+      { role: query.role, name: query.name, nameMode: query.nameMode, automationId: query.automationId, scope: query.scope },
       UIA_TIMEOUT_MS,
     ),
   );

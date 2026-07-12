@@ -158,6 +158,27 @@ describe("predictions — PATH-сверка по R (§трейдинг слой 
     expect(r.status).toBe("correct"); // 108 > 100
   });
 
+  it("аудит [4]: свеча ДО createdAt не резолвит прогноз (до-входный фитиль не считается)", () => {
+    // createdAt=1000: бар t=500 (ДО прогноза) провалился к 94 (ниже стопа 95) — но это было ДО входа;
+    // после входа цена идёт в тейк. Прежде resolveByPath бил стоп по до-входному бару → ложный wrong.
+    const p = P({ createdAt: 1000, resolveAt: 3000 });
+    const r = resolveByPath(
+      p,
+      [candle(500, 103, 94, 96), candle(1500, 108, 99, 107), candle(2500, 112, 106, 110)],
+      3000,
+    );
+    expect(r.outcome).toBe("target"); // по пост-входным барам, не по до-входному касанию стопа
+    expect(r.status).toBe("correct");
+  });
+
+  it("аудит [5]: инвертированный стоп (long, stop>entry) → resolveOne, НЕ ложная +1R победа", () => {
+    // stop=105 при entry=100 для лонга — не с той стороны. Path-сверка дала бы exit=105>entry → +1R
+    // «победа» (стоп-аут как выигрыш). Теперь стоп невалиден → resolveOne по направлению, R отсутствует.
+    const r = resolveByPath(P({ stopPrice: 105 }), [candle(500, 108, 96, 98)], 1000);
+    expect(r.rMultiple).toBeUndefined(); // не книжим стоп-аут как победу
+    expect(r.status).toBe("wrong"); // resolveOne: 98 < 100 для лонга → не угадал
+  });
+
   it("computeWinRate: матожидание в R + профит-фактор по прогнозам со стопом", () => {
     const items = [
       P({ status: "correct", rMultiple: 2, costPct: 0.2 }), // риск 5% → costR 0.04 → net 1.96

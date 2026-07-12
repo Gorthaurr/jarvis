@@ -23,6 +23,7 @@ import { Transport } from "./transport/index.js";
 import { dispatch } from "./actuators/index.js";
 import * as tier0 from "./tier0/index.js";
 import { monitors } from "./monitors.js";
+import { startGsiListener } from "./sensors/gsi-listener.js";
 import { settingsStore } from "./settings-store.js";
 import { identityStore } from "./identity-store.js";
 import { AudioCoordinator } from "./audio/index.js";
@@ -572,6 +573,7 @@ function startSidecar(): void {
 
 app.whenReady().then(() => {
   registerIpc();
+  startGsiListener(); // §Волна3 (3.4): локальный приёмник JSON-пушей игр/программ (GSI) — сенсор kind:"gsi"
   createWindow();
   startTransport();
   startSidecar();

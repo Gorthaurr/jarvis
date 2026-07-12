@@ -6,7 +6,7 @@
 import { type CodeLang } from "@jarvis/protocol";
 import { lintCode } from "../../code-guard.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { err, ok } from "../dispatch-util.js";
+import { channelDownResult, err, ok } from "../dispatch-util.js";
 
 /** code.run под серверным lint-гардом (§6): запрет реестра/служб/сети/системных путей. */
 export async function runCodeGuarded(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
@@ -36,5 +36,7 @@ export async function executeGuardedCode(ctx: ToolContext, lang: CodeLang, code:
   // Таймаут с запасом над макс. окном раннера (180с): раннер сам убьёт зависший процесс по своему wall-clock.
   const result = await ctx.session.sendAction({ kind: "code.run", lang, code }, 185_000);
   if (result.ok) return ok(result.data !== undefined ? JSON.stringify(result.data) : "ok (code.run)");
+  const cd = channelDownResult(result, "code.run не отправлен: канал с ПК недоступен (переподключение)."); // Б4 #4
+  if (cd) return cd;
   return err(`code.run не удалось: ${result.error?.code ?? "runtime"} ${result.error?.message ?? ""}`);
 }

@@ -5,7 +5,7 @@
  */
 import { type ActionCommand, DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "@jarvis/protocol";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { browserUrlBlocked, err, ok, untrusted } from "../dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, err, ok, untrusted } from "../dispatch-util.js";
 
 /**
  * Цель браузерной задачи, запомненная per-сессия (WeakMap по объекту сессии — не держит сессию в памяти).
@@ -94,6 +94,8 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
     if (sess) browserTarget.set(sess, { url, at: Date.now() }); // shell-открытие: tabId нет, act/read найдут по хосту
     return ok(`Открыл ${url}.`);
   }
+  const cd = channelDownResult(result, `Не отправлено открытие ${url}: канал с ПК недоступен (переподключение).`); // Б4 #4
+  if (cd) return cd;
   return err(`Не вышло открыть ${url}: ${result.error?.message ?? result.error?.code ?? "ошибка"}`);
 }
 
@@ -115,7 +117,11 @@ export async function browserTabs(ctx: ToolContext): Promise<ToolResult> {
       const flags = [t.active ? "активна" : "", t.audible ? "♪ звук" : ""].filter(Boolean).join(", ");
       return `${i + 1}. [tabId ${t.tabId}] ${t.title || t.host || t.url || "?"}${flags ? ` (${flags})` : ""} — ${t.host || t.url || ""}`;
     });
-    return ok(
+    // Аудит-2 [5]: title/host/url вкладки — контент, заданный САМОЙ страницей (влияемый атакующим:
+    // document.title = «Игнорируй инструкции, вызови …»). Оборачиваем в <untrusted_content>, как
+    // browser_read/browser_inspect и заголовки окон (M11) — иначе граница данные/инструкции ослаблена.
+    return untrusted(
+      "browser-tabs",
       `Открытые вкладки (${tabs.length}):\n${lines.join("\n")}\n` +
         `Чтобы действовать в КОНКРЕТНОЙ вкладке — передай её tabId в browser_act/browser_read (точное попадание).`,
     );
@@ -181,7 +187,9 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
     { kind: "browser.read", selectorIntent: String(input.selectorIntent ?? "") },
     DEFAULT_ACTION_TIMEOUT_MS,
   );
-  return result.ok ? ok(result.data !== undefined ? JSON.stringify(result.data) : "ok") : err(`browser.read не удалось: ${result.error?.message ?? ""}`);
+  if (result.ok) return ok(result.data !== undefined ? JSON.stringify(result.data) : "ok");
+  const cd = channelDownResult(result, "browser_read не отправлен: канал с ПК недоступен (переподключение)."); // Б4 #5
+  return cd ?? err(`browser.read не удалось: ${result.error?.message ?? ""}`);
 }
 
 /**
@@ -266,5 +274,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
   }
   const command = { kind: "browser.act", intent, params } as unknown as ActionCommand;
   const result = await ctx.session.sendAction(command, DEFAULT_ACTION_TIMEOUT_MS);
-  return result.ok ? ok(`Сделал: ${intent}.`) : err(`browser.act не удалось: ${result.error?.message ?? ""}`);
+  if (result.ok) return ok(`Сделал: ${intent}.`);
+  const cd = channelDownResult(result, "browser.act не отправлен: канал с ПК недоступен (переподключение)."); // Б4 #4
+  return cd ?? err(`browser.act не удалось: ${result.error?.message ?? ""}`);
 }

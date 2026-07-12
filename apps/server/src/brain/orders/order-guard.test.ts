@@ -22,6 +22,12 @@ describe("checkOrder (§14)", () => {
   it("сумма выше spend cap → blocked_cap", () => {
     expect(checkOrder(order({ total: 9000 }), policy).status).toBe("blocked_cap");
   });
+  it("аудит [7]: нечисловая сумма (NaN) → blocked_cap (FAIL-CLOSED, не проходит потолок мимо)", () => {
+    // «12,500»/«12 500» → Number → NaN; `NaN > spendCap` === false раньше пропускал заказ мимо капа.
+    expect(checkOrder(order({ total: Number.NaN }), policy).status).toBe("blocked_cap");
+    expect(checkOrder(order({ total: Number.POSITIVE_INFINITY }), policy).status).toBe("blocked_cap");
+    expect(checkOrder(order({ total: -100 }), policy).status).toBe("blocked_cap");
+  });
 });
 
 describe("assertNoCardData — красная линия карты (§0)", () => {

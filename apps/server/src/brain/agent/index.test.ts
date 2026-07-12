@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ActionCommand } from "@jarvis/protocol";
+import type { ActionCommand, SkillStep } from "@jarvis/protocol";
+import { type ILlmProvider, type LlmRequest, streamViaComplete } from "../../integrations/llm.js";
 import { SpendGuard } from "../../billing/index.js";
 import { MockLlmProvider } from "../../integrations/llm.js";
 import { HashEmbeddingProvider } from "../../integrations/openai-embeddings.js";
@@ -10,7 +11,7 @@ import type { Session } from "../../gateway/session.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { TaskStatus } from "@jarvis/protocol";
 import type { SkillProvider } from "../../memory/skills.js";
-import { type AgentDeps, handleUserText, waitWhilePaused } from "./index.js";
+import { type AgentDeps, handleUserText, replayUnsafe, waitForChannel, waitWhilePaused } from "./index.js";
 import type { Task } from "../tasks/task.js";
 
 /** Заглушка провайдера навыков (§8): по умолчанию пусто; точечно переопределяется в тестах. */
@@ -597,6 +598,30 @@ describe("agent-loop (§7, §8)", () => {
     expect(models).toContain("s"); // провалы подряд → эскалация на sonnet
   });
 
+  it("§7 аудит [1]: при схлопнутом haiku==sonnet трёп эскалирует СРАЗУ на fable (не застревает на Sonnet)", async () => {
+    // Деф-конфиг: haiku==sonnet=одна модель ("s"), fable="f" (Opus). Прежде шаг haiku→sonnet видел ту же
+    // модель → форсил currentTier="fable" БЕЗ смены model → задача застревала на "s", до "f" НИКОГДА не
+    // доходила (каскад §7 defeated). Теперь пропускаем схлопнутую ступень: haiku эскалирует прямо на "f".
+    const failingSend = vi.fn(() =>
+      Promise.resolve({ commandId: "c", ok: false, error: { code: "runtime" as const, message: "fail" }, durationMs: 1 }),
+    );
+    const session = fakeSession(failingSend);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+      { toolUses: [{ id: "t2", name: "app_launch", input: { app: "x" } }] },
+      { toolUses: [{ id: "t3", name: "app_launch", input: { app: "x" } }] },
+      { text: "Готово." },
+    ]);
+    await handleUserText(
+      session,
+      "привет, как дела",
+      await makeDeps(llm, { models: { haiku: "s", sonnet: "s", fable: "f" } }),
+    );
+    const models = llm.requests.map((r) => r.model);
+    expect(models[0]).toBe("s"); // трёп начали на haiku-слоте (схлопнут в "s")
+    expect(models).toContain("f"); // эскалация ДОШЛА до fable — не застряла на "s"
+  });
+
   it("§20 async: задача-действие → тихий финал + результат в фоне (не блокирует, без дубль-ack)", async () => {
     const session = fakeSession();
     const spoken: { voice: string }[] = [];
@@ -631,6 +656,29 @@ describe("agent-loop (§7, §8)", () => {
     task.cancel.cancelled = true; // отмена во время паузы
     await p; // не должно зависнуть
     expect(true).toBe(true);
+  });
+
+  it("Б4 (г): waitForChannel возвращает true, когда канал восстановился", async () => {
+    const task = { cancel: { cancelled: false } } as Task;
+    let up = false;
+    const session = { channelUp: () => up };
+    const p = waitForChannel(session, 5_000, task, async () => { up = true; }, () => Date.now());
+    expect(await p).toBe(true); // после первого sleep канал ожил
+  });
+
+  it("Б4 (г): waitForChannel возвращает false по таймауту (канал не вернулся)", async () => {
+    const task = { cancel: { cancelled: false } } as Task;
+    let t = 0;
+    const session = { channelUp: () => false };
+    const res = await waitForChannel(session, 1_000, task, async () => { t += 300; }, () => t);
+    expect(res).toBe(false); // окно вышло, канал так и не поднялся
+  });
+
+  it("Б4 (г): waitForChannel выходит при отмене задачи", async () => {
+    const task = { cancel: { cancelled: false } } as Task;
+    const session = { channelUp: () => false };
+    const p = waitForChannel(session, 60_000, task, async () => { task.cancel.cancelled = true; }, () => Date.now());
+    expect(await p).toBe(false); // отмена прервала ожидание, не зависли
   });
 
   it("§8 HERMES: recall подбирает навык и вшивает его процедуру в системный промпт", async () => {
@@ -794,5 +842,261 @@ describe("agent-loop (§7, §8)", () => {
     expect(tasks.list("u1")[0]?.state).toBe("cancelled");
     // Отмена ≤1 шага: после прогресса №1 петля не успевает уйти далеко.
     expect(llm.requests.length).toBeLessThanOrEqual(3);
+  });
+});
+
+/** Не-стабовый скриптовый LLM: MockLlmProvider всегда stubbed:true → префилл честно отменяется,
+ *  а для теста «префилл ЗАПОЛНИЛ и гард перепроверил» нужен живой ответ. */
+function scriptedLlm(texts: string[]): ILlmProvider & { requests: LlmRequest[] } {
+  const requests: LlmRequest[] = [];
+  let i = 0;
+  const self = {
+    live: false,
+    requests,
+    complete: async (req: LlmRequest) => {
+      requests.push(req);
+      const text = texts[Math.min(i, texts.length - 1)] ?? "Готово.";
+      i += 1;
+      return {
+        text,
+        toolUses: [],
+        stopReason: "end_turn" as const,
+        usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        stubbed: false,
+      };
+    },
+    completeStream: (req: LlmRequest, onDelta: (d: { text?: string }) => void) =>
+      streamViaComplete(self, req, onDelta),
+  };
+  return self as unknown as ILlmProvider & { requests: LlmRequest[] };
+}
+
+describe("Б6: бюджет разговорного хода", () => {
+  it("вопрос регистрируется conversational-задачей — не всплывает в active/«сделал?»", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider(); // дефолт «Готово.» одним ходом, без tool-use
+    const tasks = new TaskManager();
+    const deps = await makeDeps(llm, { tasks });
+    await handleUserText(session, "что такое рекурсия?", deps);
+    // Задача хода помечена conversational и не считается активной содержательной работой.
+    const all = tasks.list("u1");
+    expect(all.length).toBe(1);
+    expect(all[0]?.conversational).toBe(true);
+    expect(tasks.activeForUser("u1")).toHaveLength(0); // не всплывает как фоновая
+    expect(tasks.recentTerminal("u1")).toHaveLength(0); // и не попадёт в «что делал?»
+  });
+
+  it("кап tool-раундов на разговорном ходе (не уходит в 50-раундовую петлю)", async () => {
+    const session = fakeSession();
+    // Модель на разговорном ходе «упорно» зовёт screen_capture — кап 12 обрывает runaway (не 50).
+    const llm = new MockLlmProvider(
+      Array.from({ length: 30 }, () => ({ toolUses: [{ id: "t", name: "screen_capture", input: {} }] })),
+    );
+    const deps = await makeDeps(llm, {});
+    await handleUserText(session, "как думаешь, я молодец?", deps);
+    expect(llm.requests.length).toBeLessThanOrEqual(13); // кап 12 tool-раундов + возможный финал, не 30/50
+  });
+
+  it("(ревью #4) кап исчерпан без текстового ответа → честный терминал, НЕ ложное «Готово»", async () => {
+    const session = fakeSession();
+    const tasks = new TaskManager();
+    // Разговорный ход: модель зовёт инструмент КАЖДЫЙ раунд, никогда не отвечает словами → кап 12 исчерпан.
+    const llm = new MockLlmProvider(
+      Array.from({ length: 14 }, () => ({ toolUses: [{ id: "t", name: "screen_capture", input: {} }] })),
+    );
+    const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1, data: { image: "QUFB", mediaType: "image/png" } }));
+    const sess = { sessionId: "s1", userId: "u1", sendAction, send: vi.fn() } as unknown as Session;
+    void session;
+    const reply = await handleUserText(sess, "что там по погоде и по биткоину?", await makeDeps(llm, { tasks }));
+    // Не ложное «Готово» на вопрос без ответа — честный терминал.
+    expect(reply.voice).not.toContain("Готово");
+    expect(reply.voice.toLowerCase()).toMatch(/переспрос|не успел|остановил/);
+    // И задача записана как НЕуспех (fail), а не done.
+    expect(tasks.list("u1")[0]?.state).toBe("failed");
+  });
+
+  it("(ревью 3-й/4-й проход #5/#1) модель УСПЕЛА ответить, нудж обнулил finalText, кап исчерпан → ОТДАЁМ ответ", async () => {
+    const session = fakeSession();
+    const tasks = new TaskManager();
+    // conversational (кап 12): 11 нейтральных чтений → на 12-м (текстовом) ходе goal-check обнулит
+    // finalText для переспроса, но кап 12 переспросить не даст. Сохранённый ответ обязан прозвучать
+    // (и ТОЛЬКО на conversational — #1: на action-задаче отвергнутый текст не воскрешаем).
+    const llm = new MockLlmProvider([
+      ...Array.from({ length: 11 }, (_, i) => ({ toolUses: [{ id: `a${i}`, name: "memory_search", input: { query: `рекурсия ${i}` } }] })),
+      { text: "Рекурсия — это когда функция вызывает саму себя, сэр." },
+    ]);
+    const reply = await handleUserText(session, "что такое рекурсия?", await makeDeps(llm, { tasks }));
+    expect(reply.voice).toContain("Рекурсия"); // реальный ответ отдан, НЕ ложное «не успел»
+    expect(reply.voice).not.toMatch(/не успел|переспрос/);
+  });
+});
+
+describe("Б4 (г/д): channel_down в петле — ждём reconnect, не эскалируем", () => {
+  it("канал упал на действии → петля ждёт и НЕ считает это провалом модели (нет эскалации)", async () => {
+    // Первый вызов input.click возвращает channel_down; после «reconnect» действие проходит.
+    let down = true;
+    const sendAction = vi.fn((cmd: ActionCommand) => {
+      if (cmd.kind === "input.click" && down)
+        return Promise.resolve({ commandId: "c", ok: false, error: { code: "channel_down" as const, message: "канал недоступен" }, durationMs: 0 });
+      return Promise.resolve({ commandId: "c", ok: true, durationMs: 1, data: { image: "QUFB", mediaType: "image/png" } });
+    });
+    const session = { sessionId: "s1", userId: "u1", sendAction, send: vi.fn(), channelUp: () => !down } as unknown as Session;
+    const click = { toolUses: [{ id: "t1", name: "input_click", input: { target: { by: "coords", x: 10, y: 20, space: "screen" } } }] };
+    const llm = new MockLlmProvider([
+      click, // раунд 1: канал мёртв → channel_down → петля ждёт reconnect и повторяет
+      click, // раунд 2: канал восстановлен → клик прошёл (mutate success)
+      { toolUses: [{ id: "t2", name: "screen_capture", input: {} }] }, // сверка глазами после клика
+      { text: "Готово, сэр." },
+    ]);
+    const deps = await makeDeps(llm, {});
+    // Через 50мс канал восстанавливается (клиент reconnect) — waitForChannel это увидит.
+    setTimeout(() => { down = false; }, 50);
+    const reply = await handleUserText(session, "ткни по кнопке на экране и сверь", deps);
+    // Задача НЕ прервана терминально как «связь прервалась»: дождались reconnect и довели.
+    expect(reply.voice).toContain("Готово");
+    // channel_down НЕ вызвал эскалацию тира (запросы к LLM шли той же слабой моделью).
+    expect(llm.requests.every((r) => r.model === deps.models.sonnet)).toBe(true);
+  });
+});
+
+describe("Б3 live-рефреш контекста в длинной задаче", () => {
+  it("изменившийся снимок ПК впрыскивается хвостом после нескольких раундов", async () => {
+    const session = fakeSession();
+    // 6 tool-use раундов (memory_search — читающий; РАЗНЫЕ query, чтобы не триггерить anti-runaway) + финал.
+    const llm = new MockLlmProvider(
+      Array.from({ length: 7 }, (_, i) =>
+        i < 6 ? { toolUses: [{ id: `t${i}`, name: "memory_search", input: { query: `запрос ${i}` } }] } : { text: "Готово, сэр." },
+      ),
+    );
+    const deps = await makeDeps(llm, { userContext: { systemContext: "Окно: Блокнот" } });
+    // Клиент прислал свежий client.system во время задачи (роутер мутирует deps.userContext.systemContext):
+    // имитируем это, меняя снимок после 3-го LLM-вызова.
+    const orig = llm.complete.bind(llm);
+    let calls = 0;
+    llm.complete = async (req) => {
+      calls += 1;
+      if (calls === 4) deps.userContext = { ...deps.userContext, systemContext: "Окно: Dota 2 (полноэкранно)" };
+      return orig(req);
+    };
+    await handleUserText(session, "сделай долгую многошаговую работу с окнами", deps);
+    // Свежий снимок доехал до модели ХВОСТОМ (не пересборкой system-блока).
+    const allMsgs = JSON.stringify(llm.requests.map((r) => r.messages));
+    expect(allMsgs).toContain("ОБСТАНОВКА НА ПК ОБНОВИЛАСЬ");
+    expect(allMsgs).toContain("Dota 2");
+    // Впрыск — в некешируемый хвост messages, НЕ в системный блок (кеш §15 цел).
+    expect(JSON.stringify(llm.requests.map((r) => r.systemDynamic ?? ""))).not.toContain("Dota 2");
+  });
+
+  it("снимок НЕ менялся → лишних впрысков нет (не спамим тем же)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider(
+      Array.from({ length: 7 }, (_, i) =>
+        i < 6 ? { toolUses: [{ id: `t${i}`, name: "memory_search", input: { query: `запрос ${i}` } }] } : { text: "Готово." },
+      ),
+    );
+    const deps = await makeDeps(llm, { userContext: { systemContext: "Окно: Блокнот" } });
+    await handleUserText(session, "долгая многошаговая работа", deps);
+    expect(JSON.stringify(llm.requests.map((r) => r.messages))).not.toContain("ОБСТАНОВКА НА ПК ОБНОВИЛАСЬ");
+  });
+
+  it("(ревью #2/#3) впрыски снимка ограничены капом за задачу — не копятся десятки (кеш не ломаем прунингом)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider(
+      Array.from({ length: 40 }, (_, i) =>
+        i < 39 ? { toolUses: [{ id: `t${i}`, name: "memory_search", input: { query: `q${i}` } }] } : { text: "Готово." },
+      ),
+    );
+    const deps = await makeDeps(llm, { userContext: { systemContext: "Окно 0" } });
+    let n = 0;
+    const orig = llm.complete.bind(llm);
+    llm.complete = async (req) => {
+      n += 1;
+      deps.userContext = { ...deps.userContext, systemContext: `Окно ${n}` }; // снимок меняется каждый раунд
+      return orig(req);
+    };
+    await handleUserText(session, "очень долгая работа с окнами", deps);
+    // В ПОСЛЕДНЕМ запросе число впрысков снимка ограничено капом (MAX_LIVE_REFRESHES=4), не растёт с раундами.
+    const lastMsgs = JSON.stringify(llm.requests[llm.requests.length - 1]?.messages ?? []);
+    const liveCount = (lastMsgs.match(/ОБСТАНОВКА НА ПК ОБНОВИЛАСЬ/g) ?? []).length;
+    expect(liveCount).toBeGreaterThan(0); // впрыски были
+    expect(liveCount).toBeLessThanOrEqual(4); // но ограничены капом, не десятки
+  });
+});
+
+describe("replayUnsafe — гарды слепого реплея (ревью фиксов Волны 3, #2/#8/#11)", () => {
+  const type = (needsLlm = false): SkillStep => ({ action: "input.type", needsLlm, params: {} });
+
+  it("(#8) compose→click: input.click ПОСЛЕ input.type блокирует реплей", () => {
+    expect(replayUnsafe([type(), { action: "input.click", params: {} }])).toBe(true);
+  });
+
+  it("(#11) compose→invoke: ui.invoke/input.mouse ПОСЛЕ input.type блокируют реплей", () => {
+    expect(replayUnsafe([type(), { action: "ui.invoke", params: { name: "Отправить" } }])).toBe(true);
+    expect(replayUnsafe([type(), { action: "input.mouse", params: { op: "down" } }])).toBe(true);
+  });
+
+  it("клик ДО сочинения текста — безопасен (клик по полю ввода, потом печать)", () => {
+    expect(replayUnsafe([{ action: "input.click", params: {} }, type()])).toBe(false);
+  });
+
+  it("Enter после type — блок; не-коммитная клавиша (Ctrl+A) — нет", () => {
+    expect(replayUnsafe([type(), { action: "input.key", params: { combo: "ctrl+enter" } }])).toBe(true);
+    expect(replayUnsafe([type(), { action: "input.key", params: { combo: "ctrl+a" } }])).toBe(false);
+  });
+
+  it("(#5) опасная URI-схема в browser.open/app.launch — блок; https — нет", () => {
+    expect(replayUnsafe([{ action: "browser.open", params: { url: "file:///c:/x" } }])).toBe(true);
+    expect(replayUnsafe([{ action: "app.launch", params: { app: "ms-msdt:/id x" } }])).toBe(true);
+    expect(replayUnsafe([{ action: "browser.open", params: { url: "https://ya.ru" } }])).toBe(false);
+  });
+
+  // Ревью 2-го прохода (R1): ввод текста — не только input.type; ui.invoke pattern="setValue" пишет
+  // текст в контрол через UIA (demo-запись его легитимно генерит) → после него коммит = та же дыра.
+  it("(R1) ui.invoke setValue → Enter/клик — блок (обход compose-гарда через UIA-ввод)", () => {
+    const setValue: SkillStep = { action: "ui.invoke", params: { pattern: "setValue", value: "текст" } };
+    expect(replayUnsafe([setValue, { action: "input.key", params: { combo: "enter" } }])).toBe(true);
+    expect(replayUnsafe([setValue, { action: "input.click", params: {} }])).toBe(true);
+    // setValue без последующего коммита — безопасен (просто заполнение поля).
+    expect(replayUnsafe([{ action: "app.focus", params: {} }, setValue])).toBe(false);
+  });
+
+  // Ревью 2-го прохода (R2): длинный input.type неотменяем (5с+120мс/символ, до 180с) — не реплеим.
+  it("(R2) input.type/setValue с текстом длиннее капа — блок реплея", () => {
+    const long = "х".repeat(200);
+    expect(replayUnsafe([{ action: "input.type", params: { text: long } }])).toBe(true);
+    expect(replayUnsafe([{ action: "ui.invoke", params: { pattern: "setValue", value: long } }])).toBe(true);
+    expect(replayUnsafe([{ action: "input.type", params: { text: "коротко" } }])).toBe(false);
+  });
+
+  it("(#2) префилл сделал шаги опасными (combo:enter) → реплей ОТМЕНЁН, skill.execute не уходит", async () => {
+    const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+    const session = fakeSession(sendAction);
+    // 1-й вызов = префилл (заполняет text и ОПАСНЫЙ combo), 2-й = обычная петля.
+    const llm = scriptedLlm(['{"1": {"text": "gg wp"}, "2": {"combo": "enter"}}', "Сделал по процедуре, сэр."]);
+    const recall = vi.fn(async () => ({
+      id: "learned__compose-send",
+      ownerId: "u-1",
+      name: "Написать в чат",
+      when: "написать сообщение в чате",
+      procedure: "проза",
+      version: 1,
+      steps: [
+        { action: "app.focus", params: { app: "telegram" } },
+        { action: "input.type", needsLlm: true, params: {} },
+        { action: "input.key", needsLlm: true, params: {} }, // combo пуст → пре-чек молчит
+      ] as SkillStep[],
+      needsReview: false,
+    }));
+    const mock = new MockLlmProvider();
+    const deps = await makeDeps(mock, { skills: fakeSkills({ recall }) });
+    deps.llm = llm;
+    const reply = await handleUserText(session, "запусти поиск в доте", deps);
+    // Реплей НЕ ушёл: после префилла гард перепроверил заполненные шаги и отменил слепой макрос.
+    const kinds = (sendAction.mock.calls as unknown as Array<[{ kind?: string }]>).map((c) => c[0]?.kind);
+    expect(kinds).not.toContain("skill.execute");
+    // Петля получила честную пометку об отмене макроса (идёт по процедуре, где действуют send-гарды).
+    const loopMsgs = JSON.stringify(llm.requests[1]?.messages ?? []);
+    expect(loopMsgs).toContain("не выполнился");
+    expect(reply.voice).toContain("Сделал по процедуре");
   });
 });

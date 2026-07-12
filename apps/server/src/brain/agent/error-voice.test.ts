@@ -42,6 +42,16 @@ describe("toolEffect — классификация для verify-петли", (
     expect(toolEffect("mcp__github__create_issue")).toBe("mutate");
     expect(toolEffect("mcp__pg__execute_sql")).toBe("mutate");
   });
+  it("аудит [8]: skill_execute → mutate (реплей реально мутирует GUI; успех взводит anyMutateSucceeded → нет ложного «Не вышло»)", () => {
+    expect(toolEffect("skill_execute")).toBe("mutate");
+    // но конфиг-опы навыков остаются нейтральными
+    expect(toolEffect("skill_save")).toBe("neutral");
+    expect(toolEffect("skill_list")).toBe("neutral");
+    expect(toolEffect("skill_promote")).toBe("neutral");
+  });
+  it("аудит [8]: skill_execute НЕ blind — у навыка своя checkExpect-сверка, нового verify-долга нет", () => {
+    expect(isBlindMutate("skill_execute")).toBe(false);
+  });
 });
 
 describe("isBlindMutate — слепые действия (ok ≠ цель достигнута, нужна сверка)", () => {

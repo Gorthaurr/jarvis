@@ -4,10 +4,10 @@
  * §Волна2 (2.2): + input_batch — ad-hoc берст шагов через ТОТ ЖЕ skill-runner (одна аренда, один раунд).
  * Маршрутизация остаётся в dispatch (switch).
  */
-import { DEFAULT_ACTION_TIMEOUT_MS, type SkillStep, newId } from "@jarvis/protocol";
+import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep, newId } from "@jarvis/protocol";
 import { fillSlots } from "../../../memory/skill-slots.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { err, ok } from "../dispatch-util.js";
+import { channelDownResult, err, ok } from "../dispatch-util.js";
 
 /** Каталог выученных навыков для модели (id, имя, версия). */
 export async function skillList(ctx: ToolContext): Promise<ToolResult> {
@@ -44,10 +44,25 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   if (missing.length > 0) {
     return err(`навык «${skillId}»: не заполнены переменные ${missing.map((m) => `{{${m}}}`).join(", ")} — передай их значения в params.`);
   }
+  // Ревью фиксов Волны 3 (#12): клиент гонит runSkill под бюджетом 90с на ЛЮБОЙ skill.execute —
+  // прежний дефолтный таймаут 15с отваливался ПЕРВЫМ, и LLM-петля начинала кликать параллельно
+  // ещё идущему реплею («два писателя в GUI»). Ждём строго дольше клиентского бюджета.
   const result = await ctx.session.sendAction(
     { kind: "skill.execute", skillId: skill.id, version: skill.version, steps, params },
-    DEFAULT_ACTION_TIMEOUT_MS,
+    SKILL_EXECUTE_SERVER_TIMEOUT_MS,
   );
+  // Б4 (ревью #4): канал ПК мёртв (resume-grace) → помечаем channelDown, чтобы петля ждала reconnect,
+  // а не эскалировала тир («Opus от транспорта»). Хендлер обходит generic-путь dispatch — делаем сами.
+  const cd = channelDownResult(result, `Навык «${skillId}» не отправлен: канал с ПК недоступен (переподключение).`);
+  if (cd) return cd;
+  // Таймаут КАНАЛА ≠ «не выполнено»: клиент мог продолжать исполнять шаги — статус неизвестен.
+  if (!result.ok && result.error?.code === "timeout") {
+    return err(
+      `Навык «${skillId}» не уложился в ${Math.round(SKILL_EXECUTE_SERVER_TIMEOUT_MS / 1000)}с — СТАТУС НЕИЗВЕСТЕН ` +
+        `(шаги могли выполниться и ещё выполняться). НЕ повторяй навык и не дублируй его шаги вслепую: ` +
+        `сверь текущее состояние (ui_snapshot/screen_capture) и действуй по факту.`,
+    );
+  }
   if (result.ok) {
     // §Волна2 (2.1, ревью M11): fused-наблюдение после реплея — текст С ЭКРАНА, в tool_result
     // только под <untrusted_content> (сырой JSON.stringify пробивал бы границу данные/инструкции).
@@ -104,6 +119,15 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
       );
     }
     if (s.needsLlm) return err(`input_batch: шаг ${i + 1} с needsLlm в ad-hoc берсте невозможен — заполни значения сам.`);
+    // Ревью фиксов, 2-й проход (R2): длинный input.type НЕотменяем (typeText даёт себе 5с+120мс/символ,
+    // до 180с > серверного потолка 130с) → печатал бы параллельно LLM-петле в уже другое окно.
+    const params = s.params && typeof s.params === "object" ? (s.params as Record<string, unknown>) : undefined;
+    if (action === "input.type" && typeof params?.text === "string" && params.text.length > REPLAY_TYPE_MAX_CHARS) {
+      return err(
+        `input_batch: шаг ${i + 1} — текст input.type длиннее ${REPLAY_TYPE_MAX_CHARS} символов не батчится ` +
+          `(печать неотменяема и не влезает в бюджет реплея). Длинный текст — через fs_write/office_* или обычный input_type.`,
+      );
+    }
     const expect = (s.expect && typeof s.expect === "object" ? s.expect : undefined) as SkillStep["expect"];
     // Ревью Волны 2: expect без содержимого «подтверждается» безусловно (checkExpect: нет role →
     // true) — итоговое «постусловия подтверждены» было бы ложью. Требуем role (a11y) / text (visual).
@@ -122,23 +146,32 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
       target,
       params: (s.params && typeof s.params === "object" ? s.params : undefined) as SkillStep["params"],
       expect,
+      // §Волна3 (3.3): предусловие шага — живой стейт до исполнения (валидирует клиентский раннер).
+      precondition: (s.precondition && typeof s.precondition === "object" && typeof (s.precondition as { role?: unknown }).role === "string"
+        ? s.precondition
+        : undefined) as SkillStep["precondition"],
       timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : undefined,
       // Ревью Волны 2: у слепого шага (без expect) НЕТ критерия неудачи → ретраи переисполняли бы
       // неидемпотентное действие (тройной клик/ввод). Без expect — 0 повторов по умолчанию.
-      retries: typeof s.retries === "number" ? s.retries : expect ? undefined : 0,
+      // Ревью фиксов, 2-й проход (R3): retries из контента клампим — без капа sleep(200·attempt)
+      // между попытками раздувал хвостовой перебег за серверный потолок.
+      retries: typeof s.retries === "number" ? Math.max(0, Math.min(3, Math.floor(s.retries))) : expect ? undefined : 0,
     });
   }
-  // Таймаут — от реального объёма берста: шаги × (1+retries) попыток expect-поллинга, не дефолтные 15с.
-  const timeoutMs = Math.min(
-    120_000,
-    10_000 + steps.reduce((a, s) => a + (s.timeoutMs ?? 15_000) * (1 + (s.retries ?? 2)), 0),
-  );
+  // Ревью фиксов Волны 3 (#12): расчётный «от объёма берста» таймаут мог быть КОРОЧЕ клиентского
+  // бюджета runSkill (90с на любой skill.execute) → сервер отваливался первым и петля кликала
+  // параллельно ещё идущему берсту. Единый потолок строго выше клиентского бюджета; нормальное
+  // завершение возвращается раньше — потолок платится только на реально зависшем берсте.
+  const timeoutMs = SKILL_EXECUTE_SERVER_TIMEOUT_MS;
   const result = await ctx.session.sendAction(
     // origin — как у прочих команд (H5: USER_BUSY-гейт проактивного берста на клиенте).
     { kind: "skill.execute", skillId: `adhoc-batch-${newId()}`, version: 0, steps, params: {}, origin: ctx.origin ?? "user" },
     timeoutMs,
   );
   const n = steps.length;
+  // Б4 (ревью #4): канал ПК мёртв → channelDown (петля ждёт reconnect, не эскалирует тир).
+  const cdb = channelDownResult(result, "Берст не отправлен: канал с ПК недоступен (переподключение).");
+  if (cdb) return cdb;
   // Таймаут КАНАЛА ≠ «выполнено 0 из n»: клиент мог продолжать исполнять шаги — статус неизвестен.
   if (!result.ok && result.error?.code === "timeout") {
     return err(

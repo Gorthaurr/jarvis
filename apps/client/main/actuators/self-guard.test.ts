@@ -1,5 +1,6 @@
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { assertReadable, assertWritable, isProtectedSelfPath, isSecretPath } from "./self-guard.js";
+import { assertReadable, assertWritable, isAncestorOfSelf, isProtectedSelfPath, isSecretPath } from "./self-guard.js";
 
 // § рельсы самомодификации: Джарвис правит ИСХОДНИКИ, но не может перезаписать критичное для себя.
 describe("self-guard — рельсы самомодификации", () => {
@@ -64,5 +65,12 @@ describe("self-guard — рельсы самомодификации", () => {
 
   it("запущенный бинарь (process.execPath) защищён", () => {
     expect(isProtectedSelfPath(process.execPath)).toBe(true);
+  });
+
+  it("аудит [11]: isAncestorOfSelf — предок запущенного бинаря (рекурсивно сносить нельзя)", () => {
+    expect(isAncestorOfSelf(dirname(process.execPath))).toBe(true); // папка бинаря — предок
+    expect(isAncestorOfSelf(process.execPath)).toBe(true); // сам путь
+    expect(isAncestorOfSelf(join(dirname(process.execPath), "no-such-sub"))).toBe(false); // не предок
+    expect(isAncestorOfSelf("C:/totally/unrelated/dir")).toBe(false);
   });
 });

@@ -13,9 +13,23 @@
  * РАЗРЕШЕНО: исходники (каталоги src в apps и packages) — их и надо менять для самоулучшения,
  * затем пересборка. Менять собранный dist «на лету» бессмысленно (его перезапишет сборка).
  */
-import { basename, resolve } from "node:path";
+import { basename, resolve, sep } from "node:path";
 
 const lc = (p: string): string => resolve(p).toLowerCase();
+
+/**
+ * Аудит ядра [11]: является ли `abs` предком (или равен каталогом) запущенного бинаря Джарвиса.
+ * Рекурсивное удаление/перемещение такого каталога снесло бы сам бинарь → отказываем. Чистая (process).
+ */
+export function isAncestorOfSelf(abs: string): boolean {
+  try {
+    const exe = lc(process.execPath);
+    const dir = lc(abs);
+    return exe === dir || exe.startsWith(dir + sep);
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Секретный файл: и писать, и читать в контекст модели запрещено (§0/§sec). Помимо .env —

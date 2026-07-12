@@ -114,13 +114,16 @@ export async function pressKey(
     throw new BlockedKeyError(combo);
   }
   const keys = comboKeys(combo);
-  // H4: down/up держат модификаторы зажатыми МЕЖДУ вызовами. Перед down сверяем ИТОГОВУЮ
-  // комбинацию (уже удерживаемое ∪ новые клавиши) — иначе Alt(down)+F4(down) обходит блок-лист.
-  if (mode === "down") {
+  // H4 + аудит ядра [10]: удерживаемые модификаторы (down без up) живут МЕЖДУ вызовами и могут собрать
+  // опасное комбо с ЛЮБЫМ ШЛЮЩИМ НАЖАТИЕ вызовом — не только down. Прежний гард работал только для
+  // mode==="down", поэтому Alt(down) + F4(press) синтезировал Alt+F4 мимо блок-листа. Сверяем ИТОГОВУЮ
+  // комбинацию (удерживаемое ∪ новые) для down И press (mode !== "up"; up лишь ОТПУСКАЕТ, нажатия не шлёт).
+  if (mode !== "up" && heldKeys.size > 0) {
     const effective = [...heldKeys, ...keys].join("+");
     if (isBlockedCombo(effective)) {
       log.warn("input.key: опасное комбо собрано удержанием — заблокировано", { effective, held: [...heldKeys] });
-      heldKeys.clear(); // не оставляем зажатые модификаторы висеть в учёте
+      // НЕ чистим heldKeys: удерживаемые клавиши физически всё ещё зажаты сайдкаром — «забыть» их =
+      // десинк, и следующий заход собрал бы то же комбо уже мимо гарда (аудит ядра [10]).
       throw new BlockedKeyError(effective);
     }
   }
@@ -132,10 +135,12 @@ export async function pressKey(
     if (mode === "down") for (const k of keys) heldKeys.delete(k);
     throw e;
   }
-  // Учёт удержания ведём только по успеху RPC. press = атомарное нажать+отпустить (не удерживается).
+  // Учёт удержания ведём только по успеху RPC. press атомарен (нажать+отпустить СВОИ клавиши) и НЕ
+  // отпускает раздельно удерживаемые модификаторы — их снимает только явный up. Прежний heldKeys.clear()
+  // на press ДЕСИНКал учёт: Alt оставался физически зажат, но забывался → следующий press/down собирал
+  // Alt+combo мимо гарда (аудит ядра [10]).
   if (mode === "down") for (const k of keys) heldKeys.add(k);
   else if (mode === "up") for (const k of keys) heldKeys.delete(k);
-  else heldKeys.clear(); // полный press: сбрасываем накопленное удержание (клавиатура «отпущена»)
 }
 
 /** Заблокированное опасное комбо (§6). dispatch маппит в runtime-ошибку — агент выберет иной путь. */

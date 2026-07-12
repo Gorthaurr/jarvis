@@ -32,7 +32,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, err, numField, ok, untrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, err, numField, ok, untrusted } from "./dispatch-util.js";
 import {
   browserAct,
   browserCloseTab,
@@ -144,6 +144,12 @@ export interface ToolResult {
    * не ослаблен, сверка просто приезжает вместе с действием, а не отдельным раундом.
    */
   observed?: boolean;
+  /**
+   * Б4 (г/д): ActionCommand не ушёл — сокет клиента временно мёртв (обрыв в resume-grace), сессия жива.
+   * Это НЕ провал действия и НЕ повод эскалировать тир (мёртвый канал ≠ слабая модель): петля ждёт
+   * reconnect и повторяет, а не считает раунд «провалившимся» и не жжёт Opus «от транспорта».
+   */
+  channelDown?: boolean;
 }
 
 /** tool name → ActionKind (реверс ACTUATOR_TOOL_BY_KIND). */
@@ -376,7 +382,13 @@ export async function dispatchTool(
     // §Волна2 (2.3): дешёвые сенсоры читают НЕДОВЕРЕННЫЙ контент (текст с экрана, заголовки окон —
     // M11: влияемые атакующим данные; detail у wait_for несёт OCR-текст, window.focus — заголовок) →
     // та же обёртка, что browser_read/screen_capture.
-    if (kind === "screen.ocr" || kind === "ui.snapshot" || kind === "window.list" || kind === "wait.for" || kind === "window.focus") {
+    // Аудит ядра [9]: ui.ground добавлен — он возвращает name/automationId/value UIA-элементов (влияемый
+    // атакующим текст, как ui.snapshot; M11). Раньше падал в generic ok() без обёртки → граница
+    // данные/инструкции была ослаблена для этого read-пути.
+    if (
+      kind === "screen.ocr" || kind === "ui.snapshot" || kind === "window.list" ||
+      kind === "wait.for" || kind === "window.focus" || kind === "ui.ground"
+    ) {
       const src =
         kind === "screen.ocr"
           ? "screen-ocr"
@@ -386,11 +398,13 @@ export async function dispatchTool(
               ? "window-list"
               : kind === "wait.for"
                 ? "wait-for"
-                : "window-focus";
+                : kind === "ui.ground"
+                  ? "ui-ground"
+                  : "window-focus";
       const out = untrusted(src, result.data !== undefined ? JSON.stringify(result.data) : `ok (${kind})`);
       out.data = result.data;
       // OCR/снапшот — реальный взгляд на состояние; wait_for — сверка ТОЛЬКО при met:true
-      // (met:false — честное «не дождался»); список окон/фокус — слабее, сверкой не считаем.
+      // (met:false — честное «не дождался»); список окон/фокус/ground — слабее, сверкой не считаем.
       out.observed =
         kind === "screen.ocr" || kind === "ui.snapshot"
           ? true
@@ -405,6 +419,12 @@ export async function dispatchTool(
   }
   const code = result.error?.code ?? "runtime";
   const msg = result.error?.message ?? "";
+  // Б4 (г/д): канал мёртв (resume-grace) → не «действие не удалось», а «канал недоступен» + флаг для петли.
+  if (code === "channel_down") {
+    const out = err(`Действие ${kind} не отправлено: канал с ПК временно недоступен (переподключение). Не провал — жду восстановления.`);
+    out.channelDown = true;
+    return out;
+  }
   return err(`Действие ${kind} не удалось: ${code} ${msg}${visionFallbackHint(kind, code, msg)}`);
 }
 
@@ -454,6 +474,10 @@ async function lookAtScreen(ctx: ToolContext, input: Record<string, unknown>): P
   const scale = typeof input.scale === "number" ? input.scale : undefined;
   const result = await ctx.session.sendAction({ kind: "screen.capture", monitor, rect, scale }, DEFAULT_ACTION_TIMEOUT_MS);
   if (!result.ok) {
+    // Б4 (интеграционное ревью #4): канал мёртв (resume-grace) → channelDown, чтобы verify-раунд из
+    // одного screen_capture не эскалировал тир «от транспорта». Этот путь минует generic-ветку dispatch.
+    const cd = channelDownResult(result, "screen_capture не снят: канал с ПК недоступен (переподключение).");
+    if (cd) return cd;
     return err(`Не удалось снять экран: ${result.error?.code ?? "runtime"} ${result.error?.message ?? ""}`);
   }
   const data = result.data as { image?: string; mediaType?: string } | undefined;

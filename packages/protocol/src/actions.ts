@@ -62,7 +62,12 @@ export type WaitCondition =
   | { kind: "ui"; role: string; name?: string; nameMode?: "exact" | "substring"; gone?: boolean }
   | { kind: "window"; titleContains?: string; process?: string; gone?: boolean }
   | { kind: "text"; text: string; monitor?: string | number; rect?: ScreenRect; gone?: boolean }
-  | { kind: "sound"; playing: boolean };
+  | { kind: "sound"; playing: boolean }
+  // §Волна3 (3.4): состояние, ЗАПУШЕННОЕ программой на локальный GSI-листенер клиента (напр. Dota 2
+  // Game State Integration): source — имя канала (путь пуша /<source>), path — точка в JSON
+  // («map.game_state»), equals/contains — критерий. Generic-механизм, НЕ хардкод игры: любая
+  // программа, умеющая пушить JSON на http://127.0.0.1:<порт>/<source>, становится наблюдаемой.
+  | { kind: "gsi"; source?: string; path: string; equals?: string; contains?: string; gone?: boolean };
 
 /**
  * Операции питания ОС. shutdown/restart/logoff необратимы → confirm (§4).
@@ -267,6 +272,12 @@ export interface SkillStep {
   target?: Target;
   params?: Record<string, unknown>;
   needsLlm?: boolean;
+  /**
+   * §Волна3 (3.3, паттерн UFO2): ПРЕДУСЛОВИЕ шага — живой стейт проверяется ПЕРЕД исполнением
+   * (элемент существует в UIA / окно открыто). Mismatch → стоп берста/реплея с честным частичным
+   * результатом (шаги не бьются вслепую по изменившемуся экрану), один репланинг-раунд у модели.
+   */
+  precondition?: { role: string; name?: string; nameMode?: "exact" | "substring" };
   expect?: {
     /** Способ проверки: "a11y" (UIA, дефолт) | "visual" (по экрану — для canvas/игр/видео). */
     kind?: "a11y" | "visual";

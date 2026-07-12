@@ -25,6 +25,9 @@ export interface CreateTaskOpts {
   goal: string;
   /** Всего шагов — для скилла известно; undefined для open-ended LLM-петли. */
   stepsTotal?: number;
+  /** Б6: разговорный ход (вопрос/комплимент/smalltalk) — техническая задача для механики петли, но НЕ
+   *  содержательная §20-работа: не всплывает в active()/scope/«сделал?» и не рулится как фоновая. */
+  conversational?: boolean;
 }
 
 /** TTL по умолчанию для sweep: терминальные задачи живут 10 минут (§20-отчётность). */
@@ -73,6 +76,7 @@ export class TaskManager {
       startedAt: this.now(),
       cancel: { cancelled: false },
       steer: { pending: [] },
+      ...(opts.conversational ? { conversational: true } : {}),
     };
     this.tasks.set(task.taskId, task);
     this.onChange?.();
@@ -107,6 +111,7 @@ export class TaskManager {
     for (const task of this.tasks.values()) {
       if (task.sessionId !== sessionId) continue;
       if (!isActiveState(task.state)) continue;
+      if (task.conversational) continue; // Б6: разговорный ход не адресат «стоп/продолжи/что делаешь»
       // `>=`: при равном startedAt (быстрый fan-out / замороженные часы в тестах) побеждает
       // ПОЗЖЕ вставленная (Map хранит порядок вставки) — команда без taskId уходит свежайшей задаче.
       if (!best || task.startedAt >= best.startedAt) best = task;
@@ -182,6 +187,35 @@ export class TaskManager {
     const cancelled: Task[] = [];
     for (const task of this.tasks.values()) {
       if (task.userId !== userId || isTerminalState(task.state)) continue;
+      task.cancel.cancelled = true;
+      task.state = "cancelled";
+      task.finishedAt = this.now();
+      cancelled.push(task);
+    }
+    if (cancelled.length > 0) this.onChange?.();
+    return cancelled;
+  }
+
+  /**
+   * Б4 (б) resume-санация (ревью волны Б #3): отменить ОСИРОТЕВШИЕ активные задачи — те, что идут на
+   * СТАРЫХ сессиях userId, когда resume НЕ удался (Electron restart без resumeSessionId → новая сессия
+   * keepSessionId). Их agent-петли держат ссылку на старую (мёртвую) сессию в замыкании — перевесить
+   * task.sessionId бесполезно (I/O петли всё равно идёт в мёртвый сокет), а дать петле доработать
+   * НЕЛЬЗЯ: server-side задача запишет ЛОЖНЫЙ success в закрытый сокет (клиент на новой сессии его не
+   * услышит), GUI-задача 30с ждёт несуществующий reconnect. Честнее прервать: петля увидит cancel по
+   * общему task.cancel и завершится тихо; пользователь переспросит на живой сессии.
+   *
+   * 4-й проход ревью (#2): отменяем ТОЛЬКО задачи РЕАЛЬНО МЁРТВЫХ сессий. isSessionAlive(sid) даёт
+   * liveness владельца задачи (session.channelUp() из registry): текст-драйвер РЯДОМ с живым Electron —
+   * оба DEV_USER, но обе сессии ЖИВЫ → задачу живого клиента трогать НЕЛЬЗЯ (регрессия «убил чужую
+   * работу»). Без предиката (тесты) — прежнее поведение (все не-keep считаем мёртвыми). keepSessionId
+   * (текущая сессия) не трогаем всегда. Возвращает отменённые задачи.
+   */
+  cancelOrphanedTasks(userId: string, keepSessionId: string, isSessionAlive?: (sessionId: string) => boolean): Task[] {
+    const cancelled: Task[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.userId !== userId || task.sessionId === keepSessionId || isTerminalState(task.state)) continue;
+      if (isSessionAlive?.(task.sessionId)) continue; // сессия-владелец жива (параллельный клиент) — не трогаем
       task.cancel.cancelled = true;
       task.state = "cancelled";
       task.finishedAt = this.now();
@@ -303,8 +337,16 @@ export class TaskManager {
    */
   activeForUser(userId: string, excludeId?: string): Task[] {
     return [...this.tasks.values()]
-      .filter((t) => t.userId === userId && isActiveState(t.state) && t.taskId !== excludeId)
+      .filter((t) => t.userId === userId && isActiveState(t.state) && t.taskId !== excludeId && !t.conversational)
       .sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /** Есть ли у пользователя ЛЮБАЯ активная задача, ВКЛЮЧАЯ скрытые разговорные (Б6). Для решения «есть ли
+   *  что отменять»: cancel-команду перехватываем только если реально есть задача (иначе «отмени напоминание»
+   *  без §20-задачи должно дойти до агента, а не съедаться «Нет активной задачи») — интеграционное ревью #6. */
+  hasAnyActive(userId: string): boolean {
+    for (const t of this.tasks.values()) if (t.userId === userId && isActiveState(t.state)) return true;
+    return false;
   }
 
   /**

@@ -26,6 +26,7 @@ function connect() {
   if (ws) {
     try {
       ws.onclose = null;
+      ws.onerror = null; // аудит-2 [4]: снимаем и onerror — иначе поздняя ошибка старого сокета закроет НОВЫЙ
       ws.close();
     } catch {
       /* уже мёртв */
@@ -38,6 +39,9 @@ function connect() {
     scheduleReconnect();
     return;
   }
+  // аудит-2 [4]: захватываем ссылку на ЭТОТ сокет — обработчики (особенно onerror) действуют на него,
+  // а не на мутабельную модульную `ws`, которая к моменту поздней ошибки может указывать на новый сокет.
+  const socket = ws;
   ws.onopen = () => {
     console.log("[jarvis] подключился к серверу");
     send({ type: "hello", agent: "jarvis-web-hands", version: "0.1.0" });
@@ -60,7 +64,7 @@ function connect() {
   ws.onclose = () => scheduleReconnect();
   ws.onerror = () => {
     try {
-      ws.close();
+      socket.close(); // аудит-2 [4]: закрываем СВОЙ сокет, не текущий модульный ws
     } catch {
       /* ignore */
     }
@@ -908,8 +912,11 @@ async function closeTgTab(h) {
 async function telegramSend(to, text, variants) {
   if (!to || !text) throw new Error("нужны to и text");
   const ka = startKeepAlive(); // SW не должен умереть на время операции
-  const h = await openTgTab();
+  // аудит-2 [3]: openTgTab() ВНУТРИ try — иначе его throw (окно не открылось/waitTabComplete reject) минует
+  // finally и оставит keep-alive interval висеть навсегда (пинит SW). closeTgTab(undefined) безопасен.
+  let h;
   try {
+    h = await openTgTab();
     const results = await chrome.scripting.executeScript({ target: { tabId: h.tabId }, func: tgSendInPage, args: [to, text, Array.isArray(variants) ? variants : []] });
     const res = (results && results[0] && results[0].result) || { ok: false, step: "no-result", error: "executeScript без результата" };
     if (!res.ok) {
@@ -941,8 +948,9 @@ async function telegramSendVoice(to, audioB64) {
 /** DEV-диагностика: поиск по query, дамп СТРУКТУРЫ результатов (БЕЗ открытия/отправки). */
 async function telegramDiag(query) {
   const ka = startKeepAlive();
-  const h = await openTgTab();
+  let h; // аудит-2 [3]: openTgTab внутри try — иначе его throw оставит keep-alive interval висеть
   try {
+    h = await openTgTab();
     const results = await chrome.scripting.executeScript({ target: { tabId: h.tabId }, func: tgDiagInPage, args: [query] });
     return (results && results[0] && results[0].result) || { ok: false, error: "нет результата" };
   } finally {

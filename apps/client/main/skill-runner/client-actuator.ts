@@ -6,7 +6,7 @@
  * UIA-шаги бросают/возвращают false — раннер корректно деградирует.
  */
 import type { SkillStep } from "@jarvis/protocol";
-import type { UiPattern } from "@jarvis/protocol";
+import { REPLAY_TYPE_MAX_CHARS, type UiPattern } from "@jarvis/protocol";
 import { createLogger, sleep } from "@jarvis/shared";
 import * as apps from "../actuators/apps.js";
 import * as ground from "../actuators/ground.js";
@@ -63,9 +63,21 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         case "ui.ground":
           if (step.target?.by === "role") await ground.ground({ role: step.target.role, name: step.target.name });
           return;
-        case "input.type":
-          await input.typeText(str(p.text));
+        case "input.type": {
+          // Кап REPLAY_TYPE_MAX_CHARS (150) — на ВСЕХ путях runSkill, вкл. ЯВНЫЙ skill_execute. Интеграционное
+          // ревью (2-й проход): typeText НЕотменяем и стоит 5с+120мс/символ; бюджет реплея гейтит СТАРТ шага,
+          // не его ДЛИТЕЛЬНОСТЬ, поэтому одиночный type обязан быть коротким по времени — 150 симв ≈ 23с
+          // укладывается в «конверт шага», а 600 (77с) перебегал за серверный потолок 130с → «два писателя».
+          // Длинный литеральный текст в реплее не поддерживается физически — через fs_write/office_*.
+          const text = str(p.text);
+          if (text.length > REPLAY_TYPE_MAX_CHARS) {
+            throw new Error(
+              `input.type: текст ${text.length} символов не влезает в бюджет реплея (кап ${REPLAY_TYPE_MAX_CHARS}) — длинный ввод не через навык`,
+            );
+          }
+          await input.typeText(text);
           return;
+        }
         case "input.key":
           await input.pressKey(str(p.combo));
           return;
@@ -138,6 +150,18 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         return true;
       } catch {
         return false;
+      }
+    },
+
+    async checkPrecondition(pre): Promise<boolean> {
+      // §Волна3 ревью (#6): предусловие ОБЯЗАНО выполняться в АКТИВНОМ окне (scope="active", без
+      // фолбэка на весь стол) — иначе элемент с той же ролью/именем в фоновом окне даёт ложный pass,
+      // и слепой клик уходит по изменившемуся экрану. nameMode прокидываем (протокол его объявляет).
+      try {
+        await ground.ground({ role: pre.role, name: pre.name, nameMode: pre.nameMode, scope: "active" });
+        return true;
+      } catch {
+        return false; // не найден в активном окне → предусловие не выполнено (честный стоп реплея)
       }
     },
   };
