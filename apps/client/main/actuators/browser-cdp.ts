@@ -109,8 +109,11 @@ export function buildActScript(intent: string, params?: Record<string, unknown>)
     if (I === 'scroll') { window.scrollBy(0, Number(P.dy) || 600); return 'ok'; }
     if (I === 'back') { history.back(); return 'ok'; }
     if (I === 'forward') { history.forward(); return 'ok'; }
-    if (I === 'play') { const m = media(); if (m) m.play(); return 'ok'; }
-    if (I === 'pause') { const m = media(); if (m) m.pause(); return 'ok'; }
+    // Аудит-2 [11]: честность — нет media-элемента → ЧЕСТНАЯ ошибка, а не ложный 'ok' (иначе модель
+    // скажет «поставил на паузу/включил», хотя воспроизведение не тронуто — тот самый HIGH-баг регион-
+    // блокнутой Я.Музыки). Как ветка 'click', которая бросает 'элемент не найден'.
+    if (I === 'play') { const m = media(); if (!m) throw new Error('нет media-элемента для воспроизведения (плеер на canvas/MSE?) — нужен клик по вкладке'); m.play(); return 'ok'; }
+    if (I === 'pause') { const m = media(); if (!m) throw new Error('нет media-элемента для паузы (плеер на canvas/MSE?) — нужен клик по вкладке'); m.pause(); return 'ok'; }
     if (I === 'next' || I === 'prev') {
       const labels = I === 'next' ? ['next','след','вперёд','перемотать вперёд'] : ['prev','пред','назад','предыдущ'];
       const btn = [...document.querySelectorAll('button,[role=button],a')].find(e => {
@@ -118,7 +121,7 @@ export function buildActScript(intent: string, params?: Record<string, unknown>)
         return labels.some(l => s.includes(l));
       });
       if (btn) { btn.click(); return 'ok'; }
-      const m = media(); if (m) m.currentTime += (I === 'next' ? 10 : -10); return 'ok';
+      const m = media(); if (!m) throw new Error('нет кнопки перемотки и нет media-элемента — нужен клик по вкладке'); m.currentTime += (I === 'next' ? 10 : -10); return 'ok';
     }
     if (I === 'click') {
       const el = P.selector ? document.querySelector(String(P.selector)) : (P.text ? byText(P.text) : null);

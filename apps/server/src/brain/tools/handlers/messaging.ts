@@ -5,7 +5,7 @@
  * живут здесь, рядом с потребителями. Маршрутизация остаётся в dispatch (switch).
  */
 import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol";
-import { nameSearchVariants } from "@jarvis/shared";
+import { TtlCache, nameSearchVariants } from "@jarvis/shared";
 import { approveSend, isSendApproved } from "../../consent.js";
 import { CadenceGuard } from "../../messaging/cadence.js";
 import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
@@ -36,9 +36,13 @@ async function confirmSendOnce(
 
 /** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
 const cadence = new CadenceGuard();
-const sentKeys = new Set<string>();
-/** Идемпотентность заказов — на процесс (§14). */
-const placedOrderKeys = new Set<string>();
+// Аудит-2 [8]: дедуп отправки — ОКНО, а не «навсегда». Прежний Set<string> без TTL/eviction: (а) блокировал
+// ЛЕГИТИМНЫЙ повтор той же фразы тому же адресату НАВСЕГДА («напиши маме 'еду домой'» назавтра не уходил);
+// (б) рос без ограничения на долгоживущем сервере. TtlCache даёт окно дедупа (анти-retry burst) + eviction.
+const SEND_DEDUP_MS = Math.max(30_000, Number(process.env.JARVIS_SEND_DEDUP_MS) || 10 * 60_000);
+const sentKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
+/** Идемпотентность заказов — окно (§14; аудит-2 [8]). */
+const placedOrderKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
 
 /** Проблема резолва адресата (не транспорт): не нашёл/неоднозначно/не залогинен. */
 function isResolveIssue(msg: string): boolean {
@@ -67,9 +71,11 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
   // M6: cadence-гард — тот же механизм, что message_send (анти-бан/анти-веер/анти-burst).
   const cad = cadence.check({ userId: ctx.userId, channel: "telegram", recipient: to, neverMessagedBefore: false });
   if (!cad.allowed) return err(`Не отправил «${to}»: cadence-лимит (${cad.reason}).`);
-  // M6: идемпотентность — тот же ключ/набор, что message_send. Ретрай агента после таймаута не дублирует отправку.
+  // M6: идемпотентность — ОКНО дедупа (аудит-2 [8]): rapid-повтор УСПЕШНО доставленной фразы в окне
+  // SEND_DEDUP_MS не уходит второй раз. ⚠️ Доставленная-но-истёкшая-по-таймауту отправка ключ НЕ ставит
+  // (только на result.ok) → в этом окне возможен дубль — открытый tradeoff [9] (нужна delivery-confirmation).
   const key = idempotencyKey({ userId: ctx.userId, channel: "telegram", recipient: to, body: text });
-  if (sentKeys.has(key)) return ok(`Уже отправлено «${to}» в Telegram (повтор не ушёл).`);
+  if (sentKeys.get(key) !== undefined) return ok(`Уже отправлено «${to}» в Telegram (повтор не ушёл).`);
   // §14: отправка — критичное действие, подтверждаем ОДИН раз на адресата (дальше помним навсегда).
   const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
   if (!gate.approved) return ok(`Не отправил — вы не подтвердили отправку «${to}».`);
@@ -80,7 +86,7 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
     const data = result.data as { chatTitle?: string; peerId?: string } | undefined;
     const who = chatTitleOf(result.data) || to; // называем РЕАЛЬНОГО адресата (мог отличаться: Герман→Herman)
     if (data?.chatTitle) ctx.resolutionMemory?.remember(ctx.userId, "telegram", to, { peerId: data.peerId, title: data.chatTitle });
-    sentKeys.add(key);
+    sentKeys.set(key, true);
     cadence.record(ctx.userId, "telegram", to);
     return ok(`Отправлено «${who}» в Telegram.`);
   }
@@ -99,7 +105,7 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
     try {
       const out = await ctx.telegramSend(to, text, nameSearchVariants(to));
       const who = chatTitleOf(out) || to;
-      sentKeys.add(key);
+      sentKeys.set(key, true);
       cadence.record(ctx.userId, "telegram", to);
       return ok(`Отправлено «${who}» в Telegram (через расширение).`);
     } catch (e) {
@@ -155,8 +161,8 @@ export async function messageSend(ctx: ToolContext, input: Record<string, unknow
       requestConfirm: (summary) => confirmSendOnce(ctx, channel, to, summary),
       regenerate: async (_rev, prev) => prev, // полная перегенерация — через новый ход агента
       cadence,
-      isAlreadySent: (k) => sentKeys.has(k),
-      markSent: (k) => sentKeys.add(k),
+      isAlreadySent: (k) => sentKeys.get(k) !== undefined,
+      markSent: (k) => sentKeys.set(k, true),
       send: async (ch, rcpt, b) => {
         const r = await ctx.session.sendAction({ kind: "message.send", channel: ch, to: rcpt, body: b }, DEFAULT_ACTION_TIMEOUT_MS);
         if (r.error?.code === "channel_down") channelDown = true;
@@ -183,8 +189,8 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
   try {
     const res = await placeOrder({ userId: ctx.userId, vendor, items, total }, DEFAULT_ORDER_POLICY, {
       requestConfirm: async (summary) => ({ approved: (await ctx.confirm!(summary, "order")).approved }),
-      isAlreadyPlaced: (k) => placedOrderKeys.has(k),
-      markPlaced: (k) => placedOrderKeys.add(k),
+      isAlreadyPlaced: (k) => placedOrderKeys.get(k) !== undefined,
+      markPlaced: (k) => placedOrderKeys.set(k, true),
       place: async (req) => {
         const r = await ctx.session.sendAction(
           { kind: "order.place", vendor: req.vendor, items: req.items as unknown as Record<string, unknown>[], total: req.total },

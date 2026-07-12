@@ -25,7 +25,10 @@ export class AmbientEngine {
   private ticking = false;
   private readonly speakers = new Map<string, { userId: string; speak: (text: string, urgent: boolean) => void }>();
   /** Недоставленное (сессии не было в момент сигнала) → проговорить при подключении владельца. */
-  private pending: Array<{ userId: string; text: string; urgent: boolean }> = [];
+  private pending: Array<{ userId: string; text: string; urgent: boolean; seenKey: string }> = [];
+  /** Аудит-2 [6]: сигналы, поставленные в pending В ЭТОМ ПРОЦЕССЕ (анти-дубль на тиках), НЕ persist —
+   *  durable «seen» ставится ЛИШЬ при реальной доставке, иначе рестарт до flush терял бы срочный сигнал. */
+  private readonly queuedKeys = new Set<string>();
   private readonly now: () => number;
   private readonly intervalMs: number;
   private readonly minSalience: number;
@@ -103,9 +106,9 @@ export class AmbientEngine {
   /** Рассмотреть один сигнал: новый (не seen) + салиентный → сформулировать и проактивно сообщить. */
   private async consider(sig: AmbientSignal): Promise<void> {
     const seenKey = `${sig.sourceId}:${sig.key}`;
-    if (this.store.has(seenKey)) return; // уже сообщали об этом событии
+    if (this.store.has(seenKey) || this.queuedKeys.has(seenKey)) return; // доставлено durable ИЛИ уже в очереди процесса
     if (sig.salience < this.minSalience) {
-      this.store.mark(seenKey, this.now()); // не важно — но помечаем, чтобы не пересматривать каждый тик
+      this.store.mark(seenKey, this.now()); // не важно — durable-помечаем, чтобы не пересматривать каждый тик
       return;
     }
     // ЛИШЬ ТЕПЕРЬ (новое важное) — опц. LLM-фразировка. Дорого ровно на событиях, не на тиках.
@@ -118,16 +121,20 @@ export class AmbientEngine {
         log.debug("ambient: фразировщик не сработал — беру title", e instanceof Error ? e.message : String(e));
       }
     }
-    this.store.mark(seenKey, this.now()); // помечаем ДО доставки — не задвоить при гонке тиков
-    this.deliver(sig.userId, phrase, sig.urgent === true);
-    log.info("ambient: проактивное уведомление", { source: sig.sourceId, key: sig.key.slice(0, 40), urgent: sig.urgent === true });
-  }
-
-  /** Доставить владельцу: точная/любая его сессия → speakQueued (urgent проходит и при занятости). Нет сессии → pending. */
-  private deliver(userId: string, text: string, urgent: boolean): void {
-    const speak = this.speakerFor(userId);
-    if (speak) speak(text, urgent);
-    else this.pending.push({ userId, text, urgent });
+    // Аудит-2 [6]: durable-mark ТОЛЬКО при РЕАЛЬНОЙ доставке живой сессии. Владелец офлайн → сигнал в
+    // in-memory pending, durable НЕ помечаем (queuedKeys гасит дубль в рамках процесса). Рестарт до flush
+    // потеряет pending, но seenKey на диске НЕ осядет → сигнал пересмотрится и прозвучит (раньше срочный
+    // «оплати счёт» глох навсегда на 14 дней TTL).
+    const speak = this.speakerFor(sig.userId);
+    if (speak) {
+      this.store.mark(seenKey, this.now());
+      speak(phrase, sig.urgent === true);
+      log.info("ambient: проактивное уведомление", { source: sig.sourceId, key: sig.key.slice(0, 40), urgent: sig.urgent === true });
+    } else {
+      this.queuedKeys.add(seenKey);
+      this.pending.push({ userId: sig.userId, text: phrase, urgent: sig.urgent === true, seenKey });
+      log.info("ambient: уведомление отложено (владелец офлайн)", { source: sig.sourceId, key: sig.key.slice(0, 40), urgent: sig.urgent === true });
+    }
   }
 
   private speakerFor(userId: string): ((text: string, urgent: boolean) => void) | undefined {
@@ -141,7 +148,11 @@ export class AmbientEngine {
     if (!speak) return;
     const mine = this.pending.filter((p) => p.userId === userId);
     this.pending = this.pending.filter((p) => p.userId !== userId);
-    for (const p of mine) speak(p.text, p.urgent);
+    for (const p of mine) {
+      this.store.mark(p.seenKey, this.now()); // Аудит-2 [6]: доставлено из очереди → ТЕПЕРЬ durable seen
+      this.queuedKeys.delete(p.seenKey);
+      speak(p.text, p.urgent);
+    }
   }
 }
 

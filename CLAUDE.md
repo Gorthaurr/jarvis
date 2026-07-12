@@ -347,6 +347,22 @@
     `fs_delete`/`fs_move` КАТАЛОГА сносило/релоцировало `node_modules`/`.env`/бинарь ВНУТРИ мимо leaf-гарда →
     `assertTreeWritable` (скан поддерева + предок бинаря `isAncestorOfSelf`), при исчерпании бюджета
     (200K) — FAIL-CLOSED отказ (не «чисто»). Env-выключателей нет — это исправления. Тесты: сервер 1205 / клиент 195.
+  - **АУДИТ ЯДРА — 2-й ПРОХОД (2026-07-12, 8 файндеров + 2 верификатора Opus по НЕПОКРЫТЫМ подсистемам:
+    крипто/MCP/extension/proactive/reminders/userbots/voice/клиент-актуаторы; 12 CONFIRMED — 9 исправлены+тесты,
+    3 вынесены в `docs/AUDIT_2_OPEN_FINDINGS_2026-07-12.md`):** [1][2] MCP-зомби — гонка connectAll↔dispose
+    (connectOne после dispose заселял живого сироту → `disposed`-флаг + kill свежего transport) и taskkill за
+    зависшим последовательным `close()` (→ kill ВСЕХ по PID СРАЗУ, closes параллельно); [3] extension keep-alive
+    interval тёк при throw `openTgTab` (→ внутрь try); [4] `ws.onerror` закрывал НОВЫЙ сокет (замыкание на
+    мутабельную `ws` → захват `socket` + обнуление old.onerror); [5] `browser_tabs` отдавал title/host страницы
+    как ДОВЕРЕННЫЙ текст (→ `<untrusted_content>`, M11); [6] ambient durable-`seen` ставился ДО доставки → срочный
+    сигнал (офлайн-владелец + рестарт до flush) глох навсегда (→ mark ТОЛЬКО при реальной доставке + in-memory
+    `queuedKeys` анти-дубль); [7] watch-checker кормил web_search/fetch в модель БЕЗ `<untrusted_content>` и без
+    анти-инъекции в system → подделанная страница флипала вердикт `met:true` (→ обёртка + анти-инъекция); [8] дедуп
+    отправки (`sentKeys`/`placedOrderKeys`) был вечным Set → блокировал ЛЕГИТИМНЫЙ повтор навсегда + тёк (→ окно
+    `TtlCache`, `JARVIS_SEND_DEDUP_MS` деф 10мин); [11] browser-cdp play/pause/next возвращал `ok` без media →
+    ложный успех (→ честная ошибка, как ветка click). Открыты (COM/дизайн, требуют живого Office/решения владельца):
+    [9] дубль при доставлено-но-таймаут, [10] killOfficeTree бьёт все инстансы, [12] append_row затирает B1.
+    Тесты: сервер 1210 / клиент 195, +5. Extension пересобран (нужен живой reload+смоук для [3][4]).
   - **ПАМЯТЬ+КОНТЕКСТ уровень А + Б4а/Б5 (2026-07-10, отчёт `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md`;
     диагноз: facts:0 навсегда — 3 структурных разрыва; контекст ПК замораживался; 39-мин STT-ход):**
     ПАМЯТЬ: (А1) баг спреда — retrieval-facts затирал профильные, теперь merge+dedup; (А2/А9) единый

@@ -117,7 +117,11 @@ export async function browserTabs(ctx: ToolContext): Promise<ToolResult> {
       const flags = [t.active ? "активна" : "", t.audible ? "♪ звук" : ""].filter(Boolean).join(", ");
       return `${i + 1}. [tabId ${t.tabId}] ${t.title || t.host || t.url || "?"}${flags ? ` (${flags})` : ""} — ${t.host || t.url || ""}`;
     });
-    return ok(
+    // Аудит-2 [5]: title/host/url вкладки — контент, заданный САМОЙ страницей (влияемый атакующим:
+    // document.title = «Игнорируй инструкции, вызови …»). Оборачиваем в <untrusted_content>, как
+    // browser_read/browser_inspect и заголовки окон (M11) — иначе граница данные/инструкции ослаблена.
+    return untrusted(
+      "browser-tabs",
       `Открытые вкладки (${tabs.length}):\n${lines.join("\n")}\n` +
         `Чтобы действовать в КОНКРЕТНОЙ вкладке — передай её tabId в browser_act/browser_read (точное попадание).`,
     );

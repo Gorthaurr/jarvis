@@ -57,11 +57,33 @@ function baseChildEnv(): Record<string, string> {
   return out;
 }
 
+/** Форс-килл дерева дочернего процесса транспорта по PID (§L6; аудит-2 [1]/[2] — независимо от close). */
+function killTransportTree(transport: StdioClientTransport | undefined): void {
+  const pid = (transport as { pid?: number | null } | undefined)?.pid ?? undefined;
+  if (typeof pid !== "number" || pid <= 0) return;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
+    } else {
+      try {
+        process.kill(-pid, "SIGKILL"); // группа npx→node
+      } catch {
+        process.kill(pid, "SIGKILL");
+      }
+    }
+  } catch {
+    /* процесс уже мёртв / нет прав — не критично */
+  }
+}
+
 export class McpManager {
   private readonly servers = new Map<string, ServerEntry>();
   /** namespaced имя → { server, bare } для O(1) роутинга callTool. */
   private readonly index = new Map<string, { server: string; bare: string }>();
   private readonly log: Logger;
+  /** Аудит-2 [1]: dispose() уже прошёл — connectOne, дорезолвившийся ПОСЛЕ, обязан убить свой свежий
+   *  transport и НЕ заселять servers (иначе живой stdio-ребёнок остаётся сиротой мимо taskkill). */
+  private disposed = false;
 
   constructor(
     private readonly reserved: ReadonlySet<string>,
@@ -94,6 +116,17 @@ export class McpManager {
         env: { ...baseChildEnv(), ...(sc.env ?? {}) },
       });
       await client.connect(transport);
+      // Аудит-2 [1]: пока мы коннектились (~2.3с), мог пройти dispose() → servers уже вычищен и никто не
+      // убьёт этого ребёнка. Убиваем свой свежий transport и НЕ заселяем реестр (иначе процесс-сирота).
+      if (this.disposed) {
+        killTransportTree(transport);
+        try {
+          await client.close();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
       const listed = await client.listTools();
       const tools: ToolSchema[] = [];
       for (const t of listed.tools ?? []) {
@@ -102,9 +135,22 @@ export class McpManager {
         this.index.set(ns, { server: name, bare: t.name });
         tools.push({ name: ns, description: `[MCP:${name}] ${t.description ?? t.name}`, input_schema: normSchema(t.inputSchema) });
       }
+      if (this.disposed) {
+        killTransportTree(transport); // повторная проверка после второго await (listTools)
+        try {
+          await client.close();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
       this.servers.set(name, { client, transport, tools, state: "connected" });
       this.log.info("MCP сервер подключён", { server: name, tools: tools.length });
     } catch (e) {
+      if (this.disposed) {
+        killTransportTree(transport); // dispose прошёл во время неудачного connect — не оставляем сироту
+        return;
+      }
       // transport мог уже спавнить ребёнка до провала connect — сохраняем для kill в dispose.
       this.servers.set(name, { client: null as unknown as Client, transport, tools: [], state: "error" });
       this.log.warn("MCP сервер не подключился", { server: name, error: e instanceof Error ? e.message : String(e) });
@@ -153,34 +199,15 @@ export class McpManager {
   }
 
   async dispose(): Promise<void> {
-    const isWin = process.platform === "win32";
-    for (const e of this.servers.values()) {
-      // PID берём ДО close() — close может обнулить процесс в транспорте.
-      const pid = (e.transport as { pid?: number | null } | undefined)?.pid ?? undefined;
-      try {
-        await e.client?.close?.();
-      } catch {
-        /* ignore */
-      }
-      // §L6: client.close() на Windows НЕ убивает дерево дочернего npx/npm (внуки-node остаются
-      // зомби, держат порты/хендлы на каждом рестарте). Форс-килл дерева по PID.
-      if (typeof pid === "number" && pid > 0) {
-        try {
-          if (isWin) {
-            spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
-          } else {
-            // posix: убить группу процессов (npx→node), фолбэк — сам pid.
-            try {
-              process.kill(-pid, "SIGKILL");
-            } catch {
-              process.kill(pid, "SIGKILL");
-            }
-          }
-        } catch {
-          /* процесс уже мёртв / нет прав — не критично */
-        }
-      }
-    }
+    this.disposed = true; // [1]: connectOne, дорезолвившийся после этого, сам убьёт свой transport
+    const entries = [...this.servers.values()];
+    // Аудит-2 [2]: force-kill ВСЕХ детей по PID СРАЗУ (не за последовательным await close). §L6:
+    // client.close() на Windows НЕ убивает дерево npx/node; а зависший close() ОДНОГО мёртвого stdio-child
+    // раньше блокировал taskkill остальных → при 2с-обрезке dispose (server.ts) их деревья оставались
+    // зомби. Kill по PID (fire-and-forget, unref) не зависит от close.
+    for (const e of entries) killTransportTree(e.transport);
+    // Затем best-effort graceful close ПАРАЛЛЕЛЬНО (не блокирует друг друга).
+    await Promise.allSettled(entries.map((e) => e.client?.close?.()));
     this.servers.clear();
     this.index.clear();
   }
