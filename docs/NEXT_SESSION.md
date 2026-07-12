@@ -5,12 +5,24 @@
 > 1. **Фиксы Волны 3** (3 раунда адверс-ревью, 19 находок) — коммит `4b5e01a`.
 > 2. **Память/контекст уровень Б** (Б1 сон-цикл консолидации, Б2 skip-search, Б3 live-рефреш,
 >    Б4б-д resume-санация channel_down/waitForChannel/cancelOrphaned, Б6 бюджет разговора) —
->    7 итераций адверс-ревью на Opus (13→0 находок), все исправлены. Тесты: сервер 1191 / клиент 185.
+>    7 итераций адверс-ревью на Opus (13→0 находок), все исправлены — коммит `f9cdd5b`.
+> 3. **Интеграционное ревью ВСЕЙ смены** (10 агентов Opus по диффу 973465a..HEAD + контрольный проход):
+>    забытые call-sites channel_down (messaging/screen_capture/browser_read), кап input.type=150 на
+>    всех путях runSkill, format/sampleRate при реплее TTS из кеша, synthTtsToBase64 под yandex3,
+>    idempotency сон-цикла, capExhausted-гейт, cancel-регрессия — коммит `7e86ed5`. Тесты: сервер 1197 / клиент 187.
+> 4. **Два deep-research** (коммит `17dbaae`): `docs/RESEARCH_REALTIME_VOICE_2026-07-12.md` (realtime-голос
+>    как Grok) + `docs/RESEARCH_VOICE_IN_CALLS_2026-07-12.md` (голос в звонках/СберДжаз-дейли).
 > ⚠️ Живьём НЕ прогонялось (нет голоса/GUI-задачи): сон-цикл, live-рефреш, channel_down-пауза,
 > кап разговора — смотреть при первом живом использовании; выключатели JARVIS_CONSOLIDATION /
 > JARVIS_LIVE_CONTEXT_REFRESH / JARVIS_CHANNEL_WAIT_MS. Ветка НЕ смержена.
 > Осталось из MEMORY_CONTEXT_REVIEW: Б5 wake/STT-санация, Б7 мелочь (timezone/аудио-endpoint/SMTC),
 > forget/stale в консолидации (TODO). Из HARNESS_PLAN: волны 1-3 сделаны.
+>
+> 🎙️ **РЕШЕНИЕ ВЛАДЕЛЬЦА ЖДЁТ (realtime-голос):** план `RESEARCH_REALTIME_VOICE` рекомендует гибрид
+> «Fast Talker (Haiku) + Slow Thinker (Claude)». Первый шаг — Haiku на разговорную ветку — **конфликтует
+> с зафиксированным требованием «Haiku не используем»** (`shared/index.ts:26`). Автономно НЕ трогал.
+> Нужно «да» владельца, что Haiku допустим КАК ГОЛОС-ФРОНТ разговора (не как исполнитель). Smart Turn v3
+> и backchannel из того же этапа требуют живого микрофона.
 
 ## ГЛАВНАЯ ЗАДАЧА СЛЕДУЮЩЕЙ СЕССИИ (запрос владельца)
 
