@@ -183,7 +183,9 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
     { kind: "browser.read", selectorIntent: String(input.selectorIntent ?? "") },
     DEFAULT_ACTION_TIMEOUT_MS,
   );
-  return result.ok ? ok(result.data !== undefined ? JSON.stringify(result.data) : "ok") : err(`browser.read не удалось: ${result.error?.message ?? ""}`);
+  if (result.ok) return ok(result.data !== undefined ? JSON.stringify(result.data) : "ok");
+  const cd = channelDownResult(result, "browser_read не отправлен: канал с ПК недоступен (переподключение)."); // Б4 #5
+  return cd ?? err(`browser.read не удалось: ${result.error?.message ?? ""}`);
 }
 
 /**

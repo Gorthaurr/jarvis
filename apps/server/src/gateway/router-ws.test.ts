@@ -79,6 +79,22 @@ describe("router task control (§20)", () => {
     expect(handleControlUtterance(ctx, "что делаешь")).toBe(false);
   });
 
+  // Интеграционное ревью #6 (РЕГРЕССИЯ): «отмени напоминание/подписку» БЕЗ активной §20-задачи не должно
+  // съедаться «Нет активной задачи» — уходит в агент (cancel_reminder и пр.). Перехват cancel — только
+  // если реально есть что останавливать.
+  it("(#6) «отмени напоминание» без активной задачи уходит в АГЕНТ (не съедается)", () => {
+    const { ctx } = fakeCtx(new TaskManager());
+    expect(handleControlUtterance(ctx, "отмени напоминание про хлеб")).toBe(false);
+  });
+
+  it("(#6) «отмени» СНИМАЕТ скрытую разговорную задачу (перехват, если есть что отменять)", () => {
+    const tasks = new TaskManager();
+    const talk = tasks.create({ userId: "u1", sessionId: "s1", goal: "что происходит", conversational: true });
+    const { ctx } = fakeCtx(tasks);
+    expect(handleControlUtterance(ctx, "отмени")).toBe(true); // есть скрытая задача → перехват
+    expect(tasks.get(talk.taskId)?.state).toBe("cancelled");
+  });
+
   it("обычная реплика не перехватывается управлением", () => {
     const tasks = new TaskManager();
     tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });

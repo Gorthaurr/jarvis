@@ -35,7 +35,7 @@ import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
 import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "../brain/profile.js";
-import { consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
+import { claimConsolidationRun, consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
 import { ReminderService } from "../proactive/reminders/service.js";
 import { createWatchChecker } from "../proactive/watch/checker.js";
 import { WatchService } from "../proactive/watch/service.js";
@@ -820,8 +820,9 @@ function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logge
   const userId = ctx.session.userId;
   const p = getProfile(userId);
   const last = p.lastConsolidatedAt ?? 0;
+  const today = new Date().toDateString();
   // «Новый день» — разные календарные даты (сервер на ПК владельца, локальная дата консистентна с renderNow).
-  if (last && new Date(last).toDateString() === new Date().toDateString()) return;
+  if (last && new Date(last).toDateString() === today) return;
   const turns = ctx.memory.recentTurns().map((t) => ({ role: t.role, text: t.text }));
   // Ревью волны Б 2-й проход (#2): НЕ сжигать дневной слот на ПУСТОЙ памяти. Раньше пометка стояла ДО
   // проверки реплик → первый коннект дня после >12ч-простоя (working-store вычистил вчерашнее по TTL)
@@ -829,6 +830,9 @@ function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logge
   // пометки: следующий коннект (когда диалог накопится) попробует снова. Идемпотентность цела —
   // проверка+пометка синхронны до fire-and-forget, параллельные коннекты не запустят второй прогон.
   if (!turns.some((t) => t.role === "user")) return;
+  // Интеграционное ревью (#4): атомарная in-memory бронь на СЕГОДНЯ — не подвержена TOCTOU-гонке
+  // loadProfile (конкурентный коннект того же userId мог затереть профиль-метку до её записи на диск).
+  if (!claimConsolidationRun(userId, today)) return;
   void setLastConsolidated(userId);
   const taskTitles = brain.tasks
     .recentTerminal(userId, { limit: 10, maxAgeMs: 36 * 3_600_000 })

@@ -208,9 +208,10 @@
     gsi+gone (`Watch.sawFreshAt` durable + `gsiState` fresh/stale/none из клиента) — редкий watch-тик больше не
     промахивается мимо короткого окна `recentlyGone`; (R5) `PCM_ORPHAN_MS` 8→12с (> серверного INACTIVITY_MS 8с) и
     `last`-чанк не сбрасывает сироту — честный частичный last после inactivity-аборта звучит. Раунд 3 (1 CONFIRMED,
-    R6): кап `REPLAY_TYPE_MAX_CHARS` УБРАН из общего client-actuator — там он хард-фейлил ЯВНЫЙ `skill_execute`
-    записанного показом навыка с длинным литеральным текстом (одиночный type budget-safe, не «два писателя»); кап
-    остаётся ТОЛЬКО на слепых путях (server `replayUnsafe` + `inputBatch`). Env-выключателей у фиксов нет.
+    R6): кап `REPLAY_TYPE_MAX_CHARS` УБРАН из общего client-actuator... **⚠️ R6 ОТМЕНЁН интеграционным ревью
+    (см. запись 2026-07-12 ниже): премисса «одиночный type budget-safe» ложна для >~625 символов (77с > 130с
+    потолка), поэтому кап 150 ВЕРНУЛИ на ВСЕ пути runSkill вкл. явный `skill_execute` — длинный литеральный
+    текст в навыке физически не реплеится, идёт через fs_write/office_*.** Env-выключателей у фиксов нет.
     Тесты: сервер 1161 / клиент 185, +34 регресс-теста.
   - **АДВЕРСАРИАЛЬНОЕ РЕВЬЮ ВОЛНЫ 3 (2026-07-11, 4 агента: 3 файндера + верификатор; 18 находок CONFIRMED,
     0 опровергнуто — ВСЕ исправлены, +17 регресс-тестов):** ключевое, что закрыто (нарушения законов честности/
@@ -287,8 +288,10 @@
     не растит streak (мёртвый канал ≠ слабая модель — конец «Opus от транспорта»); (г) `waitForChannel`
     (окно `JARVIS_CHANNEL_WAIT_MS` деф 30с < resume-grace 120с) ждёт reconnect и повторяет раунд той же
     моделью, не вернулся → честный терминал `channelLost` (ok=false, кэш не пишется); (б)
-    `manager.reassignActiveTasks` перевешивает живые задачи userId на новую сессию при провале resume
-    (teardown старой не снимет; отмена по userId Б4а sessionId-агностична). `session.channelUp()` — сигнал.
+    `manager.cancelOrphanedTasks` при провале resume ПРЕРЫВАЕТ задачи МЁРТВЫХ сессий (liveness через
+    `registry.channelUp` — живой параллельный клиент не теряет работу). `channel_down` помечается ВО ВСЕХ
+    путях sendAction (generic dispatch + hand-rolled: skills/code/browser_open/browser_act/browser_read/
+    messaging/screen_capture через `channelDownResult`) — интеграционное ревью закрыло забытые call-sites.
     (Б6) **БЮДЖЕТ РАЗГОВОРА**: `Task.conversational` — разговорный ход (вопрос/комплимент) исключён из
     `active()`/`activeForUser()`/`recentTerminal()`/`isSubstantiveTask` (не всплывает в scope/«сделал?» —
     «да ты молодец» больше не §20-задача) + кап `HARD_STEP_CAP=3` (комплимент за $0.19 и 8 раундов срезан);
@@ -312,6 +315,18 @@
     сохранённый `lastAnswer` на разговорном ходе (не ложное «не успел»); кап conversational 3→12 (не рвёт
     research-вопросы); «отмени» снимает и скрытую разговорную задачу (cancel до active-гейта). Финал: 7-й
     проход (4 файндера Opus) — 0 находок. Тесты: сервер 1191, +55 к волне Б.
+  - **ИНТЕГРАЦИОННОЕ РЕВЬЮ ВСЕЙ СМЕНЫ (2026-07-12, 10 агентов Opus, дифф 973465a..HEAD = оба коммита):**
+    финальный проход поверх покластерных — ловит МЕЖволновое и забытые sibling call-sites. Закрыто:
+    (i) кап `input.type` на явном skill_execute сведён к ЕДИНОМУ `REPLAY_TYPE_MAX_CHARS`=150 (≈23с печати):
+    прежний отдельный `REPLAY_STEP_TYPE_MAX_CHARS`=600 (77с) перебегал серверный потолок 130с → «два
+    писателя»; бюджет реплея гейтит СТАРТ шага, не длительность, поэтому одиночный type обязан быть КОРОТКИМ
+    по времени (2-й контрольный проход); (ii) `channel_down` в messaging (telegram/message/order) + `screen_capture` +
+    `browser_read` — забытые call-sites (эскалация «от транспорта»); (iii) `synthTtsToBase64` (Telegram-
+    voice) переиспользует `synthesizeToBuffer` — под yandex3 слал headerless-PCM как mp3 (битое голосовое);
+    (iv) idempotency сон-цикла — атомарный `claimConsolidationRun` (TOCTOU loadProfile); (v) `capExhausted`-
+    воскрешение гейтится `!blindMutatePending`; (vi) РЕГРЕССИЯ: cancel-ветка съедала «отмени напоминание»
+    без задачи → перехват только при `hasAnyActive`; (vii) `looksLikeDirective` расширен (@/телефон/
+    authority-директивы); (viii) `DRAIN_IDLE_MS` 2.5→11с (не рвёт медленную фразу). Тесты: сервер 1197 / клиент 187.
   - **ПАМЯТЬ+КОНТЕКСТ уровень А + Б4а/Б5 (2026-07-10, отчёт `docs/MEMORY_CONTEXT_REVIEW_2026-07-10.md`;
     диагноз: facts:0 навсегда — 3 структурных разрыва; контекст ПК замораживался; 39-мин STT-ход):**
     ПАМЯТЬ: (А1) баг спреда — retrieval-facts затирал профильные, теперь merge+dedup; (А2/А9) единый

@@ -307,7 +307,7 @@ describe("PCM-стрим v3: сироты и дренаж (ревью фиксо
     // раньше clearDrainTimer в начале feed() снимал вотчдог БЕЗ повторного взвода → канал зависал.
     pb.enqueue({ audio: b64([9]), seq: 1, last: false, format: "pcm16" });
     expect(ctx.sources).toHaveLength(1); // источника из carry-чанка нет
-    vi.advanceTimersByTime(2_600); // > DRAIN_IDLE_MS (2.5с)
+    vi.advanceTimersByTime(11_500); // > DRAIN_IDLE_MS (11с; поднят выше серверного INACTIVITY_MS, #3)
     expect(ctx.closed).toBe(true); // плеер завершился по дренажу — barge-окно не залипло
   });
 });

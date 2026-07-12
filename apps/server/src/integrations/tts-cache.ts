@@ -49,7 +49,17 @@ class ReplayTtsStream implements TtsStream {
     if (this._cancelled) return;
     for (const c of this.chunks) {
       if (this._cancelled) return;
-      this.chunkCb?.({ audio: c.audio, seq: c.seq, last: c.last });
+      // Интеграционное ревью #2: СОХРАНЯЕМ format/sampleRate при реплее из кеша. Без них под
+      // TTS_PROVIDER=yandex3 (чанки format="pcm16") повторная фраза («Готово, сэр.») уходила клиенту
+      // как headerless-PCM без метки → декодировалась как mp3 → ТИШИНА (ложный успех: state идёт,
+      // звука нет). Тот же класс, что #20 filler-cache; этот call-site (кеш реплик) был пропущен.
+      this.chunkCb?.({
+        audio: c.audio,
+        seq: c.seq,
+        last: c.last,
+        ...(c.format ? { format: c.format } : {}),
+        ...(c.sampleRate ? { sampleRate: c.sampleRate } : {}),
+      });
     }
     if (!this._cancelled) this.doneCb?.();
   }

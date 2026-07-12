@@ -72,7 +72,11 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   // «отмени» голосом → «останови ВСЁ, что делаешь»: cancelUser по USERID (Б4а — переживает reconnect).
   // Ревью волны Б 6-й проход: cancel идёт РАНЬШЕ проверки видимой active — иначе одинокая РАЗГОВОРНАЯ
   // задача (Б6: скрыта из activeForUser) была бы НЕотменяема (research-вопрос до 12 раундов web_*).
+  // Интеграционное ревью #6 (РЕГРЕССИЯ): перехватываем cancel ТОЛЬКО если реально есть что отменять
+  // (любая активная задача userId, вкл. скрытую разговорную). Иначе «отмени напоминание/подписку»/«забудь
+  // что просил» БЕЗ §20-задачи должно уйти в АГЕНТ (cancel_reminder и пр.), а не съесться «Нет задачи».
   if (decision.kind === "cancel") {
+    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false; // нечего останавливать — в агент
     handleTaskControl(ctx, "cancel", undefined, source);
     return true;
   }

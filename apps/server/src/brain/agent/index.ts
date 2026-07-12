@@ -2100,7 +2100,7 @@ async function runAgentLoop(
   // 5-й проход ревью (#2): capExhausted, но на РАЗГОВОРНОМ ходе есть сохранённый ответ (нудж обнулил
   // finalText, кап не дал переспросить) → терминал ниже его ОЗВУЧИТ как успех. Значит и метрики/статус
   // задачи обязаны быть УСПЕХОМ (иначе ok=false в metrics при реально отданном ответе — рассинхрон).
-  const capAnswered = capExhausted && Boolean(lastAnswer) && opts?.conversational === true;
+  const capAnswered = capExhausted && Boolean(lastAnswer) && opts?.conversational === true && !blindMutatePending;
 
   // §8 HERMES самообучение: задача решена САМА (успешно), готового навыка не было (recalled===null)
   // и сам не сохранил по ходу → один бэкстоп-ход предлагает сохранить приём навыком. Узкий набор
@@ -2270,9 +2270,12 @@ async function runAgentLoop(
     // 3-й проход (#5): модель УСПЕЛА дать реальный ответ, но нудж (goal-check/verify) обнулил finalText,
     // а переспросить не дал кап. Отдаём сохранённый ответ (это УСПЕХ, не ложное «не успел»).
     // 4-й проход (#1): ТОЛЬКО на РАЗГОВОРНОМ ходе. На action-задаче отвергнутый verify/goal-check текст
-    // («Готово, музыка играет» на регион-блокнутой странице) воскрешать НЕЛЬЗЯ — это обход verify-петли
-    // и ложный успех. Разговорный ход mutate/verify не делает — там lastAnswer безопасен.
-    if (lastAnswer && opts?.conversational) {
+    // («Готово, музыка играет» на регион-блокнутой странице) воскрешать НЕЛЬЗЯ — это обход verify-петли.
+    // Интеграционный проход (#6): + гард !blindMutatePending — разговорный ход С recall-навыком (оставлен
+    // намеренно) может кликать GUI (input_click горячий) → blindMutatePending; если claim обнулён
+    // verify-нуджем ИМЕННО из-за неснятой слепой сверки, воскрешать его = обход verify-LAW. Только когда
+    // слепого долга нет.
+    if (lastAnswer && opts?.conversational && !blindMutatePending) {
       tasks.finish(taskId, lastAnswer);
       if (shown) emitTaskStatus(session, task);
       return terminal(verbalize(lastAnswer));

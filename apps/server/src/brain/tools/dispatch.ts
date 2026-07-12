@@ -32,7 +32,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, err, numField, ok, untrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, err, numField, ok, untrusted } from "./dispatch-util.js";
 import {
   browserAct,
   browserCloseTab,
@@ -466,6 +466,10 @@ async function lookAtScreen(ctx: ToolContext, input: Record<string, unknown>): P
   const scale = typeof input.scale === "number" ? input.scale : undefined;
   const result = await ctx.session.sendAction({ kind: "screen.capture", monitor, rect, scale }, DEFAULT_ACTION_TIMEOUT_MS);
   if (!result.ok) {
+    // Б4 (интеграционное ревью #4): канал мёртв (resume-grace) → channelDown, чтобы verify-раунд из
+    // одного screen_capture не эскалировал тир «от транспорта». Этот путь минует generic-ветку dispatch.
+    const cd = channelDownResult(result, "screen_capture не снят: канал с ПК недоступен (переподключение).");
+    if (cd) return cd;
     return err(`Не удалось снять экран: ${result.error?.code ?? "runtime"} ${result.error?.message ?? ""}`);
   }
   const data = result.data as { image?: string; mediaType?: string } | undefined;

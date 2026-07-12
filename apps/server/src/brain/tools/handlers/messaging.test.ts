@@ -74,4 +74,16 @@ describe("telegramSend — cadence + идемпотентность (M6)", () =>
     expect(String(r2.content)).toMatch(/cadence-лимит/);
     expect(ctx.session.sendAction).toHaveBeenCalledTimes(1); // до транспорта вторая не дошла
   });
+
+  // Интеграционное ревью (#2): channel_down (мёртвый сокет в resume-grace) → ToolResult.channelDown=true,
+  // чтобы петля ЖДАЛА reconnect, а не эскалировала тир («Opus от транспорта»). Нет фолбэка расширения.
+  it("(#2) channel_down без фолбэка → помечает channelDown (петля ждёт reconnect, не эскалирует)", async () => {
+    const session: ActuatorSink = {
+      sendAction: vi.fn(async (): Promise<ActionResult> => ({ commandId: "c", durationMs: 0, ok: false, error: { code: "channel_down", message: "канал недоступен" } })),
+    };
+    const ctx = baseCtx({ session });
+    const r = await telegramSend(ctx, { to: "@x", text: "привет" });
+    expect(r.isError).toBe(true);
+    expect(r.channelDown).toBe(true); // не обычная ошибка — сигнал петле ждать reconnect
+  });
 });

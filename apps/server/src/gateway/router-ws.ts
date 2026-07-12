@@ -64,7 +64,7 @@ import { type SkillProvider, hasGuardSteps, isLearnedMd, listSkills } from "../m
 import { type ReplySink, type VoicePipeline, createVoicePipeline } from "../voice/index.js";
 import { TranscriptNormalizer } from "../voice/lexicon.js";
 import { routerLexicon } from "../brain/router/index.js";
-import type { FillerCache } from "../voice/filler-cache.js";
+import { type FillerCache, synthesizeToBuffer } from "../voice/filler-cache.js";
 import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
 import type { VoiceProfileStore } from "../voice/speaker/store.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
@@ -176,27 +176,14 @@ function formatTabsContext(
   return `Открытые вкладки браузера: ${items.join("; ")}`;
 }
 
-/** §: синтез TTS ЦЕЛИКОМ → base64 mp3 (для голосовых TG): копим чанки → склейка → base64. Голос — как
- *  у обычной речи (провайдер по умолчанию = филипп), отдельных opts не передаём. */
-function synthTtsToBase64(tts: ITtsProvider, text: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Uint8Array[] = [];
-    const stream = tts.synthesize(text);
-    stream.onChunk((c: TtsChunk) => {
-      if (c.audio && c.audio.byteLength) chunks.push(new Uint8Array(c.audio));
-    });
-    stream.onError((e) => reject(e));
-    stream.onDone(() => {
-      const total = chunks.reduce((n, a) => n + a.length, 0);
-      const buf = new Uint8Array(total);
-      let off = 0;
-      for (const a of chunks) {
-        buf.set(a, off);
-        off += a.length;
-      }
-      resolve(Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength).toString("base64"));
-    });
-  });
+/** §: синтез TTS ЦЕЛИКОМ → base64 (для голосовых TG). Интеграционное ревью #2: используем общий
+ *  synthesizeToBuffer (filler-cache) — он ПРАВИЛЬНО оборачивает сырой PCM16 (yandex3, format="pcm16")
+ *  в WAV-контейнер; прежняя локальная склейка слала headerless-PCM как «mp3» → битое голосовое (ложный
+ *  успех). Голос — дефолтный (филипп); отдельных opts не передаём. */
+async function synthTtsToBase64(tts: ITtsProvider, text: string): Promise<string> {
+  const buf = await synthesizeToBuffer(tts, text);
+  if (!buf) throw new Error("синтез голосового не удался (пустой поток)");
+  return Buffer.from(buf).toString("base64");
 }
 
 /**

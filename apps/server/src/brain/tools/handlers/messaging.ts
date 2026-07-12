@@ -12,7 +12,7 @@ import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { err, ok } from "../dispatch-util.js";
+import { channelDownResult, err, ok } from "../dispatch-util.js";
 
 /**
  * Подтверждение отправки адресату ОДИН РАЗ (§14, фидбэк пользователя). Если этого адресата уже одобряли
@@ -84,6 +84,10 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
     cadence.record(ctx.userId, "telegram", to);
     return ok(`Отправлено «${who}» в Telegram.`);
   }
+  // Б4 (интеграционное ревью #4): канал ПК мёртв (resume-grace) — команда не ушла. Основной CDP-путь
+  // недоступен; фолбэк на расширение идёт через ОТДЕЛЬНЫЙ /ext-сокет (может быть жив), поэтому пробуем
+  // его; но если фолбэка нет/тоже не вышел — помечаем channelDown (петля ждёт reconnect, не эскалирует).
+  const wasChannelDown = !result.ok && result.error?.code === "channel_down";
   const rawReason = result.error?.message ?? "ошибка";
   const reason = stripResolveMarker(rawReason);
   // self-heal: вели по памяти, но резолв не вышел → запомненное устарело → забываем.
@@ -100,9 +104,17 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
       return ok(`Отправлено «${who}» в Telegram (через расширение).`);
     } catch (e) {
       const em = stripResolveMarker(e instanceof Error ? e.message : String(e));
+      // Фолбэк тоже не вышел, а исходно был channel_down → петля пусть ждёт reconnect (не эскалирует).
+      if (wasChannelDown) {
+        const cd = channelDownResult(result, "telegram_send не отправлен: канал с ПК недоступен (переподключение).");
+        if (cd) return cd;
+      }
       return err(`Не удалось отправить в Telegram: ${reason}; расширение: ${em}`);
     }
   }
+  // Фолбэка нет и канал ПК мёртв → channelDown (не эскалируем тир на транспортном сбое).
+  const cd = channelDownResult(result, "telegram_send не отправлен: канал с ПК недоступен (переподключение).");
+  if (cd) return cd;
   return err(`Не удалось отправить в Telegram: ${reason}`);
 }
 
@@ -135,6 +147,7 @@ export async function messageSend(ctx: ToolContext, input: Record<string, unknow
   if (channel !== "vk" && channel !== "telegram") return err("message_send: неизвестный channel");
   if (!to || !body) return err("message_send: нужны to и body");
 
+  let channelDown = false; // Б4 (интеграционное ревью #4): код channel_down теряется в обёртке — ловим сами
   const res = await sendOutbound(
     { userId: ctx.userId, channel, recipient: to, body, neverMessagedBefore: true },
     {
@@ -146,11 +159,16 @@ export async function messageSend(ctx: ToolContext, input: Record<string, unknow
       markSent: (k) => sentKeys.add(k),
       send: async (ch, rcpt, b) => {
         const r = await ctx.session.sendAction({ kind: "message.send", channel: ch, to: rcpt, body: b }, DEFAULT_ACTION_TIMEOUT_MS);
+        if (r.error?.code === "channel_down") channelDown = true;
         return { ok: r.ok, error: r.error?.message };
       },
     },
   );
   if (res.status === "sent") return ok(`Отправлено ${to}.`);
+  if (channelDown) {
+    const cd = channelDownResult({ ok: false, error: { code: "channel_down" } }, "message_send не отправлен: канал с ПК недоступен (переподключение).");
+    if (cd) return cd;
+  }
   return err(`Не отправлено (${res.status}): ${res.reason ?? ""}`);
 }
 
@@ -161,6 +179,7 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
   const items = (Array.isArray(input.items) ? input.items : []) as OrderItem[];
   const total = Number(input.total ?? 0);
   if (!vendor || items.length === 0) return err("order_place: нужны vendor и items");
+  let channelDown = false; // Б4 (интеграционное ревью #4): channel_down теряется в обёртке — ловим сами
   try {
     const res = await placeOrder({ userId: ctx.userId, vendor, items, total }, DEFAULT_ORDER_POLICY, {
       requestConfirm: async (summary) => ({ approved: (await ctx.confirm!(summary, "order")).approved }),
@@ -171,10 +190,15 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
           { kind: "order.place", vendor: req.vendor, items: req.items as unknown as Record<string, unknown>[], total: req.total },
           DEFAULT_ACTION_TIMEOUT_MS,
         );
+        if (r.error?.code === "channel_down") channelDown = true;
         return { ok: r.ok, error: r.error?.message, orderId: (r.data as { orderId?: string })?.orderId };
       },
     });
     if (res.status === "placed") return ok(`Заказ оформлен в «${vendor}» на ${total}.`);
+    if (channelDown) {
+      const cd = channelDownResult({ ok: false, error: { code: "channel_down" } }, "order_place не отправлен: канал с ПК недоступен (переподключение).");
+      if (cd) return cd;
+    }
     return err(`Заказ не оформлен (${res.status}): ${res.reason ?? ""}`);
   } catch (e) {
     if (e instanceof CardDataError) return err(e.message); // §0: красная линия карты
