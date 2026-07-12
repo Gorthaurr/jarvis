@@ -118,6 +118,9 @@ export interface VoicePipelineDeps {
   onUserTurnStream?: (text: string, sink: ReplySink) => Promise<void>;
   /** Отправка аудио-чанка TTS клиенту (speak.chunk, §5). */
   sendSpeakChunk: (c: TtsChunk) => void;
+  /** Realtime инкремент 0: замер mouth-to-ear (конец речи → первый звук РЕАЛЬНО сыгран у клиента), мс.
+   *  Зовётся из onAudioPlayed при получении ack. undefined → только лог (метрики не пишем). */
+  onMouthToEar?: (ms: number, turnSeq: number) => void;
   /** Уведомление клиента о состоянии (орб idle/listening/thinking/speaking). */
   sendClientState: (s: VoiceState) => void;
   /** Транскрипт для UI/логов (§5). */
@@ -203,8 +206,18 @@ export class VoicePipeline {
    * это переживает. null вне открытого стрима.
    */
   private rejectActiveStream: (() => void) | null = null;
-  /** Поколение оборота: поздние колбэки от устаревшего STT/TTS отбрасываются. */
+  /** Поколение оборота: поздние колбэки от устаревшего STT/TTS отбрасываются. Бампается ТОЛЬКО на
+   *  barge-in/stop (cancelTts) — это НЕ идентификатор хода (обычные ходы делят один gen). */
   private gen = 0;
+  /** Realtime инкремент 0: МОНОТОННЫЙ идентификатор ХОДА (++ на КАЖДОМ новом ходе в ensureStt) — в отличие
+   *  от gen (только barge). Им тегаются speak-чанки, по нему клиент дедупит и сервер замыкает mouth-to-ear
+   *  ровно на свой ход (ревью фиксов #1: на gen обычные ходы делили одно значение → метрика молчала со 2-го). */
+  private turnSeq = 0;
+  /** Realtime инкремент 0 (ревью фиксов раунд3 #1): СНАПШОТ хода для mouth-to-ear — {seq, turn_end}. Живёт
+   *  ОТДЕЛЬНО от latency-трекера (тот сбрасывается на follow-up ensureStt СИНХРОННО после speak_done, ~0мс,
+   *  а ack клиента прилетает через раунд-трип позже → для короткой однофразной mp3-реплики метрика терялась).
+   *  Снапшот переживает сброс: onAudioPlayed матчит ack с ним и считает mouth-to-ear = ackTs − turnEndTs. */
+  private m2eSnap: { seq: number; turnEndTs: number } | undefined;
   /** Говорит ли сейчас пользователь (между speech_start и финалом) — не перебиваем его фоном. */
   private userSpeaking = false;
   /** Очередь озвучки фоновых результатов (§20 async): произносим, когда канал свободен (и юзер не занят, §9). */
@@ -358,6 +371,32 @@ export class VoicePipeline {
    */
   drainPending(): void {
     this.maybeDrainSpeech();
+  }
+
+  /** Инкремент 0: снять снапшот текущего хода (seq + turn_end) для отложенного mouth-to-ear ack. */
+  private captureM2eSnapshot(): void {
+    const te = this.latency.report().marks.turn_end;
+    if (te !== undefined) this.m2eSnap = { seq: this.turnSeq, turnEndTs: te };
+  }
+
+  /**
+   * Realtime инкремент 0: рендерер начал ВОСПРОИЗВЕДЕНИЕ первого звука хода `turnId` в момент `ts`
+   * (Date.now клиента; клиент и сервер на ОДНОЙ машине → часы общие). Замыкаем mouth-to-ear.
+   * Считаем по СНАПШОТУ хода (переживает follow-up сброс latency-трекера — иначе короткая однофразная
+   * mp3-реплика теряла метрику, т.к. speak_done→ensureStt сбрасывал трекер ДО прихода ack, ревью раунд3
+   * #1). Матч по snap.seq (per-turn, монотонный → опоздавший чужой ack только отвергается, не мис-
+   * атрибутируется). Плюс дублируем в live-трекер (для его summary в in-window случае). Один ack на ход.
+   */
+  onAudioPlayed(turnId: number, ts: number): void {
+    const snap = this.m2eSnap;
+    if (!snap || turnId !== snap.seq) return; // не наш ход / уже замкнут
+    const m2eMs = ts - snap.turnEndTs;
+    this.m2eSnap = undefined; // один ack на ход
+    if (!Number.isFinite(m2eMs) || m2eMs < 0) return; // clock-skew/абсурд — не пишем ложь
+    if (turnId === this.turnSeq) this.latency.markAt("audio_played", ts); // ход ещё жив → в live-трекер тоже
+    const ms = Math.round(m2eMs);
+    this.log.info(`latency mouth-to-ear: →ухо ${ms}мс (ход ${snap.seq})`);
+    this.deps.onMouthToEar?.(ms, snap.seq);
   }
 
   private maybeDrainSpeech(): void {
@@ -592,6 +631,7 @@ export class VoicePipeline {
     };
     this.turn.reset();
     this.latency.reset();
+    this.turnSeq += 1; // инкремент 0 (ревью #1): новый ход → новый per-turn id для mouth-to-ear
     this.latency.mark("wake");
     const myGen = this.gen;
     const stream = this.deps.stt.open({
@@ -654,6 +694,7 @@ export class VoicePipeline {
     if (!stream) return;
     this.sttStream = null;
     this.latency.mark("turn_end"); // конец фразы пользователя (§10)
+    this.captureM2eSnapshot(); // инкремент 0: снапшот хода для mouth-to-ear (переживёт follow-up сброс)
     try {
       await stream.close(); // финальный partial придёт в onPartial → transcript_final
     } catch (e) {
@@ -665,7 +706,10 @@ export class VoicePipeline {
 
   private async runAgent(text: string): Promise<void> {
     const myGen = this.gen;
-    if (this.latency.report().marks.turn_end === undefined) this.latency.mark("turn_end");
+    if (this.latency.report().marks.turn_end === undefined) {
+      this.latency.mark("turn_end");
+      this.captureM2eSnapshot(); // фолбэк-путь turn_end → тоже снимаем снапшот хода
+    }
     // §22 чат: реплика пользователя в историю (голосовой ход — что распознали).
     this.deps.sendChat?.({ role: "user", text });
     // §10 realtime: пофразный стрим, если brain его поддерживает (иначе — классический путь).
@@ -707,10 +751,10 @@ export class VoicePipeline {
     this.lastActiveAt = this.now();
     const speaker = new PhraseSpeaker({
       synthesize: (t) => this.deps.tts.synthesize(t, this.voiceOpts()),
-      sendChunk: (c) => this.deps.sendSpeakChunk(c),
+      sendChunk: (c) => this.deps.sendSpeakChunk({ ...c, gen: this.turnSeq }), // инкремент 0: тег хода для mouth-to-ear
       onSpeaking: () => {
         this.latency.mark("tts_first_chunk");
-        this.latency.mark("audio"); // первый звук пошёл к клиенту
+        this.latency.mark("audio"); // первый звук ОТПРАВЛЕН клиенту (mouth-to-ear замкнёт audio.played)
         this.dispatch({ type: "speak_start" });
         this.log.info(`latency: ${this.latency.report().summary}`);
       },
@@ -831,7 +875,7 @@ export class VoicePipeline {
     this.latency.mark("tts_first_chunk");
     this.latency.mark("audio"); // первый звук (филлер) пошёл к клиенту
     this.dispatch({ type: "speak_start" }); // thinking → speaking
-    this.deps.sendSpeakChunk({ audio, seq: 0, last: true });
+    this.deps.sendSpeakChunk({ audio, seq: 0, last: true, gen: this.turnSeq }); // инкремент 0: тег хода
     this.log.info("realtime: филлер проигран (маскировка пола латентности Opus)", this.latency.report());
   }
 
@@ -872,11 +916,11 @@ export class VoicePipeline {
       if (first) {
         first = false;
         this.latency.mark("tts_first_chunk");
-        this.latency.mark("audio"); // первый звук пошёл к клиенту
+        this.latency.mark("audio"); // первый звук ОТПРАВЛЕН клиенту (mouth-to-ear замкнёт audio.played)
         if (drive) this.dispatch({ type: "speak_start" });
         this.log.info(`latency: ${this.latency.report().summary}`);
       }
-      this.deps.sendSpeakChunk(c);
+      this.deps.sendSpeakChunk({ ...c, gen: this.turnSeq }); // инкремент 0: тег хода для mouth-to-ear
     });
     stream.onError((e) => this.log.warn("ошибка TTS-стрима", e.message));
     stream.onDone(() => {

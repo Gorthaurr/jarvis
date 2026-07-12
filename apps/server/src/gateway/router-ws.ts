@@ -15,6 +15,7 @@
 import {
   type ActionResult,
   type AudioFrame,
+  type AudioPlayed,
   type ClientContext,
   type ClientEnv,
   type ClientSystem,
@@ -363,6 +364,8 @@ export function makeSessionContext(
         last: c.last,
         // §Волна3 (3.5): PCM-стрим v3 — клиент играет по мере прихода (WebAudio-очередь).
         ...(c.format ? { format: c.format, sampleRate: c.sampleRate } : {}),
+        // Realtime инкремент 0: клиент эхом вернёт gen в audio.played (mouth-to-ear того же хода).
+        ...(c.gen !== undefined ? { gen: c.gen } : {}),
       }),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
@@ -567,6 +570,12 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "audio.vad":
       ctx.voice.onVadEvent((env.payload as VadEvent).state);
       break;
+    case "audio.played": {
+      // Realtime инкремент 0: рендерер начал воспроизведение первого чанка хода → mouth-to-ear метрика.
+      const p = env.payload as AudioPlayed;
+      if (typeof p?.gen === "number" && typeof p?.ts === "number") ctx.voice.onAudioPlayed(p.gen, p.ts);
+      break;
+    }
     case "screen.capture.result":
       // Результат screen.capture коррелируется как ActionResult в проде;
       // M0 — лог. TODO(M2): связать со screen.capture command.

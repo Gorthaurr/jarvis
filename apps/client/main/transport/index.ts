@@ -46,6 +46,7 @@ import type {
   DevText,
   ClientState,
   VadEvent,
+  AudioPlayed,
   DemoEvent,
   DemoSave,
   SkillSaved,
@@ -190,6 +191,11 @@ export class Transport extends EventEmitter {
   /** Отправить VAD-событие (audio.vad): speech_start/speech_end/barge_in (§10). */
   sendVad(state: VadEvent["state"]): void {
     this.send(makeEnvelope<VadEvent>("audio.vad", { state }));
+  }
+
+  /** Realtime инкремент 0: рендерер начал воспроизведение первого звука хода gen в момент ts (mouth-to-ear). */
+  sendAudioPlayed(gen: number, ts: number): void {
+    this.send(makeEnvelope<AudioPlayed>("audio.played", { gen, ts, seq: 0 }));
   }
 
   /** Отправить результат подтверждения пользователя (§14). */

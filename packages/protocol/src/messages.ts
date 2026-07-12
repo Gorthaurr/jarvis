@@ -38,6 +38,7 @@ export type MessageType =
   | "voice.enroll.cancel" // отменить запись отпечатка
   | "voice.list" // запросить список enrolled-голосов
   | "voice.remove" // VoiceName — удалить голос по имени
+  | "audio.played" // AudioPlayed — рендерер начал воспроизведение первого чанка хода (mouth-to-ear, инкремент 0)
   | "pong"
   // server -> client
   | "server.hello" // ServerHello
@@ -246,6 +247,18 @@ export interface SpeakChunk {
   format?: "pcm16";
   /** Частота PCM (только при format="pcm16"). */
   sampleRate?: number;
+  /** Realtime инкремент 0: монотонный инвалидатор ХОДА (pipeline.gen). Клиент эхом возвращает его в
+   *  audio.played при старте воспроизведения первого чанка → сервер меряет mouth-to-ear того же хода.
+   *  (Фундамент для turnGen двух продюсеров Talker/Thinker, инкремент B.) */
+  gen?: number;
+}
+
+/** Realtime инкремент 0: рендерер начал ВОСПРОИЗВЕДЕНИЕ первого чанка хода `gen` в момент `ts` (Date.now
+ *  клиента). Сервер замыкает метрику «конец речи → первый звук» (mouth-to-ear), если gen ещё актуален. */
+export interface AudioPlayed {
+  gen: number;
+  ts: number;
+  seq: number;
 }
 
 export interface Transcript {

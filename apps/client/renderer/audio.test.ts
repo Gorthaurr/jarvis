@@ -19,9 +19,10 @@ class FakePlayer {
 
 function harness() {
   const players: FakePlayer[] = [];
-  const factory: PlayerFactory = (bytes, onEnded): Utterance => {
+  const factory: PlayerFactory = (bytes, onEnded, onPlaying): Utterance => {
     const p = new FakePlayer(bytes, onEnded);
     players.push(p);
+    onPlaying?.(); // симулируем <audio> onplaying (звук РЕАЛЬНО пошёл) — для mouth-to-ear ack
     return {
       stop() {
         p.stopped = true;
@@ -107,6 +108,60 @@ describe("AudioPlayback очередь (§10)", () => {
     pb.stop(); // barge-in
     pb.enqueue({ audio: b64([9]), seq: 0, last: true }); // straggler в окне подавления → дропаем
     expect(players).toHaveLength(1); // новая озвучка не стартовала
+  });
+});
+
+// Realtime инкремент 0: mouth-to-ear ack — при РЕАЛЬНОМ старте первого звука хода рендерер зовёт
+// onFirstAudioPlayed(gen, ts) РОВНО ОДИН раз на ход (дедуп по gen). Сервер меряет «конец речи → звук».
+describe("AudioPlayback — mouth-to-ear ack (инкремент 0)", () => {
+  function harnessAck() {
+    const players: FakePlayer[] = [];
+    const factory: PlayerFactory = (bytes, onEnded, onPlaying): Utterance => {
+      const p = new FakePlayer(bytes, onEnded);
+      players.push(p);
+      onPlaying?.(); // <audio> onplaying → mouth-to-ear ack (по реальному старту, не по dequeue)
+      return { stop() { p.stopped = true; } };
+    };
+    const played: Array<{ gen: number; ts: number }> = [];
+    const pb = new AudioPlayback(factory, undefined, (gen, ts) => played.push({ gen, ts }));
+    return { pb, players, played };
+  }
+
+  it("первый звук хода → ack(gen) ОДИН раз; следующая озвучка того же хода — без второго ack", () => {
+    const { pb, players, played } = harnessAck();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true, gen: 5 }); // ход 5 стартовал играть
+    expect(played).toHaveLength(1);
+    expect(played[0]!.gen).toBe(5);
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true, gen: 5 }); // вторая фраза того же хода → в очередь
+    players[0]!.onEnded(); // она стартует
+    expect(played).toHaveLength(1); // тот же ход 5 — второго ack НЕТ (дедуп)
+  });
+
+  it("новый ход (другой gen) → новый ack", () => {
+    const { pb, players, played } = harnessAck();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true, gen: 5 });
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true, gen: 6 }); // ход 6 в очередь (ход 5 ещё играет)
+    players[0]!.onEnded(); // ход 5 доиграл → стартует ход 6
+    expect(played.map((p) => p.gen)).toEqual([5, 6]);
+  });
+
+  it("чанк без gen — ack не шлём (старый сервер/нетегированный звук)", () => {
+    const { pb, played } = harnessAck();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // gen отсутствует
+    expect(played).toHaveLength(0);
+  });
+
+  it("ревью #1: наложение ходов без barge — ack атрибутируется ЕГО озвучке, не последнему чанку", () => {
+    const { pb, players, played } = harnessAck();
+    // ход 5: две фразы; ход 6 приходит ПОКА играет ход 5 (проактив/speakQueued, без stop())
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true, gen: 5 }); // фраза1 хода5 играет → ack 5
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true, gen: 5 }); // фраза2 хода5 → в очередь (несёт gen5)
+    pb.enqueue({ audio: b64([3]), seq: 0, last: true, gen: 6 }); // ход6 → в очередь (несёт gen6)
+    expect(played.map((p) => p.gen)).toEqual([5]); // играет только ход5
+    players[0]!.onEnded(); // фраза1 доиграла → фраза2 (gen5) стартует → дедуп, НЕ преждевременный ack 6
+    expect(played.map((p) => p.gen)).toEqual([5]);
+    players[1]!.onEnded(); // фраза2 доиграла → озвучка хода6 стартует → ТЕПЕРЬ ack 6 (в свой реальный старт)
+    expect(played.map((p) => p.gen)).toEqual([5, 6]);
   });
 });
 

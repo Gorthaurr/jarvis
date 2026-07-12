@@ -1,4 +1,82 @@
-# NEXT_SESSION — с чего начать (обновлено 2026-07-12)
+# NEXT_SESSION — с чего начать (обновлено 2026-07-13)
+
+## 🟢 ПРОДОЛЖИ ОТСЮДА (скажут «продолжи» → делай ЭТО по порядку)
+
+> **Дисциплина владельца (память `adversarial-review-all-changes`, ОБЯЗАТЕЛЬНО):** каждый инкремент →
+> адверсариальное ревью через Workflow **СО ВСЕХ УГЛОВ** (корректность/конкурентность/edge/ресурсы/
+> безопасность/ПОКРЫТИЕ-в-проде/регрессии) → чинить CONFIRMED с тестами → контрольный проход **до 0** →
+> PR (push→`gh pr create`) → после фул-ревью **merge** (push/PR/merge ТОЛЬКО по явному «делай»; merge —
+> необратим, при красном CI/конфликте СТОП). Крупную фичу вести ИНКРЕМЕНТАМИ, каждый — свой PR-цикл.
+> Голос живьём Я НЕ ПРОГОНЯЮ (нет микрофона) — логику юнит-тестирую, живая калибровка за владельцем.
+
+**ГДЕ МЫ:** PR **#2** (10 волн: Волна 3, память Б, интеграционное ревью, 2 аудита ядра, исследования,
+планы) **СМЕРЖЕН в `main`** (origin/main `1332e62`). Тесты на тот момент: сервер 1210 / клиент 195.
+
+**НЕЗАВЕРШЁННОЕ (в рабочем дереве, НЕ закоммичено):** realtime **Инкремент 0** — латентный харнес
+mouth-to-ear («конец речи → первый звук РЕАЛЬНО сыгран у клиента»). Построен + 3 раунда адверс-фиксов, НО
+**all-angle ревью нашло 3 CONFIRMED — их НАДО ЗАКРЫТЬ ПЕРВЫМ ДЕЛОМ.** Тесты сейчас: **сервер 1217 / клиент
+199**, tsc чист, сборка ок (файлы инкремента 0 см. ниже — они в `git status`).
+
+### ШАГ 1 — закрыть 3 находки all-angle ревью инкремента 0 (в `apps/server/src/voice/pipeline.ts` и gateway)
+
+- **[HIGH+MED, metric-integrity] мис-атрибуция ПРОАКТИВНОЙ/ФОНОВОЙ речи.** Корень: `speak()`/`speakQueued`→
+  `startTts(drive=true)`/`playFiller` тегают чанки `gen: this.turnSeq`, а `this.turnSeq` может совпасть с
+  «висящим» `m2eSnap.seq` (снапшот оставлен follow-up-таймаутом `finalizeStt`→`captureM2eSnapshot` БЕЗ речи
+  юзера, либо неспотреблённый снапшот прошлого хода). Тогда `onAudioPlayed` матчит проактивную озвучку
+  (напоминание/итог задачи через минуты) со снапшотом → `m2eMs = playTs − turnEndTs` = минуты → лог/`onMouthToEar`
+  пишет ГИГАНТСКИЙ ложный «→ухо» (нарушение «мис-атрибуция хода»). **ФИКС:** речь ВНЕ пользовательского хода
+  (drive=false / проактив / фоновый итог / приветствие) тегать **sentinel-gen** (напр. `undefined` или
+  зарезервированное значение, которое `onAudioPlayed` НИКОГДА не матчит), чтобы засчитывался ТОЛЬКО
+  собственный ответ пользовательского хода; и/или инвалидировать `m2eSnap` при переходе в idle / старте
+  не-пользовательской озвучки / возрастной бонус (age-bound). Тесты: проактивная речь после хода mouth-to-ear
+  НЕ пишет; итог фоновой задачи через 20с НЕ пишет. (Детали трасс — в отчёте ревью, run `w3zbl5uv1`.)
+- **[LOW, integration-gap] `onMouthToEar` не проброшен в БОЕВОМ gateway** (`gateway/router-ws.ts`
+  `makeSessionContext`→`createVoicePipeline` не передаёт `onMouthToEar`) → метрика идёт ТОЛЬКО в лог, НЕ в
+  `metrics.jsonl`. **ФИКС:** пробросить `onMouthToEar` в `createVoicePipeline`, писать в метрики (recordRound /
+  строка metrics.jsonl) — тогда baseline P50/P95 реально пишется (цель инкремента 0, план §Инкремент0 (а)/(б)).
+
+### ШАГ 2 — довести инкремент 0 по циклу
+1. `npx tsc --noEmit` (server+client), `npx vitest run` (оба), `node scripts/build.mjs` (клиент+extension).
+2. **All-angle адверс-ревью** (файндеры по РАЗНЫМ углам, скрипт-образец: `scratchpad/review-inc0-allangles.js`
+   в прошлой сессии — воссоздать) → чинить до **0 CONFIRMED**.
+3. WIP инкремента 0 УЖЕ закоммичен на ветке **`feat/realtime-inc0`** (это текущая ветка; коммит помечен
+   «WIP … 3 находки открыты»). После закрытия находок + all-angle ревью до 0: доп. коммиты, `git push -u origin feat/realtime-inc0`.
+4. `gh pr create --base main` → **PR #3**; после фул-ревью — merge (по «делай»). ⚠️ merge PR #2 уже сделан — `main` с 10 волнами.
+
+**Файлы инкремента 0 (scope):** `packages/shared/src/index.ts` (LatencyStage +audio_played),
+`packages/protocol/src/messages.ts` (SpeakChunk.gen, AudioPlayed, "audio.played"),
+`apps/server/src/voice/{latency.ts,pipeline.ts}` (turnSeq, m2eSnap, captureM2eSnapshot, onAudioPlayed,
+onMouthToEar-dep), `apps/server/src/gateway/router-ws.ts` (dispatch audio.played + gen в sendSpeakChunk),
+`apps/server/src/integrations/voice-providers.ts` (TtsChunk.gen), `apps/client/renderer/{audio.ts,renderer.ts}`,
+`apps/client/preload/index.ts`, `apps/client/main/{ipc-contract.ts,index.ts,transport/index.ts}` + тесты
+`voice/{latency,pipeline}.test.ts`, `renderer/audio.test.ts`.
+
+### ШАГ 3 — следующие realtime-инкременты (каждый = свой PR-цикл; план `docs/REALTIME_HYBRID_IMPL_PLAN_2026-07-12.md`)
+- **B+C** — Fast Talker-filler на разговорной ветке + перекрытие TTS-фраз (стрим v3 с эмоцией). **Наибольший
+  скачок «живости».** Talker-модель **переключаема**: дефолт быстрый **Sonnet-тир** (правило владельца
+  «Haiku НЕ используем» — Haiku за env-флагом ВЫКЛ; включать Haiku-как-голос-фронт только с явного «да» владельца).
+- **A** — Smart Turn v3 endpointing (ONNX 8МБ, русский) рядом с VAD — seam с мокабельным инференсом; живая
+  РУ-калибровка за владельцем. ⚠️ проверить боевой аудио-путь (audio.frame WS vs LiveKit).
+- **D** — спекуляция на partial STT / adaptive barge / loopback-AEC / WebRTC (позже, поштучно).
+- **Call-присутствие** (`docs/CALL_PRESENCE_IMPL_PLAN_2026-07-12.md`): Discord официальным API, СберДжаз/Meet
+  через VB-CABLE, слух через per-process loopback. ⚠️ **ПЕРВЫМ живой зонд:** есть ли Process Loopback API на
+  Windows build 19045 (может отсутствовать до 20348 → фолбэк system-loopback + наушники). `JARVIS_CALL_MODE=0`
+  дефолт, гейт авторизации outward-речи.
+
+### Прочие открытые хвосты (не realtime)
+- Аудит-2 вынес 3 находки владельцу: `docs/AUDIT_2_OPEN_FINDINGS_2026-07-12.md` ([9] дубль отправки при
+  таймауте, [10] killOfficeTree бьёт все инстансы, [11/12] append_row затирает B1) — COM/дизайн, решать владельцу.
+- Extension-фиксы аудита-2 ([3] keep-alive, [4] ws.onerror) — нужен **живой reload+смоук в Chrome**.
+- Owner-запрошенный концепт «своя среда исполнения» (`docs/RESEARCH_EXECUTION_ENVIRONMENT_2026-07-12.md`) —
+  реализация по решению владельца (первый шаг: persistent code-сессия + `jarvis.*` SDK-фасад).
+
+### Команды (из `jarvis/`)
+- Сервер: из `apps/server` → `npx tsx src/index.ts` (порт 8787, НЕ watch). Клиент: `pnpm --filter @jarvis/client start`.
+- Тесты: `apps/server`/`apps/client` → `npx vitest run`. Typecheck: `npx tsc --noEmit`. Сборка клиента+ext: `node apps/client/scripts/build.mjs`.
+- Текст-драйвер (сам тестирую): `_jarvis_cmd.mjs` + dev-эндпоинты (см. `docs/HOW_IT_WORKS.md`).
+
+---
+
 
 > 🔴 **ЧИТАТЬ ПЕРВЫМ: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)** — механизмы + как тестировать текстом + мышление.
 > Ветка: `feat/harness-wave3`. Сделано автономно 2026-07-11/12 (закоммичено):

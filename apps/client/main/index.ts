@@ -390,6 +390,10 @@ function registerIpc(): void {
   // Аудио из renderer (§3): кадры захвата + управление микрофоном.
   ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));
   ipcMain.on(IPC.playbackActive, (_e, active: boolean) => audio?.setPlaybackActive(Boolean(active)));
+  // Realtime инкремент 0: рендерер начал воспроизведение первого звука хода → на сервер (mouth-to-ear).
+  ipcMain.on(IPC.audioPlayed, (_e, gen: number, ts: number) => {
+    if (typeof gen === "number" && typeof ts === "number") transport?.sendAudioPlayed(gen, ts);
+  });
   ipcMain.on(IPC.activate, () => audio?.activate());
   ipcMain.on(IPC.mute, () => audio?.mute());
   // Запись/повтор навыков демонстрацией (§8).

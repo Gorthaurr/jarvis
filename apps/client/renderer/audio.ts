@@ -201,12 +201,18 @@ export interface Utterance {
 }
 
 /** Фабрика плеера: получает байты mp3 и колбэк «доиграл» (→ следующая в очереди). */
-export type PlayerFactory = (bytes: Uint8Array<ArrayBuffer>, onEnded: () => void) => Utterance;
+// Инкремент 0 (ревью #3): onPlaying — РЕАЛЬНЫЙ старт звучания (<audio> onplaying), для точного mouth-to-ear
+// (не по моменту снятия из очереди, а по факту первого слышимого сэмпла). Опционален (фейк-плеер в тестах).
+export type PlayerFactory = (
+  bytes: Uint8Array<ArrayBuffer>,
+  onEnded: () => void,
+  onPlaying?: () => void,
+) => Utterance;
 
 /** Дефолтный плеер: нативный <audio> + blob (надёжно для целого mp3).
  *  Волна 1: сервер шлёт earcon приёмки как WAV (RIFF) — сниффим магию, чтобы blob получил
  *  правильный MIME (audio/wav), а не «mp3 по умолчанию». */
-const defaultPlayer: PlayerFactory = (bytes, onEnded) => {
+const defaultPlayer: PlayerFactory = (bytes, onEnded, onPlaying) => {
   const isWav = bytes.length > 3 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46; // "RIFF"
   const blob = new Blob([bytes], { type: isWav ? "audio/wav" : "audio/mpeg" });
   const url = URL.createObjectURL(blob);
@@ -218,6 +224,9 @@ const defaultPlayer: PlayerFactory = (bytes, onEnded) => {
       URL.revokeObjectURL(url);
     }
   };
+  // Инкремент 0 (ревью #3): звук РЕАЛЬНО пошёл (после декода+буфера) → точный mouth-to-ear ack. Ошибка
+  // в ack не должна ломать воспроизведение (гейт try/catch внутри onPlaying-колбэка на стороне вызова).
+  el.onplaying = () => onPlaying?.();
   el.onended = () => {
     cleanup();
     onEnded();
@@ -256,7 +265,9 @@ const defaultPlayer: PlayerFactory = (bytes, onEnded) => {
  */
 export class AudioPlayback {
   private parts: Uint8Array<ArrayBuffer>[] = []; // чанки текущей принимаемой озвучки
-  private queue: Uint8Array<ArrayBuffer>[] = []; // готовые озвучки, ждущие воспроизведения
+  // Инкремент 0 (ревью #1): каждая готовая озвучка несёт СВОЙ gen (ход) — чтобы mouth-to-ear ack на
+  // её РЕАЛЬНОМ старте атрибутировался верному ходу, а не последнему принятому чанку (наложение ходов).
+  private queue: Array<{ bytes: Uint8Array<ArrayBuffer>; gen: number | undefined }> = [];
   private current: Utterance | null = null;
   private active = false; // идёт ли воспроизведение прямо сейчас (для barge-in в «хвосте», §10)
   private volume = 1; // громкость голоса Джарвиса 0..1 (ползунок в настройках)
@@ -274,13 +285,34 @@ export class AudioPlayback {
   // создавал новый живой плеер и играл обрывок отменённой фразы поверх речи юзера (+ взводил barge-окно
   // и повисал без last). Новая ЛЕГИТИМНАЯ фраза приходит лишь через секунды (новый ход) — окно её не задевает.
   private suppressChunksUntil = 0;
+  // Realtime инкремент 0: gen последнего принятого чанка + gen, для которого уже отрапортовали
+  // «первый звук сыгран» (дедуп — один ack на ход). Замыкает mouth-to-ear метрику на сервере.
+  private lastChunkGen: number | undefined;
+  private playedReportedGen: number | undefined;
 
   // onActive(true/false) — реальный СТАРТ/КОНЕЦ звучания очереди. Нужен main, чтобы перебивание (§10)
   // работало, пока звук ЕЩЁ ИГРАЕТ, даже если сервер уже ушёл из speaking (синтез кончился раньше плеера).
   constructor(
     private readonly createPlayer: PlayerFactory = defaultPlayer,
     private readonly onActive?: (active: boolean) => void,
+    // Realtime инкремент 0: РЕАЛЬНЫЙ старт воспроизведения первого звука хода (mouth-to-ear ack наверх).
+    private readonly onFirstAudioPlayed?: (gen: number, ts: number) => void,
   ) {}
+
+  /** Инкремент 0: отрапортовать «первый звук хода сыгран» — один раз на ход (дедуп по gen). gen передаётся
+   *  ЯВНО (gen ИМЕННО стартующей озвучки, а не последнего принятого чанка — ревью #1: при наложении ходов
+   *  lastChunkGen мис-атрибутировал). Ошибка ack не должна ломать воспроизведение (ревью #4) — try/catch. */
+  private reportPlayed(gen: number | undefined, ts: number = Date.now()): void {
+    if (typeof gen !== "number" || gen === this.playedReportedGen) return;
+    this.playedReportedGen = gen;
+    try {
+      // ts: mp3 — момент <audio> onplaying (реально слышно); PCM — расчётный АУДИБЕЛЬНЫЙ момент (ревью #2:
+      // src.start() лишь ПЛАНИРУЕТ сэмпл на ~20мс+latency вперёд, брать Date.now() там = оптимизм).
+      this.onFirstAudioPlayed?.(gen, ts);
+    } catch {
+      /* ack — вспомогательная метрика, её сбой не трогает воспроизведение */
+    }
+  }
 
   private setActive(a: boolean): void {
     if (a === this.active) return;
@@ -296,11 +328,13 @@ export class AudioPlayback {
 
   /** Принять чанк (audio — base64). На последнем — озвучка в очередь и (если простаиваем) старт.
    *  §Волна3 (3.5): чанк format="pcm16" (v3 TTS-стрим) играется ПО МЕРЕ ПРИХОДА (см. enqueuePcm). */
-  enqueue(chunk: { audio: string; seq: number; last: boolean; format?: string; sampleRate?: number }): void {
+  enqueue(chunk: { audio: string; seq: number; last: boolean; format?: string; sampleRate?: number; gen?: number }): void {
     // §Волна3 ревью (#18): «отставший» чанк отменённой фразы (пришёл в окне после stop()) — игнорируем,
     // чтобы он не зазвучал поверх речи юзера и не создал повисший live-плеер. Легитимная новая фраза
     // приходит секундами позже (новый ход), вне окна.
     if (Date.now() < this.suppressChunksUntil) return;
+    // Инкремент 0: помним ход последнего чанка — при РЕАЛЬНОМ старте звука отрапортуем mouth-to-ear.
+    if (typeof chunk.gen === "number") this.lastChunkGen = chunk.gen;
     if (chunk.format === "pcm16") {
       this.enqueuePcm(chunk);
       return;
@@ -309,7 +343,7 @@ export class AudioPlayback {
     if (chunk.last) {
       const merged = this.assemble();
       if (merged) {
-        this.queue.push(merged);
+        this.queue.push({ bytes: merged, gen: this.lastChunkGen });
         this.playNext();
       }
     }
@@ -350,11 +384,16 @@ export class AudioPlayback {
     // идём в busy-ветку (копим дальше, на last соберём цельную WAV-озвучку) — ни один сэмпл не теряется.
     if (!this.current && this.queue.length === 0 && this.pcmParts.length === 0) {
       this.setActive(true);
-      const lp = new PcmLivePlayer(rate, () => {
-        if (this.current === lp) this.current = null;
-        if (this.live === lp) this.live = null;
-        this.playNext();
-      });
+      const genAtStart = this.lastChunkGen; // ревью #1: gen ИМЕННО этой live-фразы (не позднего чанка)
+      const lp = new PcmLivePlayer(
+        rate,
+        () => {
+          if (this.current === lp) this.current = null;
+          if (this.live === lp) this.live = null;
+          this.playNext();
+        },
+        (ts) => this.reportPlayed(genAtStart, ts), // инкремент 0: ts = расчётный аудибельный момент (ревью #2)
+      );
       lp.setVolume(this.volume);
       this.current = lp;
       this.live = lp;
@@ -373,7 +412,7 @@ export class AudioPlayback {
       const merged = mergeParts(this.pcmParts);
       this.pcmParts = [];
       if (merged) {
-        this.queue.push(wavFromPcm16(merged, rate));
+        this.queue.push({ bytes: wavFromPcm16(merged, rate), gen: this.lastChunkGen });
         this.playNext();
       }
     }
@@ -411,16 +450,22 @@ export class AudioPlayback {
   /** Запустить следующую озвучку, если сейчас ничего не играет. */
   private playNext(): void {
     if (this.current) return; // играет — следующая стартует по onEnded
-    const bytes = this.queue.shift();
-    if (!bytes) {
+    const item = this.queue.shift();
+    if (!item) {
       this.setActive(false); // очередь пуста и ничего не играет → звук кончился
       return;
     }
     this.setActive(true); // звук пошёл (старт из простоя или следующая фраза)
-    this.current = this.createPlayer(bytes, () => {
-      this.current = null;
-      this.playNext();
-    });
+    // Инкремент 0 (ревью #3): mouth-to-ear ack — по РЕАЛЬНОМУ старту звучания (<audio> onplaying), не по
+    // dequeue; (ревью #1) с gen ИМЕННО этой озвучки, не последнего чанка.
+    this.current = this.createPlayer(
+      item.bytes,
+      () => {
+        this.current = null;
+        this.playNext();
+      },
+      () => this.reportPlayed(item.gen),
+    );
     this.current.setVolume?.(this.volume); // применить выбранную громкость к этой озвучке
   }
 }
@@ -494,10 +539,15 @@ class PcmLivePlayer implements Utterance {
    *  плеер иначе НИКОГДА не завершится: current занят навсегда → onActive залип → barge-окно до 90с
    *  ловит речь юзера. Доиграли хвост и тишина дольше таймаута → честно завершаемся (освобождаем канал). */
   private drainTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Инкремент 0: onFirstAudio вызывается ОДИН раз при планировании самого первого сэмпла. */
+  private firstScheduled = false;
 
   constructor(
     sampleRate: number,
     private readonly onEnded: () => void,
+    // Инкремент 0 (ревью #2): ts — РАСЧЁТНЫЙ момент, когда первый сэмпл станет слышимым (Date.now + задержка
+    // планирования startAt−currentTime + outputLatency), а не момент вызова src.start().
+    private readonly onFirstAudio?: (ts: number) => void,
   ) {
     this.ctx = new AudioContext({ sampleRate });
     this.gain = this.ctx.createGain();
@@ -543,10 +593,23 @@ class PcmLivePlayer implements Utterance {
         else this.armDrainTimer(); // last не пришёл — ждём ещё чанк, иначе дренаж завершит (#17)
       }
     };
+    let started = false;
     try {
       src.start(startAt);
+      started = true;
     } catch {
       this.pendingSources -= 1; // контекст уже закрыт (barge-in) — не зависаем на счётчике
+    }
+    // Инкремент 0 (ревью #4): onFirstAudio ВНЕ try{src.start} — иначе его бросок попал бы в catch выше и
+    // дал ДВОЙНОЙ декремент pendingSources (src уже стартовал, onended тоже декрементит) → плеер мог бы
+    // завершиться посреди фразы. reportPlayed внутри тоже try/catch (двойная защита).
+    if (started && !this.firstScheduled) {
+      this.firstScheduled = true;
+      // Ревью #2: аудибельный момент = сейчас + задержка планирования (startAt − currentTime) + выходная
+      // латентность устройства → сопоставимо с mp3-путём (<audio> onplaying = реально слышно).
+      const scheduleDelayMs = Math.max(0, (startAt - this.ctx.currentTime) * 1000);
+      const outLatencyMs = (this.ctx.outputLatency || 0) * 1000;
+      this.onFirstAudio?.(Date.now() + scheduleDelayMs + outLatencyMs);
     }
   }
 

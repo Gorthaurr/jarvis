@@ -31,6 +31,8 @@ const api: JarvisBridge = {
     ipcRenderer.send(IPC.taskControl, { action, taskId }),
   pushPcm: (pcm: ArrayBuffer) => ipcRenderer.send(IPC.pushPcm, pcm),
   setPlaybackActive: (active: boolean) => ipcRenderer.send(IPC.playbackActive, active),
+  audioPlayed: (gen: number, ts: number) => ipcRenderer.send(IPC.audioPlayed, gen, ts), // realtime инкремент 0
+
   activate: () => ipcRenderer.send(IPC.activate),
   mute: () => ipcRenderer.send(IPC.mute),
   startSkill: (name: string) => ipcRenderer.send(IPC.skillStart, name),
