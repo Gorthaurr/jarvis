@@ -81,7 +81,11 @@ const VERIFY_TOOLS = new Set([
 ]);
 // Нейтральные — не меняют наблюдаемый результат на экране (поиск/память/навыки/служебные).
 const NEUTRAL_TOOLS = new Set([
-  "web_search", "web_fetch", "memory_write", "memory_search", "skill_save", "skill_list", "skill_execute",
+  // Аудит ядра [8]: skill_execute УБРАН из нейтральных — реплей навыка РЕАЛЬНО мутирует GUI (клики/ввод).
+  // Как neutral он не взводил anyMutateSucceeded → успешный реплей + «тихий финал» ловился masked-failure
+  // и озвучивался ЛОЖНЫМ «Не вышло» (честность в обратную сторону). Теперь по умолчанию mutate (как
+  // input_batch); в BLIND_MUTATE он НЕ входит (у навыка своя checkExpect-сверка) → нового verify-долга нет.
+  "web_search", "web_fetch", "memory_write", "memory_search", "skill_save", "skill_list",
   "skill_promote", "tool_load", "tool_create", "browser_tabs", "set_reminder", "cancel_reminder", "list_reminders",
   "watch_create", "watch_cancel", "watch_list", // §долгие-задачи: durable-конфиг наблюдения, не меняет экран
   "obligation_add", "obligation_remove", "obligation_list", // §проактив-всё: durable-конфиг счетов, не меняет экран

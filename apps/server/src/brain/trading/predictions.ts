@@ -154,15 +154,26 @@ export function resolveByPath(p: Prediction, candles: readonly Candle[], now: nu
   const entry = p.entryPrice;
   const stop = p.stopPrice;
   const last = candles.length > 0 ? candles[candles.length - 1]!.c : entry;
-  if (stop == null || !Number.isFinite(stop) || stop === entry || candles.length === 0) {
+  // Аудит ядра [5]: стоп ОБЯЗАН быть с правильной стороны входа. Инвертированный стоп (long: stop≥entry)
+  // при path-сверке давал первый же бар c.l≤stop → exit=stop>entry → rMultiple>0 → «стоп-аут» книжился
+  // как +1R ПОБЕДА (ложный успех, раздувал expectancyR). Невалидный стоп → деградируем на resolveOne.
+  const invalidStop =
+    stop == null || !Number.isFinite(stop) || stop === entry ||
+    (p.direction === "up" ? stop > entry : stop < entry);
+  if (invalidStop || candles.length === 0) {
     return resolveOne(p, last, now);
   }
+  // Аудит ядра [4]: НЕ резолвим по свечам, начавшимся ДО createdAt — до-входный фитиль неотличим от
+  // пост-входного и ложно бил бы стоп/тейк движением, которого после прогноза не было (окно тянется с
+  // −barMs). Оставляем только бары окна [createdAt, …]; нет ни одного пост-входного → resolveOne.
+  const pathCandles = candles.filter((c) => c.t >= p.createdAt);
+  if (pathCandles.length === 0) return resolveOne(p, last, now);
   const long = p.direction === "up";
   const risk = Math.abs(entry - stop);
   const target = p.targetPrice;
-  let exitPrice = last;
+  let exitPrice = pathCandles[pathCandles.length - 1]!.c;
   let outcome: "target" | "stop" | "time" = "time";
-  for (const c of candles) {
+  for (const c of pathCandles) {
     const hitStop = long ? c.l <= stop : c.h >= stop;
     const hitTarget = target != null && (long ? c.h >= target : c.l <= target);
     if (hitStop) {

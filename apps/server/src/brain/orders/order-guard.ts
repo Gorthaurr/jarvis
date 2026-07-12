@@ -113,6 +113,12 @@ export function assertNoCardData(obj: unknown): void {
 
 /** Решение по заказу (§14). spend cap — жёсткий; allowlist/порог → confirm. */
 export function checkOrder(req: OrderRequest, policy: OrderPolicy): OrderGuardDecision {
+  // Аудит ядра [7]: жёсткий кап FAIL-CLOSED на нечисловой/отрицательной сумме. `NaN > spendCap` === false
+  // → нераспознанная сумма («12,500»/«12 500» → Number → NaN) проходила потолок мимо (§0/§14 fail-open).
+  // Не можем оценить сумму → трактуем как превышение капа (блок), а не как «ок».
+  if (!Number.isFinite(req.total) || req.total < 0) {
+    return { status: "blocked_cap", reason: `сумма не распознана (${req.total}) — заказ заблокирован для безопасности` };
+  }
   if (req.total > policy.spendCap) {
     return { status: "blocked_cap", reason: `сумма ${req.total} выше потолка ${policy.spendCap}` };
   }

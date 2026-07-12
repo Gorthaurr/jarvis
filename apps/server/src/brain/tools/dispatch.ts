@@ -382,7 +382,13 @@ export async function dispatchTool(
     // §Волна2 (2.3): дешёвые сенсоры читают НЕДОВЕРЕННЫЙ контент (текст с экрана, заголовки окон —
     // M11: влияемые атакующим данные; detail у wait_for несёт OCR-текст, window.focus — заголовок) →
     // та же обёртка, что browser_read/screen_capture.
-    if (kind === "screen.ocr" || kind === "ui.snapshot" || kind === "window.list" || kind === "wait.for" || kind === "window.focus") {
+    // Аудит ядра [9]: ui.ground добавлен — он возвращает name/automationId/value UIA-элементов (влияемый
+    // атакующим текст, как ui.snapshot; M11). Раньше падал в generic ok() без обёртки → граница
+    // данные/инструкции была ослаблена для этого read-пути.
+    if (
+      kind === "screen.ocr" || kind === "ui.snapshot" || kind === "window.list" ||
+      kind === "wait.for" || kind === "window.focus" || kind === "ui.ground"
+    ) {
       const src =
         kind === "screen.ocr"
           ? "screen-ocr"
@@ -392,11 +398,13 @@ export async function dispatchTool(
               ? "window-list"
               : kind === "wait.for"
                 ? "wait-for"
-                : "window-focus";
+                : kind === "ui.ground"
+                  ? "ui-ground"
+                  : "window-focus";
       const out = untrusted(src, result.data !== undefined ? JSON.stringify(result.data) : `ok (${kind})`);
       out.data = result.data;
       // OCR/снапшот — реальный взгляд на состояние; wait_for — сверка ТОЛЬКО при met:true
-      // (met:false — честное «не дождался»); список окон/фокус — слабее, сверкой не считаем.
+      // (met:false — честное «не дождался»); список окон/фокус/ground — слабее, сверкой не считаем.
       out.observed =
         kind === "screen.ocr" || kind === "ui.snapshot"
           ? true

@@ -1713,7 +1713,7 @@ async function runAgentLoop(
       ) {
         verifyNudges += 1;
         const claimed = claimsObservedResult(resp.text);
-        convo.push({ role: "assistant", content: resp.text });
+        convo.push({ role: "assistant", content: resp.text.trim() || "…" }); // аудит [2]: пустой content → Anthropic 400 (как sibling ниже)
         convo.push({
           role: "user",
           content: claimed
@@ -1736,7 +1736,7 @@ async function runAgentLoop(
       const launchOnlyClaim = /(?<![\p{L}])(запущен|запустил|поднялс|стартовал|открыл)\p{L}*/iu.test(resp.text || "");
       if (resp.stopReason === "end_turn" && !goalCheckDone && round >= 2 && (!lastRoundHadVerify || launchOnlyClaim)) {
         goalCheckDone = true;
-        convo.push({ role: "assistant", content: resp.text });
+        convo.push({ role: "assistant", content: resp.text.trim() || "…" }); // аудит [2]: пустой content → Anthropic 400
         convo.push({
           role: "user",
           content:
@@ -1978,9 +1978,23 @@ async function runAgentLoop(
       consecErrorRounds += 1;
       if (consecErrorRounds >= ESCALATE_AFTER && currentTier !== "fable") {
         // аннотация обязательна: вывод типа зацикливается через back-edge петли (currentTier = nextTier)
-        const nextTier: Exclude<Tier, "tier0"> = currentTier === "haiku" ? "sonnet" : "fable";
-        const nextModel = deps.models[nextTier];
-        if (nextModel !== model) {
+        // Аудит ядра [1]: идём ВВЕРХ по лестнице тиров до первого с ДРУГОЙ моделью, ПРОПУСКАЯ схлопнутые
+        // ступени. Прежний одиночный шаг haiku→sonnet при деф-конфиге (haiku==sonnet=Sonnet) видел ту же
+        // модель и уходил в else, форсивший currentTier="fable" БЕЗ смены модели → гард currentTier!=="fable"
+        // навсегда ложь → задача застревала на Sonnet и НИКОГДА не доходила до Opus (каскад §7 defeated).
+        const TIER_LADDER: readonly Exclude<Tier, "tier0">[] = ["haiku", "sonnet", "fable"];
+        const fromIdx = TIER_LADDER.indexOf(currentTier);
+        let nextTier: Exclude<Tier, "tier0"> | null = null;
+        let nextModel = model;
+        for (let i = fromIdx + 1; i < TIER_LADDER.length; i++) {
+          const cand = deps.models[TIER_LADDER[i]!];
+          if (cand !== model) {
+            nextTier = TIER_LADDER[i]!;
+            nextModel = cand;
+            break;
+          }
+        }
+        if (nextTier) {
           // Реальная эскалация: целевой тир — ДРУГАЯ модель → есть смысл «зайти сильнее».
           // §Волна3 (3.2): помним, ОТКУДА поднялись — executor вернёт дешёвый тир, когда механика
           // пойдёт чисто (≥2 чистых раундов при известной процедуре); новый провал эскалирует снова.
@@ -1994,12 +2008,12 @@ async function runAgentLoop(
           // Filler: дать понять, что не зависли, а пробуем иначе (а не молчать на застревании).
           session.send("transcript", { text: "Секунду, зайду с другой стороны.", final: true });
         } else {
-          // Холостая эскалация: все тиры на ОДНОЙ модели (тек. конфиг — везде Opus) — «заходить
-          // сильнее» некуда, та же модель не станет умнее. НЕ жжём раунды на мнимый перезаход и НЕ
-          // врём «зайду иначе»; помечаем fable, чтобы дальше не пытаться эскалировать вхолостую.
+          // Холостая эскалация: выше по лестнице НЕТ другой модели (все схлопнуты в текущую — напр.
+          // all-Opus конфиг). «Заходить сильнее» некуда, та же модель не станет умнее. НЕ жжём раунды
+          // на мнимый перезаход и НЕ врём «зайду иначе»; помечаем fable, чтобы не пытаться вхолостую.
           currentTier = "fable";
           familyBoost = null; // маркер «эскалировать некуда» тоже липкий — откат его не снимает
-          log.info("эскалация пропущена: целевой тир — та же модель (нет более сильной)", { model });
+          log.info("эскалация пропущена: выше по лестнице нет другой модели", { model });
         }
       }
     } else {

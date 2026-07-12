@@ -598,6 +598,30 @@ describe("agent-loop (§7, §8)", () => {
     expect(models).toContain("s"); // провалы подряд → эскалация на sonnet
   });
 
+  it("§7 аудит [1]: при схлопнутом haiku==sonnet трёп эскалирует СРАЗУ на fable (не застревает на Sonnet)", async () => {
+    // Деф-конфиг: haiku==sonnet=одна модель ("s"), fable="f" (Opus). Прежде шаг haiku→sonnet видел ту же
+    // модель → форсил currentTier="fable" БЕЗ смены model → задача застревала на "s", до "f" НИКОГДА не
+    // доходила (каскад §7 defeated). Теперь пропускаем схлопнутую ступень: haiku эскалирует прямо на "f".
+    const failingSend = vi.fn(() =>
+      Promise.resolve({ commandId: "c", ok: false, error: { code: "runtime" as const, message: "fail" }, durationMs: 1 }),
+    );
+    const session = fakeSession(failingSend);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+      { toolUses: [{ id: "t2", name: "app_launch", input: { app: "x" } }] },
+      { toolUses: [{ id: "t3", name: "app_launch", input: { app: "x" } }] },
+      { text: "Готово." },
+    ]);
+    await handleUserText(
+      session,
+      "привет, как дела",
+      await makeDeps(llm, { models: { haiku: "s", sonnet: "s", fable: "f" } }),
+    );
+    const models = llm.requests.map((r) => r.model);
+    expect(models[0]).toBe("s"); // трёп начали на haiku-слоте (схлопнут в "s")
+    expect(models).toContain("f"); // эскалация ДОШЛА до fable — не застряла на "s"
+  });
+
   it("§20 async: задача-действие → тихий финал + результат в фоне (не блокирует, без дубль-ack)", async () => {
     const session = fakeSession();
     const spoken: { voice: string }[] = [];

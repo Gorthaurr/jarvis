@@ -10,13 +10,86 @@
  *
  * НИКОГДА (§0): не передавать/не логировать карточные и платёжные данные из файлов.
  */
-import { promises as fsp } from "node:fs";
+import { type Dirent, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createLogger } from "@jarvis/shared";
-import { assertReadable, assertWritable, isSecretPath } from "./self-guard.js";
+import { assertReadable, assertWritable, isAncestorOfSelf, isProtectedSelfPath, isSecretPath } from "./self-guard.js";
 
 const log = createLogger("actuator:fs");
+
+/** Бюджет обхода поддерева для рекурсивного self-guard (аудит ядра [11]). Щедрый: node_modules ловится
+ * как СЕГМЕНТ пути на входе в каталог (без спуска внутрь), поэтому бюджет тратят лишь НЕ-защищённые
+ * записи — в норме исчерпание не наступает. При исчерпании — fail-CLOSED (отказ), не «чисто». */
+const TREE_GUARD_BUDGET = 200_000;
+
+/**
+ * Аудит ядра [11]: leaf-гард (assertWritable) проверял ТОЛЬКО сам путь — рекурсивное удаление/перемещение
+ * КАТАЛОГА сносило/релоцировало node_modules/.env/запущенный бинарь ВНУТРИ поддерева в обход рельс.
+ * Перед рекурсивной операцией над каталогом: (1) запрет предка запущенного бинаря; (2) ограниченный
+ * скан поддерева — есть защищённое внутри → отказ (fail-closed). Для файла — обычный leaf-гард.
+ */
+async function assertTreeWritable(abs: string): Promise<void> {
+  assertWritable(abs); // leaf-проверка самого пути (секрет/node_modules/бинарь как конечная цель)
+  let isDir = false;
+  try {
+    isDir = (await fsp.stat(abs)).isDirectory();
+  } catch {
+    return; // нет пути — пусть операция сама отдаст честную ошибку
+  }
+  if (!isDir) return;
+  if (isAncestorOfSelf(abs)) {
+    throw new Error(
+      `защита самосохранности (§): каталог «${abs}» содержит запущенный бинарь Джарвиса — рекурсивное удаление/перемещение отклонено.`,
+    );
+  }
+  const budget = { n: TREE_GUARD_BUDGET, exhausted: false };
+  const hit = await firstProtectedInTree(abs, budget);
+  if (hit) {
+    throw new Error(
+      `защита самосохранности (§): каталог «${abs}» содержит защищённое («${hit}») — рекурсивное удаление/перемещение отклонено. Удаляй/двигай точечно.`,
+    );
+  }
+  // Контрольный проход аудита [11]: бюджет исчерпан ДО полного обхода → мы НЕ можем гарантировать, что
+  // внутри нет .env/node_modules/бинаря в непройденной ветке. FAIL-CLOSED: отказываем (а не «чисто»).
+  if (budget.exhausted) {
+    throw new Error(
+      `защита самосохранности (§): каталог «${abs}» слишком большой для полной проверки поддерева (>${TREE_GUARD_BUDGET} записей) — рекурсивное удаление/перемещение отклонено (fail-closed). Удаляй/двигай точечно.`,
+    );
+  }
+}
+
+/** Первый защищённый путь в поддереве (уровень целиком до спуска — node_modules/.env обычно наверху).
+ * budget.exhausted взводится при исчерпании бюджета: null тогда ≠ «чисто», а «не смогли проверить». */
+async function firstProtectedInTree(dir: string, budget: { n: number; exhausted: boolean }): Promise<string | null> {
+  if (budget.n <= 0) {
+    budget.exhausted = true;
+    return null;
+  }
+  let ents: Dirent[];
+  try {
+    ents = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return null; // нет доступа к каталогу — не наша забота (операция сама отдаст ошибку)
+  }
+  for (const d of ents) {
+    budget.n -= 1;
+    const full = join(dir, d.name);
+    if (isProtectedSelfPath(full)) return full;
+  }
+  for (const d of ents) {
+    if (budget.n <= 0) {
+      budget.exhausted = true;
+      return null;
+    }
+    if (d.isDirectory()) {
+      const deeper = await firstProtectedInTree(join(dir, d.name), budget);
+      if (deeper) return deeper;
+      if (budget.exhausted) return null; // дальше проверять бессмысленно — уже не гарантируем чистоту
+    }
+  }
+  return null;
+}
 
 /** Дефолтный лимит чтения (защита от загрузки гигантских файлов в память). */
 const DEFAULT_MAX_READ = 2 * 1024 * 1024; // 2 МБ
@@ -121,7 +194,10 @@ export async function listDir(path: string, recursive = false): Promise<{ path: 
 
 export async function deleteEntry(path: string, recursive = false): Promise<{ path: string; deleted: boolean }> {
   const abs = expandPath(path);
-  assertWritable(abs); // § рельсы: не даём удалить критичное для себя
+  // § рельсы: не даём удалить критичное для себя. Аудит [11]: рекурсивно — сверяем ВСЁ поддерево,
+  // иначе rm(recursive) снёс бы node_modules/.env/бинарь внутри мимо leaf-гарда.
+  if (recursive) await assertTreeWritable(abs);
+  else assertWritable(abs);
   await fsp.rm(abs, { recursive, force: false });
   log.info("fs.delete", { path: abs, recursive });
   return { path: abs, deleted: true };
@@ -130,7 +206,10 @@ export async function deleteEntry(path: string, recursive = false): Promise<{ pa
 export async function moveEntry(from: string, to: string): Promise<{ from: string; to: string }> {
   const a = expandPath(from);
   const b = expandPath(to);
-  assertWritable(a); // § рельсы: ни источник, ни приёмник не должны затрагивать критичное
+  // § рельсы: ни источник, ни приёмник не должны затрагивать критичное. Аудит [11]: rename/cp двигает
+  // ВЕСЬ подкаталог источника — если это каталог с .env/node_modules/бинарём внутри, релокация обошла бы
+  // и self-guard, и confirm (fs_move не confirm-гейтится). Поэтому источник сверяем поддеревом.
+  await assertTreeWritable(a);
   assertWritable(b);
   await fsp.rename(a, b).catch(async (e: NodeJS.ErrnoException) => {
     // EXDEV — разные тома: копируем и удаляем.

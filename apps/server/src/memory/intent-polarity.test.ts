@@ -24,6 +24,14 @@ describe("intentPolarity (§8)", () => {
     expect(intentPolarity("play some jazz")).toBe("start");
   });
 
+  it("аудит [3]: синонимы остановки «хватит/кончай/заканчивай» → stop (раньше neutral → реплей запускал)", () => {
+    expect(intentPolarity("хватит искать катку")).toBe("stop");
+    expect(intentPolarity("кончай поиск")).toBe("stop");
+    expect(intentPolarity("заканчивай уже")).toBe("stop");
+    // точность стема: «хватай/хватка» — НЕ стоп (не должны ломать start-команду игры)
+    expect(intentPolarity("хватай флаг")).not.toBe("stop");
+  });
+
   it("оба класса → mixed («поставь на паузу» не считается чистым start)", () => {
     expect(intentPolarity("поставь на паузу")).toBe("mixed");
     expect(intentPolarity("останови это и запусти заново")).toBe("mixed");
@@ -50,6 +58,8 @@ describe("polarityConflict (§8)", () => {
   it("стоп-команда ↔ запускной навык → конфликт (живой случай)", () => {
     expect(polarityConflict("прекрати поиск у доти", START_SKILL)).toBe(true);
     expect(polarityConflict("останови поиск игры в дота 2", START_SKILL)).toBe(true);
+    // аудит [3]: «хватит искать» тоже подавляет авто-реплей запускного навыка
+    expect(polarityConflict("хватит искать катку", START_SKILL)).toBe(true);
   });
 
   it("запускная команда ↔ стоп-навык → конфликт (симметрия)", () => {
