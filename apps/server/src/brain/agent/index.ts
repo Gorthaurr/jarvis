@@ -15,7 +15,7 @@
  */
 import type { ActionCommand, ActionKind, SkillStep, TaskStatus } from "@jarvis/protocol";
 import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, actionTimeoutMs, newId } from "@jarvis/protocol";
-import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, foldText, sleep } from "@jarvis/shared";
+import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, envInt, foldText, sleep } from "@jarvis/shared";
 import { COLD_TOOL_NAMES, TOOL_SCHEMAS, type ToolSchema, toolCatalogLine } from "@jarvis/tools";
 import type { McpManager } from "../mcp/manager.js";
 import { kindNeedsInput, toolNeedsInput } from "../tools/input-kinds.js";
@@ -604,7 +604,7 @@ export async function handleUserText(
     const pend = deps.pendingClarify;
     deps.pendingClarify = undefined;
     const resolved = resolveClarifyAnswer(pend.key, clean);
-    if (resolved) return finishReply(await runTier0(session, resolved, deps));
+    if (resolved) return finishReply(await runTier0(session, resolved, deps, sink)); // sink → консьерж-открытие тоже sync-first
   }
 
   const decision = classifyTier(clean);
@@ -619,7 +619,7 @@ export async function handleUserText(
       deps.pendingClarify = { key: decision.local.key };
       return finishReply({ voice: decision.local.question });
     }
-    return finishReply(await runTier0(session, decision.local, deps));
+    return finishReply(await runTier0(session, decision.local, deps, sink));
   }
   const tier: Exclude<Tier, "tier0"> = decision.tier === "tier0" ? "haiku" : decision.tier;
 
@@ -634,20 +634,24 @@ export async function handleUserText(
     }
   }
 
-  // ЗАДАЧА-ДЕЙСТВИЕ (sonnet/fable И НЕ разговор) + есть канал асинхронной озвучки → НЕ блокируем
-  // разговор: работу гоним в фоне (§20), итог проговорим по готовности. ВОПРОС/рассуждение
-  // (decision.conversational) сюда НЕ попадает — он отвечается СИНХРОННО ниже (стримом), без фоновой
-  // задачи и дворецкого-ack (фикс «каждый вопрос воспринимает как задачу»). Независимые задачи бегут
-  // ПАРАЛЛЕЛЬНО; конкуренцию за мышь/клаву разруливает аренда ввода (§20) внутри петли.
-  if (decision.conversational !== true && (tier === "sonnet" || tier === "fable") && deps.speakResult) {
-    // Волна 1: слышимая приёмка СРАЗУ (earcon) — фоновая задача молчит до результата по дизайну
-    // («тихий финал»), но тишина в момент приёма читалась как «не услышал» → повтор → дубль-каскад.
+  // SYNC-FIRST (корень жалобы «молча делал → потом скопом ответил на всё»): ДЕЙСТВИЕ исполняем
+  // СИНХРОННО этим же ходом — итог звучит СРАЗУ, а не «молча в фон → отложенный итог → очередь
+  // сливается скопом». Длинную задачу ПРОМОТИМ в фон по бюджету (JARVIS_SYNC_PROMOTE_MS): короткая
+  // (открой/пауза/один шаг) → мгновенный голосовой результат; затянувшаяся → ОДНА фраза «Берусь, сэр»
+  // (не молчание!) + фон + итог по готовности, микрофон при этом освобождается (не глохнет — прежняя
+  // причина async-всего). ВОПРОС (conversational) и так шёл синхронно ниже. Аварийный откат к старому
+  // «всё в фон» — JARVIS_SYNC_FIRST=0. Без sink (dev.text/тесты) — просто синхронный путь ниже.
+  const isActionTask = decision.conversational !== true && (tier === "sonnet" || tier === "fable");
+  if (isActionTask && deps.speakResult) {
+    if (sink && process.env.JARVIS_SYNC_FIRST !== "0") {
+      // ГОЛОСОВОЙ канал: sync-first с промоушеном в фон — итог звучит СРАЗУ, длинная задача через 10с
+      // говорит «Берусь» и уходит в фон (микрофон свободен). Это и есть фикс «молча → скопом».
+      return await runActionSyncFirst(session, clean, tier, deps, sink, { freshContext });
+    }
+    // Без sink (dev.text/чат/тесты) ИЛИ откат JARVIS_SYNC_FIRST=0: прежнее — молча в фон, итог через
+    // speakResult (в тексте нет аудио-очереди → скопом не сливается; сеанс не блокируется на длинной задаче).
     deps.taskAccepted?.();
     startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext }), deps, { bounded: true });
-    // §20 «тихий финал»: ход завершается БЕЗ произносимой фразы — итог придёт ОДИН раз через
-    // speakResult. Раньше СРАЗУ звучал безусловный дворецкий ack («Принял») + результат следом =
-    // ×2-3 фразы на КАЖДОМ ходе (жалоба). Теперь одна фраза — сам результат. Долгую многошаговую
-    // задачу подсвечивает визуальная панель прогресса (task.status), голосового филлера нет.
     return finishReply({ voice: "" });
   }
 
@@ -668,7 +672,7 @@ export async function handleUserText(
  * по-дворецки и исполняем фоновой микро-задачей, когда аренда освободится. Без
  * асинхронного канала — честно ждём аренду и исполняем инлайн (корректность > задержки).
  */
-async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps): Promise<AgentReply> {
+async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, sink?: ReplySink): Promise<AgentReply> {
   const arbiter = deps.inputArbiter;
   // §20/realtime: с голосовым каналом ВСЕГДА в фон, даже если аренда свободна. Иначе медленное
   // действие (browser.open висел 12с на CDP-таймауте) держит пайплайн в «думаю», где микрофон
@@ -678,14 +682,47 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps): 
   // ack-филлера и БЕЗ ожидания аренды ввода. Одна чистая фраза мгновенно — не плодим «Принял»+результат
   // на быстрой команде (лечит «×2 фразы» на медиа) и не ждём, пока освободится мышь от фоновой задачи.
   const instant = local.kind === "media" || local.kind === "volume";
+  // SYNC-FIRST (та же логика, что для LLM-действий): «открой X» звучит результатом СРАЗУ («Запустил
+  // доту, сэр»), а не молча-в-фон-с-отложенным-итогом. Медленное открытие (browser.open висел на
+  // CDP) ПРОМОТИМ в фон по бюджету — «Секунду, сэр» + итог по готовности, микрофон освобождается (та
+  // же защита от «глохнет», что раньше давал безусловный фон). Откат к старому фону — JARVIS_SYNC_FIRST=0.
+  if (sink && deps.speakResult && !instant && process.env.JARVIS_SYNC_FIRST !== "0") {
+    const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", 10_000);
+    const runP = runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race<{ kind: "done"; reply: AgentReply } | { kind: "error"; error: unknown } | { kind: "slow" }>([
+      // onRejected — см. runActionSyncFirst: не плодим unhandled rejection при промоушене.
+      runP.then((reply) => ({ kind: "done" as const, reply }), (error) => ({ kind: "error" as const, error })),
+      new Promise<{ kind: "slow" }>((res) => {
+        timer = setTimeout(() => res({ kind: "slow" }), promoteMs);
+        if (typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (outcome.kind === "error") throw outcome.error;
+    if (outcome.kind === "done") {
+      deps.memory.pushTurn("assistant", outcome.reply.voice);
+      return outcome.reply; // результат сразу этим ходом
+    }
+    // ПРОМОУШЕН: открытие затянулось → «Секунду, сэр» сразу, итог по готовности (микрофон свободен).
+    log.info("sync-first tier0: действие затянулось — промоушен в фон");
+    const bg = runP
+      .then((reply) => {
+        deps.memory.pushTurn("assistant", reply.voice);
+        if (reply.voice.trim() && !deps.isClosed?.()) deps.speakResult?.(reply);
+      })
+      .catch((e) => {
+        log.error("промотированное tier0-действие упало", { error: e instanceof Error ? e.message : String(e) });
+        if (!deps.isClosed?.()) deps.speakResult?.({ voice: verbalize("Не смог выполнить, сэр.") });
+      });
+    deps.bgTasks?.add(bg);
+    void bg.finally(() => deps.bgTasks?.delete(bg));
+    return { voice: verbalize("Секунду, сэр.") };
+  }
   if (deps.speakResult && !instant) {
-    // Волна 1: аренда ввода занята другой задачей → tier0-действие будет ЖДАТЬ в очереди — дай
-    // слышимую приёмку (earcon), иначе тишина читается как «не услышал». Свободная аренда →
-    // результат придёт через секунду-две, доп. звук не нужен.
+    // Откат (JARVIS_SYNC_FIRST=0): прежнее поведение — молча в фон, итог через speakResult.
     if (arbiter?.locked) deps.taskAccepted?.();
     startBackgroundTask(() => runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus), deps, { bounded: false });
-    // §20 «тихий финал»: результат действия («Открыл …») придёт ОДИН раз через speakResult —
-    // без предварительного дворецкого ack (раньше «Принял»+«Открыл» = ×2 фразы на каждом открытии).
     return { voice: "" };
   }
   // instant → без аренды; прочее (тесты/dev.text) — инлайн под арендой (корректность > задержки).
@@ -732,6 +769,110 @@ function startBackgroundTask(
   void task.finally(() => deps.bgTasks?.delete(task));
 }
 
+/**
+ * SYNC-FIRST исполнение действия на ГОЛОСОВОМ канале (корень «молча делал → потом скопом»).
+ * Действие идёт СИНХРОННО с sink (первый звук — как только готово), НО если не уложилось в бюджет
+ * JARVIS_SYNC_PROMOTE_MS — ПРОМОТИМ в фон: финализируем ход одной фразой «Берусь, сэр» (микрофон
+ * освобождается, не глохнет — прежняя причина async-всего) и доигрываем задачу в фоне, итог по
+ * готовности через speakResult. Короткая задача (открой/пауза/один шаг) промоушена не достигает —
+ * её результат звучит сразу этим ходом. Обёртка-sink глушит поздний стрим петли ПОСЛЕ промоушена,
+ * чтобы реальный итог не прозвучал ПОВЕРХ «Берусь» (озвучится один раз через speakResult).
+ */
+async function runActionSyncFirst(
+  session: Session,
+  text: string,
+  tier: Exclude<Tier, "tier0">,
+  deps: AgentDeps,
+  sink: ReplySink,
+  opts: { freshContext?: boolean },
+): Promise<AgentReply> {
+  // Fix ревью (concurrency-bound): держим потолок MAX_PARALLEL_TASKS и для sync-first. Забираем слот
+  // НЕблокирующе (tryAcquire) — интерактивный ход не тормозим. Слотов нет (все заняты промотированными
+  // петлями) → эту команду в bounded-фон (встанет в очередь семафора), чтобы не плодить >MAX параллельных
+  // LLM-петель. Редкий burst длинных задач → деградация к прежнему тихому фону, а не перегруз/429.
+  const sem = deps.concurrency;
+  if (sem && !sem.tryAcquire()) {
+    log.info("sync-first: слоты параллельности заняты — команда в bounded-фон (не превышаем MAX_PARALLEL_TASKS)");
+    deps.taskAccepted?.();
+    startBackgroundTask(() => runAgentLoop(session, text, tier, deps, undefined, { ...opts }), deps, { bounded: true });
+    sink.done(""); // тихий финал (как прежний фон-путь)
+    return { voice: "" };
+  }
+  let released = false;
+  const release = (): void => {
+    if (!released) {
+      released = true;
+      sem?.release();
+    }
+  };
+
+  const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", 10_000);
+  let detached = false;
+  // Обёртка: до промоушена — прозрачна к реальному sink; после — инертна (петля больше не стримит
+  // в голосовой канал; её финал доставит speakResult). Петля зовёт только sentence/thinking (см.
+  // контракт: sink.done делает ВЫЗЫВАЮЩИЙ, не петля), поэтому done тут не нужен.
+  const wrap: ReplySink = {
+    thinking: () => {
+      if (!detached) sink.thinking?.();
+    },
+    sentence: (s) => {
+      if (!detached) sink.sentence(s);
+    },
+    display: (d) => {
+      if (!detached) sink.display(d);
+    },
+    done: () => {},
+  };
+  // suppressStepStream (фикс double-speak): action-петля НЕ стримит step-0 пофразно в sink → нет pushedAny
+  // в пайплайне ДО промоушена → «Берусь» не глохнет и итог не звучит вторым разом. Финал — один раз
+  // (терминал при done / speakResult при промоушене). Разговорный путь (conversational) стрим сохраняет.
+  const loopP = runAgentLoop(session, text, tier, deps, wrap, { ...opts, conversational: false, suppressStepStream: true });
+  void loopP.then(release, release); // слот держим на ВСЮ жизнь петли (sync + промоушен), освобождаем на терминации
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race<{ kind: "done"; reply: AgentReply } | { kind: "error"; error: unknown } | { kind: "slow" }>([
+    // onRejected обязателен: без него отклонение петли ПОСЛЕ выигрыша таймера (промоушен) стало бы
+    // unhandled rejection (петля ещё в полёте). До промоушена ошибка пробрасывается наверх (как в
+    // синхронном пути), после — её ловит bg.catch ниже.
+    loopP.then((reply) => ({ kind: "done" as const, reply }), (error) => ({ kind: "error" as const, error })),
+    new Promise<{ kind: "slow" }>((res) => {
+      timer = setTimeout(() => res({ kind: "slow" }), promoteMs);
+      if (typeof timer.unref === "function") timer.unref();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+
+  if (outcome.kind === "error") throw outcome.error; // ошибка ДО промоушена → наверх (пайплайн даст фолбэк)
+  if (outcome.kind === "done") {
+    // Уложились в бюджет → результат звучит СРАЗУ этим ходом (финализируем sink сами — петля done не зовёт).
+    const reply = outcome.reply;
+    deps.memory.pushTurn("assistant", reply.voice);
+    if (reply.voice.trim()) log.info("Джарвис →", { voice: reply.voice });
+    if (reply.display) sink.display(reply.display);
+    sink.done(reply.voice);
+    return reply;
+  }
+
+  // ПРОМОУШЕН: задача затянулась → «Берусь, сэр» СРАЗУ (не молчание), микрофон освобождается, итог в фон.
+  detached = true;
+  log.info("sync-first: задача затянулась — промоушен в фон", { promoteMs });
+  sink.done(verbalize("Берусь, сэр — доложу по готовности."));
+  const bg = loopP
+    .then((reply) => {
+      deps.memory.pushTurn("assistant", reply.voice);
+      if (reply.voice.trim() && !deps.isClosed?.()) {
+        log.info("Джарвис → (промоушен-итог)", { voice: reply.voice });
+        deps.speakResult?.(reply);
+      }
+    })
+    .catch((e) => {
+      log.error("промотированная задача упала", { error: e instanceof Error ? e.message : String(e) });
+      if (!deps.isClosed?.()) deps.speakResult?.({ voice: verbalize("Не смог выполнить, сэр.") });
+    });
+  deps.bgTasks?.add(bg);
+  void bg.finally(() => deps.bgTasks?.delete(bg));
+  return { voice: "" }; // ход уже озвучил «Берусь» через sink.done выше
+}
+
 /** Полный agent-loop с tool-use (§7, §8). sink (§10) — пофразный стрим финальной реплики. */
 async function runAgentLoop(
   session: Session,
@@ -739,7 +880,7 @@ async function runAgentLoop(
   tier: Exclude<Tier, "tier0">,
   deps: AgentDeps,
   sink?: ReplySink,
-  opts?: { freshContext?: boolean; conversational?: boolean },
+  opts?: { freshContext?: boolean; conversational?: boolean; suppressStepStream?: boolean },
 ): Promise<AgentReply> {
   // §10 realtime: сигналим «думаю» КАК МОЖНО РАНЬШЕ (до retrieval/recall/LLM) — пайплайн
   // замаскирует пол латентности Opus коротким филлером «Секунду, сэр.», пока идёт генерация.
@@ -1550,7 +1691,12 @@ async function runAgentLoop(
     //   - конверсация (нет tool_use): held дофлашиваем в конце, streamedFinal=true (терминал не дублирует);
     //   - tool-ход: held (преамбулу) ОТБРАСЫВАЕМ — финал произнесём в терминале ровно один раз.
     let resp: LlmResponse;
-    if (sink && step === 0) {
+    // SYNC-FIRST (фикс ревью, double-speak): при suppressStepStream пофразный step-0-стрим ОТКЛЮЧЁН —
+    // ничего не уходит в sink ПОСРЕДИ петли. Иначе для текстового action-ответа стрим ставил pushedAny в
+    // пайплайне ДО промоушена → «Берусь» глох, а итог через speakResult звучал ВТОРОЙ раз (двойная озвучка).
+    // Финал произносится ОДИН раз: в терминале (done) или через speakResult (промоушен). Первый-токен-стрим
+    // не теряем для РАЗГОВОРА (conversational идёт обычным путём, там suppressStepStream не ставится).
+    if (sink && step === 0 && !opts?.suppressStepStream) {
       const chunker = new SentenceChunker();
       const held: string[] = [];
       let eager = false; // подтверждённый конверсационный режим (≥2 фразы) → немедленная отдача
@@ -1647,7 +1793,10 @@ async function runAgentLoop(
       // Докрутка обрыва по лимиту вывода: модель упёрлась в max_tokens, не закончив. Продолжаем
       // ровно с места обрыва, а не отдаём огрызок. ТОЛЬКО для не-стримленного хода: голосовой
       // step0 уже произнесён в sink (повтор/двойной голос недопустим) — там берём как есть.
-      const streamedThisStep = Boolean(sink) && step === 0;
+      // Ревью sync-first: под suppressStepStream step-0 НЕ стримился (ничего не произнесено) →
+      // ход НЕ-стримленный → докрутку НАДО делать (иначе action-ответ обрезался бы огрызком, как
+      // на фоновом пути её и делали). Без этого гарда флаг был ложно-истинным (sink есть, но нем).
+      const streamedThisStep = Boolean(sink) && step === 0 && !opts?.suppressStepStream;
       if (resp.stopReason === "max_tokens" && !streamedThisStep && continuations < MAX_CONTINUATIONS) {
         continuations += 1;
         convo.push({ role: "assistant", content: resp.text });

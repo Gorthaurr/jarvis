@@ -638,6 +638,156 @@ describe("agent-loop (§7, §8)", () => {
     expect(spoken[0]?.voice).toContain("калькулятор"); // итог проговорён в фоне (единственная фраза хода)
   });
 
+  // SYNC-FIRST (голос): корень жалобы «молча делал → потом скопом ответил на всё». На ГОЛОСОВОМ канале
+  // (есть sink) действие исполняется СИНХРОННО — итог звучит СРАЗУ через sink, а не откладывается в
+  // очередь speakResult (которая на голосе сливалась скопом). Длинная задача промотится в фон с «Берусь».
+  function fakeSink() {
+    const calls = { sentences: [] as string[], done: [] as string[], displays: 0 };
+    const sink = {
+      thinking: () => {},
+      sentence: (s: string) => calls.sentences.push(s),
+      display: () => { calls.displays += 1; },
+      done: (v: string) => calls.done.push(v),
+    };
+    return { sink, calls };
+  }
+
+  it("sync-first (голос): БЫСТРОЕ действие → итог СРАЗУ через sink.done, НЕ через фоновый speakResult", async () => {
+    const session = fakeSession(); // tool резолвится мгновенно → задача укладывается в бюджет
+    const spoken: { voice: string }[] = [];
+    const { sink, calls } = fakeSink();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+      { text: "Готово, калькулятор открыт, сэр." },
+    ]);
+    const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+    const reply = await handleUserText(session, "создай файл и посчитай что-нибудь сложное", deps, sink);
+    expect(calls.done.join(" ")).toContain("калькулятор"); // результат озвучен СРАЗУ этим ходом (через sink)
+    expect(spoken).toHaveLength(0); // НЕ ушёл в отложенную очередь speakResult → скопом не сольётся
+    expect(reply.voice).toContain("калькулятор");
+  });
+
+  it("sync-first (голос): ДЛИННАЯ задача → «Берусь» СРАЗУ (не молчание) + итог через speakResult по готовности", async () => {
+    const prev = process.env.JARVIS_SYNC_PROMOTE_MS;
+    process.env.JARVIS_SYNC_PROMOTE_MS = "40"; // маленький бюджет промоушена для теста
+    try {
+      let releaseTool: () => void = () => {};
+      const toolGate = new Promise<void>((r) => { releaseTool = r; });
+      const session = fakeSession(vi.fn(() => toolGate.then(() => ({ commandId: "c", ok: true, durationMs: 1 }))));
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = fakeSink();
+      const llm = new MockLlmProvider([
+        { toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+      const p = handleUserText(session, "сделай долгую многошаговую штуку", deps, sink);
+      // Инструмент висит дольше бюджета → промоушен: «Берусь» звучит СРАЗУ (ход НЕ молчит).
+      await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 1000 });
+      expect(calls.done[0]).toContain("Берусь");
+      await p; // ход завершился на промоушене (микрофон свободен), итог ещё не готов
+      expect(spoken).toHaveLength(0);
+      releaseTool(); // отпускаем инструмент → задача дорабатывает в фоне
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 1000 });
+      expect(spoken[0]?.voice).toContain("Готово"); // итог доставлен ОДИН раз через speakResult (не молча)
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_PROMOTE_MS;
+      else process.env.JARVIS_SYNC_PROMOTE_MS = prev;
+    }
+  });
+
+  it("sync-first откат: JARVIS_SYNC_FIRST=0 + голос → прежнее «молча в фон» (итог через speakResult)", async () => {
+    const prev = process.env.JARVIS_SYNC_FIRST;
+    process.env.JARVIS_SYNC_FIRST = "0";
+    try {
+      const session = fakeSession();
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = fakeSink();
+      const llm = new MockLlmProvider([
+        { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+      const reply = await handleUserText(session, "создай файл и посчитай что-нибудь", deps, sink);
+      expect(reply.voice).toBe(""); // откат: тихий финал
+      expect(calls.done.join("")).toBe(""); // синхронно ничего не озвучено
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 3000 });
+      expect(spoken[0]?.voice).toContain("Готово"); // итог в фоне (как раньше)
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_FIRST;
+      else process.env.JARVIS_SYNC_FIRST = prev;
+    }
+  });
+
+  it("sync-first (фикс ревью double-speak): текстовая преамбула НЕ стримится посреди петли — «Берусь» не глохнет, итог не двоится", async () => {
+    // Корень HIGH-находки: eager step-0 стрим прокидывал преамбулу в sink → pushedAny в пайплайне → «Берусь»
+    // (sink.done) глох, а итог через speakResult звучал ВТОРОЙ раз. suppressStepStream отключает step-0 стрим
+    // для action-петли: посреди петли в sink НИЧЕГО не уходит → промоушен чистый.
+    const prev = process.env.JARVIS_SYNC_PROMOTE_MS;
+    process.env.JARVIS_SYNC_PROMOTE_MS = "40";
+    try {
+      let releaseTool: () => void = () => {};
+      const toolGate = new Promise<void>((r) => { releaseTool = r; });
+      const session = fakeSession(vi.fn(() => toolGate.then(() => ({ commandId: "c", ok: true, durationMs: 1 }))));
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = fakeSink();
+      // step-0 ответ: ПРЕАМБУЛА из 2 предложений + tool_use (раньше преамбула стримилась → pushedAny).
+      const llm = new MockLlmProvider([
+        { text: "Сейчас гляну. Уже открываю.", toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+      const p = handleUserText(session, "сделай долгую штуку", deps, sink);
+      await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 1000 });
+      expect(calls.sentences).toHaveLength(0); // преамбула НЕ ушла в sink (нет pushedAny) — корень фикса
+      expect(calls.done[0]).toContain("Берусь"); // «Берусь» доставлен (не проглочен pushedAny-гейтом)
+      await p;
+      releaseTool();
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 1000 });
+      expect(spoken[0]?.voice).toContain("Готово"); // итог ОДИН раз через speakResult (не двойная озвучка)
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_PROMOTE_MS;
+      else process.env.JARVIS_SYNC_PROMOTE_MS = prev;
+    }
+  });
+
+  it("sync-first (фикс ревью concurrency): слоты параллельности заняты → команда в bounded-фон (не превышаем MAX_PARALLEL_TASKS)", async () => {
+    const { Semaphore } = await import("@jarvis/shared");
+    const concurrency = new Semaphore(1);
+    expect(concurrency.tryAcquire()).toBe(true); // занимаем единственный слот (эмулируем идущую промотированную петлю)
+    const session = fakeSession();
+    const spoken: { voice: string }[] = [];
+    const { sink, calls } = fakeSink();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+      { text: "Готово, сэр." },
+    ]);
+    const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r), concurrency, bgTasks: new Set() });
+    const reply = await handleUserText(session, "создай файл и посчитай что-нибудь", deps, sink);
+    expect(reply.voice).toBe(""); // слотов нет → sync-first НЕ занимает, уходит в bounded-фон (тихий финал)
+    expect(calls.done.join("")).toBe(""); // синхронно результат НЕ озвучен
+    expect(spoken).toHaveLength(0); // фон ждёт слот семафора
+    concurrency.release(); // освобождаем слот → bounded-фон дорабатывает
+    await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 3000 });
+    expect(spoken[0]?.voice).toContain("Готово"); // итог через фон (как старый путь под лимитом)
+  });
+
+  it("sync-first (фикс контроля): step-0 текстовый ответ с max_tokens ДОКРУЧИВАЕТСЯ, не обрезается огрызком", async () => {
+    // Регрессия suppressStepStream: streamedThisStep был ложно-истинным (sink есть, но step-0 НЕ стримился)
+    // → докрутка max_tokens пропускалась → action-ответ обрезался. Фикс: streamedThisStep учитывает suppress.
+    const session = fakeSession();
+    const { sink } = fakeSink();
+    const llm = new MockLlmProvider([
+      { text: "Первая часть ответа,", stopReason: "max_tokens" }, // обрыв по лимиту вывода
+      { text: " вторая часть ответа." }, // докрутка доводит до конца
+    ]);
+    const deps = await makeDeps(llm, { speakResult: () => {} });
+    const reply = await handleUserText(session, "напиши длинный ответ", deps, sink);
+    expect(reply.voice).toContain("Первая часть"); // не огрызок — обе части на месте
+    expect(reply.voice).toContain("вторая часть");
+    expect(llm.requests.length).toBe(2); // докрутка реально была (вторая итерация)
+  });
+
   it("§6/§20: waitWhilePaused ждёт пока paused и продолжает после resume", async () => {
     const task = { state: "paused", cancel: { cancelled: false } } as Task;
     const p = waitWhilePaused(task);
