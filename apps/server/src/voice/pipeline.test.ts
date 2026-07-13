@@ -186,6 +186,84 @@ describe("VoicePipeline (§10)", () => {
     expect(m2e).not.toHaveBeenCalled();
   });
 
+  it("инкремент 0 (fix мис-атрибуции): проактив speak()/фоновый speakQueued НЕ тегают чанки turn-seq", async () => {
+    // Ответ ХОДА тегируется turnSeq (клиент вернёт его в audio.played → mouth-to-ear ЭТОГО хода). Но
+    // проактив/онбординг/фоновый итог задачи НЕ должны нести тег: их ack замкнулся бы на висящий снапшот
+    // хода (тихий-финал/непотреблённый снапшот) → ложные «минуты» →ухо (мис-атрибуция, находка ревью).
+    const { pipe, stt, tts, chunks } = makePipeline();
+    pipe.onWake();
+    stt.last!.emit({ text: "который час", final: true });
+    await flush();
+    tts.last!.push(0, true);
+    expect(typeof chunks[chunks.length - 1]!.gen).toBe("number"); // собственный ответ хода — тегирован
+    tts.last!.finish();
+    // фоновый итог из покоя (turnSeq тот же, снапшот хода мог висеть) — БЕЗ тега
+    pipe.speakQueued("Кате отправил, сэр.");
+    tts.last!.push(0, true);
+    expect(chunks[chunks.length - 1]!.gen).toBeUndefined();
+    tts.last!.finish();
+    // проактивный speak() (напоминание/приветствие) — тоже БЕЗ тега
+    pipe.speak("Не забудьте про встречу.");
+    tts.last!.push(0, true);
+    expect(chunks[chunks.length - 1]!.gen).toBeUndefined();
+  });
+
+  it("инкремент 0 (sanity-потолок): АБСУРДНЫЙ ack (>10 мин) отброшен, но МЕДЛЕННЫЙ легитимный ход (десятки секунд) ПИШЕТСЯ", async () => {
+    // Ревью инкремента 0: прежние 30с молча резали легитимный P95-хвост (многораундовый разговорный ход:
+    // filler off → первая фраза после tool-петли, до ~loopMaxMs). Теперь потолок ловит ЛИШЬ абсурд (>10 мин
+    // = clock-skew/грубая мис-корреляция), а реальный медленный ход записывается.
+    const m2e = vi.fn();
+    const { pipe, stt, tts, chunks } = makePipeline(undefined, m2e);
+    pipe.onWake();
+    stt.last!.emit({ text: "почему падает биткоин", final: true });
+    await flush();
+    tts.last!.push(0, true);
+    const tag = chunks[chunks.length - 1]!.gen!; // == turnSeq == snap.seq (совпадёт со снапшотом)
+    tts.last!.finish();
+    pipe.onAudioPlayed(tag, Date.now() + 11 * 60_000); // ack через 11 минут — абсурд, отброшен
+    expect(m2e).not.toHaveBeenCalled();
+
+    // МЕДЛЕННЫЙ, но легитимный ход (60с до первого звука через несколько tool-раундов) ПИШЕТСЯ.
+    const m2e2 = vi.fn();
+    const p2 = makePipeline(undefined, m2e2);
+    p2.pipe.onWake();
+    p2.stt.last!.emit({ text: "сравни доллар и евро", final: true });
+    await flush();
+    p2.tts.last!.push(0, true);
+    const tag2 = p2.chunks[p2.chunks.length - 1]!.gen!;
+    p2.tts.last!.finish();
+    p2.pipe.onAudioPlayed(tag2, Date.now() + 60_000); // 60с — медленный, но легитимный (раньше резалось 30с-потолком)
+    expect(m2e2).toHaveBeenCalledTimes(1);
+    expect(m2e2.mock.calls[0]![0]).toBeGreaterThanOrEqual(59_000);
+  });
+
+  it("инкремент 0: пофразный стрим-путь (runAgentStreaming) тоже тегает ответ хода turn-seq", async () => {
+    // Прод по умолчанию идёт через onUserTurnStream (PhraseSpeaker, ИНОЙ сайт тегирования, чем runAgent).
+    // Проверяем, что собственный ответ стрим-хода несёт turn-seq (клиент вернёт его → mouth-to-ear ЭТОГО хода).
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const chunks: TtsChunk[] = [];
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn: vi.fn(async () => ({ voice: "фолбэк" })),
+      onUserTurnStream: async (_t, sink) => {
+        sink.sentence("Готово, сэр.");
+        sink.done("Готово, сэр.");
+      },
+      sendSpeakChunk: (c) => chunks.push(c),
+      sendClientState: () => {},
+      followupMs: 50,
+    });
+    pipe.onWake();
+    stt.last!.emit({ text: "сделай отчёт", final: true });
+    await flush();
+    expect(tts.last).not.toBeNull(); // PhraseSpeaker синтезировал фразу
+    tts.last!.push(0, true);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(typeof chunks[chunks.length - 1]!.gen).toBe("number"); // ответ хода тегирован и на стрим-пути
+  });
+
   it("barge-in во время speaking рубит TTS и не даёт speak_done сработать", async () => {
     const { pipe, stt, tts } = makePipeline();
     pipe.onWake();

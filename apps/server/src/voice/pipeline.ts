@@ -11,7 +11,7 @@
  *
  * Один экземпляр на сессию. Редьюсер чист; здесь — все побочные эффекты и таймеры.
  */
-import { type Logger, createLogger } from "@jarvis/shared";
+import { type Logger, createLogger, envInt } from "@jarvis/shared";
 import { FOLLOWUP_WINDOW_MS } from "@jarvis/protocol";
 import type {
   ISttProvider,
@@ -89,6 +89,15 @@ const FILLER_DELAY_MS = 250;
 
 /** Интервал опроса семантического эндпоинта после паузы (§10): чаще → отзывчивее, но не спамим. */
 const SILENCE_POLL_MS = 150;
+
+/** Инкремент 0: ВЕРХНИЙ SANITY-потолок mouth-to-ear (env JARVIS_M2E_MAX_MS, деф 10 мин). Это НЕ клип
+ *  легитимного хвоста: главная защита от мис-атрибуции проактива/фона — СТРУКТУРНАЯ (их речь не тегается
+ *  turn-seq, ack не доходит). Потолок ловит лишь АБСУРД (clock-skew/грубая мис-корреляция → «минуты»),
+ *  оставляя весь реальный диапазон (даже медленный многораундовый разговорный ход: turn_end → первая
+ *  фраза после tool-петли, до ~loopMaxMs). Ревью инкремента 0: прежние 30с молча РЕЗАЛИ легитимный P95-
+ *  хвост (agent-петля не ограничена stall-watchdog'ом по времени-до-первой-фразы) → baseline занижался.
+ *  Отброс теперь ЛОГИРУЕТСЯ (наблюдаемость), а не молчит. */
+const M2E_MAX_PLAUSIBLE_MS = envInt("JARVIS_M2E_MAX_MS", 600_000);
 
 /** §3: потолок буфера аудио хода для верификации диктора — ~8с @16кГц (хватает для опознания). */
 const SPEAKER_BUFFER_CAP = 16_000 * 8;
@@ -349,9 +358,12 @@ export class VoicePipeline {
    * трогает машину состояний (drive=false): это «выстрелил и забыл», слух остаётся как был
    * (после приветствия мик доступен через wake-on-frame, как и раньше). Иначе приветствие
    * уводило бы цикл в speaking и churn'ило STT на старте сессии → «не слышит».
+   *
+   * mouth-to-ear (инкремент 0): речь ВНЕ пользовательского хода НЕ измеряется — startTts без m2eSeq
+   * (undefined) не тегает чанки, ack такой речи не замкнётся на висящий снапшот хода.
    */
   speak(text: string): void {
-    this.startTts(text, this.gen, false);
+    this.startTts(text, this.gen, false); // проактив/онбординг: m2eSeq=undefined → не тегаем (fix мис-атрибуции)
   }
 
   /**
@@ -386,13 +398,24 @@ export class VoicePipeline {
    * mp3-реплика теряла метрику, т.к. speak_done→ensureStt сбрасывал трекер ДО прихода ack, ревью раунд3
    * #1). Матч по snap.seq (per-turn, монотонный → опоздавший чужой ack только отвергается, не мис-
    * атрибутируется). Плюс дублируем в live-трекер (для его summary в in-window случае). Один ack на ход.
+   *
+   * ЧЕСТНОСТЬ ЗАМЕРА (fix мис-атрибуции проактива/фона): матчатся ТОЛЬКО ack'и собственного ответа
+   * пользовательского хода — проактив/онбординг/фоновый итог НЕ тегаются turn-seq (startTts m2eSeq=undefined),
+   * поэтому их ack сюда не доходит. SANITY-потолок M2E_MAX_PLAUSIBLE_MS (10 мин) отсекает лишь АБСУРД
+   * (clock-skew/грубая мис-корреляция), НЕ легитимный медленный ход — весь реальный диапазон пишется
+   * (ревью инкремента 0: 30с молча резали P95-хвост). Отброс логируется, а не молчит.
    */
   onAudioPlayed(turnId: number, ts: number): void {
     const snap = this.m2eSnap;
     if (!snap || turnId !== snap.seq) return; // не наш ход / уже замкнут
     const m2eMs = ts - snap.turnEndTs;
     this.m2eSnap = undefined; // один ack на ход
-    if (!Number.isFinite(m2eMs) || m2eMs < 0) return; // clock-skew/абсурд — не пишем ложь
+    // clock-skew (отрицательное/нечисловое) или АБСУРД (>потолка) — не пишем ложь, но ЛОГИРУЕМ отброс
+    // (без лога дропнутые сэмплы были невидимы → «метрика молчит» не отличить от «нет ходов», ревью).
+    if (!Number.isFinite(m2eMs) || m2eMs < 0 || m2eMs > M2E_MAX_PLAUSIBLE_MS) {
+      this.log.warn(`mouth-to-ear: сэмпл отброшен как неправдоподобный (${Math.round(m2eMs)}мс, ход ${snap.seq})`);
+      return;
+    }
     if (turnId === this.turnSeq) this.latency.markAt("audio_played", ts); // ход ещё жив → в live-трекер тоже
     const ms = Math.round(m2eMs);
     this.log.info(`latency mouth-to-ear: →ухо ${ms}мс (ход ${snap.seq})`);
@@ -412,6 +435,9 @@ export class VoicePipeline {
     const idx = busy ? this.pendingSpeech.findIndex((p) => p.urgent) : 0;
     if (idx < 0) return; // занят, срочного нет — держим, отдадим по drainPending при освобождении
     const [next] = this.pendingSpeech.splice(idx, 1);
+    // Фоновый итог/проактивная реплика — НЕ ответ текущего пользовательского хода: m2eSeq=undefined
+    // (не тегаем turn-seq), иначе её ack замкнулся бы на висящий снапшот хода = ложные «минуты» (fix
+    // мис-атрибуции). Собственный ответ хода тегается только в runAgent/runAgentStreaming/playFiller.
     if (next) this.startTts(next.text, this.gen);
   }
 
@@ -736,7 +762,9 @@ export class VoicePipeline {
     this.deps.sendTranscript?.({ text: replyText, final: true });
     this.deps.sendChat?.({ role: "assistant", text: replyText }); // §22 чат: ответ в историю
     if (reply.display) this.deps.sendDisplay?.(reply.display);
-    this.startTts(reply.voice, myGen);
+    // Собственный ответ пользовательского хода → тегаем turnSeq (== snap.seq): mouth-to-ear замкнётся
+    // на ЭТОТ ход. this.turnSeq стабилен между finalizeStt и ответом (ensureStt не бампает в thinking).
+    this.startTts(reply.voice, myGen, true, this.turnSeq);
   }
 
   /**
@@ -904,7 +932,13 @@ export class VoicePipeline {
     };
   }
 
-  private startTts(voiceText: string, myGen: number, drive = true): void {
+  /**
+   * @param m2eSeq Инкремент 0: turn-seq для mouth-to-ear — тегается на чанки, клиент эхом вернёт его в
+   *   audio.played, сервер замкнёт метрику на ЭТОТ ход. Задаётся ТОЛЬКО для собственного ответа
+   *   пользовательского хода (runAgent). undefined (проактив/онбординг/фоновый итог) → чанки БЕЗ тега,
+   *   их ack не замкнётся на висящий снапшот хода (fix мис-атрибуции: ложные «минуты» mouth-to-ear).
+   */
+  private startTts(voiceText: string, myGen: number, drive = true, m2eSeq?: number): void {
     // Джарвис заговорил → открываем окно активного разговора (продолжение без wake word).
     this.awake = true;
     this.lastActiveAt = this.now();
@@ -920,7 +954,8 @@ export class VoicePipeline {
         if (drive) this.dispatch({ type: "speak_start" });
         this.log.info(`latency: ${this.latency.report().summary}`);
       }
-      this.deps.sendSpeakChunk({ ...c, gen: this.turnSeq }); // инкремент 0: тег хода для mouth-to-ear
+      // Инкремент 0: gen=m2eSeq (undefined → router опустит поле → клиент не тегирует эту озвучку).
+      this.deps.sendSpeakChunk({ ...c, gen: m2eSeq });
     });
     stream.onError((e) => this.log.warn("ошибка TTS-стрима", e.message));
     stream.onDone(() => {

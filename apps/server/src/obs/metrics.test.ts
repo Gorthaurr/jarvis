@@ -218,4 +218,28 @@ describe("MetricsCollector durable JSONL (аудит 2026-07-02)", () => {
     const lines = readFileSync(join(dir, "logs", "metrics.jsonl"), "utf8").trim().split("\n");
     expect(lines).toHaveLength(1); // только первое событие
   });
+
+  it("recordMouthToEar (инкремент 0) → строка type:mouth_to_ear с ms/turnSeq/userId", () => {
+    const c = new MetricsCollector(10);
+    c.enableJsonl();
+    c.recordMouthToEar(742, 3, "user-abc");
+    const lines = readFileSync(join(dir, "logs", "metrics.jsonl"), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const rec = JSON.parse(lines[0]!);
+    expect(rec).toMatchObject({ type: "mouth_to_ear", ms: 742, turnSeq: 3, userId: "user-abc" });
+    expect(typeof rec.ts).toBe("string");
+  });
+
+  it("recordMouthToEar не попадает в ОЗУ-окно per-task агрегатов (иной масштаб события)", () => {
+    const c = new MetricsCollector(10);
+    c.enableJsonl();
+    c.recordMouthToEar(500, 1);
+    expect(c.snapshot().requests).toBe(0); // не аггрегат задачи
+  });
+
+  it("recordMouthToEar без enableJsonl — no-op (на диск не пишет)", () => {
+    const c = new MetricsCollector(10);
+    c.recordMouthToEar(500, 1);
+    expect(existsSync(join(dir, "logs", "metrics.jsonl"))).toBe(false);
+  });
 });

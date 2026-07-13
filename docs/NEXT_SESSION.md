@@ -12,46 +12,27 @@
 **ГДЕ МЫ:** PR **#2** (10 волн: Волна 3, память Б, интеграционное ревью, 2 аудита ядра, исследования,
 планы) **СМЕРЖЕН в `main`** (origin/main `1332e62`). Тесты на тот момент: сервер 1210 / клиент 195.
 
-**НЕЗАВЕРШЁННОЕ (в рабочем дереве, НЕ закоммичено):** realtime **Инкремент 0** — латентный харнес
-mouth-to-ear («конец речи → первый звук РЕАЛЬНО сыгран у клиента»). Построен + 3 раунда адверс-фиксов, НО
-**all-angle ревью нашло 3 CONFIRMED — их НАДО ЗАКРЫТЬ ПЕРВЫМ ДЕЛОМ.** Тесты сейчас: **сервер 1217 / клиент
-199**, tsc чист, сборка ок (файлы инкремента 0 см. ниже — они в `git status`).
+**СТАТУС Инкремента 0 (realtime латентный харнес mouth-to-ear «конец речи → первый звук РЕАЛЬНО сыгран у
+клиента»): ✅ ЗАКРЫТ, review до нуля, ЗАКОММИЧЕН на `feat/realtime-inc0`.** 3 находки предыдущего all-angle
+ревью исправлены; ещё 3 раунда адверс-ревью через Workflow (24+9+5 агентов) сошлись 7→1→0 CONFIRMED, все
+фиксы mutation-verified. Тесты: **сервер 1223 / клиент 205**, tsc чист, сборка ок.
+**Осталось (по команде владельца):** `git push -u origin feat/realtime-inc0` → `gh pr create --base main`
+(PR #3) → после фул-ревью merge. НЕ запушено/не в PR.
 
-### ШАГ 1 — закрыть 3 находки all-angle ревью инкремента 0 (в `apps/server/src/voice/pipeline.ts` и gateway)
+### ЧТО ЗАКРЫТО в Инкременте 0 (карта фиксов)
+- **[HIGH+MED, metric-integrity] мис-атрибуция ПРОАКТИВНОЙ/ФОНОВОЙ/приветственной речи** — `startTts` получил
+  параметр `m2eSeq`: тег `gen` ставится ТОЛЬКО для собственного ответа пользовательского хода (runAgent →
+  `turnSeq`); проактив/онбординг (`speak()`)/фоновый итог (`maybeDrainSpeech`) идут БЕЗ тега → их ack не
+  замыкается на висящий снапшот. Клиент: sticky `lastChunkGen` → per-utterance `curUtterGen` (сброс на ВСЕХ
+  границах: last MP3/PCM, `stop()`, PCM-сирота, live-last и live-ДРЕНАЖ у `PcmLivePlayer`). SANITY-потолок
+  `M2E_MAX_PLAUSIBLE_MS`=`envInt("JARVIS_M2E_MAX_MS", 600_000)` (10 мин) ловит ЛИШЬ абсурд + логирует отброс
+  (прежние 30с молча резали легитимный P95-хвост многораундового разговорного хода — главная находка ревью #1).
+- **[LOW, integration-gap] `onMouthToEar` проброшен в боевом gateway** — `createVoicePipeline` (router-ws)
+  зовёт `metrics.recordMouthToEar(ms, turnSeq, userId)` (durable JSONL `type:"mouth_to_ear"` в `metrics.jsonl`).
+- **Тесты (+19, все mutation-verified):** `pipeline.test.ts` (мис-атрибуция без тега, sanity-потолок,
+  стрим-путь), `audio.test.ts` (per-utterance gen, PCM orphan/stop/live-last/drain), `metrics.test.ts`.
 
-- **[HIGH+MED, metric-integrity] мис-атрибуция ПРОАКТИВНОЙ/ФОНОВОЙ речи.** Корень: `speak()`/`speakQueued`→
-  `startTts(drive=true)`/`playFiller` тегают чанки `gen: this.turnSeq`, а `this.turnSeq` может совпасть с
-  «висящим» `m2eSnap.seq` (снапшот оставлен follow-up-таймаутом `finalizeStt`→`captureM2eSnapshot` БЕЗ речи
-  юзера, либо неспотреблённый снапшот прошлого хода). Тогда `onAudioPlayed` матчит проактивную озвучку
-  (напоминание/итог задачи через минуты) со снапшотом → `m2eMs = playTs − turnEndTs` = минуты → лог/`onMouthToEar`
-  пишет ГИГАНТСКИЙ ложный «→ухо» (нарушение «мис-атрибуция хода»). **ФИКС:** речь ВНЕ пользовательского хода
-  (drive=false / проактив / фоновый итог / приветствие) тегать **sentinel-gen** (напр. `undefined` или
-  зарезервированное значение, которое `onAudioPlayed` НИКОГДА не матчит), чтобы засчитывался ТОЛЬКО
-  собственный ответ пользовательского хода; и/или инвалидировать `m2eSnap` при переходе в idle / старте
-  не-пользовательской озвучки / возрастной бонус (age-bound). Тесты: проактивная речь после хода mouth-to-ear
-  НЕ пишет; итог фоновой задачи через 20с НЕ пишет. (Детали трасс — в отчёте ревью, run `w3zbl5uv1`.)
-- **[LOW, integration-gap] `onMouthToEar` не проброшен в БОЕВОМ gateway** (`gateway/router-ws.ts`
-  `makeSessionContext`→`createVoicePipeline` не передаёт `onMouthToEar`) → метрика идёт ТОЛЬКО в лог, НЕ в
-  `metrics.jsonl`. **ФИКС:** пробросить `onMouthToEar` в `createVoicePipeline`, писать в метрики (recordRound /
-  строка metrics.jsonl) — тогда baseline P50/P95 реально пишется (цель инкремента 0, план §Инкремент0 (а)/(б)).
-
-### ШАГ 2 — довести инкремент 0 по циклу
-1. `npx tsc --noEmit` (server+client), `npx vitest run` (оба), `node scripts/build.mjs` (клиент+extension).
-2. **All-angle адверс-ревью** (файндеры по РАЗНЫМ углам, скрипт-образец: `scratchpad/review-inc0-allangles.js`
-   в прошлой сессии — воссоздать) → чинить до **0 CONFIRMED**.
-3. WIP инкремента 0 УЖЕ закоммичен на ветке **`feat/realtime-inc0`** (это текущая ветка; коммит помечен
-   «WIP … 3 находки открыты»). После закрытия находок + all-angle ревью до 0: доп. коммиты, `git push -u origin feat/realtime-inc0`.
-4. `gh pr create --base main` → **PR #3**; после фул-ревью — merge (по «делай»). ⚠️ merge PR #2 уже сделан — `main` с 10 волнами.
-
-**Файлы инкремента 0 (scope):** `packages/shared/src/index.ts` (LatencyStage +audio_played),
-`packages/protocol/src/messages.ts` (SpeakChunk.gen, AudioPlayed, "audio.played"),
-`apps/server/src/voice/{latency.ts,pipeline.ts}` (turnSeq, m2eSnap, captureM2eSnapshot, onAudioPlayed,
-onMouthToEar-dep), `apps/server/src/gateway/router-ws.ts` (dispatch audio.played + gen в sendSpeakChunk),
-`apps/server/src/integrations/voice-providers.ts` (TtsChunk.gen), `apps/client/renderer/{audio.ts,renderer.ts}`,
-`apps/client/preload/index.ts`, `apps/client/main/{ipc-contract.ts,index.ts,transport/index.ts}` + тесты
-`voice/{latency,pipeline}.test.ts`, `renderer/audio.test.ts`.
-
-### ШАГ 3 — следующие realtime-инкременты (каждый = свой PR-цикл; план `docs/REALTIME_HYBRID_IMPL_PLAN_2026-07-12.md`)
+### СЛЕДУЮЩИЕ realtime-инкременты (каждый = свой PR-цикл; план `docs/REALTIME_HYBRID_IMPL_PLAN_2026-07-12.md`)
 - **B+C** — Fast Talker-filler на разговорной ветке + перекрытие TTS-фраз (стрим v3 с эмоцией). **Наибольший
   скачок «живости».** Talker-модель **переключаема**: дефолт быстрый **Sonnet-тир** (правило владельца
   «Haiku НЕ используем» — Haiku за env-флагом ВЫКЛ; включать Haiku-как-голос-фронт только с явного «да» владельца).

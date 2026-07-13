@@ -285,9 +285,13 @@ export class AudioPlayback {
   // создавал новый живой плеер и играл обрывок отменённой фразы поверх речи юзера (+ взводил barge-окно
   // и повисал без last). Новая ЛЕГИТИМНАЯ фраза приходит лишь через секунды (новый ход) — окно её не задевает.
   private suppressChunksUntil = 0;
-  // Realtime инкремент 0: gen последнего принятого чанка + gen, для которого уже отрапортовали
-  // «первый звук сыгран» (дедуп — один ack на ход). Замыкает mouth-to-ear метрику на сервере.
-  private lastChunkGen: number | undefined;
+  // Realtime инкремент 0: gen ТЕКУЩЕЙ накапливаемой озвучки + gen, для которого уже отрапортовали
+  // «первый звук сыгран» (дедуп — один ack на ход). Замыкает mouth-to-ear на сервере. Fix мис-атрибуции:
+  // gen НЕ липнет между озвучками — сбрасывается на ЛЮБОЙ границе озвучки: last-чанк (MP3/PCM), stop()
+  // (barge-in/mute) и осиротевший накопитель (потерян last). Поэтому озвучка без gen (проактив/фоновый
+  // итог/приветствие: сервер их не тегает) уходит в очередь с gen=undefined и НЕ наследует ход прошлой
+  // реплики → её реальное воспроизведение не приписывается чужому ходу (ложный →ухо).
+  private curUtterGen: number | undefined;
   private playedReportedGen: number | undefined;
 
   // onActive(true/false) — реальный СТАРТ/КОНЕЦ звучания очереди. Нужен main, чтобы перебивание (§10)
@@ -301,7 +305,8 @@ export class AudioPlayback {
 
   /** Инкремент 0: отрапортовать «первый звук хода сыгран» — один раз на ход (дедуп по gen). gen передаётся
    *  ЯВНО (gen ИМЕННО стартующей озвучки, а не последнего принятого чанка — ревью #1: при наложении ходов
-   *  lastChunkGen мис-атрибутировал). Ошибка ack не должна ломать воспроизведение (ревью #4) — try/catch. */
+   *  gen последнего чанка мис-атрибутировал). Проактив/фон приходят без gen → сюда попадает undefined →
+   *  ack не шлём (fix мис-атрибуции). Ошибка ack не должна ломать воспроизведение (ревью #4) — try/catch. */
   private reportPlayed(gen: number | undefined, ts: number = Date.now()): void {
     if (typeof gen !== "number" || gen === this.playedReportedGen) return;
     this.playedReportedGen = gen;
@@ -333,8 +338,9 @@ export class AudioPlayback {
     // чтобы он не зазвучал поверх речи юзера и не создал повисший live-плеер. Легитимная новая фраза
     // приходит секундами позже (новый ход), вне окна.
     if (Date.now() < this.suppressChunksUntil) return;
-    // Инкремент 0: помним ход последнего чанка — при РЕАЛЬНОМ старте звука отрапортуем mouth-to-ear.
-    if (typeof chunk.gen === "number") this.lastChunkGen = chunk.gen;
+    // Инкремент 0: копим ход ТЕКУЩЕЙ озвучки — при РЕАЛЬНОМ старте её звука отрапортуем mouth-to-ear.
+    // Не тегированный чанк (проактив/фон) НЕ трогает curUtterGen → озвучка уйдёт с gen=undefined.
+    if (typeof chunk.gen === "number") this.curUtterGen = chunk.gen;
     if (chunk.format === "pcm16") {
       this.enqueuePcm(chunk);
       return;
@@ -343,9 +349,10 @@ export class AudioPlayback {
     if (chunk.last) {
       const merged = this.assemble();
       if (merged) {
-        this.queue.push({ bytes: merged, gen: this.lastChunkGen });
+        this.queue.push({ bytes: merged, gen: this.curUtterGen });
         this.playNext();
       }
+      this.curUtterGen = undefined; // граница озвучки — следующая начинает с чистого gen (не липнет)
     }
   }
 
@@ -354,7 +361,7 @@ export class AudioPlayback {
    * весь выигрыш латентности v3: не ждём конца синтеза). Занят (фраза уже играет/очередь) → чанки
    * копятся и на last оформляются WAV-озвучкой в общую очередь (штатный путь, без потери звука).
    */
-  private enqueuePcm(chunk: { audio: string; last: boolean; sampleRate?: number }): void {
+  private enqueuePcm(chunk: { audio: string; last: boolean; sampleRate?: number; gen?: number }): void {
     const rate = chunk.sampleRate ?? this.pcmRate;
     this.pcmRate = rate;
     // Ревью фиксов (#6): сирота — прошлый стрим оборвался без last (WS-блип; сервер чанки не ресылает,
@@ -367,6 +374,10 @@ export class AudioPlayback {
     if (!chunk.last && this.pcmParts.length > 0 && Date.now() - this.pcmPartsAt > PCM_ORPHAN_MS) {
       console.warn("[audio] осиротевшие PCM-чанки без last сброшены (прошлый стрим оборвался)");
       this.pcmParts = [];
+      // Fix мис-атрибуции (ревью инкремента 0): осиротевший накопитель — ГРАНИЦА озвучки (last потерян).
+      // Новая озвучка начинается с ЭТОГО чанка → её ход = его gen (нетегированный проактив/фон → undefined).
+      // Иначе липкий gen прошлого (недосыгранного) стрима протёк бы на новую озвучку = ложный →ухо чужого хода.
+      this.curUtterGen = typeof chunk.gen === "number" ? chunk.gen : undefined;
     }
     const bytes = chunk.audio ? base64ToBytes(chunk.audio) : null;
     if (this.live) {
@@ -374,6 +385,7 @@ export class AudioPlayback {
       if (chunk.last) {
         this.live.markLast();
         this.live = null; // хвост доиграет сам и дёрнет playNext через onEnded
+        this.curUtterGen = undefined; // граница озвучки — gen не липнет на следующую (fix мис-атрибуции)
       }
       return;
     }
@@ -384,12 +396,18 @@ export class AudioPlayback {
     // идём в busy-ветку (копим дальше, на last соберём цельную WAV-озвучку) — ни один сэмпл не теряется.
     if (!this.current && this.queue.length === 0 && this.pcmParts.length === 0) {
       this.setActive(true);
-      const genAtStart = this.lastChunkGen; // ревью #1: gen ИМЕННО этой live-фразы (не позднего чанка)
+      const genAtStart = this.curUtterGen; // ревью #1: gen ИМЕННО этой live-фразы (не позднего чанка)
       const lp = new PcmLivePlayer(
         rate,
         () => {
           if (this.current === lp) this.current = null;
           if (this.live === lp) this.live = null;
+          // Живой плеер завершился (last ИЛИ ДРЕНАЖ без last) — ГРАНИЦА озвучки. Если ход ещё наш
+          // (не перехвачен новой озвучкой — гард по genAtStart), сбрасываем: иначе дренаж плеера,
+          // не издавшего НИ ОДНОГО сэмпла (вырожденный carry-чанк → onFirstAudio не сработал →
+          // playedReportedGen не выставлен, дедуп не спасёт), оставил бы gen липким для следующей
+          // нетегированной озвучки. Метрика уже снята на ПЕРВОМ сэмпле, поэтому сброс её не роняет.
+          if (this.curUtterGen === genAtStart) this.curUtterGen = undefined;
           this.playNext();
         },
         (ts) => this.reportPlayed(genAtStart, ts), // инкремент 0: ts = расчётный аудибельный момент (ревью #2)
@@ -401,6 +419,7 @@ export class AudioPlayback {
       if (chunk.last) {
         lp.markLast();
         this.live = null;
+        this.curUtterGen = undefined; // граница озвучки — gen не липнет (fix мис-атрибуции)
       }
       return;
     }
@@ -412,9 +431,10 @@ export class AudioPlayback {
       const merged = mergeParts(this.pcmParts);
       this.pcmParts = [];
       if (merged) {
-        this.queue.push({ bytes: wavFromPcm16(merged, rate), gen: this.lastChunkGen });
+        this.queue.push({ bytes: wavFromPcm16(merged, rate), gen: this.curUtterGen });
         this.playNext();
       }
+      this.curUtterGen = undefined; // граница озвучки — gen не липнет на следующую (fix мис-атрибуции)
     }
   }
 
@@ -423,6 +443,9 @@ export class AudioPlayback {
     this.parts = [];
     this.queue = [];
     this.pcmParts = [];
+    // Fix мис-атрибуции (ревью инкремента 0): прерванная (без last) озвучка — ГРАНИЦА. Её ход не должен
+    // липнуть на следующую НЕтегированную (проактив/фон) речь: та унесла бы чужой turn-seq → ложный →ухо.
+    this.curUtterGen = undefined;
     this.live = null; // current.stop() ниже закроет живой PCM-плеер (это тот же объект)
     if (this.current) {
       this.current.stop();

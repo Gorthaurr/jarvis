@@ -57,6 +57,7 @@ import { WorkingMemory } from "../memory/working.js";
 import { loadWorkingMemory } from "../memory/working-store.js";
 import type { McpManager } from "../brain/mcp/manager.js";
 import { noteClientContext } from "../proactive/salience.js";
+import { metrics } from "../obs/metrics.js";
 import { TaskManager } from "../brain/tasks/manager.js";
 import type { TradingService } from "../brain/trading/index.js";
 import type { KnowledgeBase } from "../brain/knowledge/index.js";
@@ -367,6 +368,9 @@ export function makeSessionContext(
         // Realtime инкремент 0: клиент эхом вернёт gen в audio.played (mouth-to-ear того же хода).
         ...(c.gen !== undefined ? { gen: c.gen } : {}),
       }),
+    // Realtime инкремент 0 (a/б): mouth-to-ear в durable-метрики (metrics.jsonl), не только в лог —
+    // baseline P50/P95 «конец речи → первый звук у клиента» переживает деплой и доступен офлайн-разбору.
+    onMouthToEar: (ms, turnSeq) => metrics.recordMouthToEar(ms, turnSeq, session.userId),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
     sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)

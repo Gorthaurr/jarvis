@@ -151,6 +151,26 @@ describe("AudioPlayback — mouth-to-ear ack (инкремент 0)", () => {
     expect(played).toHaveLength(0);
   });
 
+  it("fix мис-атрибуции: озвучка БЕЗ gen не наследует ход прошлой (её звук не приписывается чужому ходу)", () => {
+    // Управляемый onPlaying (не авто-вызываем) — воспроизводим сценарий: ответ хода так и не дошёл до
+    // onplaying (ошибка декода/play → onended без onplaying, ack хода НЕ отрапортован), а следом играет
+    // фоновая озвучка БЕЗ gen. Если бы gen «липнул» (sticky lastChunkGen), фон унёс бы ход прошлой реплики
+    // и его реальное воспроизведение приписалось бы висящему снапшоту того хода = ложные «минуты» →ухо.
+    const players: Array<{ bytes: Uint8Array; onEnded: () => void; onPlaying?: () => void; stopped: boolean }> = [];
+    const factory: PlayerFactory = (bytes, onEnded, onPlaying): Utterance => {
+      const p = { bytes, onEnded, onPlaying, stopped: false };
+      players.push(p);
+      return { stop() { p.stopped = true; } }; // onPlaying НЕ авто-вызываем — управляем вручную
+    };
+    const played: Array<{ gen: number; ts: number }> = [];
+    const pb = new AudioPlayback(factory, undefined, (gen, ts) => played.push({ gen, ts }));
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true, gen: 5 }); // ответ хода 5 (onplaying НЕ наступит)
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // фоновая озвучка БЕЗ gen → в очередь
+    players[0]!.onEnded(); // ход 5 завершился, так и не сыграв → стартует фон
+    players[1]!.onPlaying?.(); // фон РЕАЛЬНО зазвучал
+    expect(played).toHaveLength(0); // фон не тегирован → ack не шлём (иначе приписался бы ходу 5)
+  });
+
   it("ревью #1: наложение ходов без barge — ack атрибутируется ЕГО озвучке, не последнему чанку", () => {
     const { pb, players, played } = harnessAck();
     // ход 5: две фразы; ход 6 приходит ПОКА играет ход 5 (проактив/speakQueued, без stop())
@@ -162,6 +182,61 @@ describe("AudioPlayback — mouth-to-ear ack (инкремент 0)", () => {
     expect(played.map((p) => p.gen)).toEqual([5]);
     players[1]!.onEnded(); // фраза2 доиграла → озвучка хода6 стартует → ТЕПЕРЬ ack 6 (в свой реальный старт)
     expect(played.map((p) => p.gen)).toEqual([5, 6]);
+  });
+});
+
+/**
+ * Ревью инкремента 0: curUtterGen (gen хода для mouth-to-ear) должен сбрасываться на ЛЮБОЙ границе
+ * озвучки, а не только на last-чанке. Иначе тегированная озвучка, оборванная БЕЗ last (barge-in/stop
+ * или потерянный last → PCM-сирота), оставляет gen липким, и следующая НЕтегированная (проактив/фон)
+ * озвучка наследует чужой ход → её реальный старт приписывается снапшоту того хода = ложный mouth-to-ear
+ * <30с (потолок не ловит). Эти пути на PCM (opt-in yandex3) mp3-тест выше не покрывал (mutation-proven).
+ */
+describe("AudioPlayback — curUtterGen не липнет через границу без last (fix ревью инкремента 0)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers(); // Date.now() мокается — пауза сироты двигается advanceTimersByTime
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Фабрика с авто-onplaying (звук пошёл) + запись ack + РУЧНОЙ onEnded (управляем очередью). */
+  function harnessAckManual() {
+    const players: Array<{ bytes: Uint8Array; onEnded: () => void; onPlaying?: () => void; stopped: boolean }> = [];
+    const factory: PlayerFactory = (bytes, onEnded, onPlaying): Utterance => {
+      const p = { bytes, onEnded, onPlaying, stopped: false };
+      players.push(p);
+      onPlaying?.(); // <audio> onplaying — звук РЕАЛЬНО пошёл → mouth-to-ear ack
+      return { stop() { p.stopped = true; } };
+    };
+    const played: Array<{ gen: number; ts: number }> = [];
+    const pb = new AudioPlayback(factory, undefined, (gen, ts) => played.push({ gen, ts }));
+    return { pb, players, played };
+  }
+
+  it("(orphan) осиротевший тегированный PCM-накопитель (потерян last) НЕ протаскивает gen на нетегированную озвучку", () => {
+    const { pb, players, played } = harnessAckManual();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // mp3 занял канал → PCM пойдёт в busy-накопитель
+    expect(players).toHaveLength(1);
+    expect(played).toHaveLength(0); // mp3 без gen → ack нет
+    pb.enqueue({ audio: b64([10, 11]), seq: 0, last: false, format: "pcm16", gen: 5 }); // ход 5 копится; last потерян
+    vi.advanceTimersByTime(13_000); // пауза > PCM_ORPHAN_MS (12с) — стрим хода 5 мёртв
+    pb.enqueue({ audio: b64([20, 21]), seq: 0, last: false, format: "pcm16" }); // проактив/фон БЕЗ gen → orphan-сброс
+    pb.enqueue({ audio: "", seq: 1, last: true, format: "pcm16" }); // last фона → WAV в очередь
+    players[0]!.onEnded(); // mp3 доиграла → WAV фона стартует и «звучит»
+    expect(players).toHaveLength(2);
+    expect(played).toHaveLength(0); // фон НЕ унёс ход 5 (без orphan-сброса был бы ack gen 5 = ложь)
+  });
+
+  it("(stop) прерванный barge'ом тегированный PCM-накопитель НЕ протаскивает gen на следующую озвучку", () => {
+    const { pb, players, played } = harnessAckManual();
+    pb.enqueue({ audio: b64([1]), seq: 0, last: true }); // mp3 занял канал
+    pb.enqueue({ audio: b64([10, 11]), seq: 0, last: false, format: "pcm16", gen: 7 }); // ход 7 в busy-накопитель (не сыгран)
+    pb.stop(); // barge-in: чистит всё + curUtterGen (fix)
+    vi.advanceTimersByTime(500); // за окном подавления straggler'ов (400мс)
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // проактив/фон БЕЗ gen
+    expect(players.length).toBeGreaterThanOrEqual(2);
+    expect(played).toHaveLength(0); // фон не унёс ход 7 (без stop-сброса был бы ack gen 7 = ложь)
   });
 });
 
@@ -364,6 +439,49 @@ describe("PCM-стрим v3: сироты и дренаж (ревью фиксо
     expect(ctx.sources).toHaveLength(1); // источника из carry-чанка нет
     vi.advanceTimersByTime(11_500); // > DRAIN_IDLE_MS (11с; поднят выше серверного INACTIVITY_MS, #3)
     expect(ctx.closed).toBe(true); // плеер завершился по дренажу — barge-окно не залипло
+  });
+
+  // Контрольное ревью round-2: последние два curUtterGen-сброса — на last у ЖИВОГО PcmLivePlayer (fresh-live
+  // и existing-live). Они load-bearing в edge-случае «live-озвучка дошла до last, не издав НИ ОДНОГО сэмпла»
+  // (пустые/carry-чанки): тогда onFirstAudio не сработал → reportPlayed НЕ выставил playedReportedGen →
+  // дедуп НЕ спасёт, и без сброса gen липнет на следующую нетегированную озвучку (ложный m2e). harness с
+  // наблюдением ack, чтобы поймать регрессию сброса (mp3-путь его не покрывал).
+  function harnessAckPcm() {
+    const players: Array<{ bytes: Uint8Array; onEnded: () => void; onPlaying?: () => void; stopped: boolean }> = [];
+    const factory: PlayerFactory = (bytes, onEnded, onPlaying): Utterance => {
+      const p = { bytes, onEnded, onPlaying, stopped: false };
+      players.push(p);
+      onPlaying?.();
+      return { stop() { p.stopped = true; } };
+    };
+    const played: Array<{ gen: number; ts: number }> = [];
+    const pb = new AudioPlayback(factory, undefined, (gen, ts) => played.push({ gen, ts }));
+    return { pb, players, played };
+  }
+
+  it("(fresh-live last без сэмпла) тегированная live-озвучка, дошедшая до last без звука, НЕ протаскивает gen", () => {
+    const { pb, played } = harnessAckPcm();
+    pb.enqueue({ audio: "", seq: 0, last: true, format: "pcm16", gen: 5 }); // fresh-live, last сразу, 0 сэмплов
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // untagged mp3 (проактив/фон)
+    expect(played).toHaveLength(0); // без сброса на fresh-live last фон унёс бы ход 5 (ложный →ухо)
+  });
+
+  it("(existing-live last без сэмпла) тегированная live-озвучка (2 пустых чанка) НЕ протаскивает gen", () => {
+    const { pb, played } = harnessAckPcm();
+    pb.enqueue({ audio: "", seq: 0, last: false, format: "pcm16", gen: 5 }); // fresh-live, 0 сэмплов
+    pb.enqueue({ audio: "", seq: 1, last: true, format: "pcm16", gen: 5 }); // existing-live → last, 0 сэмплов
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // untagged mp3
+    expect(played).toHaveLength(0); // без сброса на existing-live last фон унёс бы ход 5
+  });
+
+  it("(drain без сэмпла) live-плеер, завершённый по ДРЕНАЖУ без единого сэмпла, НЕ протаскивает gen", () => {
+    // Сиблинг last-без-сэмпла: live-озвучка терминируется дренажем (last не пришёл), не издав звука
+    // (вырожденный carry-чанк → onFirstAudio не сработал → playedReportedGen не выставлен, дедуп бессилен).
+    const { pb, played } = harnessAckPcm();
+    pb.enqueue({ audio: b64([9]), seq: 0, last: false, format: "pcm16", gen: 5 }); // вырожденный чанк (байт в carry): 0 сэмплов, взведён дренаж
+    vi.advanceTimersByTime(11_500); // > DRAIN_IDLE_MS → плеер завершился по дренажу
+    pb.enqueue({ audio: b64([2]), seq: 0, last: true }); // untagged mp3 (проактив/фон)
+    expect(played).toHaveLength(0); // дренаж-граница сбросила ход 5 → фон не унёс чужой ход
   });
 });
 

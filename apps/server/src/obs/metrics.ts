@@ -205,6 +205,23 @@ export class MetricsCollector {
     }
   }
 
+  /**
+   * Realtime инкремент 0: mouth-to-ear («конец речи пользователя → первый звук РЕАЛЬНО сыгран у клиента»,
+   * мс) — durable JSONL-строкой (type:"mouth_to_ear"). Это ГЛАВНАЯ метрика §10; baseline P50/P95 «до уха»
+   * считается офлайн-разбором этих строк (переживают деплой). В ОЗУ-окно per-task агрегатов НЕ попадает
+   * (иной масштаб события). Пишется ТОЛЬКО для собственного ответа пользовательского хода (проводка в
+   * gateway; проактив/фон не тегаются — см. pipeline.onAudioPlayed). Fail-safe: сбой ФС не критичен.
+   */
+  recordMouthToEar(ms: number, turnSeq: number, userId?: string): void {
+    if (!this.jsonl) return;
+    try {
+      const rec = JSON.stringify({ ts: new Date().toISOString(), type: "mouth_to_ear", ms, turnSeq, ...(userId ? { userId } : {}) });
+      appendFileSync(join(dataPath("logs"), "metrics.jsonl"), rec + "\n");
+    } catch {
+      /* не критично */
+    }
+  }
+
   /** Записать событие задачи. При переполнении окна — выталкиваем старейшее (ring-buffer). */
   record(event: AgentMetricEvent): void {
     this.events.push(event);
