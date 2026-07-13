@@ -23,6 +23,12 @@ export interface ScreenShot {
   mediaType: "image/png";
   width: number;
   height: number;
+  /**
+   * Маппинг image→screen-DIP ЭТОГО кадра (полный снимок без rect). Возвращается ВСЕГДА, независимо от
+   * updateMapping — чтобы потребитель (напр. OCR в jarvis SDK) мог сам конвертировать image-координаты
+   * в АБСОЛЮТНЫЕ экранные DIP (boundsX + x/scale) и кликнуть space:"screen", не завися от lastMapping.
+   */
+  mapping?: CaptureMapping;
 }
 
 /** Маппинг последнего захвата: image-координаты → логические (DIP) virtual-desktop координаты для клика. */
@@ -128,10 +134,12 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
 
   const png = src.thumbnail.toPNG();
   if (png.length === 0) throw new Error("пустой кадр захвата экрана");
-  // Запоминаем маппинг для клика по vision-координатам (image → логические virtual-desktop) —
-  // ТОЛЬКО для кадров, которые видит модель (updateMapping !== false, ревью Волны 2).
+  // Маппинг image→screen-DIP ЭТОГО кадра. Считаем ВСЕГДА и возвращаем (нужен OCR-потребителю для
+  // конверсии координат в абсолютные DIP). В lastMapping пишем ТОЛЬКО для кадров, которые видит
+  // модель (updateMapping !== false, ревью Волны 2) — сенсорный OCR систему координат кликов не сбивает.
+  const mapping: CaptureMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale, displayId: display.id };
   if (opts?.updateMapping !== false) {
-    lastMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale, displayId: display.id };
+    lastMapping = mapping;
   }
   log.info("screen.capture", {
     display: display.id,
@@ -140,7 +148,7 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
     h: thumbnailSize.height,
     bytes: png.length,
   });
-  return { image: png.toString("base64"), mediaType: "image/png", width: thumbnailSize.width, height: thumbnailSize.height };
+  return { image: png.toString("base64"), mediaType: "image/png", width: thumbnailSize.width, height: thumbnailSize.height, mapping };
 }
 
 // ─────────────────────────── §Волна2 (2.3): $0-проба региона ───────────────────────────

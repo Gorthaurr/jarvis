@@ -721,6 +721,26 @@
   - `browser.ts` + `browser-cdp.ts` — видимый управляемый Chrome (CDP).
   - `jarvis-browser.ts` — НЕВИДИМЫЙ залогиненный браузер Джарвиса (web_open/read/act/login).
   - `code-runner.ts` — `code_run` (python/node/powershell, wall-clock таймаут).
+    - **🚀 jarvis SDK (среда «1 раунд = вся задача», 2026-07-13, 6 раундов адверс. ревью до 0 находок):** для
+      МНОГОШАГОВОЙ GUI/системной задачи модель пишет ОДИН python-скрипт `import jarvis` — он драйвит ТЕ ЖЕ
+      актуаторы за ОДИН code_run вместо N слепых LLM-раундов «скриншот→клик». Механика: `actuators/act-bridge.ts`
+      (loopback-HTTP мост на 127.0.0.1, `startActBridge(dispatch)` в `index.ts` на boot, стоп на quit) + `code-runner`
+      кладёт `jarvis.py` (исходник — `actuators/jarvis-sdk-source.ts`, String.raw) в cwd раннера и ставит
+      `JARVIS_ACT_URL/TOKEN` в env — **ТОЛЬКО для python** (node/powershell моста не видят). Скрипт `_call`-ит мост,
+      мост → `dispatch(cmd)`. API: launch/focus/close/key/write/click/find→Element/invoke/snapshot/ocr/read_context/
+      wait_for/wait_text/wait_window/windows/sleep; таймауты в СЕКУНДАХ; алиасы type/press/open. Провал → `JarvisError`
+      (честный, не ложный успех). API-справка для модели — в описании `code_run` (`packages/tools`).
+    - **БЕЗОПАСНОСТЬ моста:** `BRIDGE_ALLOWED_KINDS` — мост принимает ТОЛЬКО механический GUI/восприятие
+      (app/window/input/ui/screen/wait/context); привилегированные каналы с §14-гейтом согласия
+      (`telegram.send`/`message.send`/`order.place`/`jbrowser.*`) + `code.run`/`fs.*`/`office.*`/`system.*` → **403**
+      (иначе prompt-injected скрипт слал бы от лица юзера в обход серверных confirm/cadence/idempotency и кредов).
+      Токен per-boot в заголовке, bind loopback, тело ≤512KB.
+    - **КООРДИНАТЫ SDK = АБСОЛЮТНЫЕ экранные DIP (единая система, закон честности «клик мимо с ok = ложный успех»):**
+      `find()` кликает через handle→`ui.invoke` (снапшот) или screen-DIP (OCR полного кадра) — надёжно, без курсора;
+      `ocr()` полного кадра конвертирует thumbnail-px строк → screen-DIP (`boundsX+x/scale`, mapping из `screen.ts`
+      `ScreenShot.mapping`/`sensors-cheap.ts` `OcrOutcome.mapping`) + метит `space:"screen"`; `ocr(rect)` и `snapshot()`
+      **выбрасывают** координатные поля (rect-строки — не в screen-DIP; снапшот-bbox — физ.px) → клик по ним честно
+      падает, а не мимо; `click(x,y)` дефолт `space="screen"`.
   - `fs.ts` (CRUD + **`fs_edit`** точечная правка find/replace — для кодинга, дешевле перезаписи;
     через **`self-guard.ts`** — рельсы самомодификации: HARD-блок записи в node_modules/.env/
     запущенный бинарь + блок ЧТЕНИЯ .env §0), `system.ts` (питание/блокировка/медиа/громкость/буфер),

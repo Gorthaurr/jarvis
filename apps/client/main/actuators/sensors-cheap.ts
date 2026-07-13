@@ -35,6 +35,13 @@ export interface OcrOutcome {
   /** Размер распознанного изображения — bbox строк в ЕГО координатах. */
   width: number;
   height: number;
+  /**
+   * Маппинг image→screen-DIP кадра OCR (только для ПОЛНОГО снимка без rect; при rect строки уже
+   * сдвинуты в систему полного кадра и mapping не отдаём). Потребитель (jarvis SDK find→click)
+   * конвертирует центр строки в АБСОЛЮТНЫЕ экранные DIP: boundsX + x/scale → клик space:"screen",
+   * не завися от lastMapping. Без него координатный клик по OCR был бы мимо (ложный успех).
+   */
+  mapping?: { boundsX: number; boundsY: number; scale: number };
 }
 
 /** Локальный OCR экрана (полного или региона) через сайдкар. */
@@ -53,11 +60,16 @@ export async function screenOcr(which?: string | number, rect?: CaptureRect, lan
   if (rect && rect.space !== "screen") {
     lines = lines.map((l) => ({ ...l, x: l.x + rect.x, y: l.y + rect.y }));
   }
+  // Маппинг image→screen-DIP отдаём ТОЛЬКО для полного кадра (без rect): тогда координаты строк —
+  // в системе thumbnail этого захвата, и потребитель может конвертировать их в абсолютные DIP.
+  // При rect строки уже сдвинуты в иную систему → mapping не соответствует, не отдаём (SDK не кликает).
+  const mapping = !rect && shot.mapping ? { boundsX: shot.mapping.boundsX, boundsY: shot.mapping.boundsY, scale: shot.mapping.scale } : undefined;
   return {
     text: String(data?.text ?? ""),
     lines,
     width: shot.width,
     height: shot.height,
+    mapping,
   };
 }
 
