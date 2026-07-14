@@ -540,6 +540,16 @@
   порог `JARVIS_SKILL_SEMANTIC_MIN` деф 0.82) с лексическим фолбэком `matchLearnedSkill`; дедуп на сейве
   тоже семантический `findDuplicateSemantic` (порог 0.9, строже — лечит дубли дота/доте); кэш векторов
   триггеров `triggerVecCache`; эмбеддер передаётся в `createSkillProvider(embedder)` из server.ts.
+  **ГИБРИД + PLATFORM-BOOST (2026-07-14, `memory/skill-recall.ts`, живой тест сидов):** e5-small ШУМНЫЙ
+  (несвязанные навыки набирают 0.82+ у порога) и путал платформы («в дискорде» уходило к telegram-навыку).
+  Гибридный ранг = косинус + лексический бонус (`LEXICAL_WEIGHT` деф 0.2, доля distinctive-токенов, капнута
+  ≤1) + platform-boost (`detectPlatforms` по токену discord/telegram/vk/instagram/youtube/dota: та же
+  платформа +`PLATFORM_BOOST` 0.1, чужая −`PLATFORM_PENALTY` 0.15). Бусты применяются ТОЛЬКО выше
+  `RAW_COS_FLOOR` (деф 0.7) — иначе далёкий навык протаскивался через порог (ревью); штраф чужой платформы —
+  всегда. Живьём: VK-запрос корректно тянет VK-навык (platformBoost), telegram не перехватывает Discord,
+  регресса нет (Dota v5 выигрывает). ⚠️ **ПРЕДЕЛ: e5-small слишком слаб** для надёжного recall у power-user
+  с плотной личной библиотекой (генерик-сиды тонут в шуме) — открыт трек «сильнее эмбеддер (e5-large/
+  реранкер)». Все параметры env-tunable.
   **ГАРД ПОЛЯРНОСТИ (аудит лога 2026-07-03):** `memory/intent-polarity.ts` — recall (семантика И
   лексика) НЕ подсовывает навык противоположного намерения: строгий конфликт start↔stop по
   глагольным стемам («прекрати поиск у доти» ≠ навык «запустить поиск в доте», sim 0.856 — с
@@ -556,8 +566,13 @@
   only, чтобы не мёржить в общий id). Инструмент **`skill_promote`** (`provider.promote`, COLD §15) —
   поднять СВОЙ выученный навык (owner-check, только learned-процедуры) копией под SHARED_USER_ID.
   Boot-seed (`seedSharedSkills` + `seed/shared-skills.ts`, идемпотентно по версии) засевает курируемый
-  стартовый набор (плеер на сайте, Telegram) — чтобы новому юзеру не учить с нуля; `ensureUser(SHARED_
-  USER_ID)` на boot для FK. `RecalledSkill.fromShared` → честная формулировка в `formatRecalledSkill`
+  стартовый набор — чтобы новому юзеру не учить с нуля; `ensureUser(SHARED_
+  USER_ID)` на boot для FK. **8 ФОКУСНЫХ навыков (2026-07-14):** веб-плеер (YouTube), telegram-send,
+  yandex-music, discord-message, discord-voice, dota2-menu (только меню, не геймплей), social-read,
+  social-send. Это ПРОЦЕДУРНОЕ ЗНАНИЕ (when+procedure проза, инжектится подсказкой; модель исполняет через
+  jarvis SDK) — НЕ хардкод-шаги. Рельсы безопасности вшиты: Discord self-bot=бан→только UI, масс-
+  автоматизация соцсетей=бан, публикация=confirm, сверка исхода. Навыки ФОКУСНЫЕ (одна capability на навык)
+  для точного recall. `RecalledSkill.fromShared` → честная формулировка в `formatRecalledSkill`
   («приём из общей библиотеки» vs «твой прошлый»). Встроенные tools (telegram_send/browser_act/…) и так
   общие — shared-слой добавляет общие ПРОЦЕДУРЫ. Верифицировано: юнит (merge/override/promote/seed) +
   живой recall общего навыка чужим юзером (sim 0.864). ⚠️ кто может промоутить в hosted — ограничить

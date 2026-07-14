@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { detectPlatforms } from "./skill-recall.js";
 import {
   type RecalledSkill,
   type SkillDistiller,
@@ -150,6 +151,36 @@ describe("выученные навыки-процедуры (§8 HERMES)", () =
     expect(matchLearnedSkill("какая погода завтра", LEARNED)).toBeNull();
     expect(matchLearnedSkill("", LEARNED)).toBeNull();
     expect(matchLearnedSkill("отчёт", LEARNED)).toBeNull(); // одно слово — ниже порога (≥2 попаданий)
+  });
+
+  // §platform-boost (2026-07-14): e5-small путает платформы («в дискорде» уходило к telegram-send).
+  const MSG: RecalledSkill[] = [
+    { id: "tg", ownerId: "u", name: "Отправить в Telegram", when: "написать или отправить сообщение в telegram телеграм", procedure: "...", version: 1 },
+    { id: "dc", ownerId: "u", name: "Отправить в Discord", when: "написать или отправить сообщение в discord дискорде", procedure: "...", version: 1 },
+  ];
+
+  it("detectPlatforms: узнаёт платформу по токену, без ложных срабатываний", () => {
+    expect([...detectPlatforms("отправь в дискорде другу")]).toEqual(["discord"]);
+    expect([...detectPlatforms("напиши в телеграме")]).toEqual(["telegram"]);
+    expect([...detectPlatforms("напиши в телеграмме другу")]).toEqual(["telegram"]); // ревью: частая форма с двумя «м»
+    expect([...detectPlatforms("лайкни в инстаграме")]).toEqual(["instagram"]);
+    expect([...detectPlatforms("посмотри во вконтакте")]).toEqual(["vk"]);
+    expect([...detectPlatforms("найди матч в доте")]).toEqual(["dota"]);
+    expect([...detectPlatforms("запусти поиск в доти")]).toEqual(["dota"]); // ревью: STT-форма «доти»
+    // без ложных срабатываний коротких алиасов:
+    expect(detectPlatforms("вкусный обед").size).toBe(0); // «вкусный» ≠ «вк»
+    expect(detectPlatforms("какая погода").size).toBe(0);
+    // ревью: почтовая «телеграмму/телеграмма» (номинатив/аккузатив существительного) ≠ приложение Telegram:
+    expect(detectPlatforms("отправь телеграмму бабушке").size).toBe(0);
+  });
+
+  it("matchLearnedSkill: platform-boost — запрос про дискорд НЕ уходит в telegram-навык", () => {
+    // Без гарда телеграм-навык («отправить сообщение») выигрывал бы по общей сути.
+    expect(matchLearnedSkill("отправить сообщение в дискорде другу", MSG)?.id).toBe("dc");
+    // Только telegram-навык на discord-запросе → чужая платформа → не подсовываем (null).
+    expect(matchLearnedSkill("отправить сообщение в дискорде другу", [MSG[0]!])).toBeNull();
+    // Нет платформы в запросе → обычный лексический матч (не подавляем).
+    expect(matchLearnedSkill("отправить сообщение другу", MSG)).not.toBeNull();
   });
 
   it("formatSkillCatalog: компактные строки «• имя — когда», кап, пусто на []", () => {
@@ -354,6 +385,27 @@ describe("recallSemantic (§8 семантический recall навыка)", 
     const emb = new FakeEmb({}); // всё → null
     const r = await recallSemantic(emb, "отправить сообщение в телеграм", SKILLS);
     expect(r?.id).toBe("send-tg"); // matchLearnedSkill по токенам отправить/сообщение/телеграм
+  });
+
+  // §raw-cos floor (ревью 2026-07-14): бусты (лексика+платформа) НЕ протаскивают семантически ДАЛЁКИЙ навык
+  // через порог — только НУДЖАТ уже близкий (rawCos ≥ floor 0.70).
+  const DC: RecalledSkill[] = [{ id: "dc", ownerId: "u", name: "Discord сообщение", when: "написать в дискорде", procedure: "...", version: 1 }];
+  it("raw-cos floor: далёкий навык (rawCos<0.70) НЕ протаскивается платформенным бустом", async () => {
+    // rawCos ≈0.66 < floor: буст платформы/лексики не применяется → 0.66 < 0.82; лексический фолбэк (1 хит) тоже мимо.
+    const far = new FakeEmb({ "Discord сообщение. написать в дискорде": [1, 0, 0], "запусти дискорд поскорее": [0.66, 0.751, 0] });
+    expect(await recallSemantic(far, "запусти дискорд поскорее", DC)).toBeNull();
+  });
+  it("raw-cos floor: близкий навык (rawCos≥0.70) ПОЛУЧАЕТ платформенный буст и реколлится", async () => {
+    // rawCos 0.78 ≥ floor → +платформа/лексика добивают выше 0.82.
+    const near = new FakeEmb({ "Discord сообщение. написать в дискорде": [1, 0, 0], "напиши в дискорде": [0.78, 0.6258, 0] });
+    expect((await recallSemantic(near, "напиши в дискорде", DC))?.id).toBe("dc");
+  });
+  it("platform conflict: discord-запрос + только telegram-навык → null (чужая платформа НЕ кандидат)", async () => {
+    // Даже при высоком косинусе (0.9) + лексике «сообщение»: telegram-навык на discord-запрос — не кандидат
+    // (platform conflict → continue). Раньше лексический бонус перебивал штраф и навык проходил порог (ревью).
+    const TG: RecalledSkill[] = [{ id: "tg", ownerId: "u", name: "Отправить в Telegram", when: "написать сообщение в телеграм", procedure: "...", version: 1 }];
+    const emb = new FakeEmb({ "Отправить в Telegram. написать сообщение в телеграм": [1, 0, 0], "отправь сообщение в дискорде": [0.9, 0.436, 0] });
+    expect(await recallSemantic(emb, "отправь сообщение в дискорде", TG)).toBeNull();
   });
 
   it("findDuplicateSemantic: перефразированный дубль → находит существующий (мёрж, не плодим)", async () => {
