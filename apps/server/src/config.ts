@@ -110,10 +110,13 @@ export function loadConfig(): ServerConfig {
 
     braveApiKey: envOptional("BRAVE_SEARCH_API_KEY"),
 
-    // Битый DEFAULT_SPEND_CAP не должен дать NaN (иначе потолок трат молча отключается, §14).
+    // Месячный потолок трат SpendGuard (§14). Дефолт $300 для владельца-одиночки на СВОЁМ ключе Anthropic:
+    // прежние $50 (мультитенант-задел) реально выбивались за месяц (июль-2026: расход $77 > $50 → КАЖДАЯ
+    // задача мгновенно отбивалась «достигнут лимит»). $300 — страховка от runaway-цикла, не помеха работе;
+    // переопредели DEFAULT_SPEND_CAP в .env под свой бюджет. Битый env → NaN → дефолт (потолок не отключаем).
     defaultSpendCap: (() => {
-      const n = Number.parseFloat(env("DEFAULT_SPEND_CAP", "50.00"));
-      return Number.isFinite(n) && n > 0 ? n : 50;
+      const n = Number.parseFloat(env("DEFAULT_SPEND_CAP", "300.00"));
+      return Number.isFinite(n) && n > 0 ? n : 300;
     })(),
 
     authStrict: envBool("JARVIS_AUTH_STRICT"),

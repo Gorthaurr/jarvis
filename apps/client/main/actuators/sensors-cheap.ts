@@ -18,6 +18,7 @@ import { listWindows } from "./windows.js";
 import { NotImplementedError } from "./input.js";
 import { sidecar } from "./sidecar-client.js";
 import * as system from "./system.js";
+import { raceWithCap } from "./race-cap.js";
 
 const log = createLogger("actuator:sensors");
 
@@ -174,11 +175,30 @@ async function checkOnce(cond: WaitCondition): Promise<[boolean, string, WaitOut
       const detail = `GSI ${cond.path} = «${v.slice(0, 80)}»`;
       return [cond.gone === true ? !matched : matched, detail, "fresh"];
     }
+    case "browser":
+      // fix 2026-07-15: browser-условие (video.currentTime и т.п.) оценивается на СЕРВЕРЕ через ext-мост
+      // (расширение подключено к серверу, клиент до него не достаёт). Сюда доходить не должно — честный «нет».
+      return [false, "browser-условие проверяется на сервере (расширение), не на клиенте"];
     default: {
       const _exhaustive: never = cond;
       throw new Error(`wait_for: неизвестное условие ${JSON.stringify(_exhaustive)}`);
     }
   }
+}
+
+/**
+ * Кап на ОДИН опрос (фикс OCR-зависания, ревью 2026-07-15): screenOcr/захват экрана могут блокировать до
+ * ~20с (сайдкар-таймаут), а цикл проверял бюджет ТОЛЬКО между опросами → один зависший полл просаживал весь
+ * timeout wait_for мимо его значения (серверный watch получал «нет result за 25000ms» вместо met:false за
+ * 1.5с). raceWithCap (модуль race-cap, тестируется отдельно) гонит опрос наперегонки с капом; зависший опрос
+ * честно = «не выполнено», ожидание живёт по своему timeout. Кап ≤ остатка бюджета и жёсткого потолка.
+ */
+function checkOnceCapped(cond: WaitCondition, budgetMs: number): Promise<[boolean, string, WaitOutcome["gsiState"]?]> {
+  return raceWithCap(
+    () => checkOnce(cond),
+    budgetMs,
+    () => [false, `опрос сенсора (${cond.kind}) не ответил вовремя — пропускаю`],
+  );
 }
 
 /**
@@ -198,7 +218,8 @@ export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: 
   for (;;) {
     polls += 1;
     try {
-      const [met, seen, state] = await checkOnce(cond);
+      // Кап опроса = остаток бюджета (чтобы зависший OCR не переехал timeout wait_for).
+      const [met, seen, state] = await checkOnceCapped(cond, timeout - (Date.now() - startedAt));
       detail = seen;
       if (state) gsiState = state; // R4: состояние источника последнего опроса — серверному watch
       if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}) };

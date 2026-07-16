@@ -253,6 +253,7 @@ export async function recallSemantic(
   const qTokens = new Set(skillTokens(text)); // §hybrid: значимые токены запроса для лексического бонуса
   let best: RecalledSkill | null = null;
   let bestSim = 0;
+  let bestRawCos = 0; // §P0: сырой косинус ЛУЧШЕГО кандидата — гейт авто-реплея смотрит и на него (бусты ≠ семантика)
   let bestBoosted = false;
   // Гард полярности: близкий по косинусу, но противоположный по смыслу навык («прекрати X» ↔
   // «запусти X») не подсовываем ни в промпт, ни в авто-реплей. Заблокированного лучшего логируем —
@@ -300,6 +301,7 @@ export async function recallSemantic(
     }
     if (sim > bestSim) {
       bestSim = sim;
+      bestRawCos = rawCos;
       best = s;
       bestBoosted = boosted;
     }
@@ -311,8 +313,18 @@ export async function recallSemantic(
     });
   }
   if (best && bestSim >= SKILL_SEMANTIC_MIN) {
-    log.info("skill recall: семантическое попадание", { id: best.id, sim: Number(bestSim.toFixed(3)), platformBoost: bestBoosted || undefined });
-    return best;
+    log.info("skill recall: семантическое попадание", {
+      id: best.id,
+      sim: Number(bestSim.toFixed(3)),
+      rawCos: Number(bestRawCos.toFixed(3)),
+      platformBoost: bestBoosted || undefined,
+    });
+    // §P0 (гейт авто-реплея): уверенность recall доносится до петли — СЛЕПОЙ авто-реплей требует
+    // гибридный sim ≥ JARVIS_AUTO_REPLAY_MIN_SIM И сырой косинус ≥ JARVIS_AUTO_REPLAY_MIN_RAW_COS
+    // (ревью: бусты лексики/платформы до +0.3 иначе протаскивали rawCos~0.7 через «строгий» порог
+    // 0.92 — навык ТОЙ ЖЕ платформы, но ДРУГОГО действия получал слепые жесты). Копия — исходная
+    // запись в списке не мутируется.
+    return { ...best, recallSim: bestSim, recallSimRaw: bestRawCos };
   }
   // Диагностика: лучший кандидат не дотянул до порога — видно, НАСКОЛЬКО (для тюнинга boost/порога).
   if (best) {

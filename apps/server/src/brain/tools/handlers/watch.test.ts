@@ -55,6 +55,29 @@ describe("watchCreate — валидация предиката (§Волна3 �
     expect(add).toHaveBeenCalledTimes(1);
   });
 
+  it("(fix 2026-07-15) валидный browser-предикат (video.currentTime) принимается", () => {
+    const add = okAdd();
+    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=", value: 1560 } });
+    expect(res.isError).toBeFalsy();
+    expect((add.mock.calls[0]![0] as { predicate?: unknown }).predicate).toMatchObject({ kind: "browser", value: 1560 });
+  });
+
+  it("(fix 2026-07-15) browser без value → честная ошибка (иначе мёртвый предикат)", () => {
+    const add = okAdd();
+    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=" } });
+    expect(res.isError).toBe(true);
+    expect(res.content).toMatch(/value/i);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("(fix 2026-07-15) browser с кривым op → честная ошибка", () => {
+    const add = okAdd();
+    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", value: 1560, op: "≥" } });
+    expect(res.isError).toBe(true);
+    expect(res.content).toMatch(/op/i);
+    expect(add).not.toHaveBeenCalled();
+  });
+
   // Ревью фиксов Волны 3 (#9): типы критерия gsi. Клиент сравнивает String(value) со СТРОКОЙ —
   // boolean/number-критерий без коэрции давал «принят, но не сработает никогда» (тот же класс #12).
   it("(#9) gsi equals:true (boolean) коэрсится в строку «true» — предикат живой", () => {

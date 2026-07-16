@@ -23,6 +23,8 @@ public static class WindowManager
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr h, int nCmdShow);
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
@@ -65,13 +67,16 @@ public static class WindowManager
                     procNames[pid] = proc ?? "";
                 }
 
+                int rx = 0, ry = 0, rw = 0, rh = 0;
+                if (GetWindowRect(h, out RECT r)) { rx = r.Left; ry = r.Top; rw = r.Right - r.Left; rh = r.Bottom - r.Top; }
                 windows.Add(new WindowInfo(
                     Hwnd: h.ToInt64(),
                     Pid: (int)pid,
                     Process: procNames[pid],
                     Title: title,
                     Foreground: h == fg,
-                    Minimized: IsIconic(h)));
+                    Minimized: IsIconic(h),
+                    X: rx, Y: ry, W: rw, H: rh));
             }
             catch { /* одно проблемное окно не рушит список */ }
             return true;
@@ -129,7 +134,9 @@ public static class WindowManager
         }
 
         string title = TitleOf(target);
-        return new WindowFocusResult(focused, target.ToInt64(), title);
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        if (GetWindowRect(target, out RECT r)) { rx = r.Left; ry = r.Top; rw = r.Right - r.Left; rh = r.Bottom - r.Top; }
+        return new WindowFocusResult(focused, target.ToInt64(), title, rx, ry, rw, rh);
     }
 
     private static void TrySetForeground(IntPtr target)

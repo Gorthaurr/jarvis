@@ -24,6 +24,8 @@ export interface WatchServiceOpts {
   minIntervalMs?: number;
   /** Максимум активных наблюдений на пользователя (анти-runaway, деф 20). */
   maxPerUser?: number;
+  /** Dead-watch (D3): провалов проверки подряд → suspended (деф 10, env JARVIS_WATCH_MAX_FAILURES). */
+  maxFailures?: number;
 }
 
 /** §Волна3 (3.4): канал клиентской проверки предиката — sendAction живой сессии (wait.for-словарь). */
@@ -32,6 +34,15 @@ export type PredicateSender = (cmd: Record<string, unknown>, timeoutMs: number) 
   data?: unknown;
   error?: { code?: string; message?: string };
 }>;
+
+/** fix 2026-07-15: исход серверной проверки BROWSER-предиката (чтение DOM-значения вкладки через ext). */
+export interface BrowserProbeResult {
+  met: boolean;
+  detail: string;
+  /** Ошибка проверки (расширение отключено / нет вкладки). transient=true → НЕ инкрементит dead-watch. */
+  error?: string;
+  transient?: boolean;
+}
 
 export class WatchService {
   private timer?: ReturnType<typeof setTimeout>;
@@ -43,6 +54,7 @@ export class WatchService {
   private readonly minIntervalMs: number;
   private readonly minPredicateIntervalMs: number;
   private readonly maxPerUser: number;
+  private readonly maxFailures: number;
 
   constructor(
     private readonly checker: WatchChecker,
@@ -55,6 +67,8 @@ export class WatchService {
     // LLM-чекера («когда матч найдётся» нужен каждые ~5с, не 30с).
     this.minPredicateIntervalMs = envInt("JARVIS_WATCH_MIN_PREDICATE_INTERVAL_MS", 5_000);
     this.maxPerUser = opts.maxPerUser ?? envInt("JARVIS_WATCH_MAX_PER_USER", 20);
+    // Dead-watch (D3): столько провалов проверки подряд → suspended + одно уведомление владельцу.
+    this.maxFailures = opts.maxFailures ?? envInt("JARVIS_WATCH_MAX_FAILURES", 10);
   }
 
   /** Старт: загрузить стор, завести таймер на ближайшую проверку. */
@@ -148,6 +162,16 @@ export class WatchService {
     this.actions.set(sessionId, { userId, send });
   }
 
+  /**
+   * fix 2026-07-15: серверная проверка BROWSER-предиката (video.currentTime и т.п. через ext-мост
+   * расширения — оно на сервере, не на клиенте). Инжектится из server.ts. Нет probe / расширение
+   * отключено → browser-предикат сообщает транзиентную недоступность (НЕ dead-watch — вкладка вернётся).
+   */
+  private browserProbe?: (predicate: unknown) => Promise<BrowserProbeResult>;
+  setBrowserProbe(fn: (predicate: unknown) => Promise<BrowserProbeResult>): void {
+    this.browserProbe = fn;
+  }
+
   unregisterActions(sessionId: string): void {
     this.actions.delete(sessionId);
   }
@@ -166,10 +190,27 @@ export class WatchService {
    * (повторим в следующий тик), НЕ met (недоступность сенсора ≠ «условие выполнено»).
    */
   private async checkPredicate(w: Watch): Promise<CheckResult> {
+    // fix 2026-07-15: BROWSER-предикат (video.currentTime и т.п.) проверяем СЕРВЕРНО через ext-мост —
+    // расширение подключено к серверу, а клиентский wait.for до него не достаёт (раньше агент подсовывал
+    // OCR таймера {kind:"text"} — тот на этой машине висел >25с и наблюдение падало каждый тик).
+    const pred = w.predicate as { kind?: unknown } | undefined;
+    if (pred?.kind === "browser") {
+      if (!this.browserProbe) {
+        return { met: false, summary: "", error: "браузерная проверка недоступна (расширение не подключено)", transient: true };
+      }
+      const r = await this.browserProbe(w.predicate);
+      if (r.error) return { met: false, summary: "", error: r.error, transient: r.transient };
+      return { met: r.met, value: r.detail ? r.detail.slice(0, 200) : undefined, summary: r.met ? `Сработало: ${w.condition}.` : "" };
+    }
     const send = this.actionFor(w);
-    if (!send) return { met: false, summary: "", error: "нет живой сессии клиента для проверки предиката" };
+    // Ревью р2 #6: НЕТ живой сессии — ТРАНЗИЕНТНАЯ инфраструктура (клиент закрыт/resume-grace/сетевой
+    // блип), НЕ провал проверки. transient=true → runCheck НЕ инкрементит dead-watch (иначе «скажи когда
+    // матч найдётся» + свёрнутое на минуту окно = 10 тиков × 5с → навсегда suspended до возврата владельца).
+    if (!send) return { met: false, summary: "", error: "нет живой сессии клиента для проверки предиката", transient: true };
     try {
-      const res = await send({ kind: "wait.for", condition: w.predicate, timeoutMs: 1_500, pollMs: 700 }, 8_000);
+      // D2 (форензика 2026-07-14): серверный ActionCommand-таймаут ДОЛЖЕН быть ВЫШЕ клиентского бюджета
+      // сенсора (OCR-путь sensors-cheap до 20с), иначе КАЖДЫЙ полл = «нет result за 8000ms». Даём 25с.
+      const res = await send({ kind: "wait.for", condition: w.predicate, timeoutMs: 1_500, pollMs: 700 }, 25_000);
       if (!res.ok) return { met: false, summary: "", error: res.error?.message ?? res.error?.code ?? "wait.for failed" };
       const data = res.data as { met?: boolean; detail?: string; gsiState?: "fresh" | "stale" | "none" } | undefined;
       let met = data?.met === true;
@@ -269,10 +310,30 @@ export class WatchService {
     }
     if (res.value !== undefined) w.lastValue = res.value;
     if (res.error) {
-      log.info("наблюдение: проверка не удалась (повторю в следующий тик)", { id: w.id, error: res.error.slice(0, 120) });
+      // Ревью р2 #6: транзиентная ошибка (нет живой сессии) — НЕ dead-watch (клиент вернётся). Логируем,
+      // счётчик НЕ трогаем, пробуем в следующий тик.
+      if (res.transient) {
+        log.info("наблюдение: проверка отложена (нет живой сессии — транзиентно)", { id: w.id });
+        this.store.update(w);
+        return;
+      }
+      // Dead-watch (D3, форензика 2026-07-14: 142 провала подряд горели в тишине, чекер вне SpendGuard).
+      w.consecutiveFailures = (w.consecutiveFailures ?? 0) + 1;
+      log.info("наблюдение: проверка не удалась (повторю в следующий тик)", {
+        id: w.id,
+        error: res.error.slice(0, 120),
+        fails: w.consecutiveFailures,
+      });
+      if (w.consecutiveFailures >= this.maxFailures) {
+        w.status = "suspended";
+        w.firedAt = this.now(); // ревью р2 #8: prune держит запись 24ч от firedAt (иначе pendingNotify стёрся бы до доставки)
+        log.warn("наблюдение ПРИОСТАНОВЛЕНО: серия провалов проверки — больше не тикает", { id: w.id, fails: w.consecutiveFailures });
+        this.notify(w, `Не смог наблюдать «${w.what}» — ${w.consecutiveFailures} проверок подряд не удались, приостановил. Проверьте условие, сэр.`);
+      }
       this.store.update(w);
       return;
     }
+    w.consecutiveFailures = 0; // успешная проверка (met или нет) — серия провалов сброшена
     if (res.met) {
       const summary = res.summary.trim() || `Сработало наблюдение: ${w.what}.`;
       // continuous: не дублируем идентичное уведомление подряд (антидребезг); состояние «отлипло» — снова уведомим.

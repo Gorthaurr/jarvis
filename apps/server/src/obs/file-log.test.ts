@@ -32,11 +32,14 @@ describe("FileLogSink — durable файловый лог (аудит 2026-07-02
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     expect(() => {
-      sink.sink({ ts: Date.now(), level: "error", scope: "x", msg: "cyclic", meta: cyclic });
+      sink.sink({ ts: Date.now(), level: "error", scope: "x", msg: "boom", meta: cyclic });
       sink.flush();
     }).not.toThrow();
     const f = readdirSync(dir).find((n) => n.startsWith("server-"))!;
-    expect(readFileSync(join(dir, f), "utf8")).toContain("cyclic");
+    // Проверяем именно КОЛЛАПС meta в строку (msg отдельный — иначе ассерт ловил бы совпадение по msg, ревью #1).
+    const rec = JSON.parse(readFileSync(join(dir, f), "utf8").trim().split("\n").pop()!);
+    expect(typeof rec.meta).toBe("string");
+    expect(rec.msg).toBe("boom");
   });
 
   it("dispose дослаёт буфер и останавливает таймер", () => {
@@ -46,6 +49,27 @@ describe("FileLogSink — durable файловый лог (аудит 2026-07-02
     sink.dispose();
     const f = readdirSync(dir).find((n) => n.startsWith("server-"))!;
     expect(readFileSync(join(dir, f), "utf8")).toContain("перед выходом");
+  });
+
+  it("крупный meta режется по длине (bounded serialization, ревью 2026-07-15)", () => {
+    const sink = new FileLogSink({ dir });
+    sink.sink({ ts: Date.now(), level: "info", scope: "x", msg: "big", meta: { blob: "x".repeat(20_000) } });
+    sink.flush();
+    const f = readdirSync(dir).find((n) => n.startsWith("server-"))!;
+    const content = readFileSync(join(dir, f), "utf8");
+    expect(content).toContain("срезано]"); // маркер усечения
+    const rec = JSON.parse(content.trim().split("\n").pop()!);
+    expect(typeof rec.meta).toBe("string"); // крупный meta → усечённая строка (не полный объект)
+    expect(rec.meta.length).toBeLessThan(20_000);
+  });
+
+  it("небольшой meta остаётся структурным объектом (не режется — для грепа)", () => {
+    const sink = new FileLogSink({ dir });
+    sink.sink({ ts: Date.now(), level: "info", scope: "x", msg: "small", meta: { a: 1, b: "две" } });
+    sink.flush();
+    const f = readdirSync(dir).find((n) => n.startsWith("server-"))!;
+    const rec = JSON.parse(readFileSync(join(dir, f), "utf8").trim().split("\n").pop()!);
+    expect(rec.meta).toEqual({ a: 1, b: "две" });
   });
 
   it("pruneOldLogs удаляет server-логи старше retention, свежие оставляет", () => {

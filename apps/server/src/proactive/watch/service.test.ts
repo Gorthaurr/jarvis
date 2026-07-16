@@ -163,4 +163,130 @@ describe("WatchService — durable повторяющееся наблюдени
     expect(active).toHaveLength(1);
     expect(active[0]?.what).toContain("CI");
   });
+
+  it("dead-watch (D3, форензика 2026-07-14): серия провалов проверки → suspended + ОДНО уведомление, больше не тикает", async () => {
+    let clock = 0;
+    const speak = vi.fn();
+    // Чекер ВСЕГДА возвращает ошибку — как битый watch из эпизода (142 провала подряд в тишине).
+    const checker = vi.fn(async (): Promise<CheckResult> => ({ met: false, summary: "", error: "нет result за 8000ms" }));
+    const svc = new WatchService(checker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100, maxFailures: 3 });
+    svc.registerSpeaker("s", "u", speak);
+    svc.add({ sessionId: "s", userId: "u", what: "время видео", condition: "дошло до 35", intervalMs: 100, continuous: true });
+    for (let i = 0; i < 5; i += 1) {
+      await svc.tickNow();
+      clock += 100;
+    }
+    // На 3-м провале — suspended + ОДНО уведомление; дальнейшие тики его не трогают (не тикает, не спамит).
+    expect(checker).toHaveBeenCalledTimes(3); // после suspend больше не проверяется
+    expect(speak).toHaveBeenCalledTimes(1);
+    expect(String(speak.mock.calls[0]?.[0])).toContain("приостановил");
+    expect(svc.list({ userId: "u" })).toHaveLength(0); // suspended не в active-списке
+  });
+
+  it("dead-watch (ревью р2 #6): ТРАНЗИЕНТНЫЙ провал (нет живой сессии) НЕ копится к suspend", async () => {
+    // «скажи когда матч найдётся» + свёрнутое окно на минуту → 10+ «нет живой сессии» подряд НЕ должны
+    // навсегда suspend'ить watch (клиент вернётся). Только transient=true — прочие ошибки копятся.
+    let clock = 0;
+    const checker = vi.fn(async (): Promise<CheckResult> => ({ met: false, summary: "", error: "нет живой сессии", transient: true }));
+    const svc = new WatchService(checker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100, maxFailures: 3 });
+    svc.registerSpeaker("s", "u", vi.fn());
+    svc.add({ sessionId: "s", userId: "u", what: "матч", condition: "найдётся", intervalMs: 100, continuous: true });
+    for (let i = 0; i < 8; i += 1) {
+      await svc.tickNow();
+      clock += 100;
+    }
+    expect(svc.list({ userId: "u" })).toHaveLength(1); // всё ещё active — транзиент не suspend'ит
+  });
+
+  it("dead-watch: успешная проверка СБРАСЫВАЕТ счётчик провалов (эпизодический сбой не копится к suspend)", async () => {
+    let clock = 0;
+    let fail = true;
+    const svc = new WatchService(
+      async (): Promise<CheckResult> => (fail ? { met: false, summary: "", error: "сеть" } : { met: false, summary: "" }),
+      new WatchStore(tempDir()),
+      { now: () => clock, minIntervalMs: 100, maxFailures: 3 },
+    );
+    svc.registerSpeaker("s", "u", vi.fn());
+    svc.add({ sessionId: "s", userId: "u", what: "курс", condition: "ниже X", intervalMs: 100, continuous: true });
+    await svc.tickNow(); clock += 100; // fail 1
+    await svc.tickNow(); clock += 100; // fail 2
+    fail = false;
+    await svc.tickNow(); clock += 100; // успех → счётчик сброшен
+    fail = true;
+    await svc.tickNow(); clock += 100; // fail 1 снова
+    await svc.tickNow(); clock += 100; // fail 2 — до порога 3 не дошли
+    expect(svc.list({ userId: "u" })).toHaveLength(1); // всё ещё active (не suspended)
+  });
+
+  it("(fix 2026-07-15) browser-предикат: проверяется через browserProbe (не клиентский wait.for), met → уведомляет", async () => {
+    let clock = 1_000_000;
+    const speak = vi.fn();
+    let reached = false;
+    const probe = vi.fn(async () => ({ met: reached, detail: `currentTime=${reached ? 1600 : 1400}` }));
+    // checker НЕ должен вызываться для предикат-наблюдения (это проверка на сервере, не LLM).
+    const checker = vi.fn(async (): Promise<CheckResult> => ({ met: false, summary: "" }));
+    const svc = new WatchService(checker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 1000 });
+    svc.setBrowserProbe(probe);
+    svc.registerSpeaker("s1", "u1", speak);
+    svc.add({
+      sessionId: "s1",
+      userId: "u1",
+      what: "видео дошло до 26-й минуты",
+      condition: "видео на 26:00",
+      intervalMs: 5000,
+      predicate: { kind: "browser", prop: "currentTime", op: ">=", value: 1560 },
+    });
+
+    await svc.tickNow(); // ещё не дошло
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(checker).not.toHaveBeenCalled(); // предикат → browserProbe, НЕ LLM-чекер
+    expect(speak).not.toHaveBeenCalled();
+
+    clock += 5000;
+    reached = true;
+    await svc.tickNow(); // дошло → уведомление
+    expect(speak).toHaveBeenCalledTimes(1);
+  });
+
+  it("(fix 2026-07-15) browser-предикат без browserProbe / расширение отключено → транзиент, НЕ dead-watch", async () => {
+    let clock = 0;
+    const svc = new WatchService(
+      async (): Promise<CheckResult> => ({ met: false, summary: "" }),
+      new WatchStore(tempDir()),
+      { now: () => clock, minIntervalMs: 100, maxFailures: 2 },
+    );
+    // browserProbe НЕ задан → транзиентная недоступность (как «нет живой сессии»): не копится к suspend.
+    // ⚠️ Предикат-watch: минимальный интервал = minPredicateIntervalMs(5000), intervalMs бампится до него,
+    // поэтому clock двигаем на 5000/тик (иначе наблюдение не «созревает» повторно).
+    svc.registerSpeaker("s", "u", vi.fn());
+    svc.add({ sessionId: "s", userId: "u", what: "видео", condition: "26:00", intervalMs: 5000, continuous: true, predicate: { kind: "browser", value: 1560 } });
+    await svc.tickNow(); clock += 5000;
+    await svc.tickNow(); clock += 5000;
+    await svc.tickNow(); clock += 5000; // 3 «провала», но транзиентные → maxFailures(2) не срабатывает
+    expect(svc.list({ userId: "u" }).filter((w) => w.status === "active")).toHaveLength(1);
+  });
+
+  it("(fix 2026-07-15) browserProbe вернул error transient:true → НЕ dead-watch; transient:false → суспенд после maxFailures", async () => {
+    let clock = 0;
+    let transient = true;
+    const probe = vi.fn(async () => ({ met: false, detail: "", error: "нет вкладки", transient }));
+    const svc = new WatchService(
+      async (): Promise<CheckResult> => ({ met: false, summary: "" }),
+      new WatchStore(tempDir()),
+      { now: () => clock, minIntervalMs: 100, maxFailures: 2 },
+    );
+    svc.setBrowserProbe(probe);
+    svc.registerSpeaker("s", "u", vi.fn());
+    // Предикат-watch: интервал бампится до minPredicateIntervalMs(5000) → clock двигаем на 5000/тик.
+    svc.add({ sessionId: "s", userId: "u", what: "видео", condition: "26:00", intervalMs: 5000, continuous: true, predicate: { kind: "browser", value: 1560 } });
+    await svc.tickNow(); clock += 5000;
+    await svc.tickNow(); clock += 5000;
+    await svc.tickNow(); clock += 5000;
+    expect(svc.list({ userId: "u" }).filter((w) => w.status === "active")).toHaveLength(1); // транзиент не копится
+
+    transient = false; // теперь ошибки НЕ транзиентные → должны копиться к suspend
+    await svc.tickNow(); clock += 5000; // fail 1
+    await svc.tickNow(); clock += 5000; // fail 2 → maxFailures(2) → suspended
+    expect(svc.list({ userId: "u" }).filter((w) => w.status === "active")).toHaveLength(0);
+  });
 });

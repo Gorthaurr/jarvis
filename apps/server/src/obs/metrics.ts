@@ -9,7 +9,7 @@
  *
  * Это НЕ биллинг (тот — SpendGuard §14, в нормализованных единицах). Здесь — наблюдаемость в $/мс.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { dataPath } from "../paths.js";
@@ -159,10 +159,25 @@ export class MetricsCollector {
    *  строкой в dataDir/logs/metrics.jsonl. Так латентность/стоимость/успех задач переживают деплой и
    *  доступны офлайн-разбору. Включается gateway.listen() (enableJsonl), не в конструкторе (тесты/чистота). */
   private jsonl = false;
+  /** Учёт размера metrics.jsonl в БАЙТАХ (в ОЗУ; −1 = ещё не инициализирован от реального размера файла).
+   *  Пишем редко (несколько строк на задачу), поэтому statSync зовём ОДИН раз на сессию (ленивая init),
+   *  дальше складываем длины строк — без syscall на каждую запись. */
+  private jsonlBytes = -1;
+  /** Порог ротации metrics.jsonl по РАЗМЕРУ (байт). Ревью learn-coding-agent 2026-07-15: файл рос без
+   *  предела (pruneOldLogs чистит по возрасту ТОЛЬКО server-*.log — file-log.test.ts это фиксирует). Чистить
+   *  metrics.jsonl по возрасту НЕЛЬЗЯ: это longitudinal-экономика (/cogs, юнит-экономика), в отличие от шумных
+   *  server-логов. Поэтому bound по размеру: >cap → metrics.jsonl.1 (одна прошлая генерация), новый с нуля;
+   *  свежие данные целы, диск ограничен ~2×cap. env JARVIS_METRICS_MAX_BYTES (деф 64 МБ, мин 1 МБ). */
+  private readonly maxJsonlBytes: number;
+  /** Таймер периодической строки здоровья процесса (type:"process_health"); unref, стоп на dispose/тестах. */
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(cap?: number) {
+  constructor(cap?: number, opts?: { maxJsonlBytes?: number }) {
     const n = Number.parseInt(process.env.JARVIS_METRICS_WINDOW ?? "", 10);
     this.cap = cap ?? (Number.isFinite(n) && n >= 10 && n <= 100_000 ? n : 1000);
+    const mb = Number.parseInt(process.env.JARVIS_METRICS_MAX_BYTES ?? "", 10);
+    // opts.maxJsonlBytes — тест-переопределение (env-клампу не подчиняется, чтобы не писать 1 МБ в тесте).
+    this.maxJsonlBytes = opts?.maxJsonlBytes ?? (Number.isFinite(mb) && mb >= 1_000_000 ? mb : 64 * 1024 * 1024);
   }
 
   /** Включить durable JSONL-хвост (в проде из gateway.listen). Env JARVIS_METRICS_JSONL=0 — выключить. */
@@ -177,9 +192,100 @@ export class MetricsCollector {
     }
   }
 
-  /** Выключить durable-хвост (graceful shutdown/тесты). */
+  /** Выключить durable-хвост (graceful shutdown/тесты). Останавливает и таймер здоровья процесса. */
   disableJsonl(): void {
     this.jsonl = false;
+    this.stopProcessHealth();
+  }
+
+  /**
+   * Дописать одну JSONL-строку в metrics.jsonl (fail-safe). ЕДИНЫЙ писатель (DRY: раньше appendFileSync
+   * дублировался в record/recordRound/recordMouthToEar). Раз в ROTATE_CHECK_EVERY записей проверяет размер
+   * и ротирует по нему (по возрасту НЕ чистим — longitudinal-экономика). Сбой ФС проглатывается: окно в
+   * ОЗУ и /stats продолжают работать.
+   */
+  private appendJsonl(obj: unknown): void {
+    if (!this.jsonl) return;
+    try {
+      const path = join(dataPath("logs"), "metrics.jsonl");
+      const line = `${JSON.stringify(obj)}\n`;
+      const bytes = Buffer.byteLength(line, "utf8");
+      if (this.jsonlBytes < 0) {
+        // Первая запись сессии: реальный размер файла (переживший рестарт), дальше считаем в ОЗУ.
+        try {
+          this.jsonlBytes = statSync(path).size;
+        } catch {
+          this.jsonlBytes = 0; // файла ещё нет
+        }
+      }
+      // Ротация ДО записи: если добавление строки перевалит cap (и файл не пуст) → сдвигаем в .1, пишем в новый.
+      // Счётчик обнуляем ТОЛЬКО при реальном успехе rename (ревью 2026-07-15 #2/#3): если renameSync бросил
+      // (Windows — файл держит другой процесс/АВ/индексатор), файл на месте с размером ~cap → оставляем
+      // jsonlBytes у порога, тогда условие ротации остаётся истинным и попытка повторяется на СЛЕДУЮЩЕЙ записи
+      // (самовосстановление, рост ограничен темпом строки), а не копим ещё целый cap до новой попытки.
+      if (this.jsonlBytes > 0 && this.jsonlBytes + bytes > this.maxJsonlBytes && this.rotate(path)) {
+        this.jsonlBytes = 0;
+      }
+      appendFileSync(path, line);
+      this.jsonlBytes += bytes;
+    } catch {
+      /* не критично */
+    }
+  }
+
+  /** Ротация по размеру: metrics.jsonl → metrics.jsonl.1 (одна прошлая генерация), новый файл пишется с нуля.
+   *  unlink прошлой .1 до rename — на Windows renameSync не перезаписывает существующий таргет. Возвращает
+   *  true ТОЛЬКО если rename реально удался (иначе счётчик в appendJsonl не сбрасываем — повторим позже). */
+  private rotate(path: string): boolean {
+    const prev = `${path}.1`;
+    try {
+      unlinkSync(prev);
+    } catch {
+      /* прошлой генерации нет — ок */
+    }
+    try {
+      renameSync(path, prev);
+      log.info("metrics.jsonl ротирован по размеру", { maxBytes: this.maxJsonlBytes });
+      return true;
+    } catch {
+      return false; // rename не удался (лок/права/гонка) — счётчик не трогаем, повторим на следующей записи
+    }
+  }
+
+  /**
+   * Периодическая durable-строка здоровья процесса (type:"process_health"): rss/heap/uptime/cpu + версия
+   * node. Усиливает цель file-log («разбор „вчера оглох / сожрало память" был слеп»): при регрессе памяти/
+   * CPU у владельца durable-корреляция во времени. Idempotent, unref (не держит event loop). Пишет ТОЛЬКО
+   * при включённом jsonl. Стоп — stopProcessHealth (dispose/тесты). Первую строку эмитит сразу.
+   */
+  startProcessHealth(intervalMs = 300_000): void {
+    if (this.healthTimer || !this.jsonl) return;
+    const tick = (): void => {
+      const mem = process.memoryUsage();
+      const cpu = process.cpuUsage();
+      this.appendJsonl({
+        ts: new Date().toISOString(),
+        type: "process_health",
+        uptimeSec: Math.round(process.uptime()),
+        rssMb: Math.round(mem.rss / 1_048_576),
+        heapUsedMb: Math.round(mem.heapUsed / 1_048_576),
+        heapTotalMb: Math.round(mem.heapTotal / 1_048_576),
+        cpuUserMs: Math.round(cpu.user / 1000),
+        cpuSystemMs: Math.round(cpu.system / 1000),
+        node: process.version,
+      });
+    };
+    tick(); // durable-baseline сразу на старте (не ждём первый интервал)
+    this.healthTimer = setInterval(tick, intervalMs);
+    if (typeof this.healthTimer === "object" && "unref" in this.healthTimer) this.healthTimer.unref?.();
+  }
+
+  /** Остановить таймер здоровья процесса (dispose/тесты). Idempotent. */
+  stopProcessHealth(): void {
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer);
+      this.healthTimer = null;
+    }
   }
 
   /**
@@ -196,13 +302,7 @@ export class MetricsCollector {
     toolNames: readonly string[];
     cacheThrashCause?: string;
   }): void {
-    if (!this.jsonl) return;
-    try {
-      const rec = JSON.stringify({ ts: new Date().toISOString(), type: "round", ...event, costUsd: costUsd(event.model, event.usage) });
-      appendFileSync(join(dataPath("logs"), "metrics.jsonl"), rec + "\n");
-    } catch {
-      /* не критично */
-    }
+    this.appendJsonl({ ts: new Date().toISOString(), type: "round", ...event, costUsd: costUsd(event.model, event.usage) });
   }
 
   /**
@@ -213,13 +313,7 @@ export class MetricsCollector {
    * gateway; проактив/фон не тегаются — см. pipeline.onAudioPlayed). Fail-safe: сбой ФС не критичен.
    */
   recordMouthToEar(ms: number, turnSeq: number, userId?: string): void {
-    if (!this.jsonl) return;
-    try {
-      const rec = JSON.stringify({ ts: new Date().toISOString(), type: "mouth_to_ear", ms, turnSeq, ...(userId ? { userId } : {}) });
-      appendFileSync(join(dataPath("logs"), "metrics.jsonl"), rec + "\n");
-    } catch {
-      /* не критично */
-    }
+    this.appendJsonl({ ts: new Date().toISOString(), type: "mouth_to_ear", ms, turnSeq, ...(userId ? { userId } : {}) });
   }
 
   /** Записать событие задачи. При переполнении окна — выталкиваем старейшее (ring-buffer). */
@@ -227,14 +321,7 @@ export class MetricsCollector {
     this.events.push(event);
     if (this.events.length > this.cap) this.events.shift();
     // Durable-хвост: одна JSONL-строка на задачу (fail-safe — сбой ФС не ломает горячий путь агента).
-    if (this.jsonl) {
-      try {
-        const rec = JSON.stringify({ ts: new Date().toISOString(), ...event, costUsd: costUsd(event.model, event.usage) });
-        appendFileSync(join(dataPath("logs"), "metrics.jsonl"), rec + "\n");
-      } catch {
-        /* не критично — окно в ОЗУ и /stats продолжают работать */
-      }
-    }
+    this.appendJsonl({ ts: new Date().toISOString(), ...event, costUsd: costUsd(event.model, event.usage) });
   }
 
   /** Снимок агрегатов по текущему окну событий. */

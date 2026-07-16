@@ -44,6 +44,13 @@ export class PhraseSpeaker {
     return !this.cancelled && !this.doneEmitted;
   }
 
+  /** §P1 (ревью): реально ли речь пошла/вот-вот пойдёт (уже говорил / синтез в полёте / фразы в очереди).
+   *  В отличие от active, который истинен С КОНСТРУИРОВАНИЯ сессии (runAgentStreaming создаёт спикер ДО
+   *  вызова brain) — гейт earcon-раздумья по active был мёртв весь стриминговый ход. */
+  get speechStarted(): boolean {
+    return this.spoke || this.current !== null || this.queue.length > 0;
+  }
+
   /** Добавить готовую фразу в очередь синтеза (стрим из brain). */
   push(sentence: string): void {
     if (this.cancelled || this.doneEmitted) return;

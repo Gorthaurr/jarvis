@@ -142,6 +142,8 @@ export interface MockTurn {
   toolUses?: ToolUse[];
   /** Переопределить stop_reason (для тестов докрутки max_tokens и т.п.). */
   stopReason?: StopReason;
+  /** Переопределить usage хода (для тестов гарда контекст-окна и т.п.); мёржится с нулевыми дефолтами. */
+  usage?: Partial<LlmResponse["usage"]>;
 }
 
 /**
@@ -165,7 +167,7 @@ export class MockLlmProvider implements ILlmProvider {
       text: turn.text ?? "",
       toolUses,
       stopReason: turn.stopReason ?? (toolUses.length > 0 ? "tool_use" : "end_turn"),
-      usage: { inputTokens: 12, outputTokens: 8, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      usage: { inputTokens: 12, outputTokens: 8, cacheReadTokens: 0, cacheCreationTokens: 0, ...turn.usage },
       stubbed: true,
     };
   }

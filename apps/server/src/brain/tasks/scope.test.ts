@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyTaskScope, isDuplicateGoal } from "./scope.js";
+import { classifyTaskScope, isDuplicateGoal, looksLikeStatusQuery } from "./scope.js";
 
 describe("classifyTaskScope — правка текущей vs новая задача (§20)", () => {
   it("явные маркеры правки → edit", () => {
@@ -35,6 +35,49 @@ describe("classifyTaskScope — правка текущей vs новая зад
     expect(classifyTaskScope("сделай по другому")).toBe("edit");
     // бареное «лучше/иначе» НЕ должно ложно ловиться как правка (частотны вне рулёжки)
     expect(classifyTaskScope("лучше закажи такси")).toBe("new");
+  });
+
+  it("A2 (форензика 2026-07-14): ПРЕТЕНЗИЯ «не сработало/не сделано» при активной задаче → edit (доведи, не новая)", () => {
+    // Живой эпизод: «это не сделал», «нихуя не перемотал», «не ушло» уходили scope=new → вторая пустая
+    // петля вместо доведения. Теперь — правка текущей задачи (re-verify/добей).
+    expect(classifyTaskScope("это не сделал")).toBe("edit");
+    expect(classifyTaskScope("вот видишь у меня дошло до 35 и ты нихуя не перемотал")).toBe("edit");
+    expect(classifyTaskScope("Джарвис не ушло")).toBe("edit");
+    expect(classifyTaskScope("сообщение не отправлено")).toBe("edit");
+    expect(classifyTaskScope("так и не получилось")).toBe("edit");
+    // но самостоятельное «не» без претензии к выполненному — не ложный edit
+    expect(classifyTaskScope("не забудь про встречу завтра")).toBe("new");
+  });
+
+  it("A2 (ревью р2 #4): общие «ничего не / так и не» УБРАНЫ — новая команда не проглатывается как правка", () => {
+    expect(classifyTaskScope("на завтра ничего не запланировано, покажи календарь")).toBe("new");
+    expect(classifyTaskScope("так и не решил, закажи такси")).toBe("new");
+    expect(classifyTaskScope("до сих пор не пойму, открой настройки")).toBe("new");
+  });
+});
+
+describe("looksLikeStatusQuery — претензия/статус-запрос vs инструкция-правка (fix 2026-07-15)", () => {
+  it("претензия о невыполнении → статус-запрос (не «поправляю»)", () => {
+    expect(looksLikeStatusQuery("ты не сделал это")).toBe(true);
+    expect(looksLikeStatusQuery("я не вижу, чтобы ты что-то делал")).toBe(true);
+    expect(looksLikeStatusQuery("нихуя не перемотал")).toBe(true);
+    expect(looksLikeStatusQuery("сообщение не отправлено")).toBe(true);
+  });
+
+  it("прямой вопрос о ходе → статус-запрос", () => {
+    expect(looksLikeStatusQuery("ну что там")).toBe(true);
+    expect(looksLikeStatusQuery("готово?")).toBe(true);
+    expect(looksLikeStatusQuery("ты сделал?")).toBe(true);
+    expect(looksLikeStatusQuery("ещё долго?")).toBe(true);
+    expect(looksLikeStatusQuery("что ты сейчас делаешь")).toBe(true);
+  });
+
+  it("инструкция-правка («добавь/переделай/вместо») — НЕ статус-запрос (останется «поправляю»)", () => {
+    expect(looksLikeStatusQuery("добавь раздел про флот")).toBe(false);
+    expect(looksLikeStatusQuery("переделай вступление")).toBe(false);
+    expect(looksLikeStatusQuery("вместо этого открой сайт")).toBe(false);
+    expect(looksLikeStatusQuery("сделай подробнее")).toBe(false);
+    expect(looksLikeStatusQuery("")).toBe(false);
   });
 });
 

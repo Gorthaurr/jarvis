@@ -23,7 +23,7 @@ describe("SpendGuard — санитизация предохранителей (
 
   it("нечисловой spendCap (битый env → NaN) → дефолт, а не «выключено»", () => {
     const g = new SpendGuard({ spendCap: Number.NaN });
-    g.recordUsage("t1", 0, 60); // выше дефолтного потолка 50
+    g.recordUsage("t1", 0, 360); // выше дефолтного потолка (DEFAULT_LIMITS.spendCap=300)
     expect(g.check("t1", 1).allowed).toBe(false);
     expect(g.check("t1", 1).reason).toBe("spend_cap");
   });

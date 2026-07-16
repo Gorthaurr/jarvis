@@ -99,6 +99,24 @@ const SILENCE_POLL_MS = 150;
  *  Отброс теперь ЛОГИРУЕТСЯ (наблюдаемость), а не молчит. */
 const M2E_MAX_PLAUSIBLE_MS = envInt("JARVIS_M2E_MAX_MS", 600_000);
 
+/** Акустический фронт #1/#2 «строгий wake в шуме»: если за окно NOISY_WINDOW_MS пришло ≥ NOISY_MIN_IGNORED
+ *  НЕадресованных реплик (фон/видео/второй голос — их дропает wake-гейт), обстановка считается ЗАШУМЛЁННОЙ →
+ *  катящееся окно разговора ОТКЛЮЧАЕТСЯ: каждая команда требует «Джарвис» (иначе чужая речь затапливает пайплайн,
+ *  как в форензике). Стихло (частота упала) → окно возвращается. Выключатель JARVIS_STRICT_WAKE_IN_NOISE=0. */
+/** Клампы кривой конфигурации (ревью р2): MIN < 1 давал вход `n ≥ 0` = ВСЕГДА (вечный строгий wake в
+ *  тихой комнате — оператор, поставивший 0 «чтобы выключить», получал противоположное; честный
+ *  выключатель — JARVIS_STRICT_WAKE_IN_NOISE=0); окно ≤ 0 молча убивало фичу (прунинг съедал счётчик).
+ *  EXIT ≥ MIN давал пустую зону гистерезиса → флап с лог-переходом на каждом gateWake и разный вердикт
+ *  строгого режима внутри ОДНОЙ реплики. WARN о клампах — в конструкторе пайплайна. */
+const NOISY_WINDOW_RAW = envInt("JARVIS_NOISY_WINDOW_MS", 30_000);
+const NOISY_WINDOW_MS = Math.max(1_000, NOISY_WINDOW_RAW);
+const NOISY_MIN_RAW = envInt("JARVIS_NOISY_MIN_IGNORED", 3);
+const NOISY_MIN_IGNORED = Math.max(1, NOISY_MIN_RAW);
+/** Гистерезис (ревью, анти-флаппинг): вход в шумный режим при ≥NOISY_MIN_IGNORED, выход — при ≤этого,
+ *  чтобы счётчик у порога не дребезжал лог/состояние. Держим режим в зоне [exit+1, enter). */
+const NOISY_EXIT_RAW = envInt("JARVIS_NOISY_EXIT_IGNORED", 1);
+const NOISY_EXIT_IGNORED = Math.max(0, Math.min(NOISY_EXIT_RAW, NOISY_MIN_IGNORED - 1));
+
 /** §3: потолок буфера аудио хода для верификации диктора — ~8с @16кГц (хватает для опознания). */
 const SPEAKER_BUFFER_CAP = 16_000 * 8;
 
@@ -113,18 +131,25 @@ function concatInt16(chunks: readonly Int16Array[], total: number): Int16Array {
   return out;
 }
 
+/** §P0 (гейт авто-реплея): КАК реплика прошла wake-гейт — мозг решает, положены ли ходу слепые жесты. */
+export interface UserTurnMeta {
+  /** true — явное «Джарвис» (или подтверждённый second-chance); false — катящееся окно разговора
+   *  без обращения (главный вход чужой речи, форензика 2026-07-14: мат в Discord → авто-реплей). */
+  viaWake: boolean;
+}
+
 export interface VoicePipelineDeps {
   stt: ISttProvider;
   tts: ITtsProvider;
-  /** Вызов brain на финальном тексте реплики (уже после verbalize внутри). */
-  onUserTurn: (text: string) => Promise<AgentReplyLike>;
+  /** Вызов brain на финальном тексте реплики (уже после verbalize внутри). meta — см. UserTurnMeta. */
+  onUserTurn: (text: string, meta?: UserTurnMeta) => Promise<AgentReplyLike>;
   /**
    * §10 realtime: стриминговый вариант — brain отдаёт реплику ПОФРАЗНО (token-streaming),
    * первый звук = синтез первого предложения. Если задан — используется вместо onUserTurn
    * (с автофолбэком на короткую реплику при ошибке brain). Реплика в 1 предложение по факту
    * = тот же путь, что и раньше (одна фраза → один синтез). undefined → классический onUserTurn.
    */
-  onUserTurnStream?: (text: string, sink: ReplySink) => Promise<void>;
+  onUserTurnStream?: (text: string, sink: ReplySink, meta?: UserTurnMeta) => Promise<void>;
   /** Отправка аудио-чанка TTS клиенту (speak.chunk, §5). */
   sendSpeakChunk: (c: TtsChunk) => void;
   /** Realtime инкремент 0: замер mouth-to-ear (конец речи → первый звук РЕАЛЬНО сыгран у клиента), мс.
@@ -244,6 +269,23 @@ export class VoicePipeline {
   private lastActiveAt = 0;
   private lastCmd = ""; // анти-дубль: последняя обработанная команда + время
   private lastCmdAt = 0;
+  /** Акустика «строгий wake в шуме»: времена НЕадресованных реплик (для детекции зашумлённой обстановки)
+   *  + текущее состояние режима (для лог-перехода вкл/выкл). */
+  private ignoredAt: number[] = [];
+  /** Реплики, ЗАБЛОКИРОВАННЫЕ строгим режимом в ОТКРЫТОМ окне (ревью #2): в счётчик шума НЕ идут
+   *  (владельца от фона по тексту не отличить — режим самоподдерживался бы), но это маркер «сигнал
+   *  МАСКИРОВАН»: выход из режима по распаду счётчика при непустом blockedAt тишину НЕ доказывает —
+   *  updateNoisyMode тогда консервативно закрывает окно разговора (см. там). */
+  private blockedAt: number[] = [];
+  /** Дедуп счётчика шума на ХОД (ревью #1, HIGH): одна реплика проходит gateWake ДВАЖДЫ (спекулятивный
+   *  эндпоинт + поздний реальный финал стрима) — без дедупа порог «3 реплики» срабатывал на 2, а
+   *  exit-гистерезис 1 был недостижим (1 фраза = 2 записи → режим залипал на редком фоне). Принятые
+   *  команды дедупит lastCmd; игнор-путь — этот маркер хода. */
+  private notedNoiseTurnSeq = -1;
+  private noisyMode = false;
+  /** §P0: как принята ПОСЛЕДНЯЯ пропущенная гейтом реплика (wake/second-chance = true, окно = false).
+   *  Читается runAgent СИНХРОННО с диспатчем принятого transcript_final (та же цепочка вызовов). */
+  private lastAcceptViaWake = true;
 
   constructor(private readonly deps: VoicePipelineDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -254,14 +296,93 @@ export class VoicePipeline {
     this.convWindowMs = deps.conversationWindowMs ?? 12_000;
     this.speaker = deps.speaker;
     this.log = deps.log ?? createLogger("voice:pipeline");
+    // Ревью #3/р2: кривые JARVIS_NOISY_* — честный WARN о клампах, не тихое переопределение.
+    if (NOISY_EXIT_RAW !== NOISY_EXIT_IGNORED || NOISY_MIN_RAW !== NOISY_MIN_IGNORED || NOISY_WINDOW_RAW !== NOISY_WINDOW_MS)
+      this.log.warn("кривая конфигурация JARVIS_NOISY_* — клампы применены (MIN ≥ 1, окно ≥ 1с, EXIT ≤ MIN-1); выключатель фичи — JARVIS_STRICT_WAKE_IN_NOISE=0, не нулевые пороги", {
+        minRaw: NOISY_MIN_RAW,
+        min: NOISY_MIN_IGNORED,
+        exitRaw: NOISY_EXIT_RAW,
+        exit: NOISY_EXIT_IGNORED,
+        windowRawMs: NOISY_WINDOW_RAW,
+        windowMs: NOISY_WINDOW_MS,
+      });
+  }
+
+  /** Отсеять устаревшее (старше NOISY_WINDOW_MS) из ignoredAt И blockedAt. Одна точка прунинга. */
+  private pruneIgnored(now: number): void {
+    if (this.ignoredAt.length) this.ignoredAt = this.ignoredAt.filter((ts) => now - ts < NOISY_WINDOW_MS);
+    if (this.blockedAt.length) this.blockedAt = this.blockedAt.filter((ts) => now - ts < NOISY_WINDOW_MS);
+  }
+
+  /** ЕДИНАЯ точка перехода noisyMode (ревью, анти-флаппинг): вход при ≥NOISY_MIN_IGNORED, выход при
+   *  ≤NOISY_EXIT_IGNORED (гистерезис). Считается на уже пруненном счётчике; лог-переход строго один на смену.
+   *  ВЫХОД (ревью #2): распад счётчика доказывает тишину ТОЛЬКО если строгий режим ничего не блокировал
+   *  в открытом окне (blockedAt пуст). Иначе сигнал был МАСКИРОВАН самим режимом (фон мог продолжаться,
+   *  его реплики в открытом окне не считаются) → выходим КОНСЕРВАТИВНО: окно разговора закрывается
+   *  (awake=false). Цена владельцу — одно «Джарвис»; выгода — продолжающийся фон при закрытом окне снова
+   *  НАБЛЮДАЕМ (повторный вход в режим работает, флуд не возвращается принятой чужой фразой), и лог не
+   *  врёт «стихла», когда тишина не доказана. */
+  private updateNoisyMode(): void {
+    const n = this.ignoredAt.length;
+    if (!this.noisyMode && n >= NOISY_MIN_IGNORED) {
+      this.noisyMode = true;
+      this.log.info("акустика: зашумлённая обстановка — строгий wake (команда требует «Джарвис»)", { ignored: n, windowMs: NOISY_WINDOW_MS });
+    } else if (this.noisyMode && n <= NOISY_EXIT_IGNORED) {
+      this.noisyMode = false;
+      if (this.blockedAt.length > 0) {
+        this.awake = false;
+        this.blockedAt = [];
+        this.log.info("акустика: счётчик шума истёк, но реплики блокировались строгим режимом (тишина НЕ доказана) — строгий wake снят, окно разговора закрыто (нужно «Джарвис»)");
+      } else {
+        this.log.info("акустика: обстановка стихла — окно разговора вернулось (wake не обязателен в диалоге)");
+      }
+    }
+  }
+
+  /** Акустика «строгий wake в шуме»: зафиксировать НЕадресованную реплику ФОНА (окно закрыто). При выкл.
+   *  выключателе — no-op (ревью: иначе фича off всё равно взводила noisyMode/лог, флаг залипал). */
+  private noteIgnoredUtterance(): void {
+    if (process.env.JARVIS_STRICT_WAKE_IN_NOISE === "0") return;
+    const now = this.now();
+    this.ignoredAt.push(now);
+    this.pruneIgnored(now);
+    this.updateNoisyMode();
+  }
+
+  /** Акустика (ревью #2): реплика, ЗАБЛОКИРОВАННАЯ строгим режимом в ОТКРЫТОМ окне, — НЕ сигнал шума
+   *  (само-поддержка), но маркер «сигнал маскирован» для честного выхода (см. updateNoisyMode). */
+  private noteBlockedUtterance(): void {
+    if (process.env.JARVIS_STRICT_WAKE_IN_NOISE === "0") return;
+    const now = this.now();
+    this.blockedAt.push(now);
+    this.pruneIgnored(now);
+  }
+
+  /** Активен ли «строгий wake» (зашумлённая обстановка): катящееся окно разговора не принимает без «Джарвис».
+   *  Прунит окно и обновляет режим (единая точка перехода); side-effect masked-exit может ЗАКРЫТЬ окно
+   *  (awake=false, см. updateNoisyMode) — вызывающая ветка обязана читать awake ПОСЛЕ этого вызова.
+   *  Выключатель JARVIS_STRICT_WAKE_IN_NOISE=0. */
+  private strictWakeActive(): boolean {
+    if (process.env.JARVIS_STRICT_WAKE_IN_NOISE === "0") {
+      this.noisyMode = false; // выключатель гасит и УЖЕ взведённый режим (иначе флаг залипал бы для читателей this.noisyMode)
+      return false;
+    }
+    this.pruneIgnored(this.now());
+    this.updateNoisyMode();
+    return this.noisyMode;
   }
 
   /**
    * Wake word (§3): вне активного разговора реагируем ТОЛЬКО на обращение «Джарвис».
    * Возвращает текст команды (без слова «Джарвис»), либо "" если реплика не к нам —
    * пустую строку редьюсер трактует как «игнор» (агент не будится).
+   *
+   * @param turnSeq Ход, которому принадлежит реплика (ревью #1): одна реплика проходит gateWake
+   *   ДВАЖДЫ (спекулятивный эндпоинт + поздний реальный финал того же стрима) — счётчик шума
+   *   считает её не более раза на ход. Поздний финал передаёт seq, ЗАХВАЧЕННЫЙ в ensureStt
+   *   (к его приходу this.turnSeq мог уже уйти вперёд); спекулятивный путь берёт текущий.
    */
-  private gateWake(raw: string): string {
+  private gateWake(raw: string, turnSeq = this.turnSeq): string {
     // §3 верификация диктора: ход признан «не своим» (музыка/чужой) — игнорируем СПЕКУЛЯТИВНУЮ
     // реплику. Поздний реальный финал режется отдельно — постримным флагом streamSpeakerRejected
     // в onPartial (этот глобальный флаг к приходу финала мог сброситься ensureStt следующего цикла).
@@ -274,12 +395,16 @@ export class VoicePipeline {
     // нормализованные формы (консистентно). Wake-матч цел: latinToCyrillic('jarvis')='джарвис'.
     const normalized = this.deps.normalizeTranscript?.(raw) ?? raw;
     const t = normalized.trim();
-    if (!this.requireWake || t.length === 0) return t;
+    if (!this.requireWake || t.length === 0) {
+      this.lastAcceptViaWake = true; // без wake-гейта канал = явное обращение (§P0: жесты не режем)
+      return t;
+    }
     // Second-chance протух — сбрасываем (ревью 2026-07-10: никаких «тихих» окон дольше 15с).
     if (this.pendingSecondChance && this.now() > this.pendingSecondChance.until) this.pendingSecondChance = null;
     let cmd: string | null = null;
     if (isWakeAddressed(t)) {
       this.awake = true;
+      this.lastAcceptViaWake = true; // §P0: явное обращение — ходу положены слепые жесты
       this.pendingSecondChance = null; // штатное обращение перекрывает висящий переспрос
       const c = stripWake(t);
       cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
@@ -293,26 +418,64 @@ export class VoicePipeline {
       this.pendingSecondChance = null;
       if (original) {
         this.awake = true;
+        this.lastAcceptViaWake = true; // §P0: подтверждённый переспрос = явное обращение
         this.log.info("wake second-chance: подтверждено — исполняю исходную реплику", { original: original.slice(0, 50) });
         cmd = original;
       }
-    } else if (this.awake && this.now() - this.lastActiveAt < this.convWindowMs) {
+    } else if (!this.strictWakeActive() && this.awake && this.now() - this.lastActiveAt < this.convWindowMs) {
       // Без обращения — принимаем в КАТЯЩЕМСЯ окне активного разговора (см. lastActiveAt),
       // НО игнорируем чистые междометия («ах», «ох», «хм»…): это фоновый шум, не продолжение.
-      if (!isNoiseOnly(t)) cmd = t;
+      // Акустика «строгий wake в шуме»: в ЗАШУМЛЁННОЙ обстановке (strictWakeActive) эта ветка ВЫКЛючена —
+      // каждая команда требует «Джарвис», иначе фон/видео/второй голос затапливают пайплайн (форензика).
+      // ⚠️ Порядок условий (ревью #2): strictWakeActive ПЕРВЫМ — его masked-exit (выход из режима при
+      // маскированном сигнале) закрывает окно (awake=false), и ЭТА ЖЕ реплика уже не должна пройти
+      // по прежде-открытому окну (иначе первая фраза фона после выхода принималась бы командой).
+      if (!isNoiseOnly(t)) {
+        cmd = t;
+        this.lastAcceptViaWake = false; // §P0: принято ОКНОМ без «Джарвис» — слепые жесты не положены
+      }
       this.pendingSecondChance = null; // содержательная реплика в окне — переспрос неактуален
     }
     if (cmd === null) {
+      // Акустика «строгий wake в шуме»: сигналом ФОНА считаем только НЕадресованную реплику при ЗАКРЫТОМ
+      // окне (не идёт разговор с владельцем). Реплику, ЗАБЛОКИРОВАННУЮ строгим режимом в ОТКРЫТОМ окне,
+      // в счётчик шума НЕ засчитываем — иначе строгий режим самоподдерживался бы командами самого
+      // владельца («оглох на владельца», ревью), — но фиксируем МАРКЕРОМ маскировки (noteBlockedUtterance):
+      // пока такие есть, распад счётчика тишину не доказывает (см. updateNoisyMode, ревью #2). Открытое
+      // окно затапливать внятной чужой речью строгий режим по тексту не может (владельца от фона не
+      // отличить) — это закрывают sync-first (микрофон глух во время обработки) и спикер-гейт (шаг 2).
+      // Ревью #1/#6/#10 — что СЧИТАЕМ: не более раза на ХОД (двойной проход gateWake: спекулятивный
+      // эндпоинт + поздний финал); near-miss (lev ≤4 — похоже на обращение, скорее владелец докрикивается,
+      // чем фон; форензика: 218 искажённых зовов) — НЕ шум; чистые междометия (isNoiseOnly) — НЕ шум
+      // (навредить не могут ни в каком окне: в открытом отфильтрованы, в закрытом неадресованы).
+      const inOpenWindow = this.awake && this.now() - this.lastActiveAt < this.convWindowMs;
+      const near = wakeNearMissScore(t);
+      // Сравнение СТРОГО ПО ВОЗРАСТАНИЮ, не `!==` (ревью р2): turnSeq монотонный, и поздний финал
+      // СТАРОГО хода, прилетевший после того, как новый ход уже перезаписал маркер (задержка flush
+      // Deepgram, перекрывшая следующий ход), имеет seq МЕНЬШЕ маркера — повторно не считается.
+      if (turnSeq > this.notedNoiseTurnSeq && near > 4 && !isNoiseOnly(t)) {
+        this.notedNoiseTurnSeq = turnSeq;
+        if (!inOpenWindow) this.noteIgnoredUtterance();
+        else if (this.noisyMode) this.noteBlockedUtterance();
+      }
       // Б5 (форензика 2026-07-10): near-miss в лог — «Дарья, запусти поиск в доте» (lev 4 от
       // «джарвис») тонула молча, дроп был неотличим от трёпа. SECOND-CHANCE, шаг 1: первый токен
       // ПОХОЖ на обращение (lev ≤4) И идёт активная §20-задача → переспрос «Вы мне, сэр?» (urgent —
       // должен прозвучать И в fullscreen-игре, это целевой сценарий) + флаг ожидания подтверждения.
       // ⚠️ Окно разговора НЕ открываем (ревью: «давай»/«держи» дают lev 4 — любая следующая фраза
       // трёпа ушла бы командой); принимается ТОЛЬКО явное «да/тебе» (см. ветку выше). Кулдаун 2 мин.
-      const near = wakeNearMissScore(t);
-      this.log.info("реплика без обращения «Джарвис» — игнор", { text: t.slice(0, 50), nearMiss: near });
+      // В ШУМЕ переспрос ТОЖЕ подавляем — иначе «Вы мне?» летит на фоновую болтовню. Состояние noisyMode
+      // здесь свежее: strictWakeActive уже отработал в условии ветки окна (ревью #3: второй вызов давал
+      // бы второй прунинг/переход внутри ОДНОЙ реплики — вердикты расходились).
+      this.log.info("реплика без обращения «Джарвис» — игнор", {
+        text: t.slice(0, 50),
+        nearMiss: near,
+        noisy: this.noisyMode, // ревью #7: причина дропа видна ИЗ ЭТОЙ строки (строгий режим vs окно истекло)
+        inWindow: inOpenWindow,
+      });
       if (
         near <= 4 &&
+        !this.noisyMode &&
         (this.deps.hasActiveTask?.() ?? false) &&
         this.now() - this.lastSecondChanceAt > 120_000 &&
         process.env.JARVIS_WAKE_SECOND_CHANCE !== "0"
@@ -589,6 +752,7 @@ export class VoicePipeline {
   dispose(): void {
     this.clearFollowup();
     this.clearSilenceTimer();
+    this.clearThinkEarcon();
     this.cancelTts();
     this.pendingSpeech = []; // не держим отложенные фоновые реплики мёртвой сессии
     void this.sttStream?.close();
@@ -658,6 +822,9 @@ export class VoicePipeline {
     this.turn.reset();
     this.latency.reset();
     this.turnSeq += 1; // инкремент 0 (ревью #1): новый ход → новый per-turn id для mouth-to-ear
+    // Акустика (ревью #1): seq хода ЭТОГО стрима — поздний реальный финал (придёт после close, когда
+    // this.turnSeq мог уйти вперёд) передаёт его в gateWake, чтобы дедуп счётчика шума был точным.
+    const myTurnSeq = this.turnSeq;
     this.latency.mark("wake");
     const myGen = this.gen;
     const stream = this.deps.stt.open({
@@ -699,7 +866,7 @@ export class VoicePipeline {
         this.dispatch({ type: "transcript_final", text: "" });
         return;
       }
-      this.dispatch({ type: "transcript_final", text: this.gateWake(p.text) });
+      this.dispatch({ type: "transcript_final", text: this.gateWake(p.text, myTurnSeq) });
     });
     stream.onError((e) => this.log.warn("ошибка STT-стрима", e.message));
     // Облачный STT (Deepgram) сам закрывает WS по простою (~10с без аудио). БЕЗ этого
@@ -738,14 +905,19 @@ export class VoicePipeline {
     }
     // §22 чат: реплика пользователя в историю (голосовой ход — что распознали).
     this.deps.sendChat?.({ role: "user", text });
+    // §P0: как реплика прошла wake-гейт — мозг гейтит слепой авто-реплей (жесты только по явному «Джарвис»).
+    const meta: UserTurnMeta = { viaWake: this.lastAcceptViaWake };
+    // §P1 (форензика 2026-07-14: 36% ходов молчат ~10с до первой реакции): молчание раздумья
+    // дольше порога → короткий earcon-тик «услышал, думаю» (см. armThinkEarcon).
+    this.armThinkEarcon(myGen);
     // §10 realtime: пофразный стрим, если brain его поддерживает (иначе — классический путь).
     if (this.deps.onUserTurnStream) {
-      await this.runAgentStreaming(text, myGen);
+      await this.runAgentStreaming(text, myGen, meta);
       return;
     }
     let reply: AgentReplyLike;
     try {
-      reply = await this.deps.onUserTurn(text);
+      reply = await this.deps.onUserTurn(text, meta);
     } catch (e) {
       this.log.error("ошибка brain", e instanceof Error ? e.message : String(e));
       reply = { voice: "Что-то пошло не так. Повторишь?" };
@@ -773,7 +945,7 @@ export class VoicePipeline {
    * последней). Барежит gen-инвалидацию (barge-in/stop): поздние фразы/чанки глохнут.
    * При ошибке brain — деградация на короткую реплику (без зависания в speaking).
    */
-  private async runAgentStreaming(text: string, myGen: number): Promise<void> {
+  private async runAgentStreaming(text: string, myGen: number, meta?: UserTurnMeta): Promise<void> {
     // Джарвис заговорит → окно активного разговора (продолжение без wake word), как в startTts.
     this.awake = true;
     this.lastActiveAt = this.now();
@@ -845,7 +1017,7 @@ export class VoicePipeline {
     };
 
     try {
-      await this.deps.onUserTurnStream!(text, sink);
+      await this.deps.onUserTurnStream!(text, sink, meta);
     } catch (e) {
       this.log.error("ошибка brain (stream)", e instanceof Error ? e.message : String(e));
       // brain упал, не вызвав done() → сами завершаем сессию, чтобы не зависнуть в speaking.
@@ -866,6 +1038,48 @@ export class VoicePipeline {
 
   /** Прекеш earcon приёмки (Волна 1): собирается один раз при первом использовании. */
   private earconBuf: ArrayBuffer | null = null;
+
+  /** §P1: таймер earcon-тика «услышал, думаю» на sync-first пути (см. armThinkEarcon). */
+  private thinkEarconTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * §P1 EARCON РАЗДУМЬЯ (форензика 2026-07-14): earcon Волны 1.1 звучал ТОЛЬКО на приёмке фоновой
+   * задачи — sync-first ход молчал до первой фразы (36% ходов ~10с тишины, медиана m2e 3.4–3.9с при
+   * цели 800мс; владелец повторял команды в тишину). Теперь: через JARVIS_THINK_EARCON_MS (деф 1800,
+   * 0=выкл) после начала раздумья, если ни звука, ни ответа ещё нет — ОДИН короткий тон «услышал,
+   * думаю». Состояние машины не трогаем (это не речь); голосовой филлер («Секунду, сэр»), если он
+   * включён, замещает тик (не дублируем). env читается на КАЖДОМ вызове (тестируемость, как
+   * JARVIS_STRICT_WAKE_IN_NOISE).
+   */
+  private armThinkEarcon(myGen: number): void {
+    const ms = envInt("JARVIS_THINK_EARCON_MS", 1_800);
+    if (ms <= 0) return;
+    // Голосовой филлер («Секунду, сэр») замещает тик — но ТОЛЬКО на стриминговом пути: playFiller
+    // взводится через sink.thinking, которого у классического onUserTurn нет (ревью: скип по одному
+    // filler.ready глушил earcon на пути, где филлер физически не играет — обе маскировки молчали).
+    if (this.deps.filler?.ready && this.deps.onUserTurnStream) return;
+    this.clearThinkEarcon();
+    this.thinkEarconTimer = setTimeout(() => {
+      this.thinkEarconTimer = null;
+      if (myGen !== this.gen) return; // перебили/отменили ход
+      if (this.ctx.state !== "thinking") return; // ответ уже пошёл (или ход умер) — тик не нужен
+      // Звук идёт/вот-вот пойдёт: классический синтез (ttsStream) или у пофразной сессии уже есть
+      // фразы/синтез (speechStarted). ⚠️ НЕ active: спикер создаётся ДО вызова brain и active истинен
+      // весь ход — по нему earcon был МЁРТВ на стриминговом прод-пути (ревью, HIGH).
+      if (this.ttsStream || this.phraseSpeaker?.speechStarted) return;
+      this.earconBuf ??= buildAckEarconWav();
+      this.deps.sendSpeakChunk({ audio: this.earconBuf, seq: 0, last: true });
+      this.log.info("§P1 sync-first: earcon раздумья (первый звук ещё не пошёл)", this.latency.report());
+    }, ms);
+    if (typeof this.thinkEarconTimer.unref === "function") this.thinkEarconTimer.unref();
+  }
+
+  private clearThinkEarcon(): void {
+    if (this.thinkEarconTimer) {
+      clearTimeout(this.thinkEarconTimer);
+      this.thinkEarconTimer = null;
+    }
+  }
 
   /**
    * Волна 1 (эпизод 2026-07-10): мгновенная СЛЫШИМАЯ приёмка фоновой задачи — короткий тон
@@ -969,6 +1183,7 @@ export class VoicePipeline {
   private cancelTts(): void {
     this.gen += 1; // инвалидируем все колбэки текущего оборота (barge-in/stop)
     this.clearFillerTimer(); // §10: отложенный филлер тоже отменяем (barge-in во время раздумья)
+    this.clearThinkEarcon(); // §P1: earcon раздумья на оборванном ходе не нужен
     if (this.ttsStream) {
       this.ttsStream.cancel();
       this.ttsStream = null;

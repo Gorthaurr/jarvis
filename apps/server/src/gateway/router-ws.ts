@@ -340,21 +340,23 @@ export function makeSessionContext(
     // что делаешь») раньше стоял ТОЛЬКО на текстовом канале (onDevText) — живой ГОЛОС уходил в
     // агент, и «отмени» после reconnect плодил задачу «Отменить поиск» (форензика вечера). Теперь
     // перехват на обоих каналах; ctxForBusy замыкается после создания ctx (как для isUserBusy).
-    onUserTurn: (text) => {
+    onUserTurn: (text, meta) => {
       if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) return Promise.resolve({ voice: "" });
-      return handleUserText(session, text, agentDeps);
+      // §P0: meta.viaWake (реплика из окна разговора без «Джарвис») гейтит слепой авто-реплей макроса.
+      return handleUserText(session, text, agentDeps, undefined, meta);
     },
     // §10 realtime: пофразный стрим реплики (token-streaming → первый звук раньше). Включён
     // по умолчанию; аварийный выключатель JARVIS_VOICE_STREAMING=0 → классический onUserTurn.
     ...(process.env.JARVIS_VOICE_STREAMING === "0"
       ? {}
       : {
-          onUserTurnStream: (text: string, sink: ReplySink): Promise<void> => {
+          onUserTurnStream: (text: string, sink: ReplySink, meta?: { viaWake: boolean }): Promise<void> => {
             if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) {
               sink.done(""); // ack уже озвучен внутри handleTaskControl; ход закрывается тихо
               return Promise.resolve();
             }
-            return handleUserText(session, text, agentDeps, sink).then(() => undefined);
+            // §P0: meta.viaWake гейтит слепой авто-реплей (жесты только по явному «Джарвис»).
+            return handleUserText(session, text, agentDeps, sink, meta).then(() => undefined);
           },
         }),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.

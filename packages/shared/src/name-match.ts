@@ -241,6 +241,10 @@ export interface PickResult {
   peerId?: string;
   /** Кандидаты-ЛЮДИ по убыванию уверенности (каналы/паблики исключены) — их видит модель. */
   ranked: RankedCandidate[];
+  /** Почему ask (§P1-тёзки, форензика 2026-07-14 «не та Катя»): "namesakes" = НЕСКОЛЬКО людей носят
+   *  запрошенное имя («Катя» и «Катя Любимая») — по смыслу НЕ решить, спрашивать ВЛАДЕЛЬЦА;
+   *  "unclear" = прочая неоднозначность (кросс-скрипт/слабые матчи) — может решить модель. */
+  reason?: "namesakes" | "unclear";
 }
 
 /** Множество свёрнутых форм запроса: сам запрос + его транслит-варианты (для матча кандидатов). */
@@ -249,6 +253,27 @@ function queryForms(query: string): { folded: string; forms: Set<string> } {
   const forms = new Set<string>([folded]);
   for (const v of transliterate(query)) forms.add(foldName(v));
   return { folded, forms };
+}
+
+/**
+ * НОСИТ ли кандидат запрошенное имя (для детекта ТЁЗОК, §P1 ревью р1). Шире, чем «однозначный
+ * победитель»: имя-часть заголовка в ЛЮБОЙ позиции и в ЛЮБОМ алфавите. «Катя»/«Катя Любимая»/«Мама
+ * Катя»/«Katya»/«Katya Beloved» — все НОСИТЕЛИ имени «катя». Если носителей ≥2 — по смыслу не решить,
+ * спрашиваем владельца (namesakes), НЕ авто-шлём точному. Датив запроса («кате») сводится транслит-
+ * формами queryForms к тем же кандидатам не всегда — поэтому меряем и по folded, и по формам.
+ */
+export function bearsName(query: string, title: string): boolean {
+  const { folded, forms } = queryForms(query);
+  const t = foldName(title);
+  if (!t || !folded) return false;
+  for (const f of new Set([folded, ...forms])) {
+    if (!f || f.length < 2) continue;
+    if (t === f) return true; // точное имя
+    if (t.startsWith(`${f} `)) return true; // «Катя Любимая» (имя первым словом)
+    if (t.endsWith(` ${f}`)) return true; // «Мама Катя» (имя последним словом)
+    if (t.includes(` ${f} `)) return true; // «Мама Катя дома» (имя словом в середине)
+  }
+  return false;
 }
 
 /** Балл совпадения кандидата с запросом (0..100) + same-script-флаг. */
@@ -306,20 +331,29 @@ export function pickRecipient(query: string, candidates: readonly Candidate[]): 
   const pool = mine.length ? mine : people;
   const send = (c: RankedCandidate): PickResult => ({ action: "send", title: c.title, peerId: c.peerId, ranked: people });
 
-  // 1) Точное совпадение в одном алфавите имеет приоритет над частичными (§13).
+  // §P1-ТЁЗКИ (форензика 2026-07-14, «напиши кате» ушло НЕ ТОЙ Кате; ревью р1: расширено на ВСЕ формы).
+  // НОСИТЕЛИ запрошенного имени — кандидаты, чей заголовок содержит имя в любой позиции/алфавите
+  // («Катя», «Катя Любимая», «Мама Катя», «Katya», «Katya Beloved»). ≥2 носителей → по смыслу не
+  // решить, какую именно звал владелец → ask/namesakes (клиент даёт список с peerId, владелец выбирает,
+  // модель повторяет с peer). Это ВЫШЕ exact-приоритета: точное «Катя» НЕ бьёт живую тёзку.
+  const bearers = pool.filter((c) => bearsName(query, c.title));
+  if (bearers.length >= 2) return { action: "ask", reason: "namesakes", ranked: people };
+
   const exactSame = pool.filter((c) => c.sameScript && c.score >= 100);
+  const sureSame = pool.filter((c) => c.sameScript && c.score >= 82);
+
+  // 1) Точное совпадение в одном алфавите (тёзок нет — bearers<2) → однозначно.
   if (exactSame.length === 1) return send(exactSame[0]!);
-  if (exactSame.length > 1) return { action: "ask", ranked: people }; // два контакта с тем же именем
+  if (exactSame.length > 1) return { action: "ask", reason: "namesakes", ranked: people };
 
   // 2) Один уверенный (точное/префикс) в одном алфавите.
-  const sureSame = pool.filter((c) => c.sameScript && c.score >= 82);
   if (sureSame.length === 1) return send(sureSame[0]!);
-  if (sureSame.length > 1) return { action: "ask", ranked: people };
+  if (sureSame.length > 1) return { action: "ask", reason: "namesakes", ranked: people };
 
   // 3) Кросс-скрипт: РОВНО один правдоподобный транслит-кандидат (точное/префикс) → отправляем.
   const crossPlausible = pool.filter((c) => !c.sameScript && c.score >= 55);
   if (crossPlausible.length === 1) return send(crossPlausible[0]!);
 
   // 4) Неоднозначно (несколько кросс-кандидатов / только слабые подстроки) → решает модель.
-  return { action: "ask", ranked: people };
+  return { action: "ask", reason: "unclear", ranked: people };
 }

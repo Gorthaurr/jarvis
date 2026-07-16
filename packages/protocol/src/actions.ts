@@ -67,7 +67,21 @@ export type WaitCondition =
   // Game State Integration): source — имя канала (путь пуша /<source>), path — точка в JSON
   // («map.game_state»), equals/contains — критерий. Generic-механизм, НЕ хардкод игры: любая
   // программа, умеющая пушить JSON на http://127.0.0.1:<порт>/<source>, становится наблюдаемой.
-  | { kind: "gsi"; source?: string; path: string; equals?: string; contains?: string; gone?: boolean };
+  | { kind: "gsi"; source?: string; path: string; equals?: string; contains?: string; gone?: boolean }
+  // fix 2026-07-15: значение из DOM активной вкладки браузера пользователя (через расширение). Главный
+  // кейс — «видео дошло до N секунд»: prop:"currentTime" op:">=" value:1560. ОЦЕНИВАЕТСЯ НА СЕРВЕРЕ (ext-мост),
+  // а не на клиенте (клиент до расширения не достаёт) — потому OCR-костыля таймера больше не нужно. Дефолт
+  // selector — <video>/<audio>; prop currentTime/duration(сек)/paused; op сравнения для чисел, contains для строк.
+  | {
+      kind: "browser";
+      prop?: string;
+      op?: ">=" | "<=" | ">" | "<" | "==" | "!=" | "contains";
+      value: string | number | boolean;
+      selector?: string;
+      tabId?: number;
+      url?: string;
+      gone?: boolean;
+    };
 
 /**
  * Операции питания ОС. shutdown/restart/logoff необратимы → confirm (§4).

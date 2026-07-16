@@ -40,6 +40,7 @@ import { emotionName, emotionOverlay, matchEmotionCommand } from "../persona/emo
 import { claimsObservedResult, isBlindMutate, isHollowSuccess, looksLikeGiveUp, maskedFailureReply, toolEffect } from "./error-voice.js";
 import { decideRoundThinking, stripThinkingBlocks, thinkingEnabled } from "./thinking-policy.js";
 import { prefillNeedsLlmSteps } from "./skill-prefill.js";
+import { autoReplayBlocked } from "./replay-gate.js";
 import { type LocalIntent, classifyTier, resolveClarifyAnswer } from "../router/index.js";
 import { cap, failurePhrase, pick, successPhrase } from "../verbalize/action-phrases.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
@@ -56,7 +57,7 @@ import type { ReminderService } from "../../proactive/reminders/service.js";
 import type { WatchService } from "../../proactive/watch/service.js";
 import type { ObligationStore } from "../../proactive/ambient/obligations.js";
 import type { ResolutionMemory } from "../../memory/resolution-memory.js";
-import { classifyTaskScope, isDuplicateGoal } from "../tasks/scope.js";
+import { classifyTaskScope, isDuplicateGoal, looksLikeStatusQuery } from "../tasks/scope.js";
 import { type Task, actionTitle, formatActiveTasks, formatRecentTasks } from "../tasks/task.js";
 import { SessionWarmth } from "./warmth.js";
 import { estimateCostUsd, metrics } from "../../obs/metrics.js";
@@ -212,9 +213,10 @@ export interface AgentDeps {
   ext?: {
     readonly connected: boolean;
     openOrFocus(url: string): Promise<unknown>;
-    tabRead(url?: string, tabId?: number): Promise<unknown>;
-    tabInspect(url?: string, query?: string, cap?: number, tabId?: number): Promise<unknown>;
-    tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown>;
+    tabRead(url?: string, tabId?: number, query?: string): Promise<unknown>;
+    tabInspect(url?: string, query?: string, cap?: number, tabId?: number, refMode?: boolean): Promise<unknown>;
+    tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number, refMode?: boolean): Promise<unknown>;
+    tabBatch?(url: string, steps: unknown[], tabId?: number, refMode?: boolean): Promise<unknown>;
     tabList(): Promise<unknown>;
     tabClose(url?: string, tabId?: number): Promise<unknown>;
     exportCookies(domains?: string[]): Promise<unknown>;
@@ -395,11 +397,61 @@ function replayUriUnsafe(value: unknown): boolean {
  */
 const REPLAY_MACRO_SERVER_TIMEOUT_MS = SKILL_EXECUTE_SERVER_TIMEOUT_MS;
 
-/** Клавиша-«отправка» (Enter/Return, в т.ч. с Ctrl) — коммит сообщения/формы. */
+/** Клавиша-«отправка» (Enter/Return, в т.ч. с Ctrl) — коммит сообщения/формы. Ревью р1 #16: SHIFT+Enter
+ *  в мессенджерах — ПЕРЕНОС СТРОКИ, не отправка; считать его коммитом = сжечь пару «набрал→закоммитил»
+ *  досрочно и пропустить настоящий Enter без сверки. Модификатор shift исключаем (ctrl+enter оставляем). */
 function isSendKey(combo: unknown): boolean {
   if (typeof combo !== "string") return false;
-  const last = combo.split("+").pop()?.trim().toLowerCase() ?? "";
-  return last === "enter" || last === "return";
+  const parts = combo.toLowerCase().split("+").map((p) => p.trim());
+  const last = parts[parts.length - 1] ?? "";
+  if (last !== "enter" && last !== "return") return false;
+  return !parts.includes("shift"); // shift+enter = перенос строки, НЕ коммит
+}
+
+/** Вставка из буфера (Ctrl+V/Shift+Insert) — тоже ВВОД текста (ревью р1 #9): взводит «набрал». */
+function isPasteCombo(combo: unknown): boolean {
+  if (typeof combo !== "string") return false;
+  const c = combo.toLowerCase().replace(/\s+/g, "");
+  return c === "ctrl+v" || c === "cmd+v" || c === "shift+insert";
+}
+
+/** Шаг берста «сочинил текст» (input.type / ui.invoke setValue / вставка) — ревью р1 #3/#9. */
+function isBatchComposeStep(s: { action?: unknown; params?: Record<string, unknown> }): boolean {
+  const a = String(s.action ?? "");
+  if (a === "input.type") return true;
+  if (a === "ui.invoke" && (s.params ?? {}).pattern === "setValue") return true;
+  if (a === "input.key" && isPasteCombo((s.params ?? {}).combo)) return true;
+  return false;
+}
+
+/** Шаг берста «коммит отправки»: Enter/Ctrl+Enter ИЛИ клик/инвок (кнопка «Отправить», ревью р2 #3). */
+function isBatchSendStep(s: { action?: unknown; params?: Record<string, unknown> }): boolean {
+  const a = String(s.action ?? "");
+  if (a === "input.key") return isSendKey((s.params ?? {}).combo);
+  return a === "input.click" || a === "input.mouse" || a === "ui.invoke";
+}
+
+/**
+ * Разобрать берст input_batch на «сочинил текст → закоммитил» (ревью р1 #3/#9: send-commit-обход через
+ * один вызов). Возвращает: committed — есть пара compose→send (в этом порядке) → долг сверки исхода;
+ * endsComposed — последний содержательный шаг сочиняет текст (следующий отдельный Enter станет коммитом).
+ */
+function inspectBatchSteps(input: unknown): { committed: boolean; endsComposed: boolean; hasSend: boolean } {
+  const steps = (input as { steps?: Array<{ action?: unknown; params?: Record<string, unknown> }> })?.steps;
+  if (!Array.isArray(steps)) return { committed: false, endsComposed: false, hasSend: false };
+  let composedIdx = -1;
+  let committed = false;
+  let hasSend = false;
+  for (let i = 0; i < steps.length; i += 1) {
+    if (isBatchComposeStep(steps[i]!)) composedIdx = i;
+    else if (isBatchSendStep(steps[i]!)) {
+      hasSend = true; // ревью р3 #1/#4: коммит-шаг есть, даже если набор был в ПРОШЛОМ раунде (composedPending)
+      if (composedIdx >= 0 && composedIdx < i) committed = true;
+    }
+  }
+  const lastMeaningful = [...steps].reverse().find((s) => String(s.action ?? "") !== "wait");
+  const endsComposed = lastMeaningful ? isBatchComposeStep(lastMeaningful) : false;
+  return { committed, endsComposed, hasSend };
 }
 
 /**
@@ -461,6 +513,10 @@ export async function handleUserText(
   text: string,
   deps: AgentDeps,
   sink?: ReplySink,
+  // §P0 (гейт авто-реплея): метаданные хода от голосового пайплайна. viaWake=false — реплика принята
+  // КАТЯЩИМСЯ ОКНОМ разговора без «Джарвис» (главный вход чужой речи, форензика 2026-07-14) → слепой
+  // авто-реплей макроса запрещён. undefined (dev.text/чат/тесты) = явное обращение.
+  meta?: { viaWake?: boolean },
 ): Promise<AgentReply> {
   // §10 realtime: если задан sink — реплика отдаётся пофразно. Короткие/детерминированные
   // пути (имя/режим/tier0/фоновый ack) стримить нечего — финализируем целиком через done()
@@ -576,8 +632,15 @@ export async function handleUserText(
     // петля подхватит перед ближайшим шагом — и сразу коротко подтверждаем. «new»-реплика (отдельное
     // дело) идёт прежним путём, самостоятельной параллельной задачей.
     if (!freshContext && deps.tasks?.steer(activeTask.taskId, clean)) {
-      log.info("§20 правка впрыснута в активную задачу", { taskId: activeTask.taskId, active: activeTask.title });
-      const reply: AgentReply = { voice: "Принял, поправляю." };
+      // Претензия/статус-запрос («ты не сделал», «я не вижу, что делаешь») — НЕ инструкция-правка: steer
+      // впрыснут (петля перепроверит), но отвечаем ЧЕСТНЫМ СТАТУСОМ, а не «Принял, поправляю» — для
+      // задачи-ожидания править нечего, и «поправляю» вводило в заблуждение. Инструкция-правка
+      // («добавь/переделай/вместо») — прежнее «Принял, поправляю».
+      const statusQuery = looksLikeStatusQuery(clean);
+      log.info("§20 правка впрыснута в активную задачу", { taskId: activeTask.taskId, active: activeTask.title, statusQuery });
+      const reply: AgentReply = {
+        voice: statusQuery ? "Ещё занимаюсь этим, сэр — перепроверю и доложу, как будет готово." : "Принял, поправляю.",
+      };
       deps.memory.pushTurn("assistant", reply.voice);
       return finishReply(reply);
     }
@@ -646,12 +709,12 @@ export async function handleUserText(
     if (sink && process.env.JARVIS_SYNC_FIRST !== "0") {
       // ГОЛОСОВОЙ канал: sync-first с промоушеном в фон — итог звучит СРАЗУ, длинная задача через 10с
       // говорит «Берусь» и уходит в фон (микрофон свободен). Это и есть фикс «молча → скопом».
-      return await runActionSyncFirst(session, clean, tier, deps, sink, { freshContext });
+      return await runActionSyncFirst(session, clean, tier, deps, sink, { freshContext, viaWake: meta?.viaWake });
     }
     // Без sink (dev.text/чат/тесты) ИЛИ откат JARVIS_SYNC_FIRST=0: прежнее — молча в фон, итог через
     // speakResult (в тексте нет аудио-очереди → скопом не сливается; сеанс не блокируется на длинной задаче).
     deps.taskAccepted?.();
-    startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext }), deps, { bounded: true });
+    startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext, viaWake: meta?.viaWake }), deps, { bounded: true });
     return finishReply({ voice: "" });
   }
 
@@ -660,7 +723,11 @@ export async function handleUserText(
   // conversational: вопрос/рассуждение — от хода НЕ ждём «дела» (mutate); маскированный провал
   // («Не вышло») на таком ходе — ложь в обратную сторону (живой случай: «сколько будет 2+2» +
   // tool_load → пустой финал → «нужное действие не сработало», хотя ничего не падало).
-  const reply = await runAgentLoop(session, clean, tier, deps, sink, { freshContext, conversational: decision.conversational === true });
+  const reply = await runAgentLoop(session, clean, tier, deps, sink, {
+    freshContext,
+    conversational: decision.conversational === true,
+    viaWake: meta?.viaWake,
+  });
   deps.memory.pushTurn("assistant", reply.voice);
   return finishReply(reply);
 }
@@ -784,7 +851,7 @@ async function runActionSyncFirst(
   tier: Exclude<Tier, "tier0">,
   deps: AgentDeps,
   sink: ReplySink,
-  opts: { freshContext?: boolean },
+  opts: { freshContext?: boolean; viaWake?: boolean },
 ): Promise<AgentReply> {
   // Fix ревью (concurrency-bound): держим потолок MAX_PARALLEL_TASKS и для sync-first. Забираем слот
   // НЕблокирующе (tryAcquire) — интерактивный ход не тормозим. Слотов нет (все заняты промотированными
@@ -880,7 +947,7 @@ async function runAgentLoop(
   tier: Exclude<Tier, "tier0">,
   deps: AgentDeps,
   sink?: ReplySink,
-  opts?: { freshContext?: boolean; conversational?: boolean; suppressStepStream?: boolean },
+  opts?: { freshContext?: boolean; conversational?: boolean; suppressStepStream?: boolean; viaWake?: boolean },
 ): Promise<AgentReply> {
   // §10 realtime: сигналим «думаю» КАК МОЖНО РАНЬШЕ (до retrieval/recall/LLM) — пайплайн
   // замаскирует пол латентности Opus коротким филлером «Секунду, сэр.», пока идёт генерация.
@@ -910,6 +977,10 @@ async function runAgentLoop(
   const arbiter = deps.inputArbiter;
   let holdsInput = false;
   let queueWaitMs = 0; // суммарное ожидание аренды (телеметрия; в потолок/latency не входит)
+  // fix 2026-07-15 (ревью #5): суммарное БЛОКИРУЮЩЕЕ ОЖИДАНИЕ внутри вызовов (wait_for browser поллит DOM
+  // до met/таймаута). Как queueWaitMs — НЕ тикает в потолок задачи и вычитается из avgRoundMs, иначе долгое
+  // ожидание раздувало avgRoundMs → early-wrap срубал задачу ДО действия после ожидания («жди→перемотай»).
+  let idleWaitMs = 0;
   let lastAcquireWaitMs = 0; // ожидание ПОСЛЕДНЕГО успешного acquire (для гарда протухшего клика)
   let staleGuardBlocks = 0; // сколько слепых действий уже заблокировал гард (кэп 2 — анти-deadloop)
   const INPUT_WAIT_MS = (() => {
@@ -1113,6 +1184,21 @@ async function runAgentLoop(
     const n = Number.parseInt(process.env.JARVIS_TASK_MAX_MS ?? "", 10);
     return Number.isFinite(n) ? Math.min(1_800_000, Math.max(30_000, n)) : 240_000;
   })();
+  // Гард переполнения контекст-окна (hardening; ревью learn-coding-agent 2026-07-15). Промпт растёт с
+  // каждым tool-раундом (крупные web/OCR/browser-дампы), и на патологически длинной задаче следующий раунд
+  // может упереться в ЖЁСТКИЙ HTTP 400 (max context ~200K) на середине — деньги в мусор, итог потерян.
+  // Считаем по РЕАЛЬНОМУ размеру прошлого промпта (input+cache_read+cache_creation), детерминированно, БЕЗ
+  // LLM-суммаризации (та ломала бы prompt-кеш §15 и могла выбросить состояние экрана → ложный успех).
+  // SOFT → одноразовый нудж «сворачивайся»; HARD → ранний честный свёрток (частичный итог, не 400). Клампы
+  // страхуют кривой env; HARD всегда > SOFT. Выключатель — задрать пороги (нулём не отключается намеренно).
+  const CONTEXT_SOFT_TOKENS = (() => {
+    const n = Number.parseInt(process.env.JARVIS_CONTEXT_SOFT_TOKENS ?? "", 10);
+    return Number.isFinite(n) && n >= 20_000 ? n : 150_000;
+  })();
+  const CONTEXT_HARD_TOKENS = (() => {
+    const n = Number.parseInt(process.env.JARVIS_CONTEXT_HARD_TOKENS ?? "", 10);
+    return Number.isFinite(n) && n > CONTEXT_SOFT_TOKENS ? n : Math.max(CONTEXT_SOFT_TOKENS + 10_000, 185_000);
+  })();
   let cancelled = false;
   let limited = false;
   let timedOut = false;
@@ -1132,6 +1218,11 @@ async function runAgentLoop(
   // Волна 1 (1.5, «видимый бюджет»): на 70% потолка времени — ОДИН впрыск «сворачивайся» (graceful
   // wrap-up c честным частичным итогом вместо невидимого обрыва «251с работы → „затянулось" без итога»).
   let budgetNudged = false;
+  // Гард контекст-окна (см. CONTEXT_SOFT/HARD_TOKENS): одноразовый нудж на soft-пороге + подвид timedOut
+  // (contextWrap) на hard-пороге — честный частичный итог вместо жёсткого 400 на середине задачи.
+  let contextNudged = false;
+  let contextWrap = false;
+  let lastPromptTokens = 0; // размер ПОСЛЕДНЕГО отправленного промпта (input+cache_read+cache_creation)
   // Б3 (MEMORY_CONTEXT_REVIEW): в ДЛИННОЙ задаче системный снимок промпта заморожен на момент старта —
   // окна/вкладки/часы врут через минуты работы, и модель платит screen_capture (~2K ток) за то, что
   // приезжает бесплатно каждые 12с (client.system обновляет deps.userContext.systemContext ЖИВЬЁМ).
@@ -1301,6 +1392,15 @@ async function runAgentLoop(
   })();
   // Висит ли НЕсверённое слепое действие: ставится при успешном слепом mutate, снимается сверкой глазами.
   let blindMutatePending = false;
+  // §P1-отправка (форензика 2026-07-14, ложный успех «ушло в Клод»): был ли в задаче НАБРАН текст
+  // (input_type / ui_invoke setValue / вставка), который следующий Enter/Ctrl+Enter КОММИТИТ.
+  let composedPending = false;
+  // Долг сверки ИСХОДА отправки (ревью р1 #3/#4/#8/#9/#16): взводится КОММИТОМ (send-key после набора,
+  // или берст compose→send). Снимается ТОЛЬКО реальным взглядом (eff==="verify": screen_capture/
+  // ui_snapshot/browser_read/screen_read_text) — fused-наблюдение самого коммита ИЛИ соседнего жеста
+  // (второй Enter, клик, фокус) его НЕ снимает: снимок «сразу после нажатия» показывает факт нажатия,
+  // а не доставку. Это строже blindMutatePending (тот fused observed гасит).
+  let sendCommitDebt = false;
   // §адаптация к цели: одноразовая сверка терминала с ИСХОДНОЙ задачей — ловит «выполнил подцель
   // (запустил приложение) и посчитал задачу сделанной» (живой случай: «запусти поиск в доте» →
   // «Дота запущена, сэр» без поиска). Кап 1 — не раздуваем задачу. Если ПОСЛЕДНИЙ инструментальный
@@ -1368,8 +1468,34 @@ async function runAgentLoop(
       "wait", "ground", "verify",
     ]);
     let replaySteps = recalled?.steps ?? [];
+    // §P0 ГЕЙТ АВТО-РЕПЛЕЯ (форензика 2026-07-14: ~10 из 15 реплеев запущены чужой/разговорной речью —
+    // «мат в Discord» → «закрыть приложение» sim 0.831, «разговор о базе» → 14-шаговый макрос). Слепые
+    // жесты требуют: sim ≥ порога, командный глагол, НЕ-разговор, явное «Джарвис», не мета-навык.
+    // Причина блокировки логируется (наблюдаемость) — recall-подсказка в промпт при этом остаётся.
+    const replayGateReason =
+      recalled && (recalled.steps?.length ?? 0) >= 2
+        ? autoReplayBlocked({
+            text,
+            recalled: {
+              name: recalled.name,
+              when: recalled.when,
+              recallSim: recalled.recallSim,
+              recallSimRaw: recalled.recallSimRaw,
+            },
+            conversational: isConversational,
+            viaWake: opts?.viaWake,
+          })
+        : null;
+    if (recalled && replayGateReason)
+      log.info("§P0 авто-реплей заблокирован гейтом (подсказка навыка в промпте остаётся)", {
+        id: recalled.id,
+        reason: replayGateReason,
+        sim: recalled.recallSim,
+        rawCos: recalled.recallSimRaw,
+      });
     const replayable =
       recalled &&
+      !replayGateReason &&
       !recalled.fromShared &&
       !recalled.needsReview &&
       // §Волна2 (2.5, ревью): очередь не дождалась аренды / отменили в очереди → НИКАКИХ реальных
@@ -1484,6 +1610,30 @@ async function runAgentLoop(
         log.info("§20 бюджет-нудж: 70% потолка времени — прошу сворачиваться", { taskId, leftSec });
         nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
       }
+      // Гард контекст-окна (по РАЗМЕРУ промпта прошлого раунда): HARD → ранний честный свёрток (не ждём
+      // 400 на середине); SOFT → одноразовый нудж «сворачивайся, окно почти исчерпано». Проверяем HARD
+      // первым (перекрывает soft). round>0 — на первом раунде промпт заведомо мал, watermark ещё не снят.
+      if (round > 0 && lastPromptTokens >= CONTEXT_HARD_TOKENS) {
+        log.warn("agent-loop: промпт у жёсткого потолка контекст-окна — сворачиваюсь заранее", {
+          taskId,
+          lastPromptTokens,
+          hardCap: CONTEXT_HARD_TOKENS,
+        });
+        timedOut = true;
+        contextWrap = true; // причина провала — «контекст переполнен», не «превышен потолок времени»
+        break;
+      }
+      if (!contextNudged && round > 0 && lastPromptTokens >= CONTEXT_SOFT_TOKENS) {
+        contextNudged = true;
+        appendUserNote(
+          convo,
+          `🧠 КОНТЕКСТ ПОЧТИ ЗАПОЛНЕН (~${Math.round(lastPromptTokens / 1000)}K из ~${Math.round(CONTEXT_HARD_TOKENS / 1000)}K токенов). ` +
+            `Не запускай новых длинных чтений/дампов (web_fetch/browser_read/OCR больших страниц): заверши ` +
+            `текущий подшаг, сверь результат и дай ЧЕСТНЫЙ итог — окно вот-вот исчерпается.`,
+        );
+        log.info("§контекст-нудж: soft-порог окна — прошу сворачиваться", { taskId, lastPromptTokens, softCap: CONTEXT_SOFT_TOKENS });
+        nudgeBoostNextRound = true;
+      }
       if (round > 0 && roundDurTotalMs > 0) {
         const avgRoundMs = roundDurTotalMs / round;
         if (loopMaxMs - elapsedMs < avgRoundMs * 0.9) {
@@ -1562,6 +1712,8 @@ async function runAgentLoop(
       // verify-нуджей — чтобы verify/masked-failure проверялись с чистого листа под новую цель.
       anyMutateSucceeded = false;
       blindMutatePending = false;
+      sendCommitDebt = false; // §P1: новая цель — прежний долг сверки отправки к ней не относится
+      composedPending = false;
       goalCheckDone = false;
       verifyNudges = 0;
       log.info("§20 правка на ходу впрыснута в петлю", { taskId, count: steers.length });
@@ -1580,6 +1732,7 @@ async function runAgentLoop(
     // иначе один 50-секундный queue-wait раздувал средний раунд и гард сворачивал задачу зря (ревью B+C).
     const stepStartedMs = Date.now();
     const stepQueueWait0 = queueWaitMs;
+    const stepIdleWait0 = idleWaitMs; // ревью #5: блокирующее ожидание wait_for browser в этом раунде
 
     // §скорость: family-boost исчерпан (раунд переосмысления прошёл) → откат на прежний тир.
     // Если тем временем эскалировал КТО-ТО ЕЩЁ (trading-инструменты и т.п.) — не трогаем: откат
@@ -1736,6 +1889,9 @@ async function runAgentLoop(
     inputTokensTotal += resp.usage.inputTokens;
     outputTokensTotal += resp.usage.outputTokens;
     toolCallsTotal += resp.toolUses.length;
+    // Гард контекст-окна: реальный размер ТОЛЬКО ЧТО отправленного промпта (весь вход = не-кеш + чтение из
+    // кеша + запись в кеш). Проверяется в блоке бюджета на следующей итерации (watermark прошлого раунда).
+    lastPromptTokens = resp.usage.inputTokens + resp.usage.cacheReadTokens + resp.usage.cacheCreationTokens;
     // Волна 1 (1.8): пер-раундовая телеметрия + WARN на перезапись кеш-префикса С ПРИЧИНОЙ. Норма
     // rolling-кеша: read >> creation (пишется только свежий хвост); creation > read = префикс
     // перезаписан (в эпизоде 2026-07-10 это съело $0.63 из $1.04 и было НЕВИДИМО в per-task метриках).
@@ -2017,6 +2173,14 @@ async function runAgentLoop(
       // §8: копим траекторию для самообучения; отмечаем успех и уже-сохранённый навык.
       toolTrajectory.push(`${tu.name}${r.isError ? " (ошибка)" : ""}`);
       if (!r.isError) anyToolSucceeded = true;
+      // Ревью #5: блокирующее ОЖИДАНИЕ вызова (wait_for browser) вычитаем из бюджета задачи (как queue).
+      // Сдвигаем loopStartMs СРАЗУ (не в конце раунда) — иначе continue (channelDown) / break пропустили бы
+      // сдвиг и idle засчитался бы в потолок (десинк, ревью-2 #5-кромка). Двойного учёта нет: roundDurTotalMs
+      // ниже вычитает roundIdleMs, но loopStartMs там уже НЕ трогаем.
+      if (typeof r.idleWaitMs === "number" && r.idleWaitMs > 0) {
+        idleWaitMs += r.idleWaitMs;
+        loopStartMs += r.idleWaitMs;
+      }
       // §8 МАКРОС: жесты (фокус/клик/клавиши) с данными актуатора (разрешённые координаты клика) —
       // сырьё для компиляции авто-реплея после успеха задачи.
       if (!r.isError && MACRO_TRACE_TOOLS.has(tu.name)) {
@@ -2032,17 +2196,54 @@ async function runAgentLoop(
       if (!r.isError) {
         const eff = toolEffect(tu.name);
         const observed = r.observed === true;
-        if (eff === "verify" || observed) {
-          blindMutatePending = false; // сверились глазами — слепое действие подтверждено
+        const realVerify = eff === "verify"; // ЯВНЫЙ взгляд (screen_capture/ui_snapshot/browser_read/…)
+        const combo = (tu.input as { combo?: unknown }).combo;
+        // §P1-отправка (форензика «Отправлено — ушло в Клод», а сообщение осталось в поле): КОММИТ =
+        // send-key после набора (composedPending), ЛИБО берст compose→send одним input_batch (ревью р1
+        // #3/#9). Fused-наблюдение коммита — снимок «факт нажатия», НЕ исход → долг сверки исхода.
+        const batch = tu.name === "input_batch" ? inspectBatchSteps(tu.input) : { committed: false, endsComposed: false, hasSend: false };
+        // КОММИТ отправки после набора (composedPending): не только Enter — ревью р2 #3: чаще жмут КНОПКУ
+        // «Отправить» (input_click/input_mouse/ui_invoke). Любой такой жест после набора = коммит → долг
+        // сверки исхода (как compose-and-commit в replayUnsafe). Ложный позитив (клик мимо кнопки) стоит
+        // одной лишней сверки — дёшево против ложного «Отправлено». Ревью р3 #1/#4: input_batch с
+        // коммит-шагом (batch.hasSend) при наборе В ПРОШЛОМ раунде (composedPending) — тоже коммит.
+        const commitGesture =
+          (tu.name === "input_key" && isSendKey(combo)) ||
+          tu.name === "input_click" ||
+          tu.name === "input_mouse" ||
+          tu.name === "ui_invoke";
+        const sendCommit = ((commitGesture || batch.hasSend) && composedPending) || batch.committed;
+        // СНЯТИЕ долга: реальный взгляд снимает ВСЁ (вкл. sendCommitDebt). Fused-наблюдение снимает только
+        // ОБЫЧНЫЙ слепой долг и только если это НЕ коммит и НЕ висит долг отправки (ревью р1 #4/#8/#16:
+        // соседний Enter/клик/фокус не должен гасить долг отправки своим слабым снимком).
+        if (realVerify) {
+          blindMutatePending = false;
+          sendCommitDebt = false;
           sawVerifyThisRound = true;
-          lastAcquireWaitMs = 0; // свежий взгляд снимает гард протухшего клика (Волна 1)
+          lastAcquireWaitMs = 0;
+        } else if (observed && !sendCommit && !sendCommitDebt) {
+          blindMutatePending = false;
+          sawVerifyThisRound = true;
+          lastAcquireWaitMs = 0;
         }
         if (eff === "mutate") {
           anyMutateSucceeded = true; // P0.1: реальное дело сделано (не просто нейтральный поиск)
-          // P0.2: слепое действие (клик/ввод/act/фокус) → исход неизвестен, требуется сверка перед «готово».
-          // Самоподтверждающийся mutate (code_run/fs/office/system/launch/open) флаг НЕ ставит.
-          // 2.1: наблюдение уже приложено → сверка в этом же раунде, долг не взводим.
-          if (isBlindMutate(tu.name) && !observed) blindMutatePending = true;
+          if (sendCommit) {
+            blindMutatePending = true;
+            sendCommitDebt = true; // исход отправки сверяется ТОЛЬКО реальным взглядом
+            composedPending = false;
+          } else if (isBlindMutate(tu.name) && !observed) {
+            blindMutatePending = true;
+          }
+          // Взвод «набрал текст» — любым путём (type/setValue/вставка/берст, оканчивающийся набором).
+          if (
+            tu.name === "input_type" ||
+            (tu.name === "ui_invoke" && (tu.input as { pattern?: unknown }).pattern === "setValue") ||
+            (tu.name === "input_key" && isPasteCombo(combo)) ||
+            batch.endsComposed
+          ) {
+            composedPending = true;
+          }
         }
       }
       if (tu.name === "skill_save" && !r.isError) {
@@ -2236,8 +2437,12 @@ async function runAgentLoop(
     }
 
     round += 1;
-    // Средняя длительность раунда → гард бюджета. Ожидание аренды внутри раунда вычтено (см. снапшот).
-    roundDurTotalMs += Math.max(0, Date.now() - stepStartedMs - (queueWaitMs - stepQueueWait0));
+    // Ревью #5: блокирующее ожидание wait_for(browser) НЕ тикает в потолок задачи (как очередь аренды) —
+    // loopStartMs УЖЕ сдвинут при аккумуляции выше (устойчиво к continue/break). Здесь только вычитаем
+    // idle из средней длительности раунда, чтобы долгое «жди 26:00» не раздувало avgRoundMs (иначе
+    // early-wrap срубал бы задачу до перемотки). loopStartMs тут НЕ трогаем (двойного сдвига нет).
+    const roundIdleMs = idleWaitMs - stepIdleWait0;
+    roundDurTotalMs += Math.max(0, Date.now() - stepStartedMs - (queueWaitMs - stepQueueWait0) - roundIdleMs);
     tasks.progress(taskId, round);
     if (shown) emitTaskStatus(session, task);
   }
@@ -2459,18 +2664,26 @@ async function runAgentLoop(
     // Волна 1: в причину провала — сколько успели (панель/«что делал?» видят прогресс, не голый обрыв).
     tasks.fail(
       taskId,
-      earlyWrap
-        ? `свернулся заранее: остаток времени меньше среднего раунда (сделано шагов: ${round})`
-        : `превышен потолок времени задачи (сделано шагов: ${round})`,
+      contextWrap
+        ? `свернулся заранее: контекст-окно почти исчерпано (сделано шагов: ${round})`
+        : earlyWrap
+          ? `свернулся заранее: остаток времени меньше среднего раунда (сделано шагов: ${round})`
+          : `превышен потолок времени задачи (сделано шагов: ${round})`,
     );
     if (shown) emitTaskStatus(session, task);
     return terminal(
       verbalize(
-        spokeAny
-          ? "…дальше затянулось, остановил."
-          : round > 0
-            ? `Время вышло, сэр — остановился, сделав ${round} шагов, до конца не довёл. Продолжить?`
-            : "Долго не отвечало — остановил. Повторить?",
+        contextWrap
+          ? spokeAny
+            ? "…дальше уже не помещалось в память задачи, остановил."
+            : round > 0
+              ? `Задача разрослась и перестала помещаться в память, сэр — остановился, сделав ${round} шагов. Продолжить с того же места?`
+              : "Слишком большой объём за раз — остановился, сэр. Зайти по частям?"
+          : spokeAny
+            ? "…дальше затянулось, остановил."
+            : round > 0
+              ? `Время вышло, сэр — остановился, сделав ${round} шагов, до конца не довёл. Продолжить?`
+              : "Долго не отвечало — остановил. Повторить?",
       ),
     );
   }

@@ -119,7 +119,7 @@ describe("VoicePipeline (§10)", () => {
     // STT финализировал фразу
     stt.last!.emit({ text: "который час", final: true });
     await flush();
-    expect(onUserTurn).toHaveBeenCalledWith("который час");
+    expect(onUserTurn).toHaveBeenCalledWith("который час", expect.anything());
     expect(tts.last).not.toBeNull();
 
     // первый чанк → speaking
@@ -377,7 +377,7 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
         await flush();
       }
     };
-    return { pipe, onUserTurn, advance, say };
+    return { pipe, stt, onUserTurn, advance, say };
   }
 
   it("без обращения «Джарвис» до пробуждения — игнор (агент не зовётся)", async () => {
@@ -389,9 +389,9 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
   it("«Джарвис» будит; дальше в окне можно без обращения", async () => {
     const { onUserTurn, say } = setup(1_000);
     await say("Джарвис, который час");
-    expect(onUserTurn).toHaveBeenLastCalledWith("который час");
+    expect(onUserTurn).toHaveBeenLastCalledWith("который час", expect.anything());
     await say("а какое число"); // без «Джарвис», окно ещё открыто
-    expect(onUserTurn).toHaveBeenLastCalledWith("а какое число");
+    expect(onUserTurn).toHaveBeenLastCalledWith("а какое число", expect.anything());
     expect(onUserTurn).toHaveBeenCalledTimes(2);
   });
 
@@ -402,7 +402,7 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
     await say("как дела"); // принято → окно сдвинулось на t=800
     advance(800); // t=1600: >1000 от ПЕРВОЙ реплики, но <1000 от второй
     await say("спасибо"); // принимается благодаря качению окна
-    expect(onUserTurn).toHaveBeenNthCalledWith(3, "спасибо");
+    expect(onUserTurn).toHaveBeenNthCalledWith(3, "спасибо", expect.anything());
     expect(onUserTurn).toHaveBeenCalledTimes(3);
   });
 
@@ -413,6 +413,305 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
     advance(2_000); // > окна, активности не было
     await say("ещё раз"); // без «Джарвис» → игнор
     expect(onUserTurn).toHaveBeenCalledTimes(calls);
+  });
+
+  // Акустика «строгий wake в шуме» (#1/#2): фон/видео/второй голос затапливали пайплайн через катящееся
+  // окно разговора. Теперь при частоте НЕадресованных реплик обстановка признаётся зашумлённой → окно
+  // отключается: команда БЕЗ «Джарвис» игнорируется, пока фон не стихнет.
+  it("зашумлённая обстановка (≥3 НЕадресованных) → в окне разговора команда БЕЗ «Джарвис» игнорируется", async () => {
+    const { onUserTurn, say } = setup(10_000); // большое окно разговора (не истекает по времени в тесте)
+    // фон/видео: 3 НЕадресованные реплики (без «Джарвис») копят сигнал шума
+    await say("кто-то говорит по телефону рядом");
+    await say("а потом фраза из видео на фоне");
+    await say("и третья реплика фоном идёт");
+    expect(onUserTurn).not.toHaveBeenCalled(); // все проигнорированы (нет обращения)
+    // штатное пробуждение работает всегда
+    await say("Джарвис, поставь паузу");
+    expect(onUserTurn).toHaveBeenLastCalledWith("поставь паузу", expect.anything());
+    // в ШУМЕ фраза в окне БЕЗ «Джарвис» — ИГНОР (строгий wake), хотя окно ещё открыто
+    const calls = onUserTurn.mock.calls.length;
+    await say("продолжай дальше");
+    expect(onUserTurn).toHaveBeenCalledTimes(calls); // НЕ принято
+    // а с «Джарвис» — принято даже в шуме
+    await say("Джарвис, следующий трек");
+    expect(onUserTurn).toHaveBeenLastCalledWith("следующий трек", expect.anything());
+  });
+
+  it("тихая обстановка — окно разговора принимает без «Джарвис» (строгий wake НЕ включается)", async () => {
+    const { onUserTurn, say } = setup(10_000);
+    await say("Джарвис, привет"); // 1 пробуждение, шума нет
+    await say("а как дела"); // в окне, обстановка тихая → принято как прежде
+    expect(onUserTurn).toHaveBeenLastCalledWith("а как дела", expect.anything());
+    expect(onUserTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it("акустика: строгий режим НЕ самоподдерживается владельцем; распад при маскированном сигнале закрывает окно (одно «Джарвис» возвращает диалог)", async () => {
+    // HIGH-находка «оглох на владельца»: заблокированные строгим режимом реплики в открытом окне НЕ идут
+    // в счётчик шума (само-поддержка) — режим спадает по распаду фоновых записей. НО (ревью #2): раз режим
+    // БЛОКИРОВАЛ реплики в открытом окне, сигнал был МАСКИРОВАН — «тишина» не доказана (фон мог продолжаться).
+    // Выход тогда КОНСЕРВАТИВНЫЙ: окно разговора закрывается (цена владельцу — одно «Джарвис»), иначе первая
+    // же фраза фона после выхода принималась бы командой и катила окно бессрочно (флуд возвращался).
+    const { onUserTurn, advance, say } = setup(60_000); // окно разговора большое — не истекает по времени
+    await say("фон один"); // фон ДО разговора (окно закрыто) — 3 реплики → шумный режим
+    await say("фон два");
+    await say("фон три");
+    await say("Джарвис, поставь паузу"); // проснулись (в шуме wake работает всегда)
+    const calls = onUserTurn.mock.calls.length;
+    advance(12_000);
+    await say("громче"); // владелец БЕЗ «Джарвис» в шуме → блок (строгий); в счётчик шума НЕ идёт (маркер маскировки)
+    advance(12_000);
+    await say("ещё громче"); // снова блок, снова НЕ в счётчик
+    expect(onUserTurn).toHaveBeenCalledTimes(calls); // обе заблокированы (строгий wake)
+    advance(10_000); // t≈34с: фоновые таймстампы (t=0) истекли (>30с), команды владельца их НЕ пополняли
+    await say("теперь без обращения"); // режим СНЯТ (не самоподдержался), но сигнал был маскирован →
+    expect(onUserTurn).toHaveBeenCalledTimes(calls); // окно закрыто консервативно: без «Джарвис» не принято
+    await say("Джарвис, продолжай"); // одно обращение возвращает диалог
+    expect(onUserTurn).toHaveBeenLastCalledWith("продолжай", expect.anything());
+    await say("и дальше без обращения"); // тихо (счётчик пуст) → окно снова мягкое, как прежде
+    expect(onUserTurn).toHaveBeenLastCalledWith("и дальше без обращения", expect.anything());
+  });
+
+  it("акустика (ревью #1): одна реплика через gateWake ДВАЖДЫ (спекулятивный эндпоинт + поздний финал) = ОДИН сигнал шума", async () => {
+    // Прод-паттерн: спекулятивный эндпоинт финализирует interim, а закрытие стрима досылает поздний
+    // реальный финал → gateWake проходится дважды НА ОДНОМ ходе. Без дедупа по turnSeq порог «3 реплики»
+    // срабатывал на 2 фразах, а exit-гистерезис 1 был недостижим (1 фраза = 2 записи, режим залипал).
+    const { pipe, stt, onUserTurn, say } = setup(10_000);
+    for (const text of ["фон номер один", "фон номер два"]) {
+      pipe.onWake();
+      const s = stt.last!;
+      s.emit({ text, final: true }); // «спекулятивный» проход
+      await flush();
+      s.emit({ text, final: true }); // поздний финал ТОГО ЖЕ стрима/хода — считаться не должен
+      await flush();
+    }
+    // 2 физические реплики = 2 сигнала (не 4) → порог 3 НЕ достигнут, окно разговора живо
+    await say("Джарвис, привет");
+    await say("продолжение без обращения");
+    expect(onUserTurn).toHaveBeenLastCalledWith("продолжение без обращения", expect.anything());
+  });
+
+  it("акустика (ревью р2): запоздавший финал СТАРОГО хода, пришедший ПОСЛЕ учтённого нового, не считается повторно", async () => {
+    // Деградированная сеть: flush Deepgram хода N задержался дольше целого следующего хода. Скалярный
+    // маркер `!==` считал бы такой финал заново (маркер уже перезаписан ходом N+1) — сравнение строго
+    // по возрастанию (turnSeq монотонный) отбрасывает финалы прошлых ходов.
+    const { pipe, stt, onUserTurn, say } = setup(10_000);
+    pipe.onWake();
+    const s1 = stt.last!;
+    s1.emit({ text: "фон номер один", final: true }); // ход 1 учтён
+    await flush();
+    pipe.onWake();
+    const s2 = stt.last!;
+    expect(s2).not.toBe(s1); // новый ход — новый стрим
+    s2.emit({ text: "фон номер два", final: true }); // ход 2 учтён (маркер перезаписан)
+    await flush();
+    s1.emit({ text: "фон номер один", final: true }); // запоздавший финал хода 1 — фантом, НЕ считать
+    await flush();
+    await say("Джарвис, привет");
+    await say("продолжение без обращения"); // сигналов 2 (не 3) → строгий режим не взведён
+    expect(onUserTurn).toHaveBeenLastCalledWith("продолжение без обращения", expect.anything());
+  });
+
+  it("акустика (ревью #2): фон при живом диалоге — masked-exit закрывает окно, фон НЕ принимается командой, повторный вход работает", async () => {
+    // Целевой сценарий фичи: фильм/ТВ говорит непрерывно, владелец командует с «Джарвис». Раньше распад
+    // счётчика (заблокированные реплики не считаются) выключал режим с ложным «стихла», следующая фраза
+    // фильма ПРИНИМАЛАСЬ командой, катила окно от чужой речи, и режим не мог вернуться никогда.
+    const { onUserTurn, advance, say } = setup(60_000);
+    await say("фон один"); // t=0: три фразы при закрытом окне → строгий режим
+    await say("фон два");
+    await say("фон три");
+    await say("Джарвис, сделай громче"); // принято, окно открыто
+    const calls = onUserTurn.mock.calls.length;
+    advance(10_000); // t=10
+    await say("звук фильма продолжает идти"); // блок строгим режимом → маркер маскировки
+    advance(24_000); // t=34: фоновые записи (t=0) истекли, маркер (t=10) ещё в окне
+    await say("какая-то фраза фильма"); // masked-exit: режим снят + окно ЗАКРЫТО → НЕ принята, но СЧИТАЕТСЯ (окно закрыто)
+    expect(onUserTurn).toHaveBeenCalledTimes(calls); // ничего из фона командой не ушло
+    advance(1_000); // t=35
+    await say("снова фраза фильма"); // счётчик: 2
+    advance(1_000); // t=36
+    await say("опять фраза фильма"); // счётчик: 3 → строгий режим ВЕРНУЛСЯ (повторный вход жив)
+    expect(onUserTurn).toHaveBeenCalledTimes(calls);
+    await say("Джарвис, стоп"); // владелец пробуждается штатно и в шуме
+    expect(onUserTurn).toHaveBeenLastCalledWith("стоп", expect.anything());
+  });
+
+  it("акустика (ревью #6): near-miss попытки докричаться («Дарья…») НЕ копят зашумлённость — это владелец, не фон", async () => {
+    const { onUserTurn, say } = setup(10_000);
+    await say("Дарья, запусти поиск в доте"); // lev 4 от «джарвис» — похоже на обращение, не шум
+    await say("Дарья, запусти поиск снова");
+    await say("Дарья, ну запусти же поиск");
+    await say("Джарвис, поставь музыку"); // наконец расслышал
+    await say("а теперь громче"); // окно принимает: строгий режим от его же попыток НЕ включился
+    expect(onUserTurn).toHaveBeenLastCalledWith("а теперь громче", expect.anything());
+  });
+
+  it("акустика (ревью #10): чистые междометия при закрытом окне НЕ копят зашумлённость", async () => {
+    const { onUserTurn, say } = setup(10_000);
+    await say("ах"); // isNoiseOnly: навредить не может ни в каком окне — не сигнал шума
+    await say("ох");
+    await say("хм");
+    await say("Джарвис, привет");
+    await say("продолжим без обращения"); // тихая комната осталась тихой
+    expect(onUserTurn).toHaveBeenLastCalledWith("продолжим без обращения", expect.anything());
+  });
+
+  it("§P0: мозг получает viaWake — true на «Джарвис»/без wake-гейта, false на реплику из окна разговора", async () => {
+    // Гейт авто-реплея (форензика 2026-07-14): чужая речь входит через катящееся окно — мозг обязан
+    // знать, что реплика принята БЕЗ явного обращения, и не давать ей слепые жесты.
+    const { onUserTurn, say } = setup(10_000);
+    await say("Джарвис, закрой приложение");
+    expect(onUserTurn).toHaveBeenLastCalledWith("закрой приложение", { viaWake: true });
+    await say("а теперь сверни окно"); // принято ОКНОМ без «Джарвис»
+    expect(onUserTurn).toHaveBeenLastCalledWith("а теперь сверни окно", { viaWake: false });
+  });
+
+  it("акустика (ревью р2): зона гистерезиса — частичный распад до n=2 (между exit=1 и enter=3) ДЕРЖИТ строгий режим", async () => {
+    const { onUserTurn, advance, say } = setup(60_000);
+    await say("фон один"); // t=0
+    advance(15_000); // t=15
+    await say("фон два");
+    await say("фон три"); // n=3 → строгий режим ВКЛ
+    await say("Джарвис, поставь паузу"); // окно открыто (t=15)
+    const calls = onUserTurn.mock.calls.length;
+    advance(17_000); // t=32: запись t=0 истекла (>30с), t=15 живы → n=2 — внутри зоны [2,2]
+    await say("всё ещё без обращения"); // n=2 > exit(1) → режим НЕ спал, реплика блокируется
+    expect(onUserTurn).toHaveBeenCalledTimes(calls);
+  });
+
+  it("акустика (ревью р2): ЧИСТЫЙ выход (в окне ничего не блокировалось) — окно разговора СОХРАНЯЕТСЯ", async () => {
+    // Различие веток выхода — суть masked-exit: закрываем окно ТОЛЬКО когда сигнал был маскирован
+    // (blockedAt непуст). Владелец молчал в окне → тишина ДОКАЗАНА распадом → окно живо, как раньше.
+    const { onUserTurn, advance, say } = setup(60_000);
+    await say("фон один"); // t=0, ×3 → строгий режим
+    await say("фон два");
+    await say("фон три");
+    await say("Джарвис, поставь паузу"); // окно открыто; дальше владелец МОЛЧИТ (blockedAt пуст)
+    advance(31_000); // t=31: фоновые записи истекли, маскировки не было → чистый выход «стихла»
+    await say("продолжай без обращения"); // окно уцелело (60с) → принято сразу
+    expect(onUserTurn).toHaveBeenLastCalledWith("продолжай без обращения", expect.anything());
+  });
+
+  it("акустика (ревью р2): кривой JARVIS_NOISY_MIN_IGNORED=0 клампится с WARN — тихая комната НЕ глохнет", async () => {
+    const prevMin = process.env.JARVIS_NOISY_MIN_IGNORED;
+    process.env.JARVIS_NOISY_MIN_IGNORED = "0"; // «0 = выкл» по конвенции проекта — но здесь это дало бы вход n≥0 = ВСЕГДА
+    vi.resetModules();
+    try {
+      const { VoicePipeline: FreshPipeline } = await import("./pipeline.js");
+      let clock = 0;
+      const stt = new CtrlSttProvider();
+      const tts = new CtrlTtsProvider();
+      const warns: string[] = [];
+      const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+      const pipe = new FreshPipeline({
+        stt,
+        tts,
+        onUserTurn,
+        sendSpeakChunk: () => {},
+        sendClientState: () => {},
+        requireWakeWord: true,
+        conversationWindowMs: 10_000,
+        followupMs: 1_000_000,
+        now: () => clock,
+        log: {
+          info: () => {},
+          warn: (m: string) => {
+            warns.push(m);
+          },
+          error: () => {},
+          debug: () => {},
+        } as never,
+      });
+      expect(warns.some((m) => m.includes("кривая конфигурация JARVIS_NOISY_"))).toBe(true);
+      const say = async (text: string) => {
+        pipe.onWake();
+        stt.last!.emit({ text, final: true });
+        await flush();
+        if (tts.last) {
+          tts.last.push(0, true);
+          tts.last.finish();
+          await flush();
+        }
+      };
+      await say("Джарвис, привет");
+      await say("а как дела"); // MIN клампнут до 1 → в ТИШИНЕ режим не взводится, окно живо
+      expect(onUserTurn).toHaveBeenLastCalledWith("а как дела", expect.anything());
+    } finally {
+      if (prevMin === undefined) delete process.env.JARVIS_NOISY_MIN_IGNORED;
+      else process.env.JARVIS_NOISY_MIN_IGNORED = prevMin;
+      vi.resetModules();
+    }
+  });
+
+  it("выключатель JARVIS_STRICT_WAKE_IN_NOISE=0 → строгий wake не включается даже в шуме", async () => {
+    const prev = process.env.JARVIS_STRICT_WAKE_IN_NOISE;
+    process.env.JARVIS_STRICT_WAKE_IN_NOISE = "0";
+    try {
+      const { onUserTurn, say } = setup(10_000);
+      await say("фон один");
+      await say("фон два");
+      await say("фон три");
+      await say("Джарвис, привет");
+      await say("а дальше без обращения"); // строгий wake ВЫКЛ → окно принимает
+      expect(onUserTurn).toHaveBeenLastCalledWith("а дальше без обращения", expect.anything());
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_STRICT_WAKE_IN_NOISE;
+      else process.env.JARVIS_STRICT_WAKE_IN_NOISE = prev;
+    }
+  });
+
+  // Ревью #11: гейт «second-chance подавляется в шуме» был заявлен фичей, но не покрыт ни одним тестом
+  // (в setup() выше hasActiveTask не передаётся — ветка недостижима). Свой сетап: активная задача +
+  // перехват текстов синтеза (переспрос «Вы мне, сэр?» идёт через speakQueued → TTS).
+  function setupSecondChance() {
+    let clock = 0;
+    const stt = new CtrlSttProvider();
+    const spoken: string[] = [];
+    const tts = {
+      live: false,
+      synthesize: (text: string) => {
+        spoken.push(text);
+        return new CtrlTtsStream();
+      },
+    } as unknown as ITtsProvider;
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs: 10_000,
+      followupMs: 1_000_000,
+      hasActiveTask: () => true,
+      now: () => clock,
+    });
+    const advance = (ms: number) => {
+      clock += ms;
+    };
+    const say = async (text: string) => {
+      pipe.onWake();
+      stt.last!.emit({ text, final: true });
+      await flush();
+    };
+    return { pipe, spoken, advance, say };
+  }
+
+  it("second-chance: в ТИШИНЕ near-miss при активной задаче → переспрос «Вы мне, сэр?» звучит (контроль ветки)", async () => {
+    const { spoken, advance, say } = setupSecondChance();
+    advance(130_000); // за кулдаун second-chance (120с от t=0)
+    await say("Дарья, запусти поиск в доте"); // near-miss (lev 4), тишина → переспрос
+    expect(spoken).toContain("Вы мне, сэр?");
+  });
+
+  it("second-chance: в ШУМЕ переспрос ПОДАВЛЯЕТСЯ (не «Вы мне?» на фоновую болтовню)", async () => {
+    const { spoken, advance, say } = setupSecondChance();
+    advance(130_000); // кулдаун заведомо пройден — подавлять может ТОЛЬКО шумовой гейт
+    await say("фон один"); // 3 неадресованные → строгий режим
+    await say("фон два");
+    await say("фон три");
+    await say("Дарья, запусти поиск в доте"); // near-miss в шуме → тихий дроп, без переспроса
+    expect(spoken).not.toContain("Вы мне, сэр?");
   });
 });
 
@@ -448,7 +747,7 @@ describe("VoicePipeline — верификация диктора (§3 kill-фи
   it("СВОЙ голос (score ≥ порога) → реплика обрабатывается", async () => {
     const { onUserTurn, turn } = setup(0.82);
     await turn("какая погода");
-    expect(onUserTurn).toHaveBeenCalledWith("какая погода");
+    expect(onUserTurn).toHaveBeenCalledWith("какая погода", expect.anything());
   });
 
   it("ЧУЖОЙ голос/музыка (score < порога) → ход молча отброшен (агент не зван)", async () => {
@@ -504,5 +803,110 @@ describe("VoicePipeline — само-восстановление прослуш
     // 3. Следующий кадр в listening с закрытым STT → САМО-восстановление: открывается новый стрим.
     pipe.onAudioFrame(new Int16Array([5, 6, 7, 8]).buffer);
     expect(stt.last).not.toBe(stream1); // переоткрылся — Джарвис снова слышит
+  });
+});
+
+describe("VoicePipeline — earcon раздумья на sync-first (§P1, форензика 2026-07-14)", () => {
+  const setEnv = (v: string | undefined) => {
+    if (v === undefined) delete process.env.JARVIS_THINK_EARCON_MS;
+    else process.env.JARVIS_THINK_EARCON_MS = v;
+  };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /** Earcon — WAV-буфер (сотни байт); мок-TTS шлёт 1-байтные чанки — различаем по размеру. */
+  const earconsOf = (chunks: TtsChunk[]) => chunks.filter((c) => c.audio.byteLength > 100);
+
+  it("молчание раздумья дольше порога → ОДИН earcon-тик, состояние машины не тронуто", async () => {
+    const prev = process.env.JARVIS_THINK_EARCON_MS;
+    setEnv("30");
+    try {
+      let resolveReply: (r: { voice: string }) => void = () => {};
+      const slow = vi.fn(() => new Promise<{ voice: string }>((r) => (resolveReply = r)));
+      const { pipe, stt, tts, chunks } = makePipeline(slow);
+      pipe.onWake();
+      stt.last!.emit({ text: "который час", final: true });
+      await flush();
+      expect(pipe.state).toBe("thinking");
+      await sleep(70); // > порога 30мс — мозг всё ещё думает
+      expect(earconsOf(chunks)).toHaveLength(1); // тик «услышал, думаю» прозвучал
+      expect(pipe.state).toBe("thinking"); // это не речь — машина состояний не тронута
+      resolveReply({ voice: "Готово." });
+      await flush();
+      tts.last!.push(0, true); // реальный ответ штатно играет после тика
+      tts.last!.finish();
+      expect(earconsOf(chunks)).toHaveLength(1); // тик был один
+    } finally {
+      setEnv(prev);
+    }
+  });
+
+  it("быстрый ответ раньше порога → тик НЕ звучит", async () => {
+    const prev = process.env.JARVIS_THINK_EARCON_MS;
+    setEnv("60");
+    try {
+      const { pipe, stt, tts, chunks } = makePipeline();
+      pipe.onWake();
+      stt.last!.emit({ text: "который час", final: true });
+      await flush();
+      tts.last!.push(0, true); // ответ уже играет (speaking)
+      await sleep(90); // таймер тика сработал бы здесь — но звук уже пошёл
+      expect(earconsOf(chunks)).toHaveLength(0);
+      tts.last!.finish();
+    } finally {
+      setEnv(prev);
+    }
+  });
+
+  it("СТРИМИНГОВЫЙ прод-путь (ревью, HIGH): earcon звучит, пока PhraseSpeaker ещё не заговорил", async () => {
+    // Гард по phraseSpeaker.active глушил тик ВЕСЬ стриминговый ход: спикер создаётся ДО вызова brain
+    // и active=true с конструирования — фича была мертва ровно на прод-дефолте (onUserTurnStream).
+    const prev = process.env.JARVIS_THINK_EARCON_MS;
+    setEnv("30");
+    try {
+      const stt = new CtrlSttProvider();
+      const tts = new CtrlTtsProvider();
+      const chunks: TtsChunk[] = [];
+      const pipe = new VoicePipeline({
+        stt,
+        tts,
+        onUserTurn: async () => ({ voice: "не используется" }),
+        onUserTurnStream: () => new Promise<void>(() => {}), // brain думает бесконечно, ни одной фразы
+        sendSpeakChunk: (c) => chunks.push(c),
+        sendClientState: () => {},
+        followupMs: 1_000_000,
+      });
+      pipe.onWake();
+      stt.last!.emit({ text: "запусти поиск", final: true });
+      await flush();
+      expect(pipe.state).toBe("thinking");
+      await sleep(70); // > порога 30мс — фраз от brain так и нет
+      expect(earconsOf(chunks)).toHaveLength(1); // тик прозвучал и на пофразном пути
+    } finally {
+      setEnv(prev);
+    }
+  });
+
+  it("stop/barge-in во время раздумья отменяет тик; выключатель 0 — тика нет вовсе", async () => {
+    const prev = process.env.JARVIS_THINK_EARCON_MS;
+    setEnv("30");
+    try {
+      const slow = vi.fn(() => new Promise<{ voice: string }>(() => {}));
+      const { pipe, stt, chunks } = makePipeline(slow);
+      pipe.onWake();
+      stt.last!.emit({ text: "который час", final: true });
+      await flush();
+      pipe.stop(); // оборвали ход, пока думал
+      await sleep(60);
+      expect(earconsOf(chunks)).toHaveLength(0);
+      // выключатель: 0 = тик не взводится
+      setEnv("0");
+      const second = makePipeline(vi.fn(() => new Promise<{ voice: string }>(() => {})));
+      second.pipe.onWake();
+      second.stt.last!.emit({ text: "который час", final: true });
+      await flush();
+      await sleep(40);
+      expect(earconsOf(second.chunks)).toHaveLength(0);
+    } finally {
+      setEnv(prev);
+    }
   });
 });
