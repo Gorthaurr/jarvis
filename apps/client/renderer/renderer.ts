@@ -117,7 +117,12 @@ initTaskPanel(jarvis); // §20 док задач — подписка onTaskStat
 // ── аудио (§3, §10): захват/воспроизведение в renderer (WebRTC AEC) ────────────
 // onActive → main: пока звук РЕАЛЬНО играет, перебивание (§10) остаётся включённым и в «хвосте»
 // очереди (сервер уходит из speaking по концу синтеза, а плеер ещё доигрывает фразы).
-const playback = new AudioPlayback(undefined, (active) => jarvis.setPlaybackActive(active));
+const playback = new AudioPlayback(
+  undefined,
+  (active) => jarvis.setPlaybackActive(active),
+  // Realtime инкремент 0: первый звук хода реально сыгран → наверх (сервер замыкает mouth-to-ear метрику).
+  (gen, ts) => jarvis.audioPlayed?.(gen, ts),
+);
 let capture: AudioCapture | null = null;
 
 // §22 mute озвучки: при выключенном звуке аудио-чанки НЕ проигрываем (Джарвис слышит и делает, но молча).

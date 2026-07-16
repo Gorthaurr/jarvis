@@ -65,12 +65,16 @@ export class ResolutionMemory {
     if (!userId || !channel || !q || !title) return; // мусор не запоминаем (пустой резолв → не было бы fast-path)
     const k = keyOf(userId, channel, q);
     const prev = this.map.get(k);
+    // Наследуем прежний peerId ТОЛЬКО когда title тот же (ревью р1 #13): при СМЕНЕ адресата (корректировка
+    // «не та Катя») пустой новый peerId не должен тащить peerId СТАРОЙ связки — иначе openHinted откроет
+    // по стейл-peerId старый чат вопреки новому title.
+    const inheritPeer = prev && foldName(prev.title) === foldName(title) ? prev.peerId : undefined;
     this.map.set(k, {
       userId,
       channel,
       queryFold: foldName(q),
       queryRaw: q,
-      peerId: resolved.peerId || prev?.peerId,
+      peerId: resolved.peerId || inheritPeer,
       title,
       hits: (prev?.hits ?? 0) + 1,
       lastAt: this.now(),

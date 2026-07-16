@@ -55,7 +55,24 @@ const BARGE_THRESHOLD = (() => {
   const n = Number.parseInt(process.env.JARVIS_BARGE_THRESHOLD ?? "", 10);
   return Number.isFinite(n) && n > 0 ? n : 250;
 })();
-const BARGE_ONSET_FRAMES = 2;
+/**
+ * §10 (fix 2026-07-15, живой баг «не может озвучить длинную фразу / дать прогноз погоды»): barge-in
+ * требует НЕПРЕРЫВНОГО превышения порога В ТЕЧЕНИЕ этого времени, а не N КАДРОВ. Раньше онсет = 2 кадра
+ * (~20мс при 160 сэмплах/16кГц) → любой короткий спайк (реплика по ТВ, стук, эхо TTS сквозь несовершенный
+ * AEC) на 20мс рвал речь; чем длиннее фраза, тем вероятнее спайк её оборвёт (прогноз погоды не дослушать).
+ * Реальный barge («стоп/тихо») сплошной ≥200мс; интермиттентное эхо/шум с провалами между словами порог
+ * ПО ВРЕМЕНИ не накопит (провал сбрасывает счётчик). env JARVIS_BARGE_SUSTAIN_MS (деф 200, кламп [40, 2000]).
+ */
+const BARGE_SUSTAIN_MS = (() => {
+  const n = Number.parseInt(process.env.JARVIS_BARGE_SUSTAIN_MS ?? "", 10);
+  return Number.isFinite(n) && n >= 40 && n <= 2000 ? n : 200;
+})();
+/**
+ * §10: короткий провал ниже порога (микро-пауза между слогами РЕАЛЬНОЙ речи) НЕ сбрасывает отсчёт устойчивости
+ * — иначе живой barge с дырами не накопил бы sustain и владелец не смог бы перебить вообще. Сброс — только на
+ * СТОЙКОЙ тишине дольше этого (спайк кончился, речи не было). Деф 120мс (типичная межслоговая пауза < этого).
+ */
+const BARGE_GAP_TOLERANCE_MS = 120;
 /**
  * §10 АДАПТИВНЫЙ порог barge (фикс «озвучивает 2 слова из фразы»): фиксированный порог рвал TTS от
  * ФОНОВОГО звука — играет Дота/музыка из колонок, browser-AEC внешний звук НЕ гасит (нет reference),
@@ -89,8 +106,12 @@ export class AudioCoordinator {
   private playbackActiveSince = 0;
   /** Когда сервер начал говорить (для anti-echo grace §10); 0 — не говорит. */
   private speakingSince = 0;
-  /** Счётчик громких кадров для чувствительного barge-in + время последнего barge (рефрактер). */
-  private bargeVoiced = 0;
+  /** §10 (fix 2026-07-15): МОМЕНТ начала превышения порога (устойчивость barge ПО ВРЕМЕНИ, не по кадрам —
+   *  2 кадра = 20мс рвали длинные фразы от эхо/шум-спайка). 0 — отсчёта нет. */
+  private bargeVoicedSince = 0;
+  /** §10: момент ухода ниже порога ВНУТРИ отсчёта — короткий провал (микро-пауза речи) НЕ сбрасывает, сброс
+   *  только на стойкой тишине >BARGE_GAP_TOLERANCE_MS (иначе микро-провалы речи мешали бы накопить sustain). */
+  private bargeBelowSince = 0;
   private lastBargeAt = 0;
   /** §10 скользящий ФОН микрофона (EMA по кадрам обычной прослушки) — база адаптивного порога barge. */
   private ambientRms = 0;
@@ -136,10 +157,14 @@ export class AudioCoordinator {
     // И сбрасываем barge-детектор: перебить можно ОДИН раз за сессию речи Джарвиса.
     if (this.serverSpeaking && !wasSpeaking) {
       this.speakingSince = this.now();
-      this.bargeVoiced = 0;
+      this.resetBargeSustain();
       this.lastBargeAt = 0;
       this.bargePeak = 0;
       this.bargeFrames = 0;
+    } else if (!this.bargeWindowActive()) {
+      // speaking→listening/idle и окно закрылось (звук не играет) → сброс отсчёта, чтобы стейл не пережил
+      // разрыв до следующей фразы (ревью #close: короткий голос владельца перед закрытием → ложный barge).
+      this.resetBargeSustain();
     }
     // §10 диагностика barge-in: на спаде speaking логируем, какого ПИКА достигал микрофон —
     // если пик << BARGE_THRESHOLD, AEC душит голос юзера и порог надо ронять ещё (или ты в колонках);
@@ -161,7 +186,18 @@ export class AudioCoordinator {
   /** Принудительно закрыть микрофон (честный mute, §0.6). */
   mute(): void {
     this.playbackActive = false; // звук гасится вместе с mute → снимаем barge-окно
+    this.resetBargeSustain(); // окно закрыто — счётчик устойчивости не должен пережить разрыв (ревью #close)
     this.closeGate();
+  }
+
+  /**
+   * §10 (ревью 2026-07-15): обнулить отсчёт устойчивости barge. Зовётся при ЗАКРЫТИИ окна перебивания —
+   * иначе стейл `bargeVoicedSince`, набранный коротким голосом владельца, переживал бы разрыв окна и на
+   * ПЕРВОМ же транзиенте после реоткрытия давал ложный barge (воскрешение бага «спайк рвёт длинную фразу»).
+   */
+  private resetBargeSustain(): void {
+    this.bargeVoicedSince = 0;
+    this.bargeBelowSince = 0;
   }
 
   /**
@@ -172,6 +208,9 @@ export class AudioCoordinator {
   setPlaybackActive(active: boolean): void {
     this.playbackActive = active;
     if (active) this.playbackActiveSince = this.now();
+    // Окно перебивания только что закрылось (звук доиграл) → обнуляем отсчёт устойчивости, чтобы он не
+    // пережил разрыв до следующей фразы и не выстрелил ложным barge на транзиенте при реоткрытии (ревью #close).
+    if (!this.bargeWindowActive()) this.resetBargeSustain();
   }
 
   /** Активно ли окно перебивания: сервер говорит ЛИБО звук ещё реально играет (с бэкстопом от залипания). */
@@ -190,6 +229,9 @@ export class AudioCoordinator {
       // кормится; а в хвосте barge сам переведёт в listening, и дальше речь поймается обычным путём).
       this.maybeBargeIn(pcm, sig);
     } else {
+      // Окно перебивания закрыто (в т.ч. tail-таймаут без явной мутации) → отсчёт устойчивости не копим/не
+      // держим: иначе стейл пережил бы разрыв и выстрелил бы ложным barge при реоткрытии (ревью #close).
+      this.resetBargeSustain();
       // §10 адаптивный barge: копим ФОН только вне окна речи Джарвиса (его TTS/эхо фон не задирают).
       this.ambientRms += AMBIENT_EMA_ALPHA * (rms(pcm) - this.ambientRms);
       if (sig === "speech_start") {
@@ -231,16 +273,34 @@ export class AudioCoordinator {
     }
     if (this.lastBargeAt > 0 && this.now() - this.lastBargeAt < BARGE_REFRACTORY_MS) return; // рефрактер: не дребезжим (но не блокируем ПЕРВЫЙ barge)
     if (this.serverSpeaking && this.now() - this.speakingSince < BARGE_GRACE_MS) return; // эхо в начале речи
-    this.bargeVoiced = level >= gate ? this.bargeVoiced + 1 : 0;
-    // barge-in ТОЛЬКО по калиброванному порогу + онсет-дебаунсу. Раньше `|| sig==="speech_start"`
-    // обходил калибровку → один VAD-онсет (эхо/шум) рвал TTS. Убрано (см. ревью).
-    if (this.bargeVoiced >= BARGE_ONSET_FRAMES) {
-      this.lastBargeAt = this.now();
-      this.bargeVoiced = 0;
+    // §10 barge ПО ВРЕМЕНИ (fix 2026-07-15): непрерывное превышение порога ≥BARGE_SUSTAIN_MS. Провал ниже
+    // порога (пауза между словами эха/шума) СБРАСЫВАЕТ отсчёт — интермиттентный спайк речь не рвёт, а сплошное
+    // «стоп/тихо» накопит устойчивость. Раньше 2 кадра (~20мс) рвали длинные фразы. Калибровка порога — выше.
+    const now = this.now();
+    if (level >= gate) {
+      if (this.bargeVoicedSince === 0) this.bargeVoicedSince = now;
+      this.bargeBelowSince = 0; // снова выше порога — «тишина» прервана
+    } else if (this.bargeVoicedSince > 0) {
+      // Ниже порога ВНУТРИ отсчёта: короткий провал (микро-пауза речи) терпим, сброс только на СТОЙКОЙ тишине.
+      if (this.bargeBelowSince === 0) this.bargeBelowSince = now;
+      if (now - this.bargeBelowSince > BARGE_GAP_TOLERANCE_MS) {
+        this.bargeVoicedSince = 0;
+        this.bargeBelowSince = 0;
+      }
+    }
+    if (this.bargeVoicedSince > 0 && now - this.bargeVoicedSince >= BARGE_SUSTAIN_MS) {
+      this.lastBargeAt = now;
+      this.bargeVoicedSince = 0;
+      this.bargeBelowSince = 0;
       this.playbackActive = false; // звук сейчас оборвём → снимаем barge-окно (renderer тоже пришлёт idle)
       this.deps.onBargeIn?.(); // мгновенно глушим плеер в renderer
       this.deps.sendVad("barge_in"); // сервер отменяет синтез
-      this.log.info("barge_in (речь поверх TTS — стоп)", { level: Math.round(level), gate: Math.round(gate), ambient: Math.round(this.ambientRms) });
+      this.log.info("barge_in (устойчивая речь поверх TTS — стоп)", {
+        level: Math.round(level),
+        gate: Math.round(gate),
+        ambient: Math.round(this.ambientRms),
+        sustainMs: BARGE_SUSTAIN_MS,
+      });
     }
   }
 

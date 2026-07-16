@@ -208,7 +208,11 @@ export const PAGE = String.raw`
       if (search) { realClick(search); search.focus(); setInput(search, title); await sleep(1800); }
       const pick = () => {
         const all = dialogs();
-        return (pid && all.find((el) => peerIdOf(el) === pid)) || all.find((el) => foldTitle(rawName(el)) === want) || all.find((el) => foldTitle(rawName(el)).startsWith(want)) || null;
+        // Явный peerId (выбор владельца среди тёзок, ревью р2) — открываем СТРОГО по нему, БЕЗ фолбэка на
+        // имя: иначе не найденный peer-ряд открыл бы первую попавшуюся тёзку («не ту Катю»). Не нашли peer
+        // → null → честный откат на общий резолв (переспрос), не слепое открытие однофамильца.
+        if (pid) return all.find((el) => peerIdOf(el) === pid) || null;
+        return all.find((el) => foldTitle(rawName(el)) === want) || all.find((el) => foldTitle(rawName(el)).startsWith(want)) || null;
       };
       let row = await waitForFn(pick, 8000);
       if (!row) return { ok: false, step: "open-by-title" };

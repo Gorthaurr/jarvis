@@ -63,6 +63,79 @@ function isSuppressed(s: RecalledSkill): boolean {
 }
 
 /**
+ * §recall PLATFORM-BOOST (2026-07-14, живой тест сидов): e5-small взвешивает ДЕЙСТВИЕ выше ПЛАТФОРМЫ —
+ * «отправить сообщение в дискорде» уходило к telegram-send (та же суть «отправить сообщение», платформа
+ * терялась), а «лента в инстаграме» вообще не дотягивала до порога. Распознаём платформу/приложение в
+ * ЗАПРОСЕ и в НАВЫКЕ по узнаваемому токену и корректируем косинус: та же платформа → буст (пробивает порог
+ * и выигрывает), ЧУЖАЯ (навык называет ТОЛЬКО другую) → штраф. Навык БЕЗ платформы — нейтрален (общее
+ * руководство остаётся годным). Токены сканируем по всему тексту БЕЗ фильтра ≥4 (skillTokens роняет «вк»/«тг»):
+ * длинные распознаваемые стемы — по префиксу (дискорд→дискорде), короткие/неоднозначные — только точное
+ * равенство (не ловим «вкусно» на «вк»).
+ */
+const PLATFORM_ALIASES: ReadonlyArray<readonly [string, { readonly prefix: readonly string[]; readonly exact: readonly string[] }]> = [
+  ["discord", { prefix: ["дискорд", "discord"], exact: [] }],
+  // telegram: exact-формы приложения, вкл. ЧАСТЫЕ разговорные с двумя «м» («телеграмм»/«телеграмме» — так
+  //           мессенджер и пишут/произносят чаще всего). Оставлены ВНЕ списка только почтовые «телеграмма»/
+  //           «телеграмму» (номинатив/аккузатив существительного «телеграмма») — их префикс ловил ложно (ревью).
+  ["telegram", { prefix: [], exact: ["телеграм", "телеграме", "телеграмом", "телеграмм", "телеграмме", "телеграммом", "тг", "telegram"] }],
+  ["vk", { prefix: ["вконтакт"], exact: ["вк", "vk"] }],
+  ["instagram", { prefix: ["инстаграм", "instagram"], exact: ["инста", "инсте", "инсту", "insta"] }],
+  ["youtube", { prefix: ["ютуб", "youtube", "ютьюб"], exact: [] }],
+  // dota: exact-формы. Добавлены STT-вариант «доти» и слитный «dota2»; убрана «доты» (частый плюрал-омоним
+  //       «доты второй мировой» = бункеры). Остальные формы (доте/доту) — омонимы склонений «дот», но у
+  //       геймера значат Dota; ложный буст на не-игровом запросе гасит raw-cos-floor (низкий косинус к «найти матч»).
+  ["dota", { prefix: [], exact: ["дота", "доте", "доту", "дотка", "дотку", "доти", "dota", "dota2"] }],
+];
+
+/** Слова текста (ё→е, любой длины — короткие платформенные токены не роняем). */
+function textWords(s: string): string[] {
+  return s.toLowerCase().replace(/ё/g, "е").match(/[a-zа-я0-9]+/gu) ?? [];
+}
+
+/** Платформы/приложения, упомянутые в тексте (по узнаваемому токену). Экспорт для юнит-теста. */
+export function detectPlatforms(text: string): Set<string> {
+  const words = textWords(text);
+  const found = new Set<string>();
+  for (const [plat, { prefix, exact }] of PLATFORM_ALIASES) {
+    if (words.some((w) => exact.includes(w) || prefix.some((p) => w.startsWith(p)))) found.add(plat);
+  }
+  return found;
+}
+
+/** Отношение навыка к платформе запроса: match (та же), conflict (называет ТОЛЬКО чужую), neutral (без платформы). */
+function platformRelation(qPlat: ReadonlySet<string>, skillText: string): "match" | "conflict" | "neutral" {
+  if (qPlat.size === 0) return "neutral";
+  const sPlat = detectPlatforms(skillText);
+  if (sPlat.size === 0) return "neutral";
+  for (const p of sPlat) if (qPlat.has(p)) return "match";
+  return "conflict";
+}
+
+/** Насколько бустим косинус навыку той же платформы (env JARVIS_SKILL_PLATFORM_BOOST). Навык ЧУЖОЙ
+ *  платформы не штрафуется, а вовсе не берётся в кандидаты (continue) — штраф перебивался лексикой (ревью). */
+const PLATFORM_BOOST = (() => {
+  const n = Number.parseFloat(process.env.JARVIS_SKILL_PLATFORM_BOOST ?? "");
+  return Number.isFinite(n) && n >= 0 && n <= 0.5 ? n : 0.1;
+})();
+/** Вес лексического бонуса в гибридном ранге recall (env JARVIS_SKILL_LEXICAL_WEIGHT). e5-small шумный —
+ *  distinctive-токены поднимают реально совпавший навык над семантическим шумом. */
+const LEXICAL_WEIGHT = (() => {
+  const n = Number.parseFloat(process.env.JARVIS_SKILL_LEXICAL_WEIGHT ?? "");
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.2;
+})();
+/**
+ * Нижний порог СЫРОГО косинуса, ниже которого бонусы (лексика/платформа) НЕ применяются (env
+ * JARVIS_SKILL_RAW_COS_FLOOR). Без него бонусы (до +0.3) проталкивали семантически ДАЛЁКИЙ навык через
+ * порог 0.82 (эффективный порог падал до ~0.52) — ложный recall/неверный ТОП-1 (ревью 2026-07-14).
+ * Буст лишь НУДЖИТ уже близкий навык (≥floor); навык ЧУЖОЙ платформы (conflict) в кандидаты не берётся
+ * вовсе (continue), независимо от floor.
+ */
+const RAW_COS_FLOOR = (() => {
+  const n = Number.parseFloat(process.env.JARVIS_SKILL_RAW_COS_FLOOR ?? "");
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : 0.7;
+})();
+
+/**
  * Подобрать лучший выученный навык под текст задачи (§8 HERMES). Лексический матч с грубым стеммингом по
  * имени+описанию. Порог консервативный (≥2 попадания и ≥RECALL_MIN_SCORE): ложный recall вреднее пропуска.
  * Чистая функция (без БД) — для прямого юнит-теста.
@@ -70,11 +143,13 @@ function isSuppressed(s: RecalledSkill): boolean {
 export function matchLearnedSkill(text: string, skills: readonly RecalledSkill[]): RecalledSkill | null {
   const q = new Set(skillTokens(text));
   if (q.size === 0) return null;
+  const qPlat = detectPlatforms(text); // §platform-boost: чужую платформу не подсовываем и в лексике
   let best: RecalledSkill | null = null;
   let bestScore = 0;
   for (const s of skills) {
     if (isSuppressed(s)) continue; // P2.3: хронически падающий навык не подсовываем
     if (polarityConflict(text, `${s.name} ${s.when}`)) continue; // §8: «прекрати X» не получает навык «запусти X»
+    if (qPlat.size > 0 && platformRelation(qPlat, `${s.name} ${s.when}`) === "conflict") continue; // §platform: чужая платформа
     const targets = [...new Set(skillTokens(`${s.name} ${s.when}`))];
     if (targets.length === 0) continue;
     let hits = 0;
@@ -174,8 +249,12 @@ export async function recallSemantic(
 ): Promise<RecalledSkill | null> {
   const qv = await embedder.embed(text, "query");
   if (!qv) return matchLearnedSkill(text, learned);
+  const qPlat = detectPlatforms(text); // §platform-boost: платформа(ы) в запросе
+  const qTokens = new Set(skillTokens(text)); // §hybrid: значимые токены запроса для лексического бонуса
   let best: RecalledSkill | null = null;
   let bestSim = 0;
+  let bestRawCos = 0; // §P0: сырой косинус ЛУЧШЕГО кандидата — гейт авто-реплея смотрит и на него (бусты ≠ семантика)
+  let bestBoosted = false;
   // Гард полярности: близкий по косинусу, но противоположный по смыслу навык («прекрати X» ↔
   // «запусти X») не подсовываем ни в промпт, ни в авто-реплей. Заблокированного лучшего логируем —
   // иначе тихий пропуск не отличить от «навыка нет» при разборе логов.
@@ -185,7 +264,34 @@ export async function recallSemantic(
     if (isSuppressed(s)) continue; // P2.3: хронически падающий навык не подсовываем (и в семантике)
     const tv = await triggerVec(embedder, s);
     if (!tv) continue;
-    const sim = cosineSim(qv, tv);
+    // §platform: чужая платформа (навык называет ТОЛЬКО другую) → навык НЕ кандидат вовсе — как
+    // matchLearnedSkill (continue). Раньше был штраф −PENALTY, но лексический бонус (кап 0.2 > штраф 0.15)
+    // его перебивал → wrong-platform навык всё равно проходил порог (ревью). Считаем rel ОДИН раз.
+    const rel = qPlat.size > 0 ? platformRelation(qPlat, `${s.name} ${s.when}`) : "neutral";
+    if (rel === "conflict") continue;
+    const rawCos = cosineSim(qv, tv);
+    let sim = rawCos;
+    // Бусты (лексика + буст той же платформы) НУДЖАТ лишь уже близкий по семантике навык (rawCos ≥ floor),
+    // иначе бы бонусы проталкивали далёкий навык через порог (ревью).
+    const eligibleForBoost = rawCos >= RAW_COS_FLOOR;
+    let boosted = false;
+    if (eligibleForBoost) {
+      // §hybrid (2026-07-14): e5-small ШУМНЫЙ — несвязанные навыки набирают 0.82+ (у порога). Лексический
+      // бонус по РАЗЛИЧИТЕЛЬНЫМ общим токенам («дискорде»/«сообщение») поднимает реально совпавший навык над
+      // семантическим шумом. Доля токенов навыка, попавших в запрос — КАПНУТА ≤1 (tokenHit по префиксу может
+      // дать hits > знаменателя на морфо-вариантах, ревью → без Math.min бонус превышал бы LEXICAL_WEIGHT).
+      const targets = [...new Set(skillTokens(`${s.name} ${s.when}`))];
+      if (targets.length > 0 && qTokens.size > 0) {
+        let hits = 0;
+        for (const t of targets) if (tokenHit(qTokens, t)) hits += 1;
+        sim += LEXICAL_WEIGHT * Math.min(1, hits / Math.min(qTokens.size, targets.length));
+      }
+      // §platform-boost: та же платформа — буст (выиграть у той же сути на чужой платформе).
+      if (rel === "match") {
+        sim += PLATFORM_BOOST;
+        boosted = true;
+      }
+    }
     if (polarityConflict(text, `${s.name} ${s.when}`)) {
       if (sim > blockedSim) {
         blockedSim = sim;
@@ -195,7 +301,9 @@ export async function recallSemantic(
     }
     if (sim > bestSim) {
       bestSim = sim;
+      bestRawCos = rawCos;
       best = s;
+      bestBoosted = boosted;
     }
   }
   if (blocked && blockedSim >= SKILL_SEMANTIC_MIN && bestSim < SKILL_SEMANTIC_MIN) {
@@ -205,8 +313,27 @@ export async function recallSemantic(
     });
   }
   if (best && bestSim >= SKILL_SEMANTIC_MIN) {
-    log.info("skill recall: семантическое попадание", { id: best.id, sim: Number(bestSim.toFixed(3)) });
-    return best;
+    log.info("skill recall: семантическое попадание", {
+      id: best.id,
+      sim: Number(bestSim.toFixed(3)),
+      rawCos: Number(bestRawCos.toFixed(3)),
+      platformBoost: bestBoosted || undefined,
+    });
+    // §P0 (гейт авто-реплея): уверенность recall доносится до петли — СЛЕПОЙ авто-реплей требует
+    // гибридный sim ≥ JARVIS_AUTO_REPLAY_MIN_SIM И сырой косинус ≥ JARVIS_AUTO_REPLAY_MIN_RAW_COS
+    // (ревью: бусты лексики/платформы до +0.3 иначе протаскивали rawCos~0.7 через «строгий» порог
+    // 0.92 — навык ТОЙ ЖЕ платформы, но ДРУГОГО действия получал слепые жесты). Копия — исходная
+    // запись в списке не мутируется.
+    return { ...best, recallSim: bestSim, recallSimRaw: bestRawCos };
+  }
+  // Диагностика: лучший кандидат не дотянул до порога — видно, НАСКОЛЬКО (для тюнинга boost/порога).
+  if (best) {
+    log.info("skill recall: ниже порога семантики", {
+      id: best.id,
+      sim: Number(bestSim.toFixed(3)),
+      threshold: SKILL_SEMANTIC_MIN,
+      platform: qPlat.size ? [...qPlat].join(",") : undefined,
+    });
   }
   return matchLearnedSkill(text, learned);
 }

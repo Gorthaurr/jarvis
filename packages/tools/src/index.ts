@@ -248,7 +248,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "ui_snapshot",
     description:
-      "ДЕШЁВЫЕ ГЛАЗА для нативных окон (§Волна2): список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name, automationId, value, bbox} одним вызовом (~сотни токенов текста вместо 2K-токенного скриншота). Предпочитай его screen_capture для обычных приложений (проводник, настройки, плееры, IDE): осмотрел список → действуй точно по handle (ui_invoke / input_click by:\"handle\"). Пусто/мало элементов = окно UIA-слепое (игра/canvas) → тогда screen_capture. По умолчанию активное окно; pid — конкретный процесс (из window_list).",
+      "ДЕШЁВЫЕ ГЛАЗА для нативных окон (§Волна2): список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name, automationId, value, bbox} одним вызовом (~сотни токенов текста вместо 2K-токенного скриншота). Предпочитай его screen_capture для обычных приложений (проводник, настройки, плееры, IDE): осмотрел список → действуй точно по handle (ui_invoke / input_click by:\"handle\"). ⚠️ ПОЛЯ ВВОДА: value:\"\" = поле реально ПУСТОЕ — его name и видимый серый текст это placeholder-ПОДСКАЗКА, не введённый текст; введённое всегда лежит в value. Пусто/мало элементов = окно UIA-слепое (игра/canvas) → тогда screen_capture. По умолчанию активное окно; pid — конкретный процесс (из window_list).",
     input_schema: obj(
       {
         pid: { type: "integer", description: "PID процесса окна (из window_list). Без него — активное окно." },
@@ -260,13 +260,13 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "window_list",
     description:
-      "Список ОКОН верхнего уровня прямо сейчас (§Волна2): {hwnd, pid, process, title, foreground, minimized} за миллисекунды. Дешёвый ответ на «появилось ли окно / что открыто / какое активно» — вместо скриншота. Дальше: window_focus (сфокусировать по hwnd), ui_snapshot (элементы окна по pid).",
+      "Список ОКОН верхнего уровня прямо сейчас (§Волна2): {hwnd, pid, process, title, foreground, minimized, monitorIndex, monitor} за миллисекунды. Дешёвый ответ на «появилось ли окно / что открыто / какое активно» — вместо скриншота. ⚠️ МУЛЬТИМОНИТОР: поле monitor/monitorIndex говорит, НА КАКОМ мониторе окно — НЕ гадай «свёрнуто/не запущено» по одному скриншоту (окно может быть просто на ДРУГОМ мониторе). Нашёл нужное окно на мониторе N → смотри именно его: window_focus (сфокусировать) → screen_capture (по дефолту снимет монитор переднего окна) ИЛИ screen_capture{monitor:N}. Дальше: ui_snapshot (элементы окна по pid).",
     input_schema: obj({}, []),
   },
   {
     name: "window_focus",
     description:
-      "Сфокусировать КОНКРЕТНОЕ окно: по hwnd (из window_list — точно) или по подстроке заголовка/имени процесса (§Волна2). Надёжнее app_focus, когда у приложения несколько окон или нужно окно по заголовку. ЧЕСТНОСТЬ: возвращает реальный readback — focused=false значит фокус НЕ перешёл (не ложный успех).",
+      "Сфокусировать КОНКРЕТНОЕ окно: по hwnd (из window_list — точно) или по подстроке заголовка/имени процесса (§Волна2). Надёжнее app_focus, когда у приложения несколько окон или нужно окно по заголовку. Возвращает {focused, monitor, monitorIndex} — на каком мониторе окно (мультимонитор). После успешного фокуса screen_capture по дефолту снимет ИМЕННО его монитор. ЧЕСТНОСТЬ: реальный readback — focused=false значит фокус НЕ перешёл (не ложный успех).",
     input_schema: obj(
       {
         hwnd: { type: "integer", description: "hwnd окна из window_list (приоритетно, точно)." },
@@ -453,8 +453,9 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
     name: "browser_act",
     description:
       "Действие в вкладке пользователя через расширение (§6). " +
-      "intent: play/pause (плеер), seek (ПЕРЕМОТКА видео/аудио: params.seconds ±сек, или params.to абсолютно сек), next/prev (трек), scroll (params.dy), click (params.text по видимому тексту/aria, или params.selector из browser_inspect), type (params.text в поле; params.selector или авто-поиск видимого поля; params.enter:true — сразу искать/сабмитить), enter/submit (нажать Enter/отправить форму — ЗАПУСТИТЬ поиск после type), back/forward (ИСТОРИЯ браузера, НЕ перемотка видео). " +
-      "ПОИСК на сайте: browser_act{type, text:'запрос', enter:true} ИЛИ type затем enter — иначе запрос введён, но поиск НЕ запущен. Для перемотки ролика — seek, НЕ back/forward. Клик не сработал → browser_inspect, выбери selector, повтори.",
+      "intent: play/pause (плеер), seek (ПЕРЕМОТКА видео/аудио: params.seconds ±сек, или params.to абсолютно сек), next/prev (трек), scroll (params.dy), click (params.text по видимому тексту/aria, или params.selector из browser_inspect — копируй selector КАК ЕСТЬ, включая формы с ' >>> ' для shadow DOM), type (params.text в поле; params.selector или авто-поиск видимого поля; params.enter:true — сразу искать/сабмитить), enter/submit (нажать Enter/отправить форму — ЗАПУСТИТЬ поиск после type), back/forward (ИСТОРИЯ браузера, НЕ перемотка видео). " +
+      "ПОИСК на сайте: browser_act{type, text:'запрос', enter:true} ИЛИ type затем enter — иначе запрос введён, но поиск НЕ запущен. Для перемотки ролика — seek, НЕ back/forward. Клик не сработал → browser_inspect, выбери элемент, повтори. Элемент в iframe (browser_inspect пометил его frameId) → передай params.frameId; без него click/type/play/pause/seek сами прощупывают фреймы. В ответе клика changed:false = страница НЕ отреагировала (не считай успехом), navigated = состоялся переход. " +
+      "АДРЕСАЦИЯ: если browser_inspect дал ref у элементов — целься params.ref (по ИДЕНТИЧНОСТИ, устойчиво к ре-рендеру); ref устарел (ref_stale) → сделай свежий browser_inspect, НЕ кликай вслепую. text/selector — fallback, когда свежего снимка нет.",
     input_schema: obj(
       {
         intent: {
@@ -465,7 +466,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         params: {
           type: "object",
           additionalProperties: true,
-          description: "Параметры: text/selector (click/type), enter/submit:true (type — сразу запустить поиск), dy (scroll), seconds (seek ±сек) или to (seek абсолютно, сек).",
+          description: "Параметры: ref (АДРЕСАЦИЯ ПО ИДЕНТИЧНОСТИ из browser_inspect — предпочтительно), text/selector (fallback; selector как есть, вкл. ' >>> '), enter/submit:true (type — сразу запустить поиск), dy (scroll), seconds (seek ±сек) или to (seek абсолютно, сек), frameId (элемент в iframe — число из browser_inspect; в ref уже зашит).",
         },
         tabId: {
           type: "integer",
@@ -476,14 +477,38 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
     ),
   },
   {
+    name: "browser_batch",
+    description:
+      "БЕРСТ веб-шагов ПО ref одним вызовом (веб-аналог input_batch) — многополевая форма (логин: email+пароль+кнопка) за ОДИН раунд вместо N. Сначала browser_inspect (у каждого элемента будет ref), затем browser_batch{steps:[{ref,intent,params}]}. Все шаги адресуют ref из ПОСЛЕДНЕГО снимка (идентичность, устойчиво к ре-рендеру); стоп на первой ошибке, честное «выполнено k из n»; устаревший ref → пересними. НЕ снимает сверку ИСХОДА — после берста сверься (browser_inspect/browser_read). Прогрессивные формы (клик→выпадашка→новый пункт) — это ДВА берста (новые элементы не были в снимке). Требует ref-режима.",
+    input_schema: obj(
+      {
+        steps: {
+          type: "array",
+          description: "Шаги по ref (≤12): [{ref:'e3_5', intent:'type', params:{text:'…'}}, {ref:'e3_9', intent:'click'}].",
+          items: {
+            type: "object",
+            additionalProperties: true,
+            properties: {
+              ref: { type: "string", description: "ref элемента из последнего browser_inspect ('e3_5' или 'f2e3_5' для iframe)." },
+              intent: { type: "string", description: "click/type/seek/scroll/enter/submit/play/pause/next/prev." },
+              params: { type: "object", additionalProperties: true, description: "text (type), enter:true, dy (scroll), seconds/to (seek)." },
+            },
+          },
+        },
+        tabId: { type: "integer", description: "tabId конкретной вкладки из browser_tabs (опц.)." },
+      },
+      ["steps"],
+    ),
+  },
+  {
     name: "browser_read",
     description:
-      "Извлечь контент из текущей страницы по интенту-селектору (ActionCommand browser.read, §6). selectorIntent — это описание ЧТО извлечь (напр. \"main article text\", \"current track title\"), а не CSS-селектор.",
+      "Прочитать ЦЕЛЕВУЮ вкладку пользователя (расширение, §6): заголовок, разделы страницы (h1-h3) и текст, ВКЛЮЧАЯ текст iframe'ов. Если на странице есть видео/аудио — ВСЕГДА возвращает строку `[Плеер: позиция/длительность из DOM]` (currentTime), так что «сколько сейчас на видео» узнаёшь ОТСЮДА, а НЕ через screen_read_text по видимому таймеру (сайты прячут таймер при простое мыши — из DOM он доступен всегда). selectorIntent — КЛЮЧЕВЫЕ СЛОВА фильтра (напр. 'цена доставка', 'название трека'): вернутся только строки-совпадения с контекстом ±1 (страница целиком не влезает в кап 8K); пусто или нет совпадений → общий дамп. Это ТЕКСТ; за кнопками/полями/селекторами (интерактив) иди в browser_inspect.",
     input_schema: obj(
       {
         selectorIntent: {
           type: "string",
-          description: "Интент извлечения (что нужно достать со страницы), не CSS-селектор.",
+          description: "Ключевые слова: что ищешь на странице (фильтр блоков текста). Не CSS-селектор. Пусто/общее → полный дамп.",
         },
         tabId: {
           type: "integer",
@@ -496,7 +521,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "browser_inspect",
     description:
-      "ГЛАЗА В DOM: снимок ИНТЕРАКТИВНЫХ элементов открытой вкладки (кнопки/ссылки/инпуты) с устойчивыми CSS-СЕЛЕКТОРАМИ, текстом, aria-label, ролью и состоянием. Используй, когда не знаешь точно, что/как нажать, ИЛИ когда browser_act «не дал эффекта» / элемент не нашёлся: осмотри страницу → выбери нужный элемент → бей browser_act{selector:'…'} (точно), а не угадывай по тексту. Так же узнаёшь РЕАЛЬНОЕ состояние (напр. кнопка плеера aria-label 'Пауза' = играет, 'Воспроизведение' = на паузе). query — фильтр по подстроке (кусок подписи/текста), чтобы не глотать всю страницу.",
+      "ГЛАЗА В DOM: снимок ИНТЕРАКТИВНЫХ элементов открытой вкладки (кнопки/ссылки/инпуты) с ролью, accessibleName, СОСТОЯНИЕМ и устойчивым адресом — ГЛАВНЫЙ ход на любом незнакомом сайте ПЕРЕД действием. Используй, когда не знаешь точно, что/как нажать, ИЛИ когда browser_act «не дал эффекта» / элемент не нашёлся: осмотри → выбери элемент → бей browser_act по его ref (в ref-режиме) или selector, а не угадывай по тексту. СОСТОЯНИЕ элемента прямо в снимке: checked/selected/expanded/pressed (тумблеры/чекбоксы — вопрос «включено?» без screen_capture), value + empty:true у пустого поля (его серый текст = placeholder, НЕ введённое). В ref-режиме у каждого элемента есть ref (напр. 'e3_5') — адресуй его в browser_act{params.ref}/browser_batch (устойчиво к ре-рендеру). Видит iframe'ы (frameId, зашит и в ref) и shadow DOM (selector с ' >>> '). query — фильтр по подстроке.",
     input_schema: obj(
       {
         url: { type: "string", description: "Хост/URL целевой вкладки (как в browser_read). Можно голый хост; по умолчанию — вкладка из browser_open." },
@@ -539,7 +564,11 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "code_run",
     description:
-      "Выполнить код для РЕАЛЬНОГО управления Windows (ActionCommand code.run): python | node | powershell (FullLanguage — Add-Type/COM/.NET доступны). Тебе ОТКРЫТЫ реестр, службы, сеть, COM, запуск процессов, системные пути — разбирайся и делай САМ (это твой основной инструмент «рук», не запасной). Подтверждение нужно ТОЛЬКО на необратимое: удаление файлов / форматирование диска. ЗАПРЕЩЕНО (рельсы §4): выключать/перезагружать ПК отсюда (только через system_power) и завершать процессы самого Джарвиса (electron/node/sidecar). Карты/платёжные данные — нельзя (§0). Окно исполнения ~30с (для долгого — фоновая задача).",
+      "Выполнить код для РЕАЛЬНОГО управления Windows (ActionCommand code.run): python | node | powershell (FullLanguage — Add-Type/COM/.NET доступны). Тебе ОТКРЫТЫ реестр, службы, сеть, COM, запуск процессов, системные пути — разбирайся и делай САМ (это твой основной инструмент «рук», не запасной). Подтверждение нужно ТОЛЬКО на необратимое: удаление файлов / форматирование диска. ЗАПРЕЩЕНО (рельсы §4): выключать/перезагружать ПК отсюда (только через system_power) и завершать процессы самого Джарвиса (electron/node/sidecar). Карты/платёжные данные — нельзя (§0). Окно исполнения ~30с (для долгого — фоновая задача). " +
+      "🚀 jarvis SDK (ТОЛЬКО lang=python) — ГЛАВНЫЙ путь для многошаговых задач на ПК. Для процедуры из ≥2 действий/окон пиши ОДИН скрипт с `import jarvis` — он драйвит ТЕ ЖЕ актуаторы за ОДИН раунд, без похода в LLM между шагами (убирает медленный цикл «скриншот→клик→снова скриншот»). ТАЙМАУТЫ В СЕКУНДАХ. API: " +
+      "jarvis.launch(app) | jarvis.focus(query) | jarvis.close(app) | jarvis.key('r'|'ctrl+s'|'enter', mode=None, scancode=False) [игры→scancode=True; mode='down'/'up' — удержание] | jarvis.write(text) [печать в фокус] | jarvis.click(x,y,button=None,count=None) [x,y — АБСОЛЮТНЫЕ экранные DIP, ровно как их отдают ocr()/find(); НЕ подставляй сюда координаты из screen_capture-картинки] | jarvis.find('текст') → Element [сначала UIA-снапшот→надёжный invoke без курсора, потом OCR; el.click()/el.write(text); проверяй `if el:`] | jarvis.wait_window(title, timeout=5) | jarvis.wait_text(text, timeout=5) | jarvis.wait_for(condition_dict, timeout=5) | jarvis.sleep(sec) | jarvis.snapshot()/ocr()/read_context()/windows(). " +
+      "Любой вызов кидает jarvis.JarvisError при провале → скрипт падает → ты видишь ЧЕСТНУЮ ошибку (не ложный успех), НЕ обёртывай в try без нужды. print(...) итог — вернётся в stdout. " +
+      "ПРИМЕР («открой блокнот и напиши тест»): `import jarvis\\njarvis.launch('notepad')\\njarvis.wait_window('Блокнот', timeout=5)\\njarvis.write('тест')\\nprint('готово')`. ПРЕДПОЧИТАЙ jarvis-скрипт отдельным tool-раундам для любой процедуры из нескольких шагов.",
     input_schema: obj(
       {
         lang: {
@@ -555,11 +584,11 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "screen_capture",
     description:
-      "ПОСМОТРЕТЬ на экран и УВИДЕТЬ его (vision, ActionCommand screen.capture, §6). По умолчанию снимает АКТИВНЫЙ монитор (под курсором) — там, где игра/окно, с которым работает пользователь. Возвращает ИЗОБРАЖЕНИЕ, которое ты видишь напрямую. Зови, когда задача требует ГЛАЗ: ИГРЫ (Dota и т.п., где a11y/UIA не работает — это ЕДИНСТВЕННЫЙ путь: посмотреть → input_click {by:'coords', x, y} по увиденным координатам → пересмотреть и сверить), GUI-программы (видеоредактор/монтаж), куда кликнуть, прочитать нетекстовое, проверить результат. Если на снимке не то окно — укажи monitor: 'primary' или индекс. Полный кадр стоит ~1.5–2K токенов — зови ПО НЕОБХОДИМОСТИ; для ПОВТОРНОЙ сверки известного места дешевле rect (кроп региона вокруг цели, ~50-200 ток). Лестница дешевле: ui_snapshot (нативные окна) / screen_read_text (текст с canvas/игр) / browser_read (веб) — vision как последний резерв.",
+      "ПОСМОТРЕТЬ на экран и УВИДЕТЬ его (vision, ActionCommand screen.capture, §6). По умолчанию снимает монитор ПЕРЕДНЕГО (активного) окна — то, с которым работают СЕЙЧАС (игра/только-что-сфокусированное окно). Возвращает ИЗОБРАЖЕНИЕ, которое ты видишь напрямую. Зови, когда задача требует ГЛАЗ: ИГРЫ (Dota и т.п., где a11y/UIA не работает — это ЕДИНСТВЕННЫЙ путь: посмотреть → input_click {by:'coords', x, y} по увиденным координатам → пересмотреть и сверить), GUI-программы (видеоредактор/монтаж), куда кликнуть, прочитать нетекстовое, проверить результат. ⚠️ МУЛЬТИМОНИТОР: не то окно на снимке = оно на ДРУГОМ мониторе (НЕ спеши решать «свёрнуто/не запущено»). Проверь window_list (поле monitor) → window_focus нужного окна → пересними (дефолт снимет его монитор) ИЛИ укажи monitor: индекс/'primary'. Полный кадр стоит ~1.5–2K токенов — зови ПО НЕОБХОДИМОСТИ; для ПОВТОРНОЙ сверки известного места дешевле rect (кроп региона вокруг цели, ~50-200 ток). Лестница дешевле: ui_snapshot (нативные окна) / screen_read_text (текст с canvas/игр) / browser_read (веб) — vision как последний резерв. ⚠️ Серый текст в поле ввода на снимке — почти всегда placeholder-подсказка (поле ПУСТОЕ): ввод подтверждай по ui_snapshot (value), не по цвету пикселей.",
     input_schema: obj(
       {
         note: { type: "string", description: "Коротко: что ищешь на экране (для фокуса внимания)." },
-        monitor: { type: "string", description: "Какой монитор снять: 'active' (дефолт, под курсором) | 'primary' | 'jarvis' | индекс (число строкой). Укажи 'primary', если игра/нужное окно не на снимке." },
+        monitor: { type: "string", description: "Какой монитор снять: дефолт — монитор ПЕРЕДНЕГО окна; 'cursor' (под курсором) | 'primary' | 'jarvis' | индекс (число строкой). Укажи индекс/'primary', если нужное окно на другом мониторе (см. window_list.monitor)." },
         rect: SCREEN_RECT_SCHEMA,
         scale: { type: "number", minimum: 0.25, maximum: 2, description: "Доп. масштаб кропа (>1 — «лупа» для мелкого текста). Только с rect." },
       },
@@ -569,7 +598,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "screen_read_text",
     description:
-      "ПРОЧИТАТЬ ТЕКСТ с экрана локальным OCR (§Волна2, ActionCommand screen.ocr) — БЕЗ дорогого vision-раунда: текст с canvas/игр/видео, где UIA слепа, за ~50-200 токенов. Возвращает text + строки с bbox (координаты изображения → клик по ним через input_click coords). rect — читать только регион (быстрее и точнее); monitor — как у screen_capture. OCR может ошибаться на стилизованных шрифтах — не нашёл ожидаемое ≠ его нет: сверься screen_capture (глазами).",
+      "ПРОЧИТАТЬ ТЕКСТ с экрана локальным OCR (§Волна2, ActionCommand screen.ocr) — БЕЗ дорогого vision-раунда: текст с canvas/игр/видео, где UIA слепа, за ~50-200 токенов. Возвращает text + строки с bbox (координаты изображения → клик по ним через input_click coords). rect — читать только регион (быстрее и точнее); monitor — как у screen_capture. OCR может ошибаться на стилизованных шрифтах — не нашёл ожидаемое ≠ его нет: сверься screen_capture (глазами). ⚠️ OCR НЕ различает серый placeholder в поле ввода и реально введённый текст — пустоту/содержимое поля подтверждай ui_snapshot (value поля; \"\" = пустое).",
     input_schema: obj(
       {
         rect: SCREEN_RECT_SCHEMA,
@@ -594,7 +623,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "wait_for",
     description:
-      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет), 'gsi' (состояние, которое игра/программа САМА пушит на локальный листенер — напр. Dota 2 Game State Integration: включается конфигом gamestate_integration_*.cfg с uri http://127.0.0.1:3730/dota; НАДЁЖНЕЕ скриншотов для игр). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text' — реально наблюдённое состояние.",
+      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет), 'gsi' (состояние, которое игра/программа САМА пушит на локальный листенер — напр. Dota 2 Game State Integration: включается конфигом gamestate_integration_*.cfg с uri http://127.0.0.1:3730/dota; НАДЁЖНЕЕ скриншотов для игр), 'browser' (ЗНАЧЕНИЕ из ОТКРЫТОЙ вкладки браузера — читается через расширение, НЕ OCR: главный кейс «видео дошло до N секунд» = {kind:'browser', prop:'currentTime', op:'>=', value:1560}; так надёжно ждать таймкод видео и делать действие: wait_for(browser) → потом browser_act seek). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text'/'browser' — реально наблюдённое состояние.",
     input_schema: obj(
       {
         condition: {
@@ -658,10 +687,24 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
               required: ["kind", "path"],
               additionalProperties: false,
             },
+            {
+              type: "object",
+              properties: {
+                kind: { const: "browser" },
+                prop: { type: "string", description: "Свойство: 'currentTime'/'duration' (СЕКУНДЫ)/'paused' у <video>/<audio>; или любое DOM-свойство при selector. Деф 'currentTime'." },
+                op: { type: "string", enum: [">=", "<=", ">", "<", "==", "!=", "contains"], description: "Оператор сравнения (числа: >=/<=/>/<; строки/булево: ==/!=/contains). Деф '>='." },
+                value: { description: "Ожидаемое значение (число секунд для currentTime, true/false для paused, строка для текста)." },
+                selector: { type: "string", description: "CSS-селектор элемента (деф <video>/<audio>). Для не-медийного чтения." },
+                tabId: { type: "integer", description: "id вкладки (из browser_open/browser_tabs). Без него — активная youtube/медиа-вкладка." },
+                gone: { type: "boolean", description: "true — ждать, пока условие ПЕРЕСТАНЕТ выполняться." },
+              },
+              required: ["kind", "value"],
+              additionalProperties: false,
+            },
           ],
         },
-        timeoutMs: { type: "integer", minimum: 1000, maximum: 120000, description: "Потолок ожидания (деф 30000)." },
-        pollMs: { type: "integer", minimum: 150, description: "Шаг опроса (деф 600; text — 1200)." },
+        timeoutMs: { type: "integer", minimum: 1000, maximum: 230000, description: "Потолок ожидания, мс (деф 30000; browser — до 230000, но оставь запас под потолок задачи для действия после ожидания)." },
+        pollMs: { type: "integer", minimum: 150, description: "Шаг опроса (деф 600; text — 1200; browser — 2000)." },
       },
       ["condition"],
     ),
@@ -1152,6 +1195,14 @@ const MESSAGING_TOOLS: ToolSchema[] = [
       {
         to: { type: "string", description: "Имя/контакт получателя как в Telegram (напр. «Катя»), либо «Избранное»." },
         text: { type: "string", description: "Текст сообщения." },
+        peer: {
+          type: "string",
+          description:
+            "ТОЧНЫЙ peerId получателя. Задавай ТОЛЬКО когда предыдущий telegram_send вернул ТЁЗОК (несколько " +
+            "контактов с одним именем) со списком «id=…»: СПРОСИ владельца, кому именно, и повтори с peer нужного " +
+            "кандидата. peerId открывает чат точно, в обход выбора по имени — это единственный способ адресовать " +
+            "короткое имя, которое носят несколько человек.",
+        },
       },
       ["to", "text"],
     ),
@@ -1366,13 +1417,18 @@ const WATCH_TOOLS: ToolSchema[] = [
           type: "object",
           additionalProperties: true,
           description:
-            "Опц. ЛОКАЛЬНЫЙ предикат (форма condition из wait_for: {kind:'window'|'ui'|'text'|'sound'|'gsi', ...}) — проверка на ПК владельца за $0 (каждые ~5-10с), без веба/LLM. Для событий НА ЭТОМ компьютере (окно/текст на экране/звук/GSI-пуш игры).",
+            "Опц. ЛОКАЛЬНЫЙ предикат (форма condition из wait_for: {kind:'window'|'ui'|'text'|'sound'|'gsi'|'browser', ...}) — проверка за $0 (каждые ~5-10с), без веба/LLM. Для событий НА ЭТОМ компьютере (окно/текст на экране/звук/GSI-пуш игры) ИЛИ значения в браузере ('browser': напр. «видео дошло до N сек» = {kind:'browser', prop:'currentTime', op:'>=', value:1560} — читается через расширение, НЕ OCR). ⚠️ Watch только УВЕДОМЛЯЕТ; если надо ДЕЙСТВИЕ при срабатывании (перемотать/нажать) в пределах ~3-4 минут — лучше wait_for(browser) в петле + действие, а не watch.",
           properties: {
-            kind: { type: "string", enum: ["window", "ui", "text", "sound", "gsi"] },
+            kind: { type: "string", enum: ["window", "ui", "text", "sound", "gsi", "browser"] },
             path: { type: "string", description: "gsi: точечный путь в JSON пуша («map.game_state»)." },
             equals: { type: "string", description: "gsi: точное значение СТРОКОЙ (булево/число — как «true»/«5»)." },
             contains: { type: "string", description: "gsi: подстрока значения (строкой)." },
-            gone: { type: "boolean", description: "true — ждать ИСЧЕЗНОВЕНИЯ (окно закрылось / источник замолчал)." },
+            prop: { type: "string", description: "browser: свойство ('currentTime'/'duration' сек/'paused'), деф 'currentTime'." },
+            op: { type: "string", enum: [">=", "<=", ">", "<", "==", "!=", "contains"], description: "browser: оператор сравнения, деф '>='." },
+            value: { description: "browser: ожидаемое значение (число секунд, true/false, строка)." },
+            selector: { type: "string", description: "browser: CSS-селектор (деф <video>/<audio>)." },
+            tabId: { type: "integer", description: "browser: id вкладки (деф активная медиа-вкладка)." },
+            gone: { type: "boolean", description: "true — ждать ИСЧЕЗНОВЕНИЯ (окно закрылось / источник замолчал / условие перестало выполняться)." },
           },
         },
         continuous: {
@@ -1669,9 +1725,15 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   // полная схема в каждый ход раздувала горячий префикс (~8.9K→~7K ток), а нужны они эпизодически.
   // Каталог их перечисляет (модель знает, что они есть) + `tool_load` подгружает схему по требованию;
   // диспетчер исполняет по имени и без схемы. Безопасно: частые/coding-инструменты остались горячими.
-  "browser_inspect", // отладка селекторов в управляемом Chrome — редко
-  "browser_close", // закрытие вкладок CDP — редко
-  "browser_tabs", // полный список вкладок через РАСШИРЕНИЕ (топ-вкладки и так в live-контексте) — редко
+  // ⚠️ browser_inspect/browser_tabs/browser_close — ГОРЯЧИЕ (2026-07-14, корень «на других сайтах говно»):
+  // inspect = ЕДИНСТВЕННЫЕ глаза в DOM произвольного сайта — persona зовёт его «main move on ANY site»,
+  // verify-нуджи требуют его в лестнице §Волна3, а схема лежала в COLD со стейл-комментом «отладка CDP»
+  // (до-расширенческая эра) → на не-Яндекс сайтах модель действовала вслепую (клик-угадайка по тексту).
+  // Тот же прецедент, что ui_ground/ui_snapshot выше: cold-танец load→call = промах пути; Reliability >
+  // микро-токены. tabs/close — частые голосовые команды («закрой вкладку», «та вкладка с …»).
+  // §AX-Ref: браузерный берст по ref — COLD, пока ref-режим за флагом (деф off). После живого смоука и
+  // включения JARVIS_BROWSER_REF по умолчанию — промоутить в ГОРЯЧИЕ (сжатие раундов форм — главный рычаг).
+  "browser_batch",
   "web_inspect", // отладка в невидимом браузере Джарвиса — редко
   "telegram_send_voice", // голосовые сообщения в TG — редко против текста (telegram_send горячий)
   "system_power", // выключение/сон/перезагрузка — редко + подтверждение

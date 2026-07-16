@@ -112,13 +112,20 @@ public sealed record SnapshotResult(
 );
 
 // §Волна2 (2.4): окна верхнего уровня (window.list / window.focus).
+// Мультимонитор (2026-07-14): rect (ФИЗИЧЕСКИЕ пиксели Win32) — клиент маппит окно→монитор через
+// monitors.displayForRect (Electron-дисплеи), чтобы модель знала, НА КАКОМ мониторе окно (эпизод
+// «вруби демку в дискорде»: Дискорд на M1, браузер на M2 — раньше это было невидимо).
 public sealed record WindowInfo(
     [property: JsonPropertyName("hwnd")]       long Hwnd,
     [property: JsonPropertyName("pid")]        int Pid,
     [property: JsonPropertyName("process")]    string Process,
     [property: JsonPropertyName("title")]      string Title,
     [property: JsonPropertyName("foreground")] bool Foreground,
-    [property: JsonPropertyName("minimized")]  bool Minimized
+    [property: JsonPropertyName("minimized")]  bool Minimized,
+    [property: JsonPropertyName("x")]          int X,
+    [property: JsonPropertyName("y")]          int Y,
+    [property: JsonPropertyName("w")]          int W,
+    [property: JsonPropertyName("h")]          int H
 );
 
 public sealed record WindowListResult(
@@ -133,7 +140,11 @@ public sealed record WindowFocusArgs(
 public sealed record WindowFocusResult(
     [property: JsonPropertyName("focused")] bool Focused,  // ЧЕСТНЫЙ readback GetForegroundWindow
     [property: JsonPropertyName("hwnd")]    long Hwnd,
-    [property: JsonPropertyName("title")]   string Title
+    [property: JsonPropertyName("title")]   string Title,
+    [property: JsonPropertyName("x")]       int X,        // rect сфокусированного окна → клиент маппит монитор
+    [property: JsonPropertyName("y")]       int Y,
+    [property: JsonPropertyName("w")]       int W,
+    [property: JsonPropertyName("h")]       int H
 );
 
 // §Волна2 (2.3): локальный OCR (Windows.Media.Ocr) — текст с canvas/игр без vision-раунда LLM.

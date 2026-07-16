@@ -15,6 +15,7 @@
 import {
   type ActionResult,
   type AudioFrame,
+  type AudioPlayed,
   type ClientContext,
   type ClientEnv,
   type ClientSystem,
@@ -56,6 +57,7 @@ import { WorkingMemory } from "../memory/working.js";
 import { loadWorkingMemory } from "../memory/working-store.js";
 import type { McpManager } from "../brain/mcp/manager.js";
 import { noteClientContext } from "../proactive/salience.js";
+import { metrics } from "../obs/metrics.js";
 import { TaskManager } from "../brain/tasks/manager.js";
 import type { TradingService } from "../brain/trading/index.js";
 import type { KnowledgeBase } from "../brain/knowledge/index.js";
@@ -338,21 +340,23 @@ export function makeSessionContext(
     // что делаешь») раньше стоял ТОЛЬКО на текстовом канале (onDevText) — живой ГОЛОС уходил в
     // агент, и «отмени» после reconnect плодил задачу «Отменить поиск» (форензика вечера). Теперь
     // перехват на обоих каналах; ctxForBusy замыкается после создания ctx (как для isUserBusy).
-    onUserTurn: (text) => {
+    onUserTurn: (text, meta) => {
       if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) return Promise.resolve({ voice: "" });
-      return handleUserText(session, text, agentDeps);
+      // §P0: meta.viaWake (реплика из окна разговора без «Джарвис») гейтит слепой авто-реплей макроса.
+      return handleUserText(session, text, agentDeps, undefined, meta);
     },
     // §10 realtime: пофразный стрим реплики (token-streaming → первый звук раньше). Включён
     // по умолчанию; аварийный выключатель JARVIS_VOICE_STREAMING=0 → классический onUserTurn.
     ...(process.env.JARVIS_VOICE_STREAMING === "0"
       ? {}
       : {
-          onUserTurnStream: (text: string, sink: ReplySink): Promise<void> => {
+          onUserTurnStream: (text: string, sink: ReplySink, meta?: { viaWake: boolean }): Promise<void> => {
             if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) {
               sink.done(""); // ack уже озвучен внутри handleTaskControl; ход закрывается тихо
               return Promise.resolve();
             }
-            return handleUserText(session, text, agentDeps, sink).then(() => undefined);
+            // §P0: meta.viaWake гейтит слепой авто-реплей (жесты только по явному «Джарвис»).
+            return handleUserText(session, text, agentDeps, sink, meta).then(() => undefined);
           },
         }),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
@@ -363,7 +367,12 @@ export function makeSessionContext(
         last: c.last,
         // §Волна3 (3.5): PCM-стрим v3 — клиент играет по мере прихода (WebAudio-очередь).
         ...(c.format ? { format: c.format, sampleRate: c.sampleRate } : {}),
+        // Realtime инкремент 0: клиент эхом вернёт gen в audio.played (mouth-to-ear того же хода).
+        ...(c.gen !== undefined ? { gen: c.gen } : {}),
       }),
+    // Realtime инкремент 0 (a/б): mouth-to-ear в durable-метрики (metrics.jsonl), не только в лог —
+    // baseline P50/P95 «конец речи → первый звук у клиента» переживает деплой и доступен офлайн-разбору.
+    onMouthToEar: (ms, turnSeq) => metrics.recordMouthToEar(ms, turnSeq, session.userId),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
     sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)
@@ -567,6 +576,12 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "audio.vad":
       ctx.voice.onVadEvent((env.payload as VadEvent).state);
       break;
+    case "audio.played": {
+      // Realtime инкремент 0: рендерер начал воспроизведение первого чанка хода → mouth-to-ear метрика.
+      const p = env.payload as AudioPlayed;
+      if (typeof p?.gen === "number" && typeof p?.ts === "number") ctx.voice.onAudioPlayed(p.gen, p.ts);
+      break;
+    }
     case "screen.capture.result":
       // Результат screen.capture коррелируется как ActionResult в проде;
       // M0 — лог. TODO(M2): связать со screen.capture command.

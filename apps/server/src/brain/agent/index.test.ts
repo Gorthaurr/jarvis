@@ -239,6 +239,38 @@ describe("agent-loop (§7, §8)", () => {
     expect(JSON.stringify(llm.requests)).toContain("топтание"); // интервент-нудж «смени подход» ушёл модели
   });
 
+  it("гард контекст-окна: промпт у HARD-порога → ранний честный свёрток (не жёсткий 400), ревью 2026-07-15", async () => {
+    process.env.JARVIS_CONTEXT_SOFT_TOKENS = "20000";
+    process.env.JARVIS_CONTEXT_HARD_TOKENS = "30000";
+    const session = fakeSession();
+    // ход 0: инструмент + ОГРОМНЫЙ usage (50K > HARD 30K) → на след. итерации гард свернёт ДО нового вызова.
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t0", name: "web_search", input: { query: "гигантский дамп" } }], usage: { inputTokens: 50_000 } },
+      { text: "Этот ход не должен вызваться." },
+    ]);
+    const reply = await handleUserText(session, "сделай мне отчёт по продажам", await makeDeps(llm));
+    delete process.env.JARVIS_CONTEXT_SOFT_TOKENS;
+    delete process.env.JARVIS_CONTEXT_HARD_TOKENS;
+    expect(llm.requests).toHaveLength(1); // второй раунд НЕ начат — свернулись до него (не сожгли деньги в 400)
+    expect(reply.voice.toLowerCase()).toContain("память"); // честный частичный итог про переполнение окна
+  });
+
+  it("гард контекст-окна: SOFT-порог → одноразовый нудж «сворачивайся», задача продолжается", async () => {
+    process.env.JARVIS_CONTEXT_SOFT_TOKENS = "20000";
+    process.env.JARVIS_CONTEXT_HARD_TOKENS = "100000";
+    const session = fakeSession();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t0", name: "web_search", input: { query: "дамп" } }], usage: { inputTokens: 25_000 } }, // ≥SOFT, <HARD
+      { text: "Готово, вот итог." }, // после нуджа — штатный финал
+    ]);
+    const reply = await handleUserText(session, "сделай мне отчёт по продажам", await makeDeps(llm));
+    delete process.env.JARVIS_CONTEXT_SOFT_TOKENS;
+    delete process.env.JARVIS_CONTEXT_HARD_TOKENS;
+    expect(llm.requests.length).toBeGreaterThanOrEqual(2); // НЕ оборвано после первого — soft лишь нуджит
+    expect(JSON.stringify(llm.requests)).toContain("КОНТЕКСТ ПОЧТИ ЗАПОЛНЕН"); // нудж ушёл модели
+    expect(reply.voice.toLowerCase()).not.toContain("память"); // это НЕ hard-свёрток
+  });
+
   it("анти-капитуляция: текст-отказ БЕЗ единого инструмента → нудж на попытку, затем инструмент (не сдаётся)", async () => {
     const session = fakeSession();
     const llm = new MockLlmProvider([
@@ -297,6 +329,156 @@ describe("agent-loop (§7, §8)", () => {
     expect(llm.requests).toHaveLength(4); // действие → [verify-нудж] → сверка → финал (раньше принял бы «Готово» сразу)
     expect(JSON.stringify(llm.requests[2]?.messages ?? [])).toContain("СВЕРЬ"); // нудж на сверку ушёл модели
     expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P1-отправка: Enter ПОСЛЕ набранного текста — fused-observe НЕ снимает verify-долг (форензика «ушло в Клод»)", async () => {
+    // Живой эпизод 14.07 12:10: input_type → input_key Enter, a11y-наблюдение после нажатия сняло
+    // verify-долг фактом нажатия → «Отправлено, сэр — ушло в Клод», а сообщение осталось в поле.
+    // Теперь коммит отправки требует сверки ИСХОДА отдельным взглядом, даже при observed.
+    const sendAction = vi.fn(() =>
+      Promise.resolve({
+        commandId: "c",
+        ok: true,
+        durationMs: 1,
+        // observation → dispatch пометит observed=true (fused act+observe) — для send-commit НЕдостаточно
+        data: { observation: { via: "a11y", window: "Claude", text: "поле ввода, кнопка отправить" }, image: "QUFB", mediaType: "image/png" },
+      }),
+    );
+    const session = fakeSession(sendAction);
+    const llm = new MockLlmProvider([
+      {
+        toolUses: [
+          { id: "t1", name: "input_type", input: { text: "Привет, Клод" } }, // сочинили текст
+          { id: "t2", name: "input_key", input: { combo: "enter" } }, // коммит отправки
+        ],
+      },
+      { text: "Отправлено, сэр — ушло в Клод.", stopReason: "end_turn" }, // терминал БЕЗ сверки исхода
+      { toolUses: [{ id: "t3", name: "screen_capture", input: {} }] }, // после нуджа — реальный взгляд
+      { text: "Подтверждаю: сообщение в ленте, поле пустое." },
+    ]);
+    const reply = await handleUserText(session, "напиши клоду привет", await makeDeps(llm));
+    expect(llm.requests).toHaveLength(4); // действие → [verify-нудж] → сверка → финал
+    expect(JSON.stringify(llm.requests[2]?.messages ?? [])).toContain("СВЕРЬ"); // нудж ушёл модели
+    expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P1-отправка (ревью р1 #3/#9): input_batch [type→Enter] с observed=true всё равно требует сверки исхода", async () => {
+    // Обход send-commit через один берст: набор+Enter одним input_batch, клиент прикладывает a11y-observed
+    // → раньше долг не взводился. Теперь берст compose→send = коммит, долг снимает ТОЛЬКО реальный взгляд.
+    const sendAction = vi.fn(() =>
+      Promise.resolve({
+        commandId: "c",
+        ok: true,
+        durationMs: 1,
+        data: { observation: { via: "a11y", window: "Discord", text: "поле ввода" }, image: "QUFB", mediaType: "image/png" },
+      }),
+    );
+    const session = fakeSession(sendAction);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "b1", name: "input_batch", input: { steps: [
+        { action: "input.type", params: { text: "собираемся в 9" } },
+        { action: "input.key", params: { combo: "enter" } },
+      ] } }] },
+      { text: "Отправлено, сэр.", stopReason: "end_turn" }, // ложный терминал — долг не снят
+      { toolUses: [{ id: "s2", name: "ui_snapshot", input: {} }] }, // реальный взгляд
+      { text: "Подтверждаю: сообщение в ленте." },
+    ]);
+    const reply = await handleUserText(session, "напиши в дискорд собираемся в 9", await makeDeps(llm));
+    expect(llm.requests).toHaveLength(4); // берст → [нудж] → сверка → финал
+    expect(JSON.stringify(llm.requests[2]?.messages ?? [])).toContain("СВЕРЬ");
+    expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P1-отправка (ревью р1 #4/#8/#16): второй Enter / shift+enter НЕ гасит долг коммита своим fused-снимком", async () => {
+    const sendAction = vi.fn(() =>
+      Promise.resolve({
+        commandId: "c",
+        ok: true,
+        durationMs: 1,
+        data: { observation: { via: "a11y", window: "Telegram", text: "поле" }, image: "QUFB", mediaType: "image/png" },
+      }),
+    );
+    const session = fakeSession(sendAction);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "input_type", input: { text: "привет" } }] }, // набрали
+      { toolUses: [{ id: "t2", name: "input_key", input: { combo: "shift+enter" } }] }, // перенос строки — НЕ коммит
+      { toolUses: [{ id: "t3", name: "input_key", input: { combo: "enter" } }] }, // настоящий коммит
+      { toolUses: [{ id: "t4", name: "input_key", input: { combo: "enter" } }] }, // второй Enter «для верности»
+      { text: "Отправлено, сэр.", stopReason: "end_turn" }, // долг всё ещё висит
+      { toolUses: [{ id: "s5", name: "screen_capture", input: {} }] }, // реальный взгляд снимает долг
+      { text: "Подтверждаю: доставлено." },
+    ]);
+    const reply = await handleUserText(session, "напиши в телеге привет", await makeDeps(llm));
+    // shift+enter не должен был сжечь composedPending; настоящий Enter взвёл долг, второй Enter его не снял
+    expect(JSON.stringify(llm.requests[5]?.messages ?? [])).toContain("СВЕРЬ"); // нудж после «Отправлено»
+    expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P1-отправка (ревью р2 #3): отправка КЛИКОМ по кнопке «Отправить» после набора — тоже требует сверки исхода", async () => {
+    // Обход send-commit кнопкой (не Enter): input_type → input_click по «Отправить». Клик — blind-mutate
+    // с fused observed, раньше снимал долг «фактом нажатия». Теперь клик после набора = коммит → долг.
+    const sendAction = vi.fn(() =>
+      Promise.resolve({
+        commandId: "c",
+        ok: true,
+        durationMs: 1,
+        data: { observation: { via: "a11y", window: "Claude", text: "поле, кнопка отправить" }, image: "QUFB", mediaType: "image/png" },
+      }),
+    );
+    const session = fakeSession(sendAction);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "input_type", input: { text: "вопрос Клоду" } }] }, // набрали
+      { toolUses: [{ id: "t2", name: "input_click", input: { by: "handle", handle: 42 } }] }, // клик по «Отправить»
+      { text: "Отправлено, сэр.", stopReason: "end_turn" }, // долг ещё висит
+      { toolUses: [{ id: "s3", name: "ui_snapshot", input: {} }] }, // реальный взгляд снимает долг
+      { text: "Подтверждаю: в ленте." },
+    ]);
+    const reply = await handleUserText(session, "напиши клоду вопрос", await makeDeps(llm));
+    expect(JSON.stringify(llm.requests[3]?.messages ?? [])).toContain("СВЕРЬ"); // нудж после «Отправлено»
+    expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P1-отправка (ревью р3 #1): отправка отдельным input_batch [клик] ПОСЛЕ набора в прошлом раунде — требует сверки", async () => {
+    // Набор и коммит в РАЗНЫХ раундах: input_type (раунд 1) → input_batch[input.click «Отправить»] (раунд 2).
+    // batch.committed=false (нет пары в берсте), но batch.hasSend + composedPending = коммит → долг.
+    const sendAction = vi.fn(() =>
+      Promise.resolve({
+        commandId: "c",
+        ok: true,
+        durationMs: 1,
+        data: { observation: { via: "a11y", window: "Discord", text: "поле, отправить" }, image: "QUFB", mediaType: "image/png" },
+      }),
+    );
+    const session = fakeSession(sendAction);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "input_type", input: { text: "собираемся в 9" } }] }, // раунд 1: набор
+      { toolUses: [{ id: "b2", name: "input_batch", input: { steps: [{ action: "input.click", target: { by: "handle", handle: 7 } }] } }] }, // раунд 2: коммит кликом в берсте
+      { text: "Отправлено, сэр.", stopReason: "end_turn" }, // долг ещё висит
+      { toolUses: [{ id: "s3", name: "screen_capture", input: {} }] }, // реальный взгляд
+      { text: "Подтверждаю: в ленте." },
+    ]);
+    const reply = await handleUserText(session, "напиши в дискорд собираемся в 9", await makeDeps(llm));
+    expect(JSON.stringify(llm.requests[3]?.messages ?? [])).toContain("СВЕРЬ"); // нудж после «Отправлено»
+    expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P1-отправка: одиночный Enter БЕЗ набранного текста (пауза/диалог) с наблюдением — долга нет", async () => {
+    const sendAction = vi.fn(() =>
+      Promise.resolve({
+        commandId: "c",
+        ok: true,
+        durationMs: 1,
+        data: { observation: { via: "a11y", window: "Плеер", text: "пауза" } },
+      }),
+    );
+    const session = fakeSession(sendAction);
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "input_key", input: { combo: "enter" } }] }, // Enter вне пары «набрал→закоммитил»
+      { text: "Готово, поставил на паузу.", stopReason: "end_turn" },
+    ]);
+    const reply = await handleUserText(session, "жми на энтер", await makeDeps(llm));
+    expect(llm.requests).toHaveLength(2); // без паразитного нуджа
+    expect(reply.voice).toContain("паузу");
   });
 
   it("verify-петля P0.2: самоподтверждающийся mutate (app_launch) → сверку НЕ форсит (исход уже в результате)", async () => {
@@ -638,6 +820,156 @@ describe("agent-loop (§7, §8)", () => {
     expect(spoken[0]?.voice).toContain("калькулятор"); // итог проговорён в фоне (единственная фраза хода)
   });
 
+  // SYNC-FIRST (голос): корень жалобы «молча делал → потом скопом ответил на всё». На ГОЛОСОВОМ канале
+  // (есть sink) действие исполняется СИНХРОННО — итог звучит СРАЗУ через sink, а не откладывается в
+  // очередь speakResult (которая на голосе сливалась скопом). Длинная задача промотится в фон с «Берусь».
+  function fakeSink() {
+    const calls = { sentences: [] as string[], done: [] as string[], displays: 0 };
+    const sink = {
+      thinking: () => {},
+      sentence: (s: string) => calls.sentences.push(s),
+      display: () => { calls.displays += 1; },
+      done: (v: string) => calls.done.push(v),
+    };
+    return { sink, calls };
+  }
+
+  it("sync-first (голос): БЫСТРОЕ действие → итог СРАЗУ через sink.done, НЕ через фоновый speakResult", async () => {
+    const session = fakeSession(); // tool резолвится мгновенно → задача укладывается в бюджет
+    const spoken: { voice: string }[] = [];
+    const { sink, calls } = fakeSink();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+      { text: "Готово, калькулятор открыт, сэр." },
+    ]);
+    const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+    const reply = await handleUserText(session, "создай файл и посчитай что-нибудь сложное", deps, sink);
+    expect(calls.done.join(" ")).toContain("калькулятор"); // результат озвучен СРАЗУ этим ходом (через sink)
+    expect(spoken).toHaveLength(0); // НЕ ушёл в отложенную очередь speakResult → скопом не сольётся
+    expect(reply.voice).toContain("калькулятор");
+  });
+
+  it("sync-first (голос): ДЛИННАЯ задача → «Берусь» СРАЗУ (не молчание) + итог через speakResult по готовности", async () => {
+    const prev = process.env.JARVIS_SYNC_PROMOTE_MS;
+    process.env.JARVIS_SYNC_PROMOTE_MS = "40"; // маленький бюджет промоушена для теста
+    try {
+      let releaseTool: () => void = () => {};
+      const toolGate = new Promise<void>((r) => { releaseTool = r; });
+      const session = fakeSession(vi.fn(() => toolGate.then(() => ({ commandId: "c", ok: true, durationMs: 1 }))));
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = fakeSink();
+      const llm = new MockLlmProvider([
+        { toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+      const p = handleUserText(session, "сделай долгую многошаговую штуку", deps, sink);
+      // Инструмент висит дольше бюджета → промоушен: «Берусь» звучит СРАЗУ (ход НЕ молчит).
+      await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 1000 });
+      expect(calls.done[0]).toContain("Берусь");
+      await p; // ход завершился на промоушене (микрофон свободен), итог ещё не готов
+      expect(spoken).toHaveLength(0);
+      releaseTool(); // отпускаем инструмент → задача дорабатывает в фоне
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 1000 });
+      expect(spoken[0]?.voice).toContain("Готово"); // итог доставлен ОДИН раз через speakResult (не молча)
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_PROMOTE_MS;
+      else process.env.JARVIS_SYNC_PROMOTE_MS = prev;
+    }
+  });
+
+  it("sync-first откат: JARVIS_SYNC_FIRST=0 + голос → прежнее «молча в фон» (итог через speakResult)", async () => {
+    const prev = process.env.JARVIS_SYNC_FIRST;
+    process.env.JARVIS_SYNC_FIRST = "0";
+    try {
+      const session = fakeSession();
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = fakeSink();
+      const llm = new MockLlmProvider([
+        { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+      const reply = await handleUserText(session, "создай файл и посчитай что-нибудь", deps, sink);
+      expect(reply.voice).toBe(""); // откат: тихий финал
+      expect(calls.done.join("")).toBe(""); // синхронно ничего не озвучено
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 3000 });
+      expect(spoken[0]?.voice).toContain("Готово"); // итог в фоне (как раньше)
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_FIRST;
+      else process.env.JARVIS_SYNC_FIRST = prev;
+    }
+  });
+
+  it("sync-first (фикс ревью double-speak): текстовая преамбула НЕ стримится посреди петли — «Берусь» не глохнет, итог не двоится", async () => {
+    // Корень HIGH-находки: eager step-0 стрим прокидывал преамбулу в sink → pushedAny в пайплайне → «Берусь»
+    // (sink.done) глох, а итог через speakResult звучал ВТОРОЙ раз. suppressStepStream отключает step-0 стрим
+    // для action-петли: посреди петли в sink НИЧЕГО не уходит → промоушен чистый.
+    const prev = process.env.JARVIS_SYNC_PROMOTE_MS;
+    process.env.JARVIS_SYNC_PROMOTE_MS = "40";
+    try {
+      let releaseTool: () => void = () => {};
+      const toolGate = new Promise<void>((r) => { releaseTool = r; });
+      const session = fakeSession(vi.fn(() => toolGate.then(() => ({ commandId: "c", ok: true, durationMs: 1 }))));
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = fakeSink();
+      // step-0 ответ: ПРЕАМБУЛА из 2 предложений + tool_use (раньше преамбула стримилась → pushedAny).
+      const llm = new MockLlmProvider([
+        { text: "Сейчас гляну. Уже открываю.", toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r) });
+      const p = handleUserText(session, "сделай долгую штуку", deps, sink);
+      await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 1000 });
+      expect(calls.sentences).toHaveLength(0); // преамбула НЕ ушла в sink (нет pushedAny) — корень фикса
+      expect(calls.done[0]).toContain("Берусь"); // «Берусь» доставлен (не проглочен pushedAny-гейтом)
+      await p;
+      releaseTool();
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 1000 });
+      expect(spoken[0]?.voice).toContain("Готово"); // итог ОДИН раз через speakResult (не двойная озвучка)
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_PROMOTE_MS;
+      else process.env.JARVIS_SYNC_PROMOTE_MS = prev;
+    }
+  });
+
+  it("sync-first (фикс ревью concurrency): слоты параллельности заняты → команда в bounded-фон (не превышаем MAX_PARALLEL_TASKS)", async () => {
+    const { Semaphore } = await import("@jarvis/shared");
+    const concurrency = new Semaphore(1);
+    expect(concurrency.tryAcquire()).toBe(true); // занимаем единственный слот (эмулируем идущую промотированную петлю)
+    const session = fakeSession();
+    const spoken: { voice: string }[] = [];
+    const { sink, calls } = fakeSink();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+      { text: "Готово, сэр." },
+    ]);
+    const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r), concurrency, bgTasks: new Set() });
+    const reply = await handleUserText(session, "создай файл и посчитай что-нибудь", deps, sink);
+    expect(reply.voice).toBe(""); // слотов нет → sync-first НЕ занимает, уходит в bounded-фон (тихий финал)
+    expect(calls.done.join("")).toBe(""); // синхронно результат НЕ озвучен
+    expect(spoken).toHaveLength(0); // фон ждёт слот семафора
+    concurrency.release(); // освобождаем слот → bounded-фон дорабатывает
+    await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 3000 });
+    expect(spoken[0]?.voice).toContain("Готово"); // итог через фон (как старый путь под лимитом)
+  });
+
+  it("sync-first (фикс контроля): step-0 текстовый ответ с max_tokens ДОКРУЧИВАЕТСЯ, не обрезается огрызком", async () => {
+    // Регрессия suppressStepStream: streamedThisStep был ложно-истинным (sink есть, но step-0 НЕ стримился)
+    // → докрутка max_tokens пропускалась → action-ответ обрезался. Фикс: streamedThisStep учитывает suppress.
+    const session = fakeSession();
+    const { sink } = fakeSink();
+    const llm = new MockLlmProvider([
+      { text: "Первая часть ответа,", stopReason: "max_tokens" }, // обрыв по лимиту вывода
+      { text: " вторая часть ответа." }, // докрутка доводит до конца
+    ]);
+    const deps = await makeDeps(llm, { speakResult: () => {} });
+    const reply = await handleUserText(session, "напиши длинный ответ", deps, sink);
+    expect(reply.voice).toContain("Первая часть"); // не огрызок — обе части на месте
+    expect(reply.voice).toContain("вторая часть");
+    expect(llm.requests.length).toBe(2); // докрутка реально была (вторая итерация)
+  });
+
   it("§6/§20: waitWhilePaused ждёт пока paused и продолжает после resume", async () => {
     const task = { state: "paused", cancel: { cancelled: false } } as Task;
     const p = waitWhilePaused(task);
@@ -725,6 +1057,7 @@ describe("agent-loop (§7, §8)", () => {
         { action: "input.click", target: { by: "coords" as const, x: 2100, y: 1200, space: "screen" as const }, params: { method: "physical" } },
       ],
       needsReview: false,
+      recallSim: 0.95, // §P0: слепой авто-реплей требует семантическую уверенность ≥ порога
     }));
     const deps = await makeDeps(llm, { skills: fakeSkills({ recall }) });
     const reply = await handleUserText(session, "запусти поиск в доте", deps);
@@ -737,6 +1070,46 @@ describe("agent-loop (§7, §8)", () => {
     // Модель получила нудж «макрос отработал — сверь глазами», а не команду делать шаги заново.
     expect(JSON.stringify(llm.requests[0]?.messages ?? [])).toContain("Авто-макрос");
     expect(reply.voice).toContain("Подтверждаю");
+  });
+
+  it("§P0 ГЕЙТ авто-реплея: sim ниже порога / реплика из окна без «Джарвис» → skill.execute НЕ уходит (подсказка навыка остаётся)", async () => {
+    const mkRecall = (sim: number) =>
+      vi.fn(async () => ({
+        id: "learned__close-app",
+        ownerId: "u-1",
+        name: "Закрыть приложение",
+        when: "когда просят закрыть программу",
+        procedure: "проза процедуры",
+        version: 1,
+        steps: [
+          { action: "app.focus", params: { app: "chrome" } },
+          { action: "input.key", params: { combo: "ctrl+w" } },
+        ] as SkillStep[],
+        needsReview: false,
+        recallSim: sim,
+      }));
+    // (а) sim 0.85 < порога 0.92 — ровно диапазон ложных реплеев форензики (мат → «закрыть приложение» 0.831)
+    {
+      const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+      const session = fakeSession(sendAction);
+      const llm = new MockLlmProvider([{ text: "Закрыл, сэр." }]);
+      const deps = await makeDeps(llm, { skills: fakeSkills({ recall: mkRecall(0.85) }) });
+      await handleUserText(session, "закрой приложение", deps);
+      const kinds = (sendAction.mock.calls as unknown as Array<[{ kind?: string }]>).map((c) => c[0]?.kind);
+      expect(kinds).not.toContain("skill.execute"); // жесты не ушли
+      // подсказка навыка при этом В ПРОМПТЕ (гейт режет только слепой реплей, не recall)
+      expect(llm.requests[0]?.systemSkill ?? "").toContain("Закрыть приложение");
+    }
+    // (б) sim высокий, но реплика принята ОКНОМ разговора без «Джарвис» (viaWake=false) — главный вход чужой речи
+    {
+      const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+      const session = fakeSession(sendAction);
+      const llm = new MockLlmProvider([{ text: "Закрыл, сэр." }]);
+      const deps = await makeDeps(llm, { skills: fakeSkills({ recall: mkRecall(0.97) }) });
+      await handleUserText(session, "закрой приложение", deps, undefined, { viaWake: false });
+      const kinds = (sendAction.mock.calls as unknown as Array<[{ kind?: string }]>).map((c) => c[0]?.kind);
+      expect(kinds).not.toContain("skill.execute");
+    }
   });
 
   it("§8 МАКРОС: guard-шаги в реплее (needsReview) → быстрый путь НЕ запускается", async () => {
@@ -757,6 +1130,10 @@ describe("agent-loop (§7, §8)", () => {
         { action: "input.key", params: { combo: "enter" } },
       ],
       needsReview: true, // guard → авто-прогон запрещён (§14)
+      // §P0 (ревью): гейт авто-реплея ПРОЙДЕН намеренно (sim/raw высокие, «сделай» — командный глагол) —
+      // иначе тест §14 проходил бы по ЧУЖОЙ причине (лексический recall) и покрытие needsReview терялось.
+      recallSim: 0.95,
+      recallSimRaw: 0.9,
     }));
     const deps = await makeDeps(llm, { skills: fakeSkills({ recall }) });
     await handleUserText(session, "сделай необратимое", deps);
@@ -1086,6 +1463,7 @@ describe("replayUnsafe — гарды слепого реплея (ревью ф
         { action: "input.key", needsLlm: true, params: {} }, // combo пуст → пре-чек молчит
       ] as SkillStep[],
       needsReview: false,
+      recallSim: 0.95, // §P0: гейт авто-реплея пройден — тест проверяет СЛЕДУЮЩИЙ эшелон (префилл-гард)
     }));
     const mock = new MockLlmProvider();
     const deps = await makeDeps(mock, { skills: fakeSkills({ recall }) });

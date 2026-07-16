@@ -173,7 +173,9 @@ export function createLogger(scope = "jarvis", minLevel: LogLevel = "info"): Log
 }
 
 /** Стадии латентности голосового пайплайна (§10, quality harness §22). */
-export type LatencyStage = "wake" | "stt_first" | "llm_first_token" | "tts_first_chunk" | "audio";
+// Realtime инкремент 0: "audio" = первый чанк ОТПРАВЛЕН клиенту (серверная метка); "audio_played" =
+// клиент РЕАЛЬНО начал воспроизведение (mouth-to-ear, замыкается ack'ом audio.played от рендерера).
+export type LatencyStage = "wake" | "stt_first" | "llm_first_token" | "tts_first_chunk" | "audio" | "audio_played";
 
 // ── кеш (§15: экономия на платных вызовах) ───────────────────
 

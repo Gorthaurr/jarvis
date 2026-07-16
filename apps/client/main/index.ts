@@ -21,6 +21,8 @@ import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep, Client
 import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
 import { dispatch } from "./actuators/index.js";
+import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
+import { setActBridge } from "./actuators/code-runner.js";
 import * as tier0 from "./tier0/index.js";
 import { monitors } from "./monitors.js";
 import { startGsiListener } from "./sensors/gsi-listener.js";
@@ -146,6 +148,9 @@ function createWindow(): void {
   // DevTools НЕ открываем автоматически. Только по явному флагу JARVIS_DEVTOOLS=1.
   if (process.env.JARVIS_DEVTOOLS === "1") win.webContents.openDevTools({ mode: "detach" });
 }
+
+/** jarvis SDK: loopback-мост актуаторов (для code_run-скриптов) — держим ссылку, чтобы погасить на выходе. */
+let actBridge: ActBridge | null = null;
 
 /** §9 «не мешать»: сенсоры контекста (locked через powerMonitor) → client.context серверу. */
 let sensors: Sensors | null = null;
@@ -390,6 +395,10 @@ function registerIpc(): void {
   // Аудио из renderer (§3): кадры захвата + управление микрофоном.
   ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));
   ipcMain.on(IPC.playbackActive, (_e, active: boolean) => audio?.setPlaybackActive(Boolean(active)));
+  // Realtime инкремент 0: рендерер начал воспроизведение первого звука хода → на сервер (mouth-to-ear).
+  ipcMain.on(IPC.audioPlayed, (_e, gen: number, ts: number) => {
+    if (typeof gen === "number" && typeof ts === "number") transport?.sendAudioPlayed(gen, ts);
+  });
   ipcMain.on(IPC.activate, () => audio?.activate());
   ipcMain.on(IPC.mute, () => audio?.mute());
   // Запись/повтор навыков демонстрацией (§8).
@@ -577,6 +586,15 @@ app.whenReady().then(() => {
   createWindow();
   startTransport();
   startSidecar();
+  // jarvis SDK (среда исполнения «1 раунд = вся задача»): поднимаем loopback-мост актуаторов и отдаём
+  // его code-runner'у, чтобы python-скрипт модели драйвил актуаторы ОДНИМ скриптом (jarvis.*), не бегая
+  // в LLM между шагами. Сбой не критичен (обычный code_run/актуаторы работают) — jarvis-скрипт честно упадёт.
+  void startActBridge(dispatch)
+    .then((bridge) => {
+      actBridge = bridge;
+      setActBridge({ port: bridge.port, token: bridge.token });
+    })
+    .catch((e) => log.warn("act-bridge не поднялся — jarvis SDK недоступен", { error: e instanceof Error ? e.message : String(e) }));
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -591,5 +609,6 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   transport?.stop();
   sidecar().stop();
+  void actBridge?.stop(); // jarvis SDK: гасим loopback-мост актуаторов
   void browserController().close(); // §6: гасим управляемый браузер (не оставляем висеть)
 });

@@ -52,8 +52,19 @@ function validatePredicate(raw: unknown): { ok: true; predicate: Record<string, 
       }
       return { ok: true, predicate: p };
     }
+    case "browser": {
+      // fix 2026-07-15: значение из DOM вкладки (video.currentTime и т.п.) — оценивается серверно через ext.
+      if (p.value === undefined || !scalar(p.value)) {
+        return { ok: false, reason: "predicate browser: нужен value (строка/число/булево — напр. секунды для currentTime)." };
+      }
+      const validOps = [">=", "<=", ">", "<", "==", "!=", "contains"];
+      if (p.op !== undefined && (typeof p.op !== "string" || !validOps.includes(p.op))) {
+        return { ok: false, reason: "predicate browser: op должен быть одним из >= <= > < == != contains." };
+      }
+      return { ok: true, predicate: p };
+    }
     default:
-      return { ok: false, reason: `predicate: неизвестный kind «${String(kind)}» (ожидается window|ui|text|sound|gsi).` };
+      return { ok: false, reason: `predicate: неизвестный kind «${String(kind)}» (ожидается window|ui|text|sound|gsi|browser).` };
   }
 }
 

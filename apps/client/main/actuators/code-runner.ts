@@ -15,13 +15,25 @@
  * НИКОГДА (§0 принцип 5): не печатать/не передавать карточные и платёжные данные.
  */
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CodeLang } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
+import { JARVIS_SDK_PY } from "./jarvis-sdk-source.js";
 
 const log = createLogger("actuator:code-runner");
+
+/**
+ * jarvis SDK (среда исполнения «1 раунд = вся задача»): координаты loopback-моста актуаторов. Ставится
+ * на boot клиента (index.ts) через setActBridge; run() отдаёт их скрипту (env JARVIS_ACT_URL/TOKEN) и
+ * пишет `jarvis.py` в cwd для python, чтобы модель драйвила актуаторы ОДНИМ скриптом. undefined → мост
+ * не поднят (тесты/до boot): jarvis-скрипт честно упадёт (нет URL), обычный code_run работает как прежде.
+ */
+let actBridge: { port: number; token: string } | undefined;
+export function setActBridge(bridge: { port: number; token: string } | undefined): void {
+  actBridge = bridge;
+}
 
 export interface CodeRunResult {
   stdout: string;
@@ -80,11 +92,26 @@ export async function run(lang: CodeLang, code: string): Promise<CodeRunResult> 
   const { cmd, args } = interpreter(lang, code);
   log.info(`code.run ${lang} в ${cwd}`);
 
+  // jarvis SDK: отдаём скрипту адрес+токен моста (JARVIS_ACT_TOKEN добавляем ПОСЛЕ runnerEnv — тот
+  // вырезает *TOKEN* по имени, а этот токен раннеру нужен: он лишь пускает к локальному мосту с
+  // allowlist-гейтом). ТОЛЬКО для python: SDK (jarvis.py) есть лишь под python, а node/powershell
+  // в мосте не нуждаются — не даём им адрес/токен (defense-in-depth: меньше входов к мосту).
+  const env: NodeJS.ProcessEnv = { ...runnerEnv() };
+  if (actBridge && lang === "python") {
+    env.JARVIS_ACT_URL = `http://127.0.0.1:${actBridge.port}/act`;
+    env.JARVIS_ACT_TOKEN = actBridge.token;
+    try {
+      await writeFile(join(cwd, "jarvis.py"), JARVIS_SDK_PY, "utf8");
+    } catch (e) {
+      log.warn("не удалось записать jarvis.py — SDK будет недоступен скрипту", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   try {
     return await new Promise<CodeRunResult>((resolve, reject) => {
       const child = spawn(cmd, args, {
         cwd,
-        env: runnerEnv(),
+        env,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
       });

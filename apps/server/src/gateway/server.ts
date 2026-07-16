@@ -38,6 +38,7 @@ import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "..
 import { claimConsolidationRun, consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
 import { ReminderService } from "../proactive/reminders/service.js";
 import { createWatchChecker } from "../proactive/watch/checker.js";
+import { evalBrowserCondition, isBrowserCondition } from "../brain/tools/browser-condition.js";
 import { WatchService } from "../proactive/watch/service.js";
 import { AmbientEngine } from "../proactive/ambient/engine.js";
 import { AmbientSeenStore } from "../proactive/ambient/store.js";
@@ -475,6 +476,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       // Поднимаем ПЕРВЫМ, чтобы в файл попал и сам boot. Выключатель JARVIS_FILE_LOG=0.
       fileLog = initFileLog();
       metrics.enableJsonl();
+      metrics.startProcessHealth(); // durable process_health-строки (rss/heap/cpu) — стоп в close() через disableJsonl
       // §6B/B3: профиль теперь партиционирован по userId и грузится per-session в handshake
       // (loadProfile(userId)), а не один глобальный на boot.
       await loadConsent(); // §14: помним согласия на отправку (Кате можно) между сессиями
@@ -482,6 +484,19 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       // §6B/B5: траты периода теперь гидрируются per-user в handshake (brain.spend.hydrate(userId)),
       // а не одним глобальным гвардом на boot (тот не имел userId → persist usage_quota был мёртв).
       await brain.reminders.start(); // §9: поднять напоминания с диска, завести таймер, догнать просроченные
+      // fix 2026-07-15: серверная проверка BROWSER-предиката наблюдений (video.currentTime через ext-мост).
+      // У watch-сервиса нет прямого доступа к расширению → инжектируем зонд тут (расширение = extBridge).
+      brain.watch?.setBrowserProbe(async (predicate) => {
+        if (!extBridge.connected) return { met: false, detail: "", error: "расширение не подключено", transient: true };
+        if (!isBrowserCondition(predicate)) return { met: false, detail: "", error: "не browser-условие" };
+        try {
+          const r = await evalBrowserCondition(extBridge, predicate);
+          return { met: r.met, detail: r.detail };
+        } catch (e) {
+          // вкладка закрыта / нет медиа / расширение моргнуло — транзиентно (не суспендим наблюдение).
+          return { met: false, detail: "", error: e instanceof Error ? e.message : String(e), transient: true };
+        }
+      });
       await brain.watch?.start(); // §долгие-задачи: поднять наблюдения с диска, завести recurring-таймер проверок
       await obligationStore.load(); // §проактив-всё: поднять обязательства/счета с диска
       await brain.ambient?.start(); // §проактив-всё: запустить ambient-движок (счета по датам + Telegram-непрочитанные)

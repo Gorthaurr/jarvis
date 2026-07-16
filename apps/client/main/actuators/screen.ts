@@ -3,9 +3,11 @@
  * Через Electron desktopCapturer (без нативного кода/сайдкара).
  *
  * §6B/игры: РАНЬШЕ всегда снимал «рабочий монитор Джарвиса» (вторичный) → если игра/нужное окно на
- * ДРУГОМ мониторе (напр. Dota на основном), Джарвис «смотрел не туда» и не видел кнопок. Теперь по
- * умолчанию снимаем АКТИВНЫЙ монитор — под курсором (в игре курсор в игре → её монитор). Можно явно
- * выбрать: "active"|"primary"|"jarvis"|<индекс>.
+ * ДРУГОМ мониторе, Джарвис «смотрел не туда». Мультимонитор-фикс 2026-07-14 (эпизод «вруби демку в
+ * дискорде»): по умолчанию (и "active") снимаем монитор ПЕРЕДНЕГО (foreground) окна — то, с которым
+ * работают СЕЙЧАС (игра fullscreen-foreground; только-что-сфокусированное окно). Явно: "cursor" (под
+ * курсором) | "primary" | "jarvis" | <индекс монитора числом/строкой>. SCREEN-space rect снимается с
+ * монитора, СОДЕРЖАЩЕГО регион (не foreground). Выключатель JARVIS_CAPTURE_FOREGROUND=0 → дефолт=курсор.
  *
  * Длинная сторона капится ~1568px (Anthropic всё равно даунскейлит; токены ≈ w*h/750). При захвате
  * ЗАПОМИНАЕМ маппинг (смещение монитора в DIP + scale), чтобы input.click по vision-координатам попадал
@@ -23,6 +25,12 @@ export interface ScreenShot {
   mediaType: "image/png";
   width: number;
   height: number;
+  /**
+   * Маппинг image→screen-DIP ЭТОГО кадра (полный снимок без rect). Возвращается ВСЕГДА, независимо от
+   * updateMapping — чтобы потребитель (напр. OCR в jarvis SDK) мог сам конвертировать image-координаты
+   * в АБСОЛЮТНЫЕ экранные DIP (boundsX + x/scale) и кликнуть space:"screen", не завися от lastMapping.
+   */
+  mapping?: CaptureMapping;
 }
 
 /** Маппинг последнего захвата: image-координаты → логические (DIP) virtual-desktop координаты для клика. */
@@ -42,17 +50,59 @@ export function getLastCaptureMapping(): CaptureMapping | null {
   return lastMapping;
 }
 
-/** Выбрать монитор: индекс | "primary" | "jarvis" | "active"(под курсором, дефолт). */
-function pickDisplay(which?: string | number): Display {
-  const all = screen.getAllDisplays();
-  if (typeof which === "number" && which >= 0 && which < all.length) return all[which]!;
-  if (which === "primary") return screen.getPrimaryDisplay();
-  if (which === "jarvis") return monitors.jarvisDisplay();
+/** Монитор под курсором (fallback / явный which="cursor"). */
+function cursorDisplay(): Display {
   try {
-    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()); // active = под курсором
+    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   } catch {
     return screen.getPrimaryDisplay();
   }
+}
+
+/**
+ * Монитор FOREGROUND-окна (мультимонитор-фикс 2026-07-14): дефолт захвата. Живой эпизод «вруби демку в
+ * дискорде»: после window_focus Дискорда на M1 screen_capture по КУРСОРУ снимал M2 (браузер) → ложное
+ * «свёрнут за хромом». Монитор активного (переднего) окна — правильный дефолт: для игры это сама игра
+ * (fullscreen-foreground), для focus→capture — только что сфокусированное окно. Сайдкар недоступен/нет
+ * foreground → курсор (прежнее поведение). Выключатель JARVIS_CAPTURE_FOREGROUND=0 → всегда курсор.
+ */
+async function foregroundDisplay(): Promise<Display> {
+  if (process.env.JARVIS_CAPTURE_FOREGROUND === "0") return cursorDisplay();
+  try {
+    const { sidecar } = await import("./sidecar-client.js");
+    if (!sidecar().ready) return cursorDisplay();
+    const { listWindows } = await import("./windows.js");
+    const wins = await listWindows();
+    const fg = wins.find((w) => w.foreground && !w.minimized);
+    if (fg && fg.monitorIndex >= 0 && fg.monitorIndex < screen.getAllDisplays().length) {
+      return screen.getAllDisplays()[fg.monitorIndex]!;
+    }
+  } catch {
+    /* сайдкар лёг/таймаут — курсорный фолбэк */
+  }
+  return cursorDisplay();
+}
+
+/** Выбрать монитор: индекс | "primary" | "jarvis" | "cursor"(под курсором) | "active"/деф(foreground-окно). */
+async function pickDisplay(which?: string | number): Promise<Display> {
+  const all = screen.getAllDisplays();
+  // Индекс монитора — number ИЛИ ЧИСЛОВАЯ СТРОКА (ревью #4/#6, HIGH): tool-путь всегда шлёт monitor
+  // строкой (схема type:"string" «индекс числом»), и «0»/«1» раньше не парсились → молча снимался
+  // монитор переднего окна вместо запрошенного (та же мультимониторная слепота, что и чинили).
+  const idx = typeof which === "number" ? which : typeof which === "string" && /^\d+$/.test(which.trim()) ? Number(which.trim()) : NaN;
+  if (Number.isInteger(idx) && idx >= 0 && idx < all.length) return all[idx]!;
+  if (which === "primary") return screen.getPrimaryDisplay();
+  if (which === "jarvis") return monitors.jarvisDisplay();
+  if (which === "cursor") return cursorDisplay();
+  // "active" и дефолт → монитор переднего окна (не курсора): чинит focus→capture на мультимониторе.
+  return foregroundDisplay();
+}
+
+/** Явно ли задан монитор (число/строка-индекс/primary/jarvis/cursor) — тогда screen-rect его не переопределяет. */
+function isExplicitMonitor(which?: string | number): boolean {
+  if (typeof which === "number") return true;
+  if (typeof which !== "string") return false;
+  return which === "primary" || which === "jarvis" || which === "cursor" || /^\d+$/.test(which.trim());
 }
 
 /** Регион для кропа (§Волна2 2.3): по умолчанию — координаты ПОСЛЕДНЕГО полного снимка; space="screen" — DIP. */
@@ -86,12 +136,25 @@ function rectToDip(rect: CaptureRect): { x: number; y: number; w: number; h: num
 }
 
 export async function captureScreen(which?: string | number, opts?: CaptureOpts): Promise<ScreenShot> {
-  // Кроп по image-координатам ПРОШЛОГО снимка обязан сниматься с ТОГО ЖЕ дисплея (ревью Волны 2):
-  // «active» (под курсором) мог смениться — тогда rect молча резал бы не тот монитор.
-  let display = pickDisplay(which);
-  if (opts?.rect && opts.rect.space !== "screen" && which === undefined && lastMapping?.displayId !== undefined) {
-    const same = screen.getAllDisplays().find((d) => d.id === lastMapping!.displayId);
-    if (same) display = same;
+  // Выбор монитора для кропа — ПО РЕГИОНУ, не по foreground/курсору (ревью #1/#2):
+  //  (а) SCREEN-space rect (абсолютные DIP) без явного монитора → дисплей, СОДЕРЖАЩИЙ регион (клик-точка
+  //      fused-observe может быть на ДРУГОМ мониторе, чем переднее окно — иначе кроп клампился в 1px);
+  //  (б) IMAGE-space rect (координаты ПРОШЛОГО снимка) → тот же дисплей lastMapping (без сетевого вызова
+  //      foreground — раньше он делался и тут же выбрасывался);
+  //  (в) иначе (полный кадр / явный монитор) → pickDisplay (foreground-дефолт).
+  let display: Display;
+  if (opts?.rect?.space === "screen" && !isExplicitMonitor(which)) {
+    const cx = opts.rect.x + opts.rect.w / 2;
+    const cy = opts.rect.y + opts.rect.h / 2;
+    try {
+      display = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) });
+    } catch {
+      display = await pickDisplay(which);
+    }
+  } else if (opts?.rect && opts.rect.space !== "screen" && which === undefined && lastMapping?.displayId !== undefined) {
+    display = screen.getAllDisplays().find((d) => d.id === lastMapping!.displayId) ?? (await pickDisplay(which));
+  } else {
+    display = await pickDisplay(which);
   }
   const { width, height } = display.size;
   const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
@@ -128,10 +191,12 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
 
   const png = src.thumbnail.toPNG();
   if (png.length === 0) throw new Error("пустой кадр захвата экрана");
-  // Запоминаем маппинг для клика по vision-координатам (image → логические virtual-desktop) —
-  // ТОЛЬКО для кадров, которые видит модель (updateMapping !== false, ревью Волны 2).
+  // Маппинг image→screen-DIP ЭТОГО кадра. Считаем ВСЕГДА и возвращаем (нужен OCR-потребителю для
+  // конверсии координат в абсолютные DIP). В lastMapping пишем ТОЛЬКО для кадров, которые видит
+  // модель (updateMapping !== false, ревью Волны 2) — сенсорный OCR систему координат кликов не сбивает.
+  const mapping: CaptureMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale, displayId: display.id };
   if (opts?.updateMapping !== false) {
-    lastMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale, displayId: display.id };
+    lastMapping = mapping;
   }
   log.info("screen.capture", {
     display: display.id,
@@ -140,7 +205,7 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
     h: thumbnailSize.height,
     bytes: png.length,
   });
-  return { image: png.toString("base64"), mediaType: "image/png", width: thumbnailSize.width, height: thumbnailSize.height };
+  return { image: png.toString("base64"), mediaType: "image/png", width: thumbnailSize.width, height: thumbnailSize.height, mapping };
 }
 
 // ─────────────────────────── §Волна2 (2.3): $0-проба региона ───────────────────────────

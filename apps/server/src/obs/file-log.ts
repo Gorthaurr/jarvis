@@ -15,6 +15,11 @@ import { dataPath } from "../paths.js";
 
 const log = createLogger("obs:file-log");
 
+/** Потолок длины сериализованного `meta` в одной строке лога (идея bounded-serialization, ревью
+ *  learn-coding-agent 2026-07-15): крупный объект в log.info иначе раздул бы дневной лог. Свыше — режем
+ *  с маркером сколько срезано. Небольшой структурный meta (частый случай) не трогаем — остаётся JSON для грепа. */
+const META_MAX_CHARS = 8192;
+
 /** Папка логов (§универсальность: JARVIS_DATA_DIR → иначе cwd/data). */
 function logsDir(): string {
   return dataPath("logs");
@@ -78,13 +83,19 @@ export class FileLogSink {
 
   /** Sink-функция для addLogSink: кладёт запись в буфер (не пишет синхронно). */
   readonly sink: LogSink = (entry) => {
-    // meta может содержать несериализуемое (циклы/BigInt) — стягиваем безопасно.
+    // meta может содержать несериализуемое (циклы/BigInt) — стягиваем безопасно; и КРУПНОЕ — режем по длине
+    // (одна строка log.info с большим payload раздула бы дневной лог до флаша/ротации).
     let meta: unknown = entry.meta;
     if (meta !== undefined) {
+      let ser: string;
       try {
-        JSON.stringify(meta);
+        ser = JSON.stringify(meta) ?? "undefined";
       } catch {
-        meta = String(meta);
+        ser = String(meta);
+        meta = ser; // несериализуемое — храним строковую форму
+      }
+      if (ser.length > META_MAX_CHARS) {
+        meta = `${ser.slice(0, META_MAX_CHARS)}…[+${ser.length - META_MAX_CHARS} симв. срезано]`;
       }
     }
     const rec = { ts: new Date(entry.ts).toISOString(), level: entry.level, scope: entry.scope, msg: entry.msg, ...(meta !== undefined ? { meta } : {}) };

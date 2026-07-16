@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -217,5 +217,88 @@ describe("MetricsCollector durable JSONL (аудит 2026-07-02)", () => {
     c.record(ev());
     const lines = readFileSync(join(dir, "logs", "metrics.jsonl"), "utf8").trim().split("\n");
     expect(lines).toHaveLength(1); // только первое событие
+  });
+
+  it("recordMouthToEar (инкремент 0) → строка type:mouth_to_ear с ms/turnSeq/userId", () => {
+    const c = new MetricsCollector(10);
+    c.enableJsonl();
+    c.recordMouthToEar(742, 3, "user-abc");
+    const lines = readFileSync(join(dir, "logs", "metrics.jsonl"), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const rec = JSON.parse(lines[0]!);
+    expect(rec).toMatchObject({ type: "mouth_to_ear", ms: 742, turnSeq: 3, userId: "user-abc" });
+    expect(typeof rec.ts).toBe("string");
+  });
+
+  it("recordMouthToEar не попадает в ОЗУ-окно per-task агрегатов (иной масштаб события)", () => {
+    const c = new MetricsCollector(10);
+    c.enableJsonl();
+    c.recordMouthToEar(500, 1);
+    expect(c.snapshot().requests).toBe(0); // не аггрегат задачи
+  });
+
+  it("recordMouthToEar без enableJsonl — no-op (на диск не пишет)", () => {
+    const c = new MetricsCollector(10);
+    c.recordMouthToEar(500, 1);
+    expect(existsSync(join(dir, "logs", "metrics.jsonl"))).toBe(false);
+  });
+
+  it("ротация по размеру: превышение cap → metrics.jsonl.1, свежие данные целы (ревью 2026-07-15)", () => {
+    const c = new MetricsCollector(10, { maxJsonlBytes: 400 }); // тест-cap мимо env-клампа 1МБ
+    c.enableJsonl();
+    const path = join(dir, "logs", "metrics.jsonl");
+    for (let i = 0; i < 20; i += 1) c.record(ev({ latencyMs: i })); // строки ~190Б → несколько ротаций
+    expect(existsSync(`${path}.1`)).toBe(true); // прошлая генерация сохранена (не удалена по возрасту)
+    expect(existsSync(path)).toBe(true); // текущий продолжает писаться
+    // Текущий файл ограничен ~cap (данные не потеряны — они в .1); последнее событие точно на месте.
+    const cur = readFileSync(path, "utf8").trim().split("\n");
+    expect(JSON.parse(cur[cur.length - 1]!)).toMatchObject({ latencyMs: 19 });
+    expect(readFileSync(path, "utf8").length).toBeLessThanOrEqual(400 + 300);
+  });
+
+  it("ротация: транзиентный провал rename не сбрасывает счётчик ложно → повтор на СЛЕДУЮЩЕЙ записи (ревью #2/#3)", () => {
+    const path = join(dir, "logs", "metrics.jsonl");
+    // Детерминированно (без байт-хрупкости): измеряем размер одной записи, cap = ровно 5 записей → порог
+    // пересекается на 6-й. Блокируем .1 каталогом (renameSync обречён бросать), пишем 6 (ротация падает),
+    // СНИМАЕМ блок и пишем ещё 1. ФИКС: счётчик после провала остался у порога (~6 записей) → 7-я запись
+    // СРАЗУ ротирует. БАГ (сброс в 0): после провала счётчик ~1 запись → 7-я (2 записи) < cap(5) → НЕ ротирует.
+    const probe = new MetricsCollector(10);
+    probe.enableJsonl();
+    probe.record(ev({ latencyMs: 0 }));
+    const recBytes = statSync(path).size;
+    rmSync(path);
+    const c = new MetricsCollector(10, { maxJsonlBytes: recBytes * 5 });
+    c.enableJsonl();
+    mkdirSync(`${path}.1`); // .1 — КАТАЛОГ → renameSync(path→.1) бросает → rotate() вернёт false
+    expect(() => {
+      for (let i = 0; i < 6; i += 1) c.record(ev({ latencyMs: i })); // 6-я пересекает порог → rotate падает
+    }).not.toThrow();
+    expect(existsSync(`${path}.1`) && statSync(`${path}.1`).isDirectory()).toBe(true); // ротации не было (блок держит)
+    rmSync(`${path}.1`, { recursive: true }); // снимаем блок
+    c.record(ev({ latencyMs: 6 })); // 7-я запись: под фиксом счётчик у порога → ротирует немедленно
+    expect(statSync(`${path}.1`).isFile()).toBe(true); // .1 — ФАЙЛ: ротация сработала на первой же записи после снятия
+    expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(1); // свежий файл = только 7-я запись
+  });
+
+  it("startProcessHealth → durable-строка type:process_health (rss/heap/uptime/node)", () => {
+    const c = new MetricsCollector(10);
+    c.enableJsonl();
+    c.startProcessHealth(600_000); // первую строку пишем сразу, интервал не успеет сработать
+    c.stopProcessHealth(); // сразу гасим таймер — тест не течёт
+    const lines = readFileSync(join(dir, "logs", "metrics.jsonl"), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    const rec = JSON.parse(lines[0]!);
+    expect(rec.type).toBe("process_health");
+    expect(typeof rec.rssMb).toBe("number");
+    expect(typeof rec.heapUsedMb).toBe("number");
+    expect(typeof rec.uptimeSec).toBe("number");
+    expect(typeof rec.node).toBe("string");
+  });
+
+  it("startProcessHealth без enableJsonl — no-op (таймер не стартует, файла нет)", () => {
+    const c = new MetricsCollector(10);
+    c.startProcessHealth(600_000);
+    c.stopProcessHealth();
+    expect(existsSync(join(dir, "logs", "metrics.jsonl"))).toBe(false);
   });
 });

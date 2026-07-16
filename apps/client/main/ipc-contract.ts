@@ -31,6 +31,7 @@ export const IPC = {
   taskControl: "jarvis:taskControl", // управление задачей из UI (стоп/пауза, §20)
   pushPcm: "jarvis:pushPcm", // кадр PCM16 из renderer (захват, §3)
   playbackActive: "jarvis:playbackActive", // §10 идёт ли СЕЙЧАС воспроизведение TTS (для barge в хвосте)
+  audioPlayed: "jarvis:audioPlayed", // realtime инкремент 0: первый звук хода реально сыгран (mouth-to-ear)
   activate: "jarvis:activate", // push-to-talk активация (когда нет wake word, §18)
   mute: "jarvis:mute", // честный mute (§0.6)
   skillStart: "jarvis:skillStart", // начать запись навыка демонстрацией (§8)
@@ -83,6 +84,11 @@ export interface SpeakChunkPayload {
   audio: string;
   seq: number;
   last: boolean;
+  /** §Волна3 (3.5): сырой PCM16-стрим v3 (иначе mp3). Пробрасывается raw от сервера. */
+  format?: "pcm16";
+  sampleRate?: number;
+  /** Realtime инкремент 0: инвалидатор хода — рендерер эхом вернёт его в audioPlayed (mouth-to-ear). */
+  gen?: number;
 }
 
 /** Полезная нагрузка ответа на подтверждение (§14, с полем revision). */
@@ -141,6 +147,8 @@ export interface JarvisBridge {
   pushPcm(pcm: ArrayBuffer): void;
   /** §10 Сообщить main, идёт ли СЕЙЧАС воспроизведение TTS (чтобы перебивать и в «хвосте» очереди). */
   setPlaybackActive(active: boolean): void;
+  /** Realtime инкремент 0: рендерер начал ВОСПРОИЗВЕДЕНИЕ первого звука хода gen в момент ts (Date.now). */
+  audioPlayed(gen: number, ts: number): void;
   /** Push-to-talk активация микрофона (§18). */
   activate(): void;
   /** Честный mute (§0.6). */

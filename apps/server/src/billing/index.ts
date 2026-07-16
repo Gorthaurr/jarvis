@@ -25,9 +25,15 @@ export interface SpendLimits {
 }
 
 export const DEFAULT_LIMITS: SpendLimits = {
-  spendCap: 50,
-  maxStepsPerTask: 30,
-  maxTokensPerTask: 200_000,
+  // ⚠️ Предохранители ЗАДАЧИ не должны быть ЖЁСТЧЕ петлевого потолка HARD_STEP_CAP=50 (agent/index.ts):
+  //  иначе SpendGuard рубит легитимную длинную задачу РАНЬШЕ её собственного лимита и врёт «достигнут
+  //  лимит» на полпути (было maxStepsPerTask=30 < 50 → многошаговая GUI/веб-задача с циклами
+  //  inspect→act→verify обрывалась на 30-м раунде). Выровнено на 50; токены — с запасом под 50 раундов
+  //  с vision/inspect-снимками (uncached input+output на задачу). spendCap здесь — платформенный дефолт,
+  //  реально задаётся config.defaultSpendCap ($300, env DEFAULT_SPEND_CAP).
+  spendCap: 300,
+  maxStepsPerTask: 50,
+  maxTokensPerTask: 500_000,
 };
 
 /** Причина отказа предохранителя. */

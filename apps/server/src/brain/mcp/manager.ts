@@ -11,13 +11,17 @@
 import { spawn } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 import type { McpConfig, McpServerConfig } from "./config.js";
 
+/** Транспорт MCP-клиента: локальный stdio (спавнит ребёнка) ИЛИ удалённый StreamableHTTP (без ребёнка). */
+type McpTransport = StdioClientTransport | StreamableHTTPClientTransport;
+
 interface ServerEntry {
   client: Client;
-  transport?: StdioClientTransport; // §L6: держим ссылку → force-kill дерева ребёнка на dispose
+  transport?: McpTransport; // §L6: держим ссылку → force-kill дерева ребёнка на dispose (для stdio; http — no-op)
   tools: ToolSchema[]; // уже в namespaced-виде (имя = mcp__server__tool)
   state: "connected" | "error";
 }
@@ -57,8 +61,9 @@ function baseChildEnv(): Record<string, string> {
   return out;
 }
 
-/** Форс-килл дерева дочернего процесса транспорта по PID (§L6; аудит-2 [1]/[2] — независимо от close). */
-function killTransportTree(transport: StdioClientTransport | undefined): void {
+/** Форс-килл дерева дочернего процесса транспорта по PID (§L6; аудит-2 [1]/[2] — независимо от close).
+ *  Для HTTP-транспорта pid отсутствует → ранний выход (нечего убивать). */
+function killTransportTree(transport: McpTransport | undefined): void {
   const pid = (transport as { pid?: number | null } | undefined)?.pid ?? undefined;
   if (typeof pid !== "number" || pid <= 0) return;
   try {
@@ -105,16 +110,27 @@ export class McpManager {
   }
 
   private async connectOne(name: string, sc: McpServerConfig): Promise<void> {
-    let transport: StdioClientTransport | undefined;
+    let transport: McpTransport | undefined;
     try {
       const client = new Client({ name: "jarvis", version: "1.0.0" }, { capabilities: {} });
-      transport = new StdioClientTransport({
-        command: sc.command,
-        args: sc.args ?? [],
-        // §sec (H15): базовый allowlist + ТОЛЬКО объявленный sc.env — не разворачиваем весь process.env
-        // (иначе все секреты сервера утекают каждому MCP-ребёнку). github-MCP получит свой PAT через sc.env.
-        env: { ...baseChildEnv(), ...(sc.env ?? {}) },
-      });
+      if (sc.url) {
+        // HTTP-транспорт (удалённый/SaaS MCP): секреты — статический Bearer в sc.headers (${ENV} уже резолвнут
+        // в config). Без OAuth-flow (тяжёл и неуместен на headless single-user сервере — см. CLAUDE.md).
+        const headers = sc.headers ?? {};
+        transport = new StreamableHTTPClientTransport(new URL(sc.url), {
+          ...(Object.keys(headers).length > 0 ? { requestInit: { headers } } : {}),
+        });
+      } else {
+        const command = sc.command;
+        if (!command) throw new Error("MCP-сервер без command и без url — нечего запускать");
+        transport = new StdioClientTransport({
+          command,
+          args: sc.args ?? [],
+          // §sec (H15): базовый allowlist + ТОЛЬКО объявленный sc.env — не разворачиваем весь process.env
+          // (иначе все секреты сервера утекают каждому MCP-ребёнку). github-MCP получит свой PAT через sc.env.
+          env: { ...baseChildEnv(), ...(sc.env ?? {}) },
+        });
+      }
       await client.connect(transport);
       // Аудит-2 [1]: пока мы коннектились (~2.3с), мог пройти dispose() → servers уже вычищен и никто не
       // убьёт этого ребёнка. Убиваем свой свежий transport и НЕ заселяем реестр (иначе процесс-сирота).

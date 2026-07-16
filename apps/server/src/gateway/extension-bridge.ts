@@ -143,9 +143,10 @@ export class ExtensionBridge {
     return this.request({ type: "tab.openOrFocus", url }, 15_000);
   }
 
-  /** Прочитать вкладку (по tabId из open / url-хосту / активную) в сессии пользователя. */
-  tabRead(url?: string, tabId?: number): Promise<unknown> {
-    return this.request({ type: "tab.read", url: url ?? "", tabId }, 15_000);
+  /** Прочитать вкладку (по tabId из open / url-хосту / активную) в сессии пользователя. query —
+   *  ключевые слова: фильтр строк текста (+ структура h1-h3 и текст iframe'ов в ответе). */
+  tabRead(url?: string, tabId?: number, query?: string): Promise<unknown> {
+    return this.request({ type: "tab.read", url: url ?? "", tabId, query: query ?? "" }, 15_000);
   }
 
   /** Список открытых вкладок (заголовок/URL/активна/звучит) — чтобы резолвить «какую вкладку». */
@@ -164,13 +165,21 @@ export class ExtensionBridge {
     return this.request({ type: "tab.close", url: url ?? "", tabId }, 10_000);
   }
 
-  /** ГЛАЗА В DOM: снимок интерактивных элементов вкладки с устойчивыми селекторами (для прицельного act). */
-  tabInspect(url?: string, query?: string, cap?: number, tabId?: number): Promise<unknown> {
-    return this.request({ type: "tab.inspect", url: url ?? "", query: query ?? "", cap, tabId }, 15_000);
+  /** ГЛАЗА В DOM: снимок интерактивных элементов вкладки с устойчивыми селекторами + СОСТОЯНИЕ (для
+   *  прицельного act). refMode → минтит ref-реестр (адресация по идентичности, устойчивее селектора). */
+  tabInspect(url?: string, query?: string, cap?: number, tabId?: number, refMode?: boolean): Promise<unknown> {
+    return this.request({ type: "tab.inspect", url: url ?? "", query: query ?? "", cap, tabId, refMode: Boolean(refMode) }, 15_000);
   }
 
-  /** Действие В вкладке пользователя (play/pause/next/click/type/scroll) через chrome.scripting. */
-  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown> {
-    return this.request({ type: "tab.act", url, intent, params: params ?? {}, tabId }, 20_000);
+  /** Действие В вкладке пользователя (play/pause/next/click/type/scroll) через chrome.scripting.
+   *  refMode → адресация по params.ref (идентичность из последнего снимка), устойчивее селектора. */
+  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number, refMode?: boolean): Promise<unknown> {
+    return this.request({ type: "tab.act", url, intent, params: params ?? {}, tabId, refMode: Boolean(refMode) }, 20_000);
+  }
+
+  /** §Волна2-веб: БЕРСТ шагов по ref одним вызовом (веб-аналог input_batch) — многополевая форма за 1 раунд.
+   *  Все шаги адресуют ref из ОДНОГО снимка; стоп на первой ошибке, честное «выполнено k из n». */
+  tabBatch(url: string, steps: unknown[], tabId?: number, refMode?: boolean): Promise<unknown> {
+    return this.request({ type: "tab.batch", url, steps, tabId, refMode: Boolean(refMode) }, 60_000);
   }
 }

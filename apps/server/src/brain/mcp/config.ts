@@ -12,9 +12,15 @@ import { type Logger, createLogger } from "@jarvis/shared";
 const log: Logger = createLogger("mcp:config");
 
 export interface McpServerConfig {
-  command: string;
+  /** stdio-транспорт: команда запуска ЛОКАЛЬНОГО сервера (npx/uvx/путь). Для HTTP-сервера не нужна. */
+  command?: string;
   args?: string[];
   env?: Record<string, string>;
+  /** HTTP-транспорт (удалённый/SaaS MCP, ревью learn-coding-agent 2026-07-15): URL эндпоинта. Задан →
+   *  StreamableHTTP вместо stdio. SDK уже везёт транспорт; секреты — статическим Bearer в headers (без OAuth). */
+  url?: string;
+  /** Заголовки HTTP-транспорта (напр. { "Authorization": "Bearer ${MY_TOKEN}" }); ${ENV} резолвится. */
+  headers?: Record<string, string>;
 }
 export interface McpConfig {
   servers: Record<string, McpServerConfig>;
@@ -50,6 +56,39 @@ export function normalizeCommand(cmd: string): { command: string; viaShell: bool
   return { command: cmd, viaShell: false };
 }
 
+/**
+ * Чистая нормализация сырого конфига (SRP: без файлового IO — тестируется напрямую). Каждый сервер —
+ * либо HTTP (url), либо stdio (command); ${ENV} резолвится в url/args/env/headers.
+ */
+export function parseMcpConfig(raw: McpConfig): McpConfig {
+  const servers: Record<string, McpServerConfig> = {};
+  for (const [name, sc] of Object.entries(raw?.servers ?? {})) {
+    if (!sc) continue;
+    // HTTP-транспорт (удалённый MCP): url задан → берём его, command игнорируем. Только http(s) (не file:/
+    // прочие схемы — конфиг владельческий, но защищаемся от опечатки). Секреты в headers через ${ENV}.
+    if (typeof sc.url === "string" && sc.url.trim()) {
+      const url = resolveEnvVars(sc.url.trim());
+      if (!/^https?:\/\//i.test(url)) {
+        log.warn("MCP config: url должен быть http(s) — сервер пропущен", { name });
+        continue;
+      }
+      servers[name] = {
+        url,
+        headers: Object.fromEntries(Object.entries(sc.headers ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
+      };
+      continue;
+    }
+    if (typeof sc.command !== "string") continue;
+    const norm = normalizeCommand(sc.command);
+    servers[name] = {
+      command: norm.command,
+      args: (sc.args ?? []).map(resolveEnvVars),
+      env: Object.fromEntries(Object.entries(sc.env ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
+    };
+  }
+  return { servers };
+}
+
 /** Прочитать mcp.json (корень репо / data/). Нет файла/битый → пустой конфиг (арсенал просто пуст). */
 export function loadMcpConfig(): McpConfig {
   const candidates = [
@@ -61,18 +100,9 @@ export function loadMcpConfig(): McpConfig {
   if (!path) return EMPTY;
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as McpConfig;
-    const servers: Record<string, McpServerConfig> = {};
-    for (const [name, sc] of Object.entries(raw.servers ?? {})) {
-      if (!sc || typeof sc.command !== "string") continue;
-      const norm = normalizeCommand(sc.command);
-      servers[name] = {
-        command: norm.command,
-        args: (sc.args ?? []).map(resolveEnvVars),
-        env: Object.fromEntries(Object.entries(sc.env ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
-      };
-    }
-    log.info("MCP config загружен", { path, серверов: Object.keys(servers).length });
-    return { servers };
+    const parsed = parseMcpConfig(raw);
+    log.info("MCP config загружен", { path, серверов: Object.keys(parsed.servers).length });
+    return parsed;
   } catch (e) {
     log.warn("MCP config: не удалось прочитать — игнорирую", { path, error: e instanceof Error ? e.message : String(e) });
     return EMPTY;

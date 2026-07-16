@@ -67,6 +67,11 @@ function chatTitleOf(data: unknown): string {
 export async function telegramSend(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   const to = String(input.to ?? "").trim();
   const text = String(input.text ?? "").trim();
+  // §P1-тёзки (ревью р1): peerId ВЫБРАННОГО владельцем кандидата — задаётся после ответа «ТЁЗКИ, id=…».
+  // Точный peer открывает чат в обход резолва по имени → разрывает дедлок короткого имени, которое носят
+  // несколько людей. Прежний alias-механизм откачен: он ОБХОДИЛ namesake-гейт (fast-path openHinted) и
+  // травил память точного ключа (CRITICAL-находки ревью).
+  const peer = String(input.peer ?? "").trim();
   if (!to || !text) return err("telegram_send: нужны to и text");
   // M6: cadence-гард — тот же механизм, что message_send (анти-бан/анти-веер/анти-burst).
   const cad = cadence.check({ userId: ctx.userId, channel: "telegram", recipient: to, neverMessagedBefore: false });
@@ -80,12 +85,24 @@ export async function telegramSend(ctx: ToolContext, input: Record<string, unkno
   const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
   if (!gate.approved) return ok(`Не отправил — вы не подтвердили отправку «${to}».`);
   // ОПЫТНАЯ ПАМЯТЬ (§ скорость): помним, как резолвили этого адресата → клиент откроет чат СРАЗУ.
-  const hint = ctx.resolutionMemory?.recall(ctx.userId, "telegram", to);
-  const result = await ctx.session.sendAction({ kind: "telegram.send", to, text, preferredTitle: hint?.title, hintPeerId: hint?.peerId }, 90_000);
+  // §P1-тёзки: явный peer (выбор владельца из списка тёзок) ГЛАВНЕЕ памяти — точный peerId в обход
+  // резолва по имени; память при этом НЕ читаем (стейл-связка короткого имени не должна перебить
+  // явный выбор — CRITICAL-находка) и на успехе НЕ переписываем ключ to (короткое имя многозначно,
+  // память по нему снова увела бы не туда).
+  const hint = peer ? undefined : ctx.resolutionMemory?.recall(ctx.userId, "telegram", to);
+  const hintPeerId = peer || hint?.peerId;
+  // ⚠️ Ревью р2 (peer-канал был МЁРТВ): клиентский fast-path (openHinted по peerId) входит ТОЛЬКО при
+  // непустом preferredTitle. При явном peer подаём preferredTitle=to — иначе fast-path пропускался,
+  // hintPeerId выбрасывался, и резолв снова упирался в тёзок (дедлок). openHinted приоритизирует peerId
+  // над именем → откроет ТОЧНО выбранного, а to служит лишь фолбэком поиска, если peer протух.
+  const preferredTitle = hint?.title ?? (peer ? to : undefined);
+  const result = await ctx.session.sendAction({ kind: "telegram.send", to, text, preferredTitle, hintPeerId }, 90_000);
   if (result.ok) {
     const data = result.data as { chatTitle?: string; peerId?: string } | undefined;
     const who = chatTitleOf(result.data) || to; // называем РЕАЛЬНОГО адресата (мог отличаться: Герман→Herman)
-    if (data?.chatTitle) ctx.resolutionMemory?.remember(ctx.userId, "telegram", to, { peerId: data.peerId, title: data.chatTitle });
+    // Память пишем ТОЛЬКО когда to резолвился однозначно (без явного peer): при peer «to» — короткое
+    // многозначное имя, запоминать его → выбранный чат небезопасно (следующий раз снова не та Катя).
+    if (data?.chatTitle && !peer) ctx.resolutionMemory?.remember(ctx.userId, "telegram", to, { peerId: data.peerId, title: data.chatTitle });
     sentKeys.set(key, true);
     cadence.record(ctx.userId, "telegram", to);
     return ok(`Отправлено «${who}» в Telegram.`);

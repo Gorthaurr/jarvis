@@ -23,6 +23,8 @@ public sealed class UiaGrounder : IDisposable
     private const int MaxSearchDepth = 8;
     // Лимит символов при выгрузке текста окна (§19).
     private const int DefaultMaxChars = 8_000;
+    /// <summary>Кап чтения содержимого поля ввода через TextPattern (выжимка/снапшот — не полный дамп документа).</summary>
+    private const int TextInputValueCap = 400;
     // Граница реестра дескрипторов: AutomationElement держит нативные/COM-ресурсы,
     // без вытеснения долгая сессия копит тысячи ссылок (утечка). Храним последние N.
     // §Волна2: 512→2048 — снапшоты регистрируют до 60 хендлов за вызов; при бурсте снапшотов
@@ -276,16 +278,40 @@ public sealed class UiaGrounder : IDisposable
             // корневом уровне не надо — offscreen-контейнер обычно держит offscreen-потомков.
             if (!cur.IsOffscreen && depth > 0 && (IsActionable(el) || InteractiveTypes.Contains(cur.ControlType)))
             {
+                bool isTextInputItem = cur.ControlType == ControlType.Edit || cur.ControlType == ControlType.Document;
+                // Безопасность (ревью р2 #10): поле-пароль не читаем (утечка секрета в облачный LLM).
+                bool isPasswordItem = false;
+                try { isPasswordItem = cur.IsPassword; } catch { }
                 string? value = null;
-                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
-                    value = vp.Current.Value;
+                bool hasTextSrc = false;
+                if (!isPasswordItem)
+                {
+                    if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
+                    {
+                        hasTextSrc = true;
+                        value = vp.Current.Value;
+                    }
+                    // Document/многострочный Edit без ValuePattern → TextPattern (иначе содержимое невидимо).
+                    if (!hasTextSrc && isTextInputItem
+                        && el.TryGetCurrentPattern(TextPattern.Pattern, out object? tpObj) && tpObj is TextPattern tp)
+                    {
+                        hasTextSrc = true;
+                        value = tp.DocumentRange.GetText(TextInputValueCap);
+                    }
+                }
+                // ЧЕСТНОСТЬ (репорт Джарвиса 2026-07-14): у ПУСТОГО поля ввода value = "" ЯВНО
+                // (не null/пропуск) — Name такого поля обычно серый placeholder, и без явной пустоты
+                // модель принимала подсказку за введённый текст. Поле-пароль → маркер, не содержимое.
+                string? valueOut = isPasswordItem && isTextInputItem ? "•••" // [защищено]
+                    : (hasTextSrc && string.IsNullOrEmpty(value) && isTextInputItem) ? ""
+                    : (string.IsNullOrEmpty(value) ? null : value);
                 System.Windows.Rect b = cur.BoundingRectangle;
                 items.Add(new SnapshotItem(
                     Handle: RegisterHandle(el),
                     Role: ShortRole(cur.ControlType.ProgrammaticName),
                     Name: cur.Name ?? "",
                     AutomationId: string.IsNullOrEmpty(cur.AutomationId) ? null : cur.AutomationId,
-                    Value: string.IsNullOrEmpty(value) ? null : value,
+                    Value: valueOut,
                     X: double.IsInfinity(b.X) ? 0 : b.X,
                     Y: double.IsInfinity(b.Y) ? 0 : b.Y,
                     W: double.IsInfinity(b.Width) ? 0 : b.Width,
@@ -459,18 +485,48 @@ public sealed class UiaGrounder : IDisposable
         try
         {
             string name = el.Current.Name ?? "";
+            System.Windows.Automation.ControlType ct = el.Current.ControlType;
+            bool isTextInput = ct == ControlType.Edit || ct == ControlType.Document;
+            // Безопасность (ревью р2 #10): поле-ПАРОЛЬ (IsPassword) НЕ читаем — некоторые провайдеры UIA
+            // отдают реальный текст через ValuePattern/TextPattern; он уходил бы в облачный LLM/контекст.
+            // Зеркалит денилист секретов (.env/id_rsa). Помечаем [ЗАЩИЩЕНО], значение не трогаем.
+            bool isPassword = false;
+            try { isPassword = el.Current.IsPassword; } catch { }
             string value = "";
+            bool hasTextSource = false;
 
-            // TryGetCurrentPattern — НЕ GetCurrentPattern (тот бросает на неподдержке).
-            if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
-                value = vp.Current.Value ?? "";
-
-            if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(value))
+            if (!isPassword)
             {
-                string role = el.Current.ControlType.ProgrammaticName;
+                // TryGetCurrentPattern — НЕ GetCurrentPattern (тот бросает на неподдержке).
+                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object? vpObj) && vpObj is ValuePattern vp)
+                {
+                    hasTextSource = true;
+                    value = vp.Current.Value ?? "";
+                }
+                // Document/многострочный Edit (Блокнот!) часто БЕЗ ValuePattern — только TextPattern.
+                // Без фолбэка их содержимое было НЕВИДИМО выжимке (репорт Джарвиса 2026-07-14: «не вижу,
+                // что ввёл»), а пустота — недоказуема. Читаем кап (это выжимка, не полный дамп).
+                if (!hasTextSource && isTextInput
+                    && el.TryGetCurrentPattern(TextPattern.Pattern, out object? tpObj) && tpObj is TextPattern tp)
+                {
+                    hasTextSource = true;
+                    value = tp.DocumentRange.GetText(TextInputValueCap) ?? "";
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(name) || !string.IsNullOrWhiteSpace(value) || (isTextInput && (hasTextSource || isPassword)))
+            {
+                string role = ct.ProgrammaticName;
                 sb.Append(role).Append(": ").Append(name);
-                if (!string.IsNullOrWhiteSpace(value))
+                if (isPassword && isTextInput)
+                    sb.Append(" [ЗАЩИЩЕНО]"); // поле-пароль — содержимое не читаем (утечка секрета)
+                else if (!string.IsNullOrWhiteSpace(value))
                     sb.Append(" [").Append(value).Append(']');
+                else if (hasTextSource && isTextInput)
+                    // ЧЕСТНОСТЬ (репорт Джарвиса 2026-07-14): у ПУСТОГО поля ввода Name — это, как
+                    // правило, серый placeholder («Напишите сообщение»), и без явной пометки модель
+                    // читала подсказку как введённый текст. [ПУСТО] = UIA подтвердил пустоту.
+                    sb.Append(" [ПУСТО]");
                 sb.AppendLine();
             }
         }

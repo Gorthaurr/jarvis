@@ -14,8 +14,11 @@ export type LatencyMark = "turn_end" | LatencyStage;
 export interface LatencyReport {
   /** Абсолютные временные метки (мс) по стадиям. */
   marks: Partial<Record<LatencyMark, number>>;
-  /** Главная метрика: turn_end → первый звук (§10). undefined, если стадии нет. */
+  /** turn_end → первый звук ОТПРАВЛЕН клиенту (серверная метка; сеть/буфер клиента ещё впереди). */
   firstAudioMs?: number;
+  /** Инкремент 0 — ГЛАВНАЯ mouth-to-ear метрика (§10): turn_end → рендерер РЕАЛЬНО начал воспроизведение
+   *  (audio.played ack). undefined, если клиент не прислал ack (старый клиент / ход не озвучен). */
+  firstAudioPlayedMs?: number;
   /** turn_end → первый токен LLM. */
   llmFirstTokenMs?: number;
   /** turn_end → первый чанк TTS. */
@@ -57,18 +60,26 @@ export class LatencyTracker {
 
   report(): LatencyReport {
     const firstAudioMs = this.delta("turn_end", "audio");
+    const firstAudioPlayedMs = this.delta("turn_end", "audio_played");
     const llmFirstTokenMs = this.delta("turn_end", "llm_first_token");
     const ttsFirstChunkMs = this.delta("turn_end", "tts_first_chunk");
     const ttsSynthMs = this.delta("llm_first_token", "tts_first_chunk");
-    const withinTarget = firstAudioMs === undefined ? undefined : firstAudioMs <= TARGET_FIRST_AUDIO_MS;
+    // §10 «уложились» считаем по РЕАЛЬНОМУ звуку (mouth-to-ear), если он есть и НЕ отрицателен (ревью #2:
+    // отрицательная дельта = clock-skew / фон / мис-корреляция → НЕ считать ложным «уложился»); иначе по
+    // отправке. Если и она отрицательна/пуста → withinTarget неопределён (buildSummary покажет «неполный»).
+    const played = firstAudioPlayedMs !== undefined && firstAudioPlayedMs >= 0 ? firstAudioPlayedMs : undefined;
+    const sent = firstAudioMs !== undefined && firstAudioMs >= 0 ? firstAudioMs : undefined;
+    const target = played ?? sent;
+    const withinTarget = target === undefined ? undefined : target <= TARGET_FIRST_AUDIO_MS;
     return {
       marks: { ...this.marks },
       firstAudioMs,
+      firstAudioPlayedMs,
       llmFirstTokenMs,
       ttsFirstChunkMs,
       ttsSynthMs,
       withinTarget,
-      summary: buildSummary({ firstAudioMs, llmFirstTokenMs, ttsSynthMs, withinTarget }),
+      summary: buildSummary({ firstAudioMs, firstAudioPlayedMs, llmFirstTokenMs, ttsSynthMs, withinTarget }),
     };
   }
 }
@@ -76,6 +87,7 @@ export class LatencyTracker {
 /** Однострочная сводка стадий — видно, где время (фраза→LLM доминирует / TTS / итог). */
 function buildSummary(r: {
   firstAudioMs?: number;
+  firstAudioPlayedMs?: number;
   llmFirstTokenMs?: number;
   ttsSynthMs?: number;
   withinTarget?: boolean;
@@ -83,8 +95,10 @@ function buildSummary(r: {
   // Отрицательный/неполный firstAudioMs = фоновый/онбординг-оборот (метки не по порядку) — не шумим.
   if (r.firstAudioMs === undefined || r.firstAudioMs < 0) return "оборот неполный (фон/онбординг)";
   const ms = (n?: number): string => (n === undefined ? "—" : `${Math.round(n)}мс`);
+  // →звук = отправлено серверу; →ухо = реально сыграно у клиента (audio.played, инкремент 0). «—», пока ack нет.
+  const played = r.firstAudioPlayedMs !== undefined && r.firstAudioPlayedMs >= 0 ? ` · →ухо ${ms(r.firstAudioPlayedMs)}` : "";
   return (
-    `фраза→LLM ${ms(r.llmFirstTokenMs)} · LLM→TTS ${ms(r.ttsSynthMs)} · →звук ${ms(r.firstAudioMs)} ` +
+    `фраза→LLM ${ms(r.llmFirstTokenMs)} · LLM→TTS ${ms(r.ttsSynthMs)} · →звук ${ms(r.firstAudioMs)}${played} ` +
     `(цель ${TARGET_FIRST_AUDIO_MS}мс ${r.withinTarget ? "✓" : "✗"})`
   );
 }

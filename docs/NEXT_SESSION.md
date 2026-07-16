@@ -1,4 +1,63 @@
-# NEXT_SESSION — с чего начать (обновлено 2026-07-12)
+# NEXT_SESSION — с чего начать (обновлено 2026-07-13)
+
+## 🟢 ПРОДОЛЖИ ОТСЮДА (скажут «продолжи» → делай ЭТО по порядку)
+
+> **Дисциплина владельца (память `adversarial-review-all-changes`, ОБЯЗАТЕЛЬНО):** каждый инкремент →
+> адверсариальное ревью через Workflow **СО ВСЕХ УГЛОВ** (корректность/конкурентность/edge/ресурсы/
+> безопасность/ПОКРЫТИЕ-в-проде/регрессии) → чинить CONFIRMED с тестами → контрольный проход **до 0** →
+> PR (push→`gh pr create`) → после фул-ревью **merge** (push/PR/merge ТОЛЬКО по явному «делай»; merge —
+> необратим, при красном CI/конфликте СТОП). Крупную фичу вести ИНКРЕМЕНТАМИ, каждый — свой PR-цикл.
+> Голос живьём Я НЕ ПРОГОНЯЮ (нет микрофона) — логику юнит-тестирую, живая калибровка за владельцем.
+
+**ГДЕ МЫ:** PR **#2** (10 волн: Волна 3, память Б, интеграционное ревью, 2 аудита ядра, исследования,
+планы) **СМЕРЖЕН в `main`** (origin/main `1332e62`). Тесты на тот момент: сервер 1210 / клиент 195.
+
+**СТАТУС Инкремента 0 (realtime латентный харнес mouth-to-ear «конец речи → первый звук РЕАЛЬНО сыгран у
+клиента»): ✅ ЗАКРЫТ, review до нуля, ЗАКОММИЧЕН на `feat/realtime-inc0`.** 3 находки предыдущего all-angle
+ревью исправлены; ещё 3 раунда адверс-ревью через Workflow (24+9+5 агентов) сошлись 7→1→0 CONFIRMED, все
+фиксы mutation-verified. Тесты: **сервер 1223 / клиент 205**, tsc чист, сборка ок.
+**Осталось (по команде владельца):** `git push -u origin feat/realtime-inc0` → `gh pr create --base main`
+(PR #3) → после фул-ревью merge. НЕ запушено/не в PR.
+
+### ЧТО ЗАКРЫТО в Инкременте 0 (карта фиксов)
+- **[HIGH+MED, metric-integrity] мис-атрибуция ПРОАКТИВНОЙ/ФОНОВОЙ/приветственной речи** — `startTts` получил
+  параметр `m2eSeq`: тег `gen` ставится ТОЛЬКО для собственного ответа пользовательского хода (runAgent →
+  `turnSeq`); проактив/онбординг (`speak()`)/фоновый итог (`maybeDrainSpeech`) идут БЕЗ тега → их ack не
+  замыкается на висящий снапшот. Клиент: sticky `lastChunkGen` → per-utterance `curUtterGen` (сброс на ВСЕХ
+  границах: last MP3/PCM, `stop()`, PCM-сирота, live-last и live-ДРЕНАЖ у `PcmLivePlayer`). SANITY-потолок
+  `M2E_MAX_PLAUSIBLE_MS`=`envInt("JARVIS_M2E_MAX_MS", 600_000)` (10 мин) ловит ЛИШЬ абсурд + логирует отброс
+  (прежние 30с молча резали легитимный P95-хвост многораундового разговорного хода — главная находка ревью #1).
+- **[LOW, integration-gap] `onMouthToEar` проброшен в боевом gateway** — `createVoicePipeline` (router-ws)
+  зовёт `metrics.recordMouthToEar(ms, turnSeq, userId)` (durable JSONL `type:"mouth_to_ear"` в `metrics.jsonl`).
+- **Тесты (+19, все mutation-verified):** `pipeline.test.ts` (мис-атрибуция без тега, sanity-потолок,
+  стрим-путь), `audio.test.ts` (per-utterance gen, PCM orphan/stop/live-last/drain), `metrics.test.ts`.
+
+### СЛЕДУЮЩИЕ realtime-инкременты (каждый = свой PR-цикл; план `docs/REALTIME_HYBRID_IMPL_PLAN_2026-07-12.md`)
+- **B+C** — Fast Talker-filler на разговорной ветке + перекрытие TTS-фраз (стрим v3 с эмоцией). **Наибольший
+  скачок «живости».** Talker-модель **переключаема**: дефолт быстрый **Sonnet-тир** (правило владельца
+  «Haiku НЕ используем» — Haiku за env-флагом ВЫКЛ; включать Haiku-как-голос-фронт только с явного «да» владельца).
+- **A** — Smart Turn v3 endpointing (ONNX 8МБ, русский) рядом с VAD — seam с мокабельным инференсом; живая
+  РУ-калибровка за владельцем. ⚠️ проверить боевой аудио-путь (audio.frame WS vs LiveKit).
+- **D** — спекуляция на partial STT / adaptive barge / loopback-AEC / WebRTC (позже, поштучно).
+- **Call-присутствие** (`docs/CALL_PRESENCE_IMPL_PLAN_2026-07-12.md`): Discord официальным API, СберДжаз/Meet
+  через VB-CABLE, слух через per-process loopback. ⚠️ **ПЕРВЫМ живой зонд:** есть ли Process Loopback API на
+  Windows build 19045 (может отсутствовать до 20348 → фолбэк system-loopback + наушники). `JARVIS_CALL_MODE=0`
+  дефолт, гейт авторизации outward-речи.
+
+### Прочие открытые хвосты (не realtime)
+- Аудит-2 вынес 3 находки владельцу: `docs/AUDIT_2_OPEN_FINDINGS_2026-07-12.md` ([9] дубль отправки при
+  таймауте, [10] killOfficeTree бьёт все инстансы, [11/12] append_row затирает B1) — COM/дизайн, решать владельцу.
+- Extension-фиксы аудита-2 ([3] keep-alive, [4] ws.onerror) — нужен **живой reload+смоук в Chrome**.
+- Owner-запрошенный концепт «своя среда исполнения» (`docs/RESEARCH_EXECUTION_ENVIRONMENT_2026-07-12.md`) —
+  реализация по решению владельца (первый шаг: persistent code-сессия + `jarvis.*` SDK-фасад).
+
+### Команды (из `jarvis/`)
+- Сервер: из `apps/server` → `npx tsx src/index.ts` (порт 8787, НЕ watch). Клиент: `pnpm --filter @jarvis/client start`.
+- Тесты: `apps/server`/`apps/client` → `npx vitest run`. Typecheck: `npx tsc --noEmit`. Сборка клиента+ext: `node apps/client/scripts/build.mjs`.
+- Текст-драйвер (сам тестирую): `_jarvis_cmd.mjs` + dev-эндпоинты (см. `docs/HOW_IT_WORKS.md`).
+
+---
+
 
 > 🔴 **ЧИТАТЬ ПЕРВЫМ: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)** — механизмы + как тестировать текстом + мышление.
 > Ветка: `feat/harness-wave3`. Сделано автономно 2026-07-11/12 (закоммичено):

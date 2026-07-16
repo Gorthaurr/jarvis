@@ -72,6 +72,8 @@ export interface TtsChunk {
   format?: "pcm16";
   /** Частота PCM (есть только при format="pcm16"). */
   sampleRate?: number;
+  /** Realtime инкремент 0: инвалидатор хода (pipeline.gen) — эхом вернётся в audio.played для mouth-to-ear. */
+  gen?: number;
 }
 
 export interface TtsOpts {

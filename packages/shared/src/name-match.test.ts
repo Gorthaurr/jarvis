@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type Candidate,
+  bearsName,
   classifyKind,
   foldName,
   latinToCyrillic,
@@ -116,8 +117,16 @@ describe("pickRecipient — РЕШЕНИЕ (recall vs решение)", () => {
     expect(r.ranked.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("один и тот же алфавит, точное → SEND", () => {
+  it("один и тот же алфавит, точное при ТЁЗКЕ → ASK (§P1: раньше exact слал и это дало «не ту Катю»)", () => {
+    // «Катя» и «Катя из зала» — двое носят запрошенное имя; форензика 2026-07-14: авто-отправка по
+    // точному совпадению ушла не тому человеку. Теперь при тёзках спрашиваем владельца.
     const r = pickRecipient("Катя", [c("Катя"), c("Катя из зала")]);
+    expect(r.action).toBe("ask");
+    expect(r.reason).toBe("namesakes");
+  });
+
+  it("один и тот же алфавит, точное БЕЗ тёзок → SEND", () => {
+    const r = pickRecipient("Катя", [c("Катя"), c("Олег")]);
     expect(r.action).toBe("send");
     expect(r.title).toBe("Катя");
   });
@@ -188,9 +197,72 @@ describe("pickRecipient: ищем в МОИХ переписках, паблик
     expect(r.action).toBe("none");
   });
 
-  it("без peerId (unknown) поведение прежнее — обратная совместимость", () => {
-    const r = pickRecipient("Катя", [{ title: "Катя" }, { title: "Катя из зала" }]);
+  it("без peerId (unknown): тёзки распознаются и тут → ask/namesakes (§P1); одиночное точное — send", () => {
+    const namesakes = pickRecipient("Катя", [{ title: "Катя" }, { title: "Катя из зала" }]);
+    expect(namesakes.action).toBe("ask");
+    expect(namesakes.reason).toBe("namesakes");
+    const single = pickRecipient("Катя", [{ title: "Катя" }, { title: "Олег" }]);
+    expect(single.action).toBe("send");
+    expect(single.title).toBe("Катя");
+  });
+});
+
+describe("pickRecipient — тёзки (§P1, форензика 2026-07-14 «не та Катя»)", () => {
+  const mine = (title: string, peerId: string): Candidate => ({ title, peerId, mine: true, kind: "user" });
+
+  it("точная «Катя» + префиксная «Катя Любимая» → ask/namesakes (exact больше не бьёт тёзок)", () => {
+    // Живой эпизод: «напиши кате…» ушло НЕ ТОЙ Кате — точное совпадение авто-отправляло, хотя
+    // короткое имя носят двое. Теперь решает владелец.
+    const r = pickRecipient("катя", [mine("Катя", "1"), mine("Катя Любимая", "2")]);
+    expect(r.action).toBe("ask");
+    expect(r.reason).toBe("namesakes");
+  });
+
+  it("две «Кати …» без точной → ask/namesakes", () => {
+    const r = pickRecipient("катя", [mine("Катя Иванова", "1"), mine("Катя Петрова", "2")]);
+    expect(r.action).toBe("ask");
+    expect(r.reason).toBe("namesakes");
+  });
+
+  it("ревью р1 #5/#10: СМЕШАННЫЙ пул «Катя»(кир)+«Katya Beloved»(лат) → ask/namesakes (кросс-скрипт тёзка)", () => {
+    const r = pickRecipient("катя", [mine("Катя", "1"), mine("Katya Beloved", "2")]);
+    expect(r.action).toBe("ask");
+    expect(r.reason).toBe("namesakes");
+  });
+
+  it("ревью р1 #12/#17: имя не в начале («Мама Катя»/«Любимая Катя») → ask/namesakes (word-inclusion)", () => {
+    expect(pickRecipient("катя", [mine("Катя", "1"), mine("Мама Катя", "2")]).reason).toBe("namesakes");
+    expect(pickRecipient("катя", [mine("Катя", "1"), mine("Любимая Катя", "2")]).reason).toBe("namesakes");
+  });
+
+  it("ревью р1 #11: обе латинские тёзки «Katya»+«Katya Rabota» на «катя» → namesakes (не догадка модели)", () => {
+    const r = pickRecipient("катя", [mine("Katya", "1"), mine("Katya Rabota", "2")]);
+    expect(r.reason).toBe("namesakes");
+  });
+
+  it("ПОЛНОЕ имя с точным чатом при короткой тёзке → send (регрессии exact-приоритета нет)", () => {
+    // Владелец сказал полное имя — оно однозначно; короткий чат «Катя» его целиком НЕ носит.
+    const r = pickRecipient("катя иванова", [mine("Катя Иванова", "1"), mine("Катя", "2")]);
+    expect(r.action).toBe("send");
+    expect(r.title).toBe("Катя Иванова");
+  });
+
+  it("единственная точная «Катя» без тёзок → send как раньше", () => {
+    const r = pickRecipient("катя", [mine("Катя", "1"), mine("Пётр", "2")]);
     expect(r.action).toBe("send");
     expect(r.title).toBe("Катя");
+  });
+
+  it("«Герман»→единственный Herman (транслит), без тёзки → send", () => {
+    const r = pickRecipient("герман", [mine("Herman", "1"), mine("Олег", "2")]);
+    expect(r.action).toBe("send");
+    expect(r.title).toBe("Herman");
+  });
+
+  it("bearsName: имя в любой позиции/алфавите — носитель; чужое (Катерина/Катюша) — нет", () => {
+    for (const t of ["Катя", "Катя Любимая", "Мама Катя", "Katya", "Katya Beloved"])
+      expect(bearsName("катя", t), t).toBe(true);
+    for (const t of ["Катерина", "Катюша", "Пётр", "Катенька"])
+      expect(bearsName("катя", t), t).toBe(false);
   });
 });

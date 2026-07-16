@@ -49,6 +49,15 @@
   Файловый sink: `obs/file-log.ts` (буфер+флаш, fail-safe) через `addLogSink` в @jarvis/shared; JSONL-метрики:
   `MetricsCollector.enableJsonl()`. Выключатели `JARVIS_FILE_LOG=0`/`JARVIS_METRICS_JSONL=0`. Поднимается в
   `gateway.listen()`, dispose в `close()`.
+  - **Гигиена/здоровье (ревью learn-coding-agent 2026-07-15):** (1) `metrics.jsonl` РОС без предела —
+    `pruneOldLogs` чистит по возрасту ТОЛЬКО `server-*.log` (это ЦЕННАЯ longitudinal-экономика `/cogs`, по
+    возрасту удалять нельзя). Теперь ротация ПО РАЗМЕРУ: `>JARVIS_METRICS_MAX_BYTES` (деф 64 МБ) → сдвиг в
+    `metrics.jsonl.1` (одна прошлая генерация), диск ~2×cap; счётчик байт в ОЗУ (ленивая init от файла),
+    сброс ТОЛЬКО при успешном rename (провал на Windows-локе → повтор на след. записи, бонд держится). Единый
+    писатель `appendJsonl` (DRY, был дубль в record/recordRound/recordMouthToEar). (2) `startProcessHealth()`
+    (из `listen()`, стоп в `disableJsonl`) — durable строка `type:"process_health"` (rss/heap/uptime/cpu/node)
+    раз в 5 мин: корреляция при регрессе памяти/CPU (был слеп на «оглох/OOM»). (3) file-log sink: кап `meta`
+    (`META_MAX_CHARS` 8192) — крупный payload не раздувает дневной лог.
 
 ## Карта репозитория (pnpm monorepo)
 - `packages/protocol/src/actions.ts` — ActionCommand/ActionResult (контракт server↔client).
@@ -92,6 +101,14 @@
 - `brain/agent/index.ts` — **ядро**: `handleUserText` → детерминированные перехваты (имя, режим-маска,
   **эмоция**) → tier0 (`runLocalIntent`) / `runAgentLoop` (LLM + tools, эскалация тира §7, anti-runaway,
   фоновые задачи §20). Терминал: честный провал вместо ложного «Готово» (`error-voice.ts`).
+  - **ГАРД КОНТЕКСТ-ОКНА (hardening, ревью learn-coding-agent 2026-07-15):** промпт растёт с каждым tool-
+    раундом (крупные web/OCR/browser-дампы) → на патологически длинной задаче следующий раунд мог упереться в
+    ЖЁСТКИЙ HTTP 400 (max context ~200K) на середине. `lastPromptTokens` (реальный размер прошлого промпта =
+    input+cache_read+cache_creation) в блоке бюджета: `>=CONTEXT_HARD_TOKENS`(деф 185K) → ранний ЧЕСТНЫЙ свёрток
+    (`contextWrap`, подвид timedOut, ok=false, «перестала помещаться в память»); `>=CONTEXT_SOFT_TOKENS`(деф 150K)
+    → одноразовый нудж «сворачивайся». Детерминированно, БЕЗ LLM-суммаризации (та ломала бы prompt-кеш §15 и
+    могла выбросить состояние экрана → ложный успех — почему autoCompact у Claude Code сознательно НЕ берём).
+    Watermark отстаёт на раунд (headroom ~15K гасит типовой прирост); env `JARVIS_CONTEXT_SOFT/HARD_TOKENS`.
   - **СТРУКТУРНЫЙ verify/анти-капитуляция (P0, 2026-06-30, корень «сдаётся+врёт готово»):** петля больше
     НЕ верит первому терминальному тексту. `anyMutateSucceeded` (успех ТОЛЬКО `toolEffect==="mutate"`, не
     нейтрального web_search) гейтит анти-капитуляцию и masked-failure → «погуглил и сдался»/«нейтральный
@@ -461,6 +478,87 @@
       задачи блокируется (не дёргаем курсор)... НО после ЧЕСТНОГО промаха `browser_act` (`markBrowserActMiss`
       на исключении/autoplay-гейте) открывается окно `canvasClickAllowed` (30с), где координатный
       `input_click` РАЗРЕШЁН — для canvas/WebGL/видео без DOM-кнопки (раньше «сдавался» на этом классе).
+    - **ВЕБ-ГЛАЗА НА ПРОИЗВОЛЬНЫХ САЙТАХ (2026-07-14, корень «на Я.Музыке заебись, на других сайтах говно»):**
+      Я.Музыка работала на хардкод-ветках инжектора + сид-навыке, а generic-сайт был слеп. Закрыто:
+      (1) `browser_inspect`/`browser_tabs`/`browser_close` → ГОРЯЧИЕ (были COLD со стейл-комментом «CDP —
+      редко», при этом persona звала inspect «main move on ANY site», а verify-нуджи требовали его в
+      лестнице — cold-танец load→call = задокументированный промах, прецедент ui_*);
+      (2) `browser_read` ЧЕСТНЫЙ: `selectorIntent` больше не игнорируется — расширение фильтрует строки
+      по ключевым словам (контекст ±1, `filtered:false` → пометка «фильтр ничего не выделил») + разделы
+      h1-h3 + ТЕКСТ IFRAME'ов (агрегация allFrames, служебные фреймы <40 симв отсекаются);
+      (3) `browser_inspect` видит IFRAME (элементы с `frameId`, список `frames`) и SHADOW DOM (обход
+      открытых root'ов, селектор `host >>> inner`); `browser_act` понимает `params.frameId` (явный таргет)
+      и `>>>`-селекторы, а click/type/play/pause/seek при промахе top-фрейма САМИ прощупывают фреймы
+      (`probeFrames` — только поиск, действие затем точно в найденный фрейм);
+      (4) клик, вызвавший НАВИГАЦИЮ, больше не «frame was removed»-провал: SW-обёртка `runInPage` сверяет
+      URL/status вкладки → честный `navigated` (observed на сервере); SPA-роут ловится по `location.href`
+      (`withNav` в `robustClickMain`);
+      (5) сид-навык `learned__generic-site-actions` — цикл «inspect → act{selector} → сверь исход» как
+      процедурное знание для любого незнакомого сайта (when БЕЗ имён платформ — detectPlatforms не понимает
+      отрицаний, иначе ложный platform-boost против профильных навыков).
+      **АДВЕРС-РЕВЬЮ (2 прохода, воркфлоу 67+20 агентов Opus; 23 CONFIRMED в 1-м + 2 в фиксах — ВСЕ закрыты):**
+      (а) ложный `navigated`-успех: `urlBefore` перечитывается ПОСЛЕ waitForTabReady; смерть контекста →
+      navigated ТОЛЬКО для click/shake и с `uncertain:true` (сервер НЕ ставит `observed` — verify-долг цел);
+      при явном frameId смерть = честный `frame_gone` (запрет слепого повтора), не вкладочный успех;
+      type/enter/seek при смерти контекста — честный провал, не «переход». (б) probe рекламных iframe:
+      `probeFrames` берёт МАКС по score среди НЕ-приватных фреймов (SSRF-фильтр `isPrivateHost`), text-порог
+      сильный (≥80, точное/целое слово — префикс/подстрока убраны), media — видимый+крупный (video ≥160×90;
+      audio играющий-не-muted ∨ видимый, `duration>0` убран — скрытый трекер не проходит); probe гейтится
+      классом ошибки `not_found` (не `no_effect`/`frame_gone` — иначе двойной клик). (в) M11: page-controlled
+      `navigated`/`frameUrl` — в `<untrusted_content>` с санитизацией `[<>]`; (г) filtered=OR по всем фреймам,
+      сматчившие iframe в приоритете капа; (д) type+enter в ОДНОМ вызове = один документ (раздельный enter при
+      фокусе вне документа — честный not_found). Тесты: сервер 1291, +браузерных кейсов; `isPrivateHost` — юнит-
+      проверка (fc/fd публичные домены не ложно-приватны, IPv6-литералы ::1/fe80/fc/fd приватны).
+      ⚠️ Открыто: jarvis SDK (мост code_run) намеренно НЕ пускает `browser.*` (BRIDGE_ALLOWED_KINDS —
+      §14-гейты отправки в залогиненных сессиях); read-only browser в SDK — отдельное решение владельца.
+      ⚠️ Живой смоук в реальном Chrome (reload расширения + не-Яндекс сайт с iframe/shadow) — за владельцем.
+    - **AX-Ref РЕДИЗАЙН — АДРЕСАЦИЯ ПО ИДЕНТИЧНОСТИ (2026-07-15, `docs/WEB_ENV_REDESIGN_2026-07-15.md`; за
+      флагом `JARVIS_BROWSER_REF`, деф OFF — нужен живой смоук owner'а):** корень «на Я.Музыке заебись, на
+      других говно» = хардкод под Яндекс + generic-путь адресуется ХРУПКИМ text/nth-of-type-селектором,
+      каждый act пере-резолвит путь → лишние раунды + тихий неверный клик на списках. Механизм:
+      (1) **ref-реестр** в ISOLATED-world расширения (`globalThis.__jarvisRefs = {gen, map}`) — MV3 isolated
+      world персистентен per (расширение,фрейм,документ), переживает `executeScript` и LLM-раунды, умирает на
+      навигации → ref сам протухает. `inspectPageInPage(refMode)` минтит `ref=e<gen>_<n>` (frame-scoped SW-префикс
+      `f<frameId>`), кладёт `Element` в map, старый gen отбрасывает; `tabAct`/`tabBatch` адресуют по ref:
+      click-подобные — `stampRefIsolated`(nonce на 1 узел, uniqueness-checked)→MAIN `robustClickMain{nonce}`
+      (React-first минует Swiper); type/seek/scroll/enter — `actByRefIsolated` (ISOLATED, нативный readback
+      value). Устаревший gen/`!isConnected` → `ref_stale` (честный err, НЕ слепой хит; сервер `looksLikeRefStale`
+      → не открывает canvas-хатч). Injected-функции self-contained (ax.js-модуль НЕ годится — executeScript
+      сериализует func без замыканий; хелперы axName/stateOf/anchorFor ИНЛАЙН). (2) **СОСТОЯНИЕ в снимке** (всегда,
+      аддитивно): `checked/selected/expanded/pressed/value/empty` + `accessibleName` (вопрос «тумблер вкл?» без
+      screen_capture; пустое поле `empty:true` — серый текст = placeholder). (3) `selFor` — фикс МЁРТВОГО `break`
+      (якорь nth-of-type к стабильному предку) + расширенный data-* (cy/e2e/automation-id). (4) **`browser_batch`**
+      (`tabBatch`, COLD пока за флагом) — берст ≤12 шагов по ref одним вызовом (веб-аналог `input_batch`): пред-
+      валидация ВСЕХ ref по фреймам ДО действий, стоп на первой ошибке, честное «k из n»; логин-форма 5-6→3 раунда.
+      `BLIND_MUTATE`+mutate (error-voice), observed НЕ ставит (исход сверяется). (5) **Яндекс-хардкод ГЕЙЧЕН на
+      `!refMode`** (`robustClickMain`/`pageActInPage` `location.href='music.yandex.ru'`) — при refMode знание
+      приходит РЕЦЕПТОМ-хинтом, не хардкодом; refMode OFF → байт-в-байт как раньше (регресс-безопасно). (6)
+      **РАНЖИРОВАННЫЙ observed** (`browser.ts`): STRONG (`value`/`checked` readback, `media.paused/currentTime`,
+      достоверная навигация !uncertain) снимает verify-долг; WEAK (`changed:true` контейнер-диф, uncertain-nav)
+      НЕ снимает; КОММИТ отправки (`type+enter`/`enter`/`submit`) НЕ снимается наблюдением поля (исход постинга
+      сверяется). CDP-read фикс: обёрнут `untrusted()`. (7) **PER-HOST РЕЦЕПТЫ** `memory/site-recipes.ts` (стор
+      по ТОЧНОМУ hostname — мимо шумного e5; recall/upsert/reinforce/demote+failCount-suppress, persist tmp→rename;
+      seed = бывший Яндекс-хардкод как ДАННЫЕ + youtube; синглтон lazy env); recall инжектится ДОВЕРЕННЫМ хинтом в
+      `browser_open` ТОЛЬКО под refMode. Сид-навыки `learned__generic-site-actions` v2 / `yandex-music-control` v3
+      переписаны на ref/batch-цикл. Схемы `browser_inspect`/`browser_act`(params.ref)/`browser_batch` обновлены.
+      **АДВЕРС-РЕВЬЮ (6 линз + верификаторы; 7 CONFIRMED — ВСЕ исправлены, верификаторы упали по лимиту сессии →
+      адъюдицировано вручную):** (#1) коммит отправки `enter:"true"` СТРОКОЙ — расширение постит по truthy, но
+      серверный `committing` (`===true`) не срабатывал → observed снимал долг на реальной отправке; теперь коммит
+      по авторитетному `r.submitted===true`. (#2) seed-дубль `www.youtube.com` затирал полный `youtube.com` (оба
+      нормализуются) — убран. (#4, HIGH) ref play/pause ставил observed даже при autoplay-гейте/чужом медиа —
+      теперь rc.playing только при СОВПАДЕНИИ с намерением (play→playing/pause→paused), иначе честный
+      autoplayBlocked (как mediaControlMain); MSE-плеер без media-элемента долг по playing не снимает. (#5) стейл
+      `params.frameId` при top-ref резолвил ref в реестре ЧУЖОГО фрейма (gen не уникален между фреймами) — фрейм
+      теперь ИСКЛЮЧИТЕЛЬНО из ref. (#6) page-controlled `value`-readback шёл в ДОВЕРЕННОЕ тело — вынесен в
+      `<untrusted_content source="browser-act-observation">` с санитизацией (как navigated/frameUrl; password уже
+      маскировался в readback — поймано до ревью). (#3/#7) сид-навыки учили ref/batch как основной путь при
+      деф-OFF флаге — формулировки смягчены (ref/batch условны «если доступен», selector/text дефолт-дружественны).
+      **Открыто (осознанно):** авто-запись рецепта из успешного прохода (upsert learned) — нужен distiller/
+      loop-хук, API готов; SoM для canvas; промоут `browser_batch` в ГОРЯЧИЕ после включения флага. Тесты:
+      сервер 1302 (+site-recipes +AX-Ref browser-кейсы вкл. регресс #1/#6), клиент 234; extension esbuild+node --check. ⚠️ **Живой
+      смоук в реальном Chrome (flip JARVIS_BROWSER_REF=1 + reload расширения + сайт с iframe/shadow/списками/
+      логин-формой; регресс-гейт на Я.Музыке ПЕРЕД дефолт-включением) — за владельцем; node --check ref-реестр/
+      nonce-мост/batch не ловит.**
 - **ЛЕНИВАЯ ЗАГРУЗКА инструментов (§15, фундамент MCP):** `tools[]` шлётся в префиксе ПЕРЕД `system` БЕЗ
   cache_control → любая мутация набора между ходами рушит весь prompt-кеш. Поэтому: ГОРЯЧИЕ инструменты
   (частые) всегда в наборе; ХОЛОДНЫЕ (`packages/tools COLD_TOOL_NAMES` — редкие + будущие MCP) НЕ шлются
@@ -476,7 +574,11 @@
   `ctx.mcp.callTool` (строго после KIND_BY_TOOL, не затеняет штатные; ошибка→честный err). MCP-tools =
   ХОЛОДНЫЕ (каталог §15, tool_load по имени). Проверено end-to-end: `think` (sequential-thinking, npx)
   подключается за ~2.3с. **Добавить сервер = строка в `mcp.json`** (есть закомментированные примеры
-  git/fetch/time/github/postgres/playwright в `_disabled`). ⚠️ **uvx-сервера (Python: git/fetch/time) на
+  git/fetch/time/github/postgres/playwright в `_disabled`). **HTTP-транспорт (ревью learn-coding-agent
+  2026-07-15):** сервер с полем `url` в `mcp.json` (+опц. `headers` со статическим `Bearer ${ENV}`) идёт через
+  `StreamableHTTPClientTransport` (удалённый/SaaS MCP) вместо stdio; `parseMcpConfig` (чистый, отдельно от IO)
+  валидирует `^https?://` (иначе skip), резолвит `${ENV}` в url/headers. Без OAuth (тяжёл на headless single-user
+  сервере) и без cross-app-access (enterprise-федерация, не наш профиль) — оба осознанно мимо; PAT/Bearer покрывает. ⚠️ **uvx-сервера (Python: git/fetch/time) на
   Windows гонятся за установку pywin32 в кэше uv при ПЕРВОМ конкурентном запуске (os error 32) → нужен
   ОДНОРАЗОВЫЙ ПОСЛЕДОВАТЕЛЬНЫЙ прогрев `uvx mcp-server-<x>` ДО первого boot** (см. `_uvx_note` в mcp.json);
   поэтому в активных `servers` держим только проверенно-подключающиеся (честность: не плодим мёртвые).
@@ -540,6 +642,16 @@
   порог `JARVIS_SKILL_SEMANTIC_MIN` деф 0.82) с лексическим фолбэком `matchLearnedSkill`; дедуп на сейве
   тоже семантический `findDuplicateSemantic` (порог 0.9, строже — лечит дубли дота/доте); кэш векторов
   триггеров `triggerVecCache`; эмбеддер передаётся в `createSkillProvider(embedder)` из server.ts.
+  **ГИБРИД + PLATFORM-BOOST (2026-07-14, `memory/skill-recall.ts`, живой тест сидов):** e5-small ШУМНЫЙ
+  (несвязанные навыки набирают 0.82+ у порога) и путал платформы («в дискорде» уходило к telegram-навыку).
+  Гибридный ранг = косинус + лексический бонус (`LEXICAL_WEIGHT` деф 0.2, доля distinctive-токенов, капнута
+  ≤1) + platform-boost (`detectPlatforms` по токену discord/telegram/vk/instagram/youtube/dota: та же
+  платформа +`PLATFORM_BOOST` 0.1, чужая −`PLATFORM_PENALTY` 0.15). Бусты применяются ТОЛЬКО выше
+  `RAW_COS_FLOOR` (деф 0.7) — иначе далёкий навык протаскивался через порог (ревью); штраф чужой платформы —
+  всегда. Живьём: VK-запрос корректно тянет VK-навык (platformBoost), telegram не перехватывает Discord,
+  регресса нет (Dota v5 выигрывает). ⚠️ **ПРЕДЕЛ: e5-small слишком слаб** для надёжного recall у power-user
+  с плотной личной библиотекой (генерик-сиды тонут в шуме) — открыт трек «сильнее эмбеддер (e5-large/
+  реранкер)». Все параметры env-tunable.
   **ГАРД ПОЛЯРНОСТИ (аудит лога 2026-07-03):** `memory/intent-polarity.ts` — recall (семантика И
   лексика) НЕ подсовывает навык противоположного намерения: строгий конфликт start↔stop по
   глагольным стемам («прекрати поиск у доти» ≠ навык «запустить поиск в доте», sim 0.856 — с
@@ -556,8 +668,13 @@
   only, чтобы не мёржить в общий id). Инструмент **`skill_promote`** (`provider.promote`, COLD §15) —
   поднять СВОЙ выученный навык (owner-check, только learned-процедуры) копией под SHARED_USER_ID.
   Boot-seed (`seedSharedSkills` + `seed/shared-skills.ts`, идемпотентно по версии) засевает курируемый
-  стартовый набор (плеер на сайте, Telegram) — чтобы новому юзеру не учить с нуля; `ensureUser(SHARED_
-  USER_ID)` на boot для FK. `RecalledSkill.fromShared` → честная формулировка в `formatRecalledSkill`
+  стартовый набор — чтобы новому юзеру не учить с нуля; `ensureUser(SHARED_
+  USER_ID)` на boot для FK. **8 ФОКУСНЫХ навыков (2026-07-14):** веб-плеер (YouTube), telegram-send,
+  yandex-music, discord-message, discord-voice, dota2-menu (только меню, не геймплей), social-read,
+  social-send. Это ПРОЦЕДУРНОЕ ЗНАНИЕ (when+procedure проза, инжектится подсказкой; модель исполняет через
+  jarvis SDK) — НЕ хардкод-шаги. Рельсы безопасности вшиты: Discord self-bot=бан→только UI, масс-
+  автоматизация соцсетей=бан, публикация=confirm, сверка исхода. Навыки ФОКУСНЫЕ (одна capability на навык)
+  для точного recall. `RecalledSkill.fromShared` → честная формулировка в `formatRecalledSkill`
   («приём из общей библиотеки» vs «твой прошлый»). Встроенные tools (telegram_send/browser_act/…) и так
   общие — shared-слой добавляет общие ПРОЦЕДУРЫ. Верифицировано: юнит (merge/override/promote/seed) +
   живой recall общего навыка чужим юзером (sim 0.864). ⚠️ кто может промоутить в hosted — ограничить
@@ -593,6 +710,11 @@
   - **ПРАВКА НА ХОДУ (§20, 2026-06-25):** `Task.steer{pending:[]}` (рантайм, как cancel) + `TaskManager.steer`;
     петля СЛИВАЕТ pending ПЕРЕД шагом и впрыскивает «⚡ПОПРАВКА…» в хвост convo. Перехват в `handleUserText`:
     активная задача + scope=edit → `tasks.steer`+ack «Принял, поправляю», БЕЗ второй петли (голос и текст).
+    - **СТАТУС-ЗАПРОС vs ИНСТРУКЦИЯ-ПРАВКА (fix 2026-07-15, живой баг):** на «ты не сделал это» / «я не вижу,
+      что делаешь» при активной задаче-ОЖИДАНИИ steer — no-op, а «Принял, поправляю» ВРАЛО (править нечего).
+      `scope.looksLikeStatusQuery` (претензия «не сделал/не сработало» + вопрос о ходе «что там/готово/долго/
+      делаешь») → steer впрыскивается (петля перепроверит), но ответ = ЧЕСТНЫЙ СТАТУС «Ещё занимаюсь этим, сэр —
+      перепроверю и доложу», не «поправляю». Инструкция-правка («добавь/переделай/вместо») — прежнее «поправляю».
   - **ДУБЛЬ-ГЕЙТ (§20, аудит 2026-07-02):** `scope.ts isDuplicateGoal` (стем-Жаккар ≥0.75, ≥2 слов) — «new»-реплика,
     почти дословно совпадающая с целью УЖЕ идущей задачи (STT-вариация/нетерпеливый повтор: «продолжи/продолжу
     видео на ютубе» через 6с → две параллельные задачи, «остановил» ×2), не плодит вторую петлю: ack «Уже делаю, сэр».
@@ -664,6 +786,40 @@
   дисплеями!). Проводка как reminders (ctx.watch, BrainProviders.watch, registerSpeaker). Живьём: create→tick→
   web-чек→проактивная озвучка ✓; ⚠️ cancel в живом прогоне модель звала watch_create (follow-up, см.
   [project_jarvis_watch]).
+  - **BROWSER-ПРЕДИКАТ + ОЖИДАНИЕ ТАЙМКОДА ВИДЕО (fix 2026-07-15, живой баг «жди 26:00→перемотай»):** задача
+    «дождись, пока видео дойдёт до 26-й минуты, потом перемотай на 25-ю» не работала — агент клал OCR-предикат
+    `{kind:"text","26:0"}`, а клиентский OCR-полл ВИСЕЛ >25с (captureScreen+сайдкар) → watch падал каждый тик
+    («нет result за 25000ms»). Три фикса: (1) **`WaitCondition.kind:"browser"`** (protocol) — читает DOM-значение
+    вкладки (`video.currentTime`/`duration`/`paused` или `selector.prop`) через РАСШИРЕНИЕ, а не OCR. Оценивается
+    СЕРВЕРНО (`brain/tools/browser-condition.ts` `evalBrowserCondition`/`compareBrowserValue`): расширение висит
+    на сервере (/ext), клиент до него не достаёт. `wait_for(browser)` — блокирующий поллинг в dispatch
+    (`waitForBrowserTool`, потолок задачи idle tool-вызов не рвёт → «wait_for(browser)→browser_act seek» в одной
+    петле); watch-предикат — `service.checkPredicate` browser-ветка через инжектнутый `setBrowserProbe` (проводка
+    server.ts из extBridge). Расширение: интент `readMedia`/`getValue` в `pageActInPage` (bundle пересобран). (2)
+    **OCR-полл БОЛЬШЕ НЕ ВИСНЕТ** (`sensors-cheap.ts`): `checkOnceCapped` гонит опрос наперегонки с per-poll капом
+    (≤остаток бюджета, ≤4с) → зависший сенсор = честный met:false в срок, wait_for уважает свой timeout. (3) валидация
+    browser-предиката в `handlers/watch.ts` (value обязателен, op из белого списка). Env-выключателей нет — это
+    исправления. ⚠️ Watch только УВЕДОМЛЯЕТ (durable «потом СДЕЛАЙ действие» при срабатывании — открытый
+    follow-up: нужен onFire-реэнтри агента; для ожиданий ≤~4 мин путь `wait_for(browser)`+действие в петле).
+    Адверс-ревью (5 линз): 8 находок → 6 CONFIRMED, все исправлены (HIGH: `getValue`-утечка пароля→маскировка+кап;
+    HIGH: блокирующий wait съедал бюджет петли→idle-ожидание вычтено как queue-wait; low/тесты). Живой смоук ✓.
+  - **ЧТЕНИЕ ВРЕМЕНИ/СОСТОЯНИЯ ВИДЕО ИЗ DOM, НЕ ВИДИМОГО ТАЙМЕРА (fix 2026-07-15, живой баг «нужно двигать мышкой
+    чтобы Джарвис видел время»):** на «сколько сейчас на видео» агент брал `screen_read_text`/OCR по ВИДИМОМУ
+    таймеру, а сайты (YouTube и др.) прячут его при простое мыши → «не видит без движения курсором». Корень общий:
+    Джарвис читал отрендеренный UI, а не DOM. Фикс: `browser_read` ВСЕГДА отдаёт `[Плеер: позиция из DOM]`
+    (`video.currentTime`/`duration`/`paused`, доступны без видимого UI). Расширение: `readPageInPage` (для
+    `browser_read`) и `media()` (для `readMedia`/`wait_for(browser)`/seek/play) выбирают ОСНОВНОЙ плеер = самый
+    КРУПНЫЙ ВИДИМЫЙ (гейт видимости+размера: 1×1-трекеры/display:none/opacity долой, audio-ветка ДО display; площадь
+    первична, длительность/звук — тай-брейкеры, играющий НЕ доминирует); `tabRead` межкадрово берёт крупнейший по
+    площади (приватные хосты уже отфильтрованы `isPrivateHost`); сервер `browserRead` форматирует строку внутри
+    untrusted. Персона v75: «время/состояние читай из DOM (`browser_read`/`inspect`), не `screen_read_text` по
+    видимому UI — состояние в DOM, не в отрендеренном/наведённом; не проси „подвигать мышкой"». Живьём: «на какой
+    секунде видео?» → `browser_read` → «Семь минут двадцать восемь секунд, на паузе. Мышь не трогал.» **АДВЕРС-РЕВЬЮ
+    (2 прохода):** 1-й — CONFIRMED (честность): бонус 1e12 за «играющий» БЕЗ гейта видимости → играющая реклама/
+    трекер/hero-луп при паузном ОСНОВНОМ видео озвучивался как факт; 2-й (аудит фикса) — тот же баг ОСТАВАЛСЯ в
+    `media()` (брал ПЕРВЫЙ в DOM) + `<audio>` без controls отсекался. Все закрыты, живой регресс ✓. ⚠️ ОБОБЩЕНИЕ на
+    не-медийный скрытый UI (тултипы/collapse) — читать DOM-состояние (частично AX-Ref за флагом `JARVIS_BROWSER_REF`);
+    общий трек «DOM-состояние вместо видимого UI» открыт.
   - **`ambient/`** (РАБОЧЕЕ §проактив-всё, 2026-07-01: «Сэр, вам написал X», «не забудьте оплатить счёт»).
     Источнико-агностичный `engine.ts` (AmbientEngine: tick/дедуп(seen-store)/салиентность/проактив, 0 ток/тик) +
     источники `obligations.ts` (СЧЕТА по датам; инструменты ГОРЯЧИЕ obligation_*) + `telegram-source.ts`
@@ -673,6 +829,72 @@
   - `scheduler.ts`/`triggers/`/`salience.ts`/`presence.ts` — СТАБЫ (не подключены).
 - `voice/pipeline.ts` — машина состояний голоса (idle/listening/thinking/speaking), `speak`/
   **`speakQueued`** (проактивная речь, не перебивает юзера), barge-in, пофразный стриминг.
+  - **BARGE-IN ПО УСТОЙЧИВОСТИ ВО ВРЕМЕНИ (fix 2026-07-15, живой баг «не озвучивает длинные фразы / не даёт
+    прогноз погоды»; `apps/client/main/audio/index.ts`):** barge-in срабатывал по `BARGE_ONSET_FRAMES=2`
+    кадрам (~20мс при 160 сэмплах/16кГц) → любой короткий спайк (реплика по ТВ, стук, ЭХО TTS сквозь
+    несовершенный AEC) на 20мс рвал речь; чем длиннее фраза (прогноз погоды отдавался с реальным содержанием),
+    тем вероятнее спайк её обрывал → пользователь не дослушивал = «не может дать прогноз». Теперь barge по
+    ВРЕМЕНИ: `BARGE_SUSTAIN_MS` (env `JARVIS_BARGE_SUSTAIN_MS`, деф 200) непрерывного превышения порога +
+    `BARGE_GAP_TOLERANCE_MS` 120 (короткий провал = микро-пауза между слогами речи НЕ сбрасывает отсчёт; сброс
+    только на стойкой тишине — иначе живой barge с дырами не накопил бы sustain и владелец не смог бы перебить
+    ВООБЩЕ). Поля `bargeVoicedSince`/`bargeBelowSince`; порог/грейс/рефрактер не трогали. +2 регресс-теста
+    (спайк 80мс не рвёт; провал <120мс терпим→перебивает; провал >120мс сбрасывает). **АДВЕРС-РЕВЬЮ (3 линзы):**
+    CONFIRMED — стейл-отсчёт переживал ЗАКРЫТИЕ окна (короткий голос владельца перед listening → реоткрытие
+    хвостом → транзиент воскрешал баг). Фикс: `resetBargeSustain()` при закрытии окна во ВСЕХ путях
+    (setServerState→listening, setPlaybackActive(false), mute, кадр в закрытом окне/tail-таймаут); +регресс-тест.
+    ⚠️ Предел: сплошной громкий НЕ-речевой звук ≥sustain (громкая ТВ-фраза) всё ещё может ложно перебить —
+    полностью решается только speaker-gate/loopback-AEC (открыты).
+  - **«СТРОГИЙ WAKE В ШУМЕ» (акустика, 2026-07-14; 3 раунда адверс-ревью 7→3→0 находок):** зашумлённая
+    обстановка (≥`JARVIS_NOISY_MIN_IGNORED`(3) НЕадресованных реплик за `JARVIS_NOISY_WINDOW_MS`(30с)
+    при ЗАКРЫТОМ окне) → `noisyMode`: катящееся окно разговора ВЫКЛ (каждая команда требует «Джарвис»),
+    second-chance подавлен. Выход — гистерезис ≤`JARVIS_NOISY_EXIT_IGNORED`(1); клампы кривого env:
+    EXIT≤MIN-1, MIN≥1, окно≥1с (WARN в конструкторе — MIN=0 давал бы «вечный строгий wake в тишине»).
+    Счётчик шума: ≤1 раз/ход (двойной проход gateWake: спекулятивный эндпоинт + поздний финал; сравнение
+    `turnSeq > маркер` — запоздавший финал СТАРОГО хода не считается); near-miss lev≤4 (владелец
+    докрикивается) и `isNoiseOnly`-междометия — НЕ шум. Реплики, ЗАБЛОКИРОВАННЫЕ строгим режимом в
+    ОТКРЫТОМ окне, в счётчик не идут (иначе режим самоподдерживался бы владельцем), но метят `blockedAt`
+    «сигнал маскирован» → выход по распаду при непустом blockedAt КОНСЕРВАТИВНЫЙ: окно закрывается
+    (цена — одно «Джарвис»), лог честный «тишина не доказана» (чистый выход окно сохраняет; фон при
+    закрытом окне снова наблюдаем → повторный вход жив). Лог игнора несёт `{noisy, inWindow}` (причина
+    дропа видна из одной строки). Выключатель `JARVIS_STRICT_WAKE_IN_NOISE=0` (гасит и взведённый режим).
+    ⚠️ Осознанный предел: ОТКРЫТОЕ окно текстом не защитить (владельца от фона не отличить) — закрывают
+    sync-first и спикер-гейт (движок готов, `JARVIS_SPEAKER_GATE=0` — включать осознанно).
+  - **§P0 ГЕЙТ АВТО-РЕПЛЕЯ + §P1 EARCON РАЗДУМЬЯ (2026-07-14, по форензике `docs/LOG_FORENSICS_2026-07-14.md`):**
+    (P0) ~10 из 15 слепых авто-реплеев макросов запускались ЧУЖОЙ/разговорной речью (recall e5-small
+    0.82–0.89: мат в Discord → «закрыть приложение», разговор о базе → 14-шаговый макрос). Гейт
+    `brain/agent/replay-gate.ts` (`autoReplayBlocked` — причина в лог) режет СЛЕПОЙ реплей-прежде-петли
+    (recall-подсказка в промпт и явный skill_execute не тронуты) по 5 условиям: гибридный
+    `recallSim ≥ JARVIS_AUTO_REPLAY_MIN_SIM`(0.92) И сырой косинус `recallSimRaw ≥
+    JARVIS_AUTO_REPLAY_MIN_RAW_COS`(0.84 — бусты лексики/платформы не заменяют семантику; лексический
+    recall без косинуса реплей не получает), командный глагол в реплике, не-conversational, ЯВНОЕ
+    «Джарвис» (новый контракт `UserTurnMeta.viaWake`: pipeline `gateWake` → `onUserTurn`/`onUserTurnStream`
+    → router-ws → `handleUserText(meta)` → петля; реплика из катящегося окна жестов НЕ получает;
+    ⚠️ новый вызов handleUserText без meta = «явное обращение» — не терять проводку), не мета-навык
+    (про ЗАПИСЬ макросов: глагол записи+мета-слово; игровое «включи макрос фарма» — не мета). Поля
+    `RecalledSkill.recallSim/recallSimRaw` ставит `recallSemantic`.
+    (P1) 36% ходов молчали ~10с до первой реакции (earcon был только на приёмке ФОНОВОЙ задачи) →
+    `pipeline.armThinkEarcon`: sync-first ход без звука дольше `JARVIS_THINK_EARCON_MS`(1800, 0=выкл) →
+    один earcon-тик «услышал, думаю»; гард «речь пошла» = `PhraseSpeaker.speechStarted` (НЕ `active` —
+    тот истинен с конструирования, тик был бы мёртв на стриминговом прод-пути; ревью HIGH), голосовой
+    филлер замещает тик только на стриминговом пути.
+  - **§P1-ТЁЗКИ + §P1-ОТПРАВКА + PLACEHOLDER-ЧЕСТНОСТЬ (2026-07-14, форензика + самоотчёт Джарвиса):**
+    (тёзки, «не та Катя») `shared name-match.pickRecipient`: точное совпадение НЕ авто-шлёт при ≥2
+    сильных кандидатах, чьё имя НАЧИНАЕТСЯ с запрошенного («Катя»+«Катя Любимая») → ask с
+    `PickResult.reason:"namesakes"` — клиент (`jarvis-browser._openChat`) велит модели СПРОСИТЬ
+    владельца (не выбирать по смыслу; "unclear" = прежнее «решает модель»); полное имя с точным чатом
+    однозначно (регрессии нет). `telegram_send` принял `alias` («как владелец назвал») — на успехе
+    опытная память пишет ОБА ключа (to+alias): после clarify «кате» ведёт к выбранному чату, повторный
+    clarify перезаписывает (негативный сигнал), self-heal забывает оба.
+    (отправка, «ушло в Клод») agent-петля: `composedPending` (input_type/ui_invoke setValue) + Enter/
+    Ctrl+Enter = КОММИТ отправки — fused-observe его НЕ засчитывает сверкой (blindMutatePending
+    взводится даже при observed) → терминал только после сверки ИСХОДА (поле пусто/текст в ленте).
+    (placeholder, репорт самого Джарвиса «вижу серый текст — думаю, что ввёл») сайдкар
+    `UiaGrounder.CollectText/CollectInteractive`: пустое поле ввода (Edit/Document) помечается
+    `[ПУСТО]` в a11y-выжимке и `value:""` в ui_snapshot (Name пустого поля = серый placeholder!);
+    Document/многострочный Edit БЕЗ ValuePattern читается фолбэком TextPattern (кап 400) — содержимое
+    Блокнота и т.п. впервые видно выжимке. Легенды fused-observe (dispatch/skills) и описания
+    ui_snapshot/screen_read_text/screen_capture объясняют семантику. Проверено живьём: пустой Блокнот →
+    [ПУСТО], Блокнот с текстом → содержимое в выжимке; смоук сайдкара 11/11; сайдкар пересобран+published.
   - **«ТИХИЙ ФИНАЛ» (2026-06-23, фикс жалобы «×2-3 фразы на ВСЕХ ходах»):** содержательный ход
     (sonnet/fable) и tier0-в-фон БОЛЬШЕ НЕ произносят дворецкий ack. Корень был: ack («Принял, сэр.»)
     эмитился БЕЗУСЛОВНО + результат следом = 2 фразы на КАЖДОМ ходе. Теперь агент возвращает ПУСТУЮ
@@ -721,6 +943,26 @@
   - `browser.ts` + `browser-cdp.ts` — видимый управляемый Chrome (CDP).
   - `jarvis-browser.ts` — НЕВИДИМЫЙ залогиненный браузер Джарвиса (web_open/read/act/login).
   - `code-runner.ts` — `code_run` (python/node/powershell, wall-clock таймаут).
+    - **🚀 jarvis SDK (среда «1 раунд = вся задача», 2026-07-13, 6 раундов адверс. ревью до 0 находок):** для
+      МНОГОШАГОВОЙ GUI/системной задачи модель пишет ОДИН python-скрипт `import jarvis` — он драйвит ТЕ ЖЕ
+      актуаторы за ОДИН code_run вместо N слепых LLM-раундов «скриншот→клик». Механика: `actuators/act-bridge.ts`
+      (loopback-HTTP мост на 127.0.0.1, `startActBridge(dispatch)` в `index.ts` на boot, стоп на quit) + `code-runner`
+      кладёт `jarvis.py` (исходник — `actuators/jarvis-sdk-source.ts`, String.raw) в cwd раннера и ставит
+      `JARVIS_ACT_URL/TOKEN` в env — **ТОЛЬКО для python** (node/powershell моста не видят). Скрипт `_call`-ит мост,
+      мост → `dispatch(cmd)`. API: launch/focus/close/key/write/click/find→Element/invoke/snapshot/ocr/read_context/
+      wait_for/wait_text/wait_window/windows/sleep; таймауты в СЕКУНДАХ; алиасы type/press/open. Провал → `JarvisError`
+      (честный, не ложный успех). API-справка для модели — в описании `code_run` (`packages/tools`).
+    - **БЕЗОПАСНОСТЬ моста:** `BRIDGE_ALLOWED_KINDS` — мост принимает ТОЛЬКО механический GUI/восприятие
+      (app/window/input/ui/screen/wait/context); привилегированные каналы с §14-гейтом согласия
+      (`telegram.send`/`message.send`/`order.place`/`jbrowser.*`) + `code.run`/`fs.*`/`office.*`/`system.*` → **403**
+      (иначе prompt-injected скрипт слал бы от лица юзера в обход серверных confirm/cadence/idempotency и кредов).
+      Токен per-boot в заголовке, bind loopback, тело ≤512KB.
+    - **КООРДИНАТЫ SDK = АБСОЛЮТНЫЕ экранные DIP (единая система, закон честности «клик мимо с ok = ложный успех»):**
+      `find()` кликает через handle→`ui.invoke` (снапшот) или screen-DIP (OCR полного кадра) — надёжно, без курсора;
+      `ocr()` полного кадра конвертирует thumbnail-px строк → screen-DIP (`boundsX+x/scale`, mapping из `screen.ts`
+      `ScreenShot.mapping`/`sensors-cheap.ts` `OcrOutcome.mapping`) + метит `space:"screen"`; `ocr(rect)` и `snapshot()`
+      **выбрасывают** координатные поля (rect-строки — не в screen-DIP; снапшот-bbox — физ.px) → клик по ним честно
+      падает, а не мимо; `click(x,y)` дефолт `space="screen"`.
   - `fs.ts` (CRUD + **`fs_edit`** точечная правка find/replace — для кодинга, дешевле перезаписи;
     через **`self-guard.ts`** — рельсы самомодификации: HARD-блок записи в node_modules/.env/
     запущенный бинарь + блок ЧТЕНИЯ .env §0), `system.ts` (питание/блокировка/медиа/громкость/буфер),
@@ -731,10 +973,25 @@
     (`SetStreamServiceSettings` rtmp_custom) + прочитать обратно (`Get*`) = дешёвая верификация без
     скриншотов. ⚠️ раунд-трип к OBS вживую не прогнан (нет OBS в среде) — auth покрыт вектором.
     Правило персоны v21: «сначала API/CLI программы, GUI — последним».
-  - **`screen.ts`** — ЗРЕНИЕ (§): `screen_capture` tool → Electron desktopCapturer снимает РАБОЧИЙ
-    монитор (§6) → base64 PNG → `dispatch.lookAtScreen` отдаёт image-блоком в tool_result (модель
-    ВИДИТ пиксели). ~1.5–2K токенов/взгляд, по необходимости. ⚠️ живой захват требует Electron —
-    юнит-тест покрывает конвертацию (`dispatch-vision.test.ts`), сам захват проверять вживую.
+  - **`screen.ts`** — ЗРЕНИЕ (§): `screen_capture` tool → Electron desktopCapturer снимает монитор →
+    base64 PNG → `dispatch.lookAtScreen` отдаёт image-блоком в tool_result (модель ВИДИТ пиксели).
+    ~1.5–2K токенов/взгляд, по необходимости. ⚠️ живой захват требует Electron — юнит-тест покрывает
+    конвертацию (`dispatch-vision.test.ts`), сам захват проверять вживую.
+    - **МУЛЬТИМОНИТОР-ЗРЕНИЕ (2026-07-14, эпизод «вруби демку в дискорде»: снимал курсорный монитор,
+      не видел Дискорд на другом → ложное «свёрнут за хромом»):** дефолт (и `"active"`) = монитор
+      ПЕРЕДНЕГО (foreground) окна, НЕ курсора (`foregroundDisplay` через сайдкар `window.list` →
+      foreground-окно → его монитор; fallback курсор; выключатель `JARVIS_CAPTURE_FOREGROUND=0`). Это
+      чинит focus→capture (window_focus окна на M1 → screen_capture снимает M1) и игры (fullscreen =
+      foreground). Явно: `"cursor"` | `"primary"` | `"jarvis"` | `<индекс монитора>` (число ИЛИ
+      ЧИСЛОВАЯ СТРОКА `"1"` — tool-путь всегда шлёт строкой, парсится). SCREEN-space rect снимается с
+      монитора, СОДЕРЖАЩЕГО регион (не foreground/курсор — иначе fused-observe clickPoint на чужом
+      мониторе клампился в 1px); IMAGE-space rect (прошлый снимок) — с дисплея lastMapping без лишнего
+      foreground-вызова. `pickDisplay` async (сетевой вызов сайдкара на дефолтном пути).
+    - **ОКНА ЗНАЮТ СВОЙ МОНИТОР (2026-07-14):** сайдкар `window.list`/`window.focus` отдают rect
+      (`GetWindowRect`), клиент (`actuators/windows.ts`) обогащает `monitorIndex`/`monitor` через
+      `monitors.displayForRect` — модель видит, НА КАКОМ мониторе окно, и не гадает «свёрнуто/не
+      запущено» по одному кадру (window_focus readback тоже несёт монитор). Свёрнутое окно (off-screen
+      rect ≤ -30000) → `monitor:"свёрнуто"` (не ложный «монитор N» от nearest-point промаха).
 - `monitors.ts` (§6 мультимонитор): `MonitorManager` — рабочий монитор Джарвиса (персист
   `jarvis-monitors.json`). Tools `monitor_list`/`monitor_assign` (автономно) + ручная настройка в
   Настройках→Общее→Мониторы (IPC monitorList/monitorAssign/monitorInfo); `monitor_set` — врем. override.
