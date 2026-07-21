@@ -38,6 +38,7 @@ function buildTaskChip(taskId: string): HTMLElement {
       <span class="taskchip__state"></span>
       <span class="taskchip__title"></span>
     </div>
+    <div class="taskchip__action taskchip--hidden"></div>
     <div class="taskchip__meta taskchip--hidden">
       <span class="taskchip__step"></span>
       <span class="taskchip__pct"></span>
@@ -79,6 +80,14 @@ function renderTaskStatus(s: TaskStatus): void {
   if (titleEl) {
     titleEl.textContent = s.title ?? s.summary ?? "";
     titleEl.title = s.summary ?? ""; // полная формулировка — в тултип
+  }
+  // «Что делаю сейчас» (§20, жалоба «не видно, что делает»): сервер шлёт stepLabel только для running;
+  // клиент ДУБЛИРУЕТ гейт по state (defense-in-depth) — терминал показывает итог, не последнее действие.
+  const actionEl = chip.querySelector<HTMLElement>(".taskchip__action");
+  if (actionEl) {
+    const label = s.state === "running" ? (s.stepLabel ?? "") : "";
+    actionEl.textContent = label;
+    actionEl.classList.toggle("taskchip--hidden", label === "");
   }
 
   const fill = chip.querySelector<HTMLElement>(".taskchip__bar-fill");

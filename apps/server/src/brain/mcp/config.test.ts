@@ -86,4 +86,22 @@ describe("parseMcpConfig — HTTP-транспорт + нормализация 
     const out = parseMcpConfig({ servers: { empty: {} } });
     expect(out.servers.empty).toBeUndefined();
   });
+
+  // §14 confirm (MCP-контракт 2026-07-21): декларация подтверждения для мутирующих MCP.
+  it("confirm: true / массив bare-имён проходит; мусор отбрасывается", () => {
+    const out = parseMcpConfig({
+      servers: {
+        all: { command: "npx", confirm: true } as never,
+        some: { url: "https://x.example", confirm: ["create_issue", "delete"] } as never,
+        mixed: { command: "npx", confirm: ["delete_repo", 0, "create"] } as never, // fail-open фикс: сохранить валидные
+        junk: { command: "npx", confirm: "yes" } as never, // не boolean/массив-строк → поля нет
+        none: { command: "npx" },
+      },
+    });
+    expect(out.servers.all?.confirm).toBe(true);
+    expect(out.servers.some?.confirm).toEqual(["create_issue", "delete"]);
+    expect(out.servers.mixed?.confirm).toEqual(["delete_repo", "create"]); // мусор 0 отброшен, delete_repo цел
+    expect(out.servers.junk?.confirm).toBeUndefined();
+    expect(out.servers.none?.confirm).toBeUndefined();
+  });
 });

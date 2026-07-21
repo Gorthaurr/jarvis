@@ -243,6 +243,22 @@ describe("MetricsCollector durable JSONL (аудит 2026-07-02)", () => {
     expect(existsSync(join(dir, "logs", "metrics.jsonl"))).toBe(false);
   });
 
+  it("recordDegradation (пункт-6) → строка type:degradation с kind/meta, НЕ в ОЗУ-окно", () => {
+    const c = new MetricsCollector(10);
+    c.enableJsonl();
+    c.recordDegradation("web_search_empty", { query: "погода", userId: "u1" });
+    const lines = readFileSync(join(dir, "logs", "metrics.jsonl"), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({ type: "degradation", kind: "web_search_empty", query: "погода", userId: "u1" });
+    expect(c.snapshot().requests).toBe(0); // не аггрегат задачи
+  });
+
+  it("recordDegradation без enableJsonl — no-op (на диск не пишет)", () => {
+    const c = new MetricsCollector(10);
+    c.recordDegradation("knowledge_miss", { domain: "trading" });
+    expect(existsSync(join(dir, "logs", "metrics.jsonl"))).toBe(false);
+  });
+
   it("ротация по размеру: превышение cap → metrics.jsonl.1, свежие данные целы (ревью 2026-07-15)", () => {
     const c = new MetricsCollector(10, { maxJsonlBytes: 400 }); // тест-cap мимо env-клампа 1МБ
     c.enableJsonl();

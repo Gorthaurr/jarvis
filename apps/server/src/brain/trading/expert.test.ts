@@ -26,7 +26,7 @@ class FakeLlm implements ILlmProvider {
 }
 
 const knowledge = {
-  consult: () => ({ found: true, text: "## Размер позиции от риска\nстоп от структуры, R:R≥2", topics: [] as string[] }),
+  consult: () => ({ found: true, matched: true, text: "## Размер позиции от риска\nстоп от структуры, R:R≥2", topics: [] as string[] }),
 };
 
 const ctx = (over: Partial<ExpertContext> = {}): ExpertContext => ({

@@ -49,17 +49,46 @@ export interface EpisodicMemory {
    * по-прежнему мёртв → 0 исправлено (попробуем в следующий раз). Возвращает счётчики.
    */
   backfillMissingEmbeddings?(limit?: number): Promise<{ scanned: number; fixed: number }>;
+  /**
+   * ЧЕСТНОЕ ЗАБЫВАНИЕ (аудит контекста 2026-07-20): пометить stale эпизоды, семантически близкие к
+   * `queryText` (косинус ≥ minScore, до `max` штук). Раньше забывания НЕ БЫЛО ни на одном горизонте:
+   * stale в рантайме никто не выставлял → устаревший/противоречащий факт жил вечно в доверенном блоке
+   * промпта. stale=true — МЯГКОЕ удаление (обратимо, не hard-delete): факт перестаёт всплывать в
+   * search, но строка цела. Порог держать ВЫСОКИМ (не стереть лишнее). Возвращает счётчик + тексты.
+   */
+  markStale?(userId: string, queryText: string, minScore: number, max?: number): Promise<{ staled: number; texts: string[] }>;
 }
 
 /**
- * Порог релевантности для retrieval (env JARVIS_MEMORY_MIN_SCORE). Корень бага «вспоминает то,
- * чего не было»: top-k соседи возвращаются БЕЗ порога → тематически несвязанные эпизоды вшиваются
- * в промпт как «факты». Дефолт 0 = ВЫКЛ (масштаб косинуса зависит от embedding-модели — порог надо
- * откалибровать на живых данных, иначе риск над-фильтрации; механика готова, включается одним env).
+ * Порог релевантности АВТО-retrieval'а (env JARVIS_MEMORY_MIN_SCORE). Корень бага «вспоминает то,
+ * чего не было»: top-k соседи вшивались в доверенный блок промпта как «факты» БЕЗ порога → тематически
+ * несвязанный сосед (косинус ~0.7) читался моделью как истина.
+ *
+ * Аудит контекста 2026-07-20: порог ВКЛЮЧЁН по умолчанию (0.82), ОТКАЛИБРОВАН НА ЖИВОМ e5-small
+ * (не угадан). Замер: запрос «где я работаю» против стора → релевантный «работает в Сбербанке»=0.859,
+ * НЕсвязанные «ходил в кино»=0.793 / «любит велосипед»=0.787; несвязанный запрос «погода на Марсе» →
+ * весь стор 0.754-0.762. e5-small СИЛЬНО сжимает косинусы вверх (даже несвязанное ~0.75-0.79), поэтому
+ * наивные 0.7-0.78 протекают шумом. 0.82 — разделяющая граница (держит 0.859, режет ≤0.793); совпадает
+ * со skill-semantic-min проекта. Почему безопасно (страх над-фильтрации снят):
+ *   • курируемые факты профиля (высокоценные) идут ОТДЕЛЬНЫМ asserted-блоком и порогом НЕ трогаются —
+ *     фильтруется лишь эпизодический recall, «потерять важный факт» нельзя;
+ *   • прошедший порог recall ХЕДЖИРУЕТСЯ («возможно, из прошлых разговоров — сверься», persona/index.ts)
+ *     → над-фильтрация в серой зоне почти бесплатна, честность несёт хедж, не порог.
+ * Явный `search(..., 0)` (дедуп на записи, explicit memory_search) порог НЕ применяет. Тюн/выкл — env.
+ *
+ * EMBEDDER-AWARE (адверс-ревью F4): 0.82 откалиброван ПОД e5-small. При OPENAI_API_KEY поднимается
+ * OpenAiEmbeddingProvider (gateway/server.ts), у которого косинусы релевантного НИЖЕ (~0.4-0.6, не 0.85+),
+ * → 0.82 отсёк бы ВЕСЬ авто-ретривал молча. Тот же сигнал, что выбирает эмбеддер, выбирает и дефолт:
+ * OpenAI → 0 (не над-фильтруем; честность несёт ХЕДЖ-блок, он универсален и от порога не зависит; владелец
+ * калибрует под OpenAI явным env). Явный JARVIS_MEMORY_MIN_SCORE перекрывает оба пути.
  */
 export function memoryMinScore(): number {
-  const n = Number.parseFloat(process.env.JARVIS_MEMORY_MIN_SCORE ?? "");
-  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+  const raw = process.env.JARVIS_MEMORY_MIN_SCORE;
+  const n = Number.parseFloat(raw ?? "");
+  if (raw != null && Number.isFinite(n)) return Math.min(1, Math.max(0, n));
+  // OpenAI-эмбеддер (opt-in) — иная шкала косинусов; дефолт-порог e5 к нему не применяем.
+  if (process.env.OPENAI_API_KEY) return 0;
+  return 0.82;
 }
 
 /** Косинусная близость двух векторов. */
@@ -181,6 +210,28 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
     if (fixed > 0) log.info("эпизодическая память: бэкилл эмбеддингов (осиротевшие факты → в поиск)", { scanned: res.rows.length, fixed });
     return { scanned: res.rows.length, fixed };
   }
+
+  async markStale(userId: string, queryText: string, minScore: number, max = 5): Promise<{ staled: number; texts: string[] }> {
+    const vec = await this.embedder.embed(queryText, "query");
+    if (!vec) return { staled: 0, texts: [] };
+    const res = await query(
+      `select id, text, 1 - (embedding <=> $2::vector) as score
+         from episodic_memory
+        where user_id = $1 and stale = false and embedding is not null
+        order by embedding <=> $2::vector
+        limit $3`,
+      [userId, toVectorLiteral(vec), max],
+    );
+    if (!res) return { staled: 0, texts: [] };
+    const matches = res.rows.filter((r) => Number(r.score) >= minScore);
+    if (matches.length === 0) return { staled: 0, texts: [] };
+    const ids = matches.map((r) => String(r.id));
+    // stale=true — МЯГКОЕ удаление (строки целы, честно обратимо): search фильтрует `stale = false`.
+    const upd = await query(`update episodic_memory set stale = true where id = any($1::uuid[])`, [ids]);
+    const texts = matches.map((r) => String(r.text));
+    if (upd) log.info("эпизодическая память: факты помечены stale (забыто по запросу)", { count: matches.length });
+    return { staled: upd ? matches.length : 0, texts: upd ? texts : [] };
+  }
 }
 
 /** Dev/тесты: косинусный поиск в памяти процесса. */
@@ -212,6 +263,23 @@ export class InMemoryEpisodicMemory implements EpisodicMemory {
 
   async hasEntries(userId: string): Promise<boolean> {
     return this.store.some((e) => e.episode.userId === userId);
+  }
+
+  async markStale(userId: string, queryText: string, minScore: number, max = 5): Promise<{ staled: number; texts: string[] }> {
+    const vec = await this.embedder.embed(queryText, "query");
+    if (!vec) return { staled: 0, texts: [] };
+    const ranked = this.store
+      .map((e, idx) => ({ idx, text: e.episode.text, score: e.episode.userId === userId ? cosine(vec, e.vec) : -1 }))
+      .filter((x) => x.score >= minScore)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, max);
+    if (ranked.length === 0) return { staled: 0, texts: [] };
+    // In-memory без колонки stale — удаляем из стора (для search-путей эквивалентно stale=true).
+    const drop = new Set(ranked.map((x) => x.idx));
+    const kept = this.store.filter((_, i) => !drop.has(i));
+    this.store.length = 0;
+    this.store.push(...kept);
+    return { staled: ranked.length, texts: ranked.map((x) => x.text) };
   }
 
   /** Размер хранилища (диагностика тестов). */

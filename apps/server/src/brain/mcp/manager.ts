@@ -26,6 +26,41 @@ interface ServerEntry {
   state: "connected" | "error";
 }
 
+/** Форматы base64-image, принимаемые Anthropic Messages API (прочие → HTTP 400 на весь запрос → дроп). */
+const SUPPORTED_IMAGE_MIME: ReadonlySet<string> = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+/**
+ * Нормализация image-блоков MCP-результата под Anthropic (ЧИСТАЯ, экспортируется для юнит-теста). Сторонний
+ * MCP шлёт произвольный mimeType/данные, а Anthropic base64-image принимает ТОЛЬКО jpeg/png/gif/webp и ≤~3.75MB.
+ * Без нормализации «image/svg+xml»/«image/bmp» или data-URI-префикс в data → HTTP 400 на ВЕСЬ ход (регресс).
+ * Дропаем неподдерживаемое/крупное (не роняем ход); кап 4; data-URI-префикс срезаем; отсутствует mime → png.
+ * Возвращает валидные картинки + число отброшенных (для честной пометки модели).
+ */
+export function normalizeMcpImages(
+  blocks: ReadonlyArray<{ type?: string; data?: string; mimeType?: string }>,
+): { images: Array<{ mediaType: string; data: string }>; dropped: number } {
+  const raw = blocks.filter((c) => c.type === "image" && typeof c.data === "string" && c.data.length > 0);
+  const images: Array<{ mediaType: string; data: string }> = [];
+  for (const c of raw) {
+    if (images.length >= 4) break; // кап (анти-раздувание контекста, ~2K ток/картинку)
+    let data = c.data as string;
+    let mime = typeof c.mimeType === "string" ? (c.mimeType.toLowerCase().split(";")[0] ?? "").trim() : "";
+    // data:image/png;base64,<b64> → извлечь mime + ЧИСТЫЙ base64 (Anthropic хочет без префикса).
+    const uri = /^data:([^;,]+)?(?:;base64)?,(.*)$/is.exec(data);
+    if (uri) {
+      if (uri[1]) mime = uri[1].toLowerCase().trim();
+      data = uri[2] ?? "";
+    }
+    if (!mime) mime = "image/png"; // отсутствует → безопасный дефолт (png частейший)
+    if (!SUPPORTED_IMAGE_MIME.has(mime)) continue; // svg/bmp/tiff — Anthropic отвергнет → ДРОП (не роняем ход)
+    // Пустой base64 после срезки data-URI («data:image/png;base64,» без тела) — недекодируем → тоже 400 → дроп
+    // (ревью-2: стартовый фильтр видел ИСХОДНУЮ длину >0, а тело обнулилось). Крупный (>~3.75MB raw) — тоже дроп.
+    if (!data || data.length > 5_000_000) continue;
+    images.push({ mediaType: mime, data });
+  }
+  return { images, dropped: raw.length - images.length };
+}
+
 /** Санитайз имени под лимит Anthropic [A-Za-z0-9_-]{1,64}. */
 function san(s: string): string {
   return s.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40) || "x";
@@ -181,6 +216,19 @@ export class McpManager {
     return this.index.has(name);
   }
 
+  /**
+   * §14 (MCP-контракт 2026-07-21): требует ли МУТИРУЮЩИЙ MCP-инструмент подтверждения ДО исполнения.
+   * Декларируется владельцем в mcp.json (`confirm: true` = все инструменты сервера; массив = конкретные
+   * bare-имена). Нет декларации → false (read-only/доверенные; привилегированное всё равно первопартийное).
+   */
+  requiresConfirm(name: string): boolean {
+    const ref = this.index.get(name);
+    if (!ref) return false;
+    const c = this.cfg.servers?.[ref.server]?.confirm;
+    if (c === true) return true;
+    return Array.isArray(c) ? c.includes(ref.bare) : false;
+  }
+
   /** Все MCP-инструменты в формате Anthropic (для активированных через tool_load). */
   asToolSchemas(): ToolSchema[] {
     const out: ToolSchema[] = [];
@@ -188,23 +236,38 @@ export class McpManager {
     return out;
   }
 
-  /** Исполнить MCP-инструмент по namespaced-имени. Ошибка → {isError:true}, не throw (честность §). */
-  async callTool(name: string, input: Record<string, unknown>): Promise<{ content: string; isError: boolean }> {
+  /** Исполнить MCP-инструмент по namespaced-имени. Ошибка → {isError:true}, не throw (честность §).
+   *  MCP-контракт 2026-07-21: ПРОБРАСЫВАЕМ image-блоки (раньше схлопывались в `[image]`-плейсхолдер → модель
+   *  теряла картинку скриншот/чарт-MCP); text и images отдаются раздельно, dispatch соберёт vision-tool_result. */
+  async callTool(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<{ content: string; images?: Array<{ mediaType: string; data: string }>; isError: boolean }> {
     const ref = this.index.get(name);
     if (!ref) return { content: `MCP-инструмент ${name} не найден`, isError: true };
     const entry = this.servers.get(ref.server);
     if (!entry || entry.state !== "connected") return { content: `MCP-сервер ${ref.server} недоступен`, isError: true };
     try {
       const res = (await entry.client.callTool({ name: ref.bare, arguments: input })) as {
-        content?: Array<{ type?: string; text?: string }>;
+        content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
         isError?: boolean;
       };
-      const text = (res.content ?? [])
-        .map((c) => (c.type === "text" ? c.text : c.type ? `[${c.type}]` : ""))
+      const blocks = res.content ?? [];
+      const text = blocks
+        .map((c) => (c.type === "text" ? c.text : c.type && c.type !== "image" ? `[${c.type}]` : ""))
         .filter(Boolean)
         .join("\n")
         .slice(0, 8000);
-      return { content: text || "ok", isError: Boolean(res.isError) };
+      // Image-блоки (base64) → vision, с нормализацией под Anthropic (allowlist/data-URI/размер/кап) — см.
+      // normalizeMcpImages. Без неё сторонний mimeType (svg/bmp) или data-URI-префикс → HTTP 400 на ВЕСЬ ход.
+      const { images, dropped } = normalizeMcpImages(blocks);
+      const note = dropped > 0 ? `\n[+${dropped} изобр. от MCP опущено (неподдерж. формат/размер/кап 4)]` : "";
+      const finalText = (text + note) || (images.length > 0 ? "" : "ok");
+      return {
+        content: finalText,
+        ...(images.length > 0 ? { images } : {}),
+        isError: Boolean(res.isError),
+      };
     } catch (e) {
       return { content: `Ошибка MCP ${name}: ${e instanceof Error ? e.message : String(e)}`, isError: true };
     }

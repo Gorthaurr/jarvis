@@ -21,6 +21,13 @@ export interface McpServerConfig {
   url?: string;
   /** Заголовки HTTP-транспорта (напр. { "Authorization": "Bearer ${MY_TOKEN}" }); ${ENV} резолвится. */
   headers?: Record<string, string>;
+  /**
+   * §14 CONFIRM для МУТИРУЮЩИХ MCP-инструментов (глобальный план 2026-07-21, «MCP-контракт»): раньше MCP-ветка
+   * dispatch минула confirm-гейт → сторонний create/delete/send-MCP исполнялся бы БЕЗ подтверждения. Декларация
+   * владельцем: `true` = ВСЕ инструменты сервера требуют confirm; массив bare-имён = конкретные. По умолчанию
+   * (нет поля) — без confirm (read-only/доверенные серверы; привилегированное всё равно первопартийное).
+   */
+  confirm?: boolean | string[];
 }
 export interface McpConfig {
   servers: Record<string, McpServerConfig>;
@@ -60,6 +67,21 @@ export function normalizeCommand(cmd: string): { command: string; viaShell: bool
  * Чистая нормализация сырого конфига (SRP: без файлового IO — тестируется напрямую). Каждый сервер —
  * либо HTTP (url), либо stdio (command); ${ENV} резолвится в url/args/env/headers.
  */
+/** Нормализация §14-confirm: `true` (все) или массив bare-имён; иначе поля нет. Ревью: один не-строковый
+ *  элемент раньше (`.every`) ронял ВСЮ декларацию (fail-OPEN — задекларированный delete исполнялся бы без
+ *  confirm при опечатке). Теперь `.filter` СОХРАНЯЕТ валидные имена + WARN об отбросе мусора. */
+function parseConfirm(c: unknown): { confirm?: boolean | string[] } {
+  if (c === true) return { confirm: true };
+  if (Array.isArray(c)) {
+    const strs = c.filter((x): x is string => typeof x === "string");
+    if (strs.length < c.length) {
+      log.warn("MCP config: не-строковые элементы в confirm отброшены (валидные имена сохранены)", { dropped: c.length - strs.length });
+    }
+    return strs.length > 0 ? { confirm: strs } : {};
+  }
+  return {};
+}
+
 export function parseMcpConfig(raw: McpConfig): McpConfig {
   const servers: Record<string, McpServerConfig> = {};
   for (const [name, sc] of Object.entries(raw?.servers ?? {})) {
@@ -75,6 +97,7 @@ export function parseMcpConfig(raw: McpConfig): McpConfig {
       servers[name] = {
         url,
         headers: Object.fromEntries(Object.entries(sc.headers ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
+        ...parseConfirm(sc.confirm),
       };
       continue;
     }
@@ -84,6 +107,7 @@ export function parseMcpConfig(raw: McpConfig): McpConfig {
       command: norm.command,
       args: (sc.args ?? []).map(resolveEnvVars),
       env: Object.fromEntries(Object.entries(sc.env ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
+      ...parseConfirm(sc.confirm),
     };
   }
   return { servers };

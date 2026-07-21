@@ -152,6 +152,31 @@ describe("classifyTier", () => {
 
   it("короткая болтовня → haiku", () => {
     expect(classifyTier("привет, как дела").tier).toBe("haiku");
+    // §econ (isPureSocial — позитивный гейт): ЧИСТО социальная реплика (после снятия соц-паттернов остаток пуст/
+    // вежливость) → smalltalk=true (кандидат на LEAN).
+    expect(classifyTier("привет").smalltalk).toBe(true);
+    expect(classifyTier("здравствуй").smalltalk).toBe(true);
+    expect(classifyTier("доброе утро").smalltalk).toBe(true);
+    expect(classifyTier("спасибо, ты молодец").smalltalk).toBe(true);
+    expect(classifyTier("привет, как дела").smalltalk).toBe(true); // остаток пуст → чистый трёп
+    expect(classifyTier("спасибо большое").smalltalk).toBe(true);
+    // Любое СОДЕРЖАТЕЛЬНОЕ слово в остатке (команда/вопрос/совет — даже с соц-префиксом) → НЕ smalltalk (полная персона).
+    expect(classifyTier("открой Spotify").smalltalk).toBeFalsy();
+    expect(classifyTier("объясни почему небо голубое").smalltalk).toBeFalsy();
+    expect(classifyTier("спасибо, включи музыку").smalltalk).toBeFalsy();
+    expect(classifyTier("класс, запусти стим").smalltalk).toBeFalsy();
+    // Ревью-2 (блоклист был неполон → isPureSocial): синонимы/иные императивы/совет тоже НЕ трёп.
+    expect(classifyTier("спасибо, добавь молоко в список").smalltalk).toBeFalsy();
+    expect(classifyTier("круто, посоветуй фильм").smalltalk).toBeFalsy();
+    expect(classifyTier("класс, врубай музыку").smalltalk).toBeFalsy();
+    expect(classifyTier("супер, свяжись с Катей").smalltalk).toBeFalsy();
+    expect(classifyTier("спасибо, проверь почту").smalltalk).toBeFalsy();
+    expect(classifyTier("добрый вечер, какая погода?").smalltalk).toBeFalsy();
+    expect(classifyTier("спасибо, что ты сегодня делал?").smalltalk).toBeFalsy();
+    // Ревью-3: «могёшь» есть в SMALL_TALK (похвала), но сленг «можешь»=просьба; «могёшь это/так?» — НЕ трёп.
+    expect(classifyTier("могёшь это?").smalltalk).toBeFalsy();
+    expect(classifyTier("могёшь так?").smalltalk).toBeFalsy();
+    expect(classifyTier("ну ты могёшь всё").smalltalk).toBe(true); // чистая похвала — lean верно
   });
 
   it("P1.1: чистое рассуждение/совет/разбор → fable (Opus), не слабый Sonnet", () => {

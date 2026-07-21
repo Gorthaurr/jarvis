@@ -41,8 +41,14 @@ export interface UserContextSlot {
   displayName?: string;
   /** Часовой пояс (для времени в ответах). */
   timezone?: string;
-  /** Произвольные факты долговременной памяти (§8), уже отобранные retrieval'ом. */
+  /** КУРИРУЕМЫЕ факты долговременной памяти (§8) — asserted (профиль, высокая уверенность). */
   facts?: readonly string[];
+  /**
+   * Эпизодический recall (§8) — НЕподтверждённые записи, всплывшие из прошлых разговоров, ОТДЕЛЬНО от
+   * курируемых `facts` (аудит контекста 2026-07-20). Идут ХЕДЖИРОВАННЫМ блоком «возможно… сверься»:
+   * низкоуверенный/устаревший сосед на шумном e5-small не должен читаться моделью как твёрдый факт.
+   */
+  recalledMemories?: readonly string[];
   /** Авто-профиль окружения (§9): браузер/приложения пользователя — чтобы агент адаптировался. */
   environment?: string;
   /**
@@ -81,7 +87,32 @@ export interface UserContextSlot {
  * Возвращает блоки раздельно, чтобы слой LLM-клиента мог пометить первый как
  * cache_control (§15). Для простоты M0 — также склеенная строка `full`.
  */
-export function buildSystemPrompt(slot: UserContextSlot = {}): {
+/**
+ * LEAN-ядро персоны для ТРИВИАЛЬНЫХ разговорных ходов (smalltalk/приветствие, §econ 2026-07-21). Полная
+ * персона (~33К) на «привет» = холодная запись кеша ~$0.2/ход (лог-анализ: 27 таких ходов = 11% трат —
+ * тир-свитч haiku↔sonnet фрагментирует префикс). Здесь — ТОЛЬКО жёсткие правила, важные для устной
+ * социальной реплики: русский-всегда, идентичность Джарвиса, тон дворецкого, кириллица иностранных,
+ * честность. Инструментов/законов verify-петли/каталога возможностей НЕТ — «привет» их не требует.
+ * За флагом (агент гейтит `JARVIS_LEAN_SMALLTALK`); полная персона — дефолт (нулевой регресс).
+ */
+export const LEAN_PERSONA_CORE = `# Jarvis — lean (лёгкая разговорная реплика)
+You are Jarvis, a personal voice assistant-majordomo for ONE user (his Windows PC). This turn is a LIGHT
+social/conversational reply (greeting, thanks, small-talk, «как дела») — answer WARMLY and BRIEFLY, in character.
+Hard rules (never break, even here):
+- **OUTPUT IS ALWAYS RUSSIAN** — every reply in Russian, no exceptions, even for a single word or unclear input.
+- **You are Jarvis, only Jarvis.** Asked who you are → «Джарвис, ваш ассистент». NEVER discuss your internals
+  (models/providers/tokens/gateways). Something failed → say it humanly («не получилось», «связь прервалась»), no tech detail.
+- **Tone:** calm butler; address «сэр» (or no address); short natural spoken Russian; no markdown/emoji/URLs in speech.
+- **Foreign words → CYRILLIC by sound** in the reply (voice engine mangles Latin): «YouTube»→«ютьюб», «VPN»→«ви-пи-эн», «Chrome»→«хром».
+- **Honesty:** NEVER claim you did something you didn't — this is a light social turn, not an action. If the user
+  actually asks for a concrete action (open/send/set/play…), do NOT fake a result and do NOT promise a "later" — just
+  answer honestly and briefly (say you'll take care of it now, without pretending it's already done).
+Keep it to one or two short sentences.`;
+
+export function buildSystemPrompt(
+  slot: UserContextSlot = {},
+  opts: { lean?: boolean } = {},
+): {
   staticPrefix: string;
   /** §8 HERMES: блок выученного навыка — ОТДЕЛЬНО от динамики, чтобы кешировать его собственным
    *  брейкпоинтом (повторные ходы той же задачи читают навык из кеша, а не шлют заново). */
@@ -89,9 +120,14 @@ export function buildSystemPrompt(slot: UserContextSlot = {}): {
   dynamicSuffix: string;
   full: string;
 } {
-  const staticPrefix = loadPersona();
-  const skillSuffix = slot.learnedSkill ? `# Подходящий выученный навык (§8)\n\n${slot.learnedSkill}` : "";
-  const dynamicSuffix = renderDynamic(slot);
+  // LEAN (smalltalk): короткое ядро вместо полной персоны + УРЕЗАННАЯ динамика (имя/время/тон/язык —
+  // без live-снимка ПК/фактов/recall/каталога навыков: «привет» их не требует, а это лишние 1x-токены).
+  const staticPrefix = opts.lean ? LEAN_PERSONA_CORE : loadPersona();
+  const dynSlot: UserContextSlot = opts.lean
+    ? { timezone: slot.timezone, displayName: slot.displayName, personaTone: slot.personaTone, language: slot.language }
+    : slot;
+  const skillSuffix = !opts.lean && slot.learnedSkill ? `# Подходящий выученный навык (§8)\n\n${slot.learnedSkill}` : "";
+  const dynamicSuffix = renderDynamic(dynSlot);
   return {
     staticPrefix,
     skillSuffix,
@@ -162,6 +198,15 @@ function renderDynamic(slot: UserContextSlot): string {
   if (slot.facts && slot.facts.length > 0) {
     lines.push("Известные факты о пользователе:");
     for (const f of slot.facts) lines.push(`- ${f}`);
+  }
+  // ПРОВЕНАНС (аудит контекста 2026-07-20): эпизодический recall — НЕ факт. Хеджируем ЯВНО, отдельным
+  // блоком, чтобы низкоуверенный/устаревший сосед не выдавался за истину; при противоречии со свежим —
+  // забыть устаревшее (memory_forget). Это прямой фикс сбоя «среда сама кладёт непроверенное в промпт».
+  if (slot.recalledMemories && slot.recalledMemories.length > 0) {
+    lines.push(
+      "Возможно, всплыло из прошлых разговоров (НЕподтверждённое — сверься, прежде чем опираться; не выдавай за факт; при противоречии со свежим забудь устаревшее через memory_forget):",
+    );
+    for (const m of slot.recalledMemories) lines.push(`- ${m}`);
   }
   // Свободный контекст из настроек UI («что Джарвису знать о вас») — со слов пользователя.
   if (slot.context && slot.context.trim()) {

@@ -1,5 +1,44 @@
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt } from "./index.js";
+import { LEAN_PERSONA_CORE, buildSystemPrompt } from "./index.js";
+
+// §econ (лог-анализ 2026-07-21): LEAN-промпт для smalltalk — короткое ядро вместо полной 33К-персоны.
+describe("buildSystemPrompt lean — тривиальный smalltalk (§econ)", () => {
+  const slot = {
+    displayName: "Антон",
+    timezone: "Europe/Moscow",
+    language: "ru",
+    environment: "Windows, Chrome, Steam, Dota 2, OBS, Telegram",
+    systemContext: "Активно: Chrome (YouTube). Мониторы: 2.",
+    facts: ["работает по ночам", "любит джаз"],
+  };
+
+  it("lean=true → короткое ядро вместо полной персоны, БЕЗ live-снимка/фактов/окружения", () => {
+    const lean = buildSystemPrompt(slot, { lean: true });
+    const full = buildSystemPrompt(slot);
+    expect(lean.staticPrefix).toBe(LEAN_PERSONA_CORE);
+    expect(lean.full.length).toBeLessThan(full.full.length / 5); // радикально короче (≈33К → ~1К)
+    expect(lean.full).not.toContain("Chrome (YouTube)"); // live-снимок ПК не тащим
+    expect(lean.full).not.toContain("любит джаз"); // факты не тащим
+    expect(lean.full).not.toContain("Steam, Dota 2"); // окружение не тащим
+    // но идентичность/имя/жёсткие правила сохранены:
+    expect(lean.full).toContain("Jarvis");
+    expect(lean.full).toContain("ALWAYS RUSSIAN");
+    expect(lean.dynamicSuffix).toContain("Антон"); // имя для тепла
+  });
+
+  it("lean игнорирует навык/каталог (smalltalk их не требует)", () => {
+    const lean = buildSystemPrompt({ ...slot, learnedSkill: "как отправить в телеграм" }, { lean: true });
+    expect(lean.skillSuffix).toBe("");
+    expect(lean.full).not.toContain("телеграм");
+  });
+
+  it("дефолт (без lean) — полная персона, всё на месте (нулевой регресс)", () => {
+    const full = buildSystemPrompt(slot);
+    expect(full.staticPrefix).not.toBe(LEAN_PERSONA_CORE);
+    expect(full.staticPrefix.length).toBeGreaterThan(5000); // полная персона
+    expect(full.full).toContain("любит джаз"); // факты на месте
+  });
+});
 
 // §15: язык/контекст из настроек UI проходят в динамический хвост системного промпта.
 describe("buildSystemPrompt — контекст/язык из настроек (§15)", () => {
@@ -71,5 +110,30 @@ describe("buildSystemPrompt — контекст/язык из настроек 
   it("пустой systemContext не плодит untrusted-блок", () => {
     expect(buildSystemPrompt({ systemContext: "   " }).dynamicSuffix).not.toContain("untrusted_content");
     expect(buildSystemPrompt({}).dynamicSuffix).not.toContain("untrusted_content");
+  });
+
+  // Аудит контекста 2026-07-20: ПРОВЕНАНС. Эпизодический recall — ОТДЕЛЬНЫЙ хеджированный блок, НЕ
+  // сливается с курируемыми фактами → низкоуверенный сосед не читается как твёрдый факт.
+  it("recalledMemories идут ОТДЕЛЬНЫМ хеджированным блоком, отдельно от asserted-фактов", () => {
+    const r = buildSystemPrompt({
+      facts: ["работает по ночам"],
+      recalledMemories: ["упоминал BMW X5"],
+    });
+    // Курируемый факт — под asserted-заголовком.
+    expect(r.dynamicSuffix).toContain("Известные факты о пользователе:");
+    expect(r.dynamicSuffix).toContain("- работает по ночам");
+    // Эпизодический recall — под ХЕДЖ-заголовком с явным «сверься/не выдавай за факт».
+    expect(r.dynamicSuffix).toContain("Возможно, всплыло из прошлых разговоров");
+    expect(r.dynamicSuffix).toContain("сверься, прежде чем опираться");
+    expect(r.dynamicSuffix).toContain("- упоминал BMW X5");
+    // Хедж-блок идёт ПОСЛЕ asserted-фактов (recency + не путается с ними).
+    expect(r.dynamicSuffix.indexOf("Известные факты")).toBeLessThan(
+      r.dynamicSuffix.indexOf("Возможно, всплыло"),
+    );
+  });
+
+  it("пустой recalledMemories не плодит хедж-блок", () => {
+    expect(buildSystemPrompt({ facts: ["x"] }).dynamicSuffix).not.toContain("Возможно, всплыло");
+    expect(buildSystemPrompt({ recalledMemories: [] }).dynamicSuffix).not.toContain("Возможно, всплыло");
   });
 });
