@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Task } from "./task.js";
-import { actionTitle, deriveTaskTitle, formatActiveTasks, formatRecentTasks } from "./task.js";
+import { actionTitle, deriveTaskTitle, formatActiveTasks, formatRecentTasks, stepLabelFor } from "./task.js";
 
 describe("deriveTaskTitle — краткая суть для чипа (§20)", () => {
   it("короткую цель оставляет как есть, с большой буквы", () => {
@@ -163,5 +163,42 @@ describe("formatActiveTasks — «в работе сейчас» для «сде
     expect(out).toContain("# Задачи В РАБОТЕ прямо сейчас");
     expect(out).toContain("ещё в работе");
     expect(out).toContain("- ⏳ Смета ремонта — начал 1 мин назад, шаг 2/5");
+  });
+});
+
+describe("stepLabelFor — «что делаю сейчас» для чипа (§20, жалоба «не видно, что делает»)", () => {
+  it("процессные инструменты (actionTitle=null) получают глагольную метку", () => {
+    expect(stepLabelFor("screen_capture", {})).toBe("Смотрю на экран");
+    expect(stepLabelFor("browser_read", {})).toBe("Читаю страницу");
+    expect(stepLabelFor("browser_inspect", {})).toBe("Изучаю страницу");
+    expect(stepLabelFor("input_click", {})).toBe("Кликаю");
+    expect(stepLabelFor("input_type", {})).toBe("Печатаю");
+    expect(stepLabelFor("ui_ground", {})).toBe("Ищу элемент на экране");
+    expect(stepLabelFor("wait_for", {})).toBe("Жду нужного состояния");
+    expect(stepLabelFor("memory_search", {})).toBe("Вспоминаю");
+  });
+
+  it("browser_act play/pause — конкретно (делегирует actionTitle), click — общая метка", () => {
+    expect(stepLabelFor("browser_act", { intent: "play" })).toBe("Воспроизведение");
+    expect(stepLabelFor("browser_act", { intent: "pause" })).toBe("Пауза");
+    expect(stepLabelFor("browser_act", { intent: "click" })).toBe("Действую на странице");
+    expect(stepLabelFor("browser_batch", {})).toBe("Действую на странице");
+  });
+
+  it("browser_open/web_fetch — с хостом и глаголом", () => {
+    expect(stepLabelFor("browser_open", { url: "https://music.yandex.ru/x" })).toBe("Открываю: Яндекс Музыка");
+    expect(stepLabelFor("web_fetch", { url: "https://example.org/a" })).toBe("Читаю: example.org");
+    expect(stepLabelFor("browser_open", {})).toBe("Открываю сайт"); // без url — общий глагол
+  });
+
+  it("для сути делегирует actionTitle (Поиск/Запуск/Excel)", () => {
+    expect(stepLabelFor("web_search", { query: "погода" })).toBe("Поиск: погода");
+    expect(stepLabelFor("app_launch", { app: "obs" })).toBe("Запуск: Obs");
+    expect(stepLabelFor("office_excel", {})).toBe("Excel");
+  });
+
+  it("НИКОГДА не null: MCP → «Внешний инструмент», незнакомое → «Работаю…»", () => {
+    expect(stepLabelFor("mcp__github__get_issue", { n: 1 })).toBe("Внешний инструмент");
+    expect(stepLabelFor("some_unknown_tool", {})).toBe("Работаю…");
   });
 });

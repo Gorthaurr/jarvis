@@ -11,7 +11,8 @@ import type { Session } from "../../gateway/session.js";
 import { TaskManager } from "../tasks/manager.js";
 import type { TaskStatus } from "@jarvis/protocol";
 import type { SkillProvider } from "../../memory/skills.js";
-import { type AgentDeps, handleUserText, replayUnsafe, waitForChannel, waitWhilePaused } from "./index.js";
+import { type AgentDeps, estimateResultTokens, handleUserText, replayUnsafe, waitForChannel, waitWhilePaused } from "./index.js";
+import type { IWebProvider } from "../../integrations/web.js";
 import type { Task } from "../tasks/task.js";
 
 /** Заглушка провайдера навыков (§8): по умолчанию пусто; точечно переопределяется в тестах. */
@@ -149,6 +150,35 @@ describe("agent-loop (§7, §8)", () => {
     expect(toolNames).not.toContain("order_place");
   });
 
+  it("провенанс (аудит 2026-07-20): эпизодический recall → ХЕДЖ-блок, НЕ «Известные факты»", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider(); // дефолт «Готово.» одним ходом, без tool-use
+    // Стаб-эпизодик: авто-ретривал вернёт один хит (уже прошедший порог на стороне провайдера).
+    const episodic = {
+      hasEntries: async () => true,
+      search: async () => [{ episode: { id: "e1", userId: "u1", kind: "event", text: "интересовался BMW X5", ts: 1 }, score: 0.9 }],
+      write: async () => {},
+    } as unknown as InMemoryEpisodicMemory;
+    await handleUserText(session, "что мне посоветуешь", await makeDeps(llm, { episodic }));
+    const dyn = llm.requests[0]?.systemDynamic ?? "";
+    // Recall — под ХЕДЖ-заголовком (НЕподтверждённое), не под asserted «Известные факты».
+    expect(dyn).toContain("Возможно, всплыло из прошлых разговоров");
+    expect(dyn).toContain("интересовался BMW X5");
+    const hedgeIdx = dyn.indexOf("интересовался BMW X5");
+    const assertedIdx = dyn.indexOf("Известные факты о пользователе:");
+    // Хит НЕ должен стоять в asserted-блоке (либо его нет, либо хедж-блок ПОСЛЕ него).
+    expect(assertedIdx === -1 || assertedIdx < hedgeIdx).toBe(true);
+  });
+
+  it("memory_forget предлагается модели в наборе (горячий, симметрично memory_write)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    await handleUserText(session, "я больше не работаю в сбере", await makeDeps(llm));
+    const toolNames = (llm.requests[0]?.tools ?? []).map((t) => t.name);
+    expect(toolNames).toContain("memory_forget");
+    expect(toolNames).toContain("memory_write");
+  });
+
   it("докрутка вывода: stop_reason=max_tokens → продолжает с места обрыва и склеивает (не огрызок)", async () => {
     const session = fakeSession();
     const llm = new MockLlmProvider([
@@ -269,6 +299,56 @@ describe("agent-loop (§7, §8)", () => {
     expect(llm.requests.length).toBeGreaterThanOrEqual(2); // НЕ оборвано после первого — soft лишь нуджит
     expect(JSON.stringify(llm.requests)).toContain("КОНТЕКСТ ПОЧТИ ЗАПОЛНЕН"); // нудж ушёл модели
     expect(reply.voice.toLowerCase()).not.toContain("память"); // это НЕ hard-свёрток
+  });
+
+  // Аудит контекста 2026-07-20: PROACTIVE-гард. Оценщик токенов результата — чистая функция.
+  it("estimateResultTokens: текст ≈ длина/2.5 (консервативно под кириллицу), картинка ≈ 2000, блочный суммируется", () => {
+    expect(estimateResultTokens([{ type: "tool_result", content: "x".repeat(350) }])).toBe(140); // 350/2.5
+    expect(estimateResultTokens([{ content: [{ type: "text", text: "y".repeat(700) }, { type: "image" }] }])).toBe(280 + 2000); // 700/2.5 + скрин
+    expect(estimateResultTokens([{ type: "text", text: "нет content" }])).toBe(0); // блок без content игнор
+    expect(estimateResultTokens([])).toBe(0);
+  });
+
+  it("гард PROACTIVE: usage НИЖЕ HARD, но ОГРОМНЫЙ tool_result → проекция ≥ HARD → свёрток ДО след. вызова", async () => {
+    // Ключ: lastPromptTokens (40K) сам по себе < HARD (100K) → СТАРЫЙ гард (только по нему) НЕ свернул бы;
+    // но projected = 40K + оценка гигантского web-результата (~114K) ≥ HARD → новый гард ловит ДО 400.
+    process.env.JARVIS_CONTEXT_SOFT_TOKENS = "50000";
+    process.env.JARVIS_CONTEXT_HARD_TOKENS = "100000";
+    const bigWeb = {
+      search: async () => [{ title: "T", url: "https://x.example", snippet: "д".repeat(400_000) }],
+      fetch: async () => null,
+    } as unknown as IWebProvider;
+    const session = fakeSession();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t0", name: "web_search", input: { query: "big" } }], usage: { inputTokens: 40_000 } },
+      { text: "Этот ход не должен вызваться (свернулись по проекции)." },
+    ]);
+    const reply = await handleUserText(session, "сделай отчёт", await makeDeps(llm, { web: bigWeb }));
+    delete process.env.JARVIS_CONTEXT_SOFT_TOKENS;
+    delete process.env.JARVIS_CONTEXT_HARD_TOKENS;
+    expect(llm.requests).toHaveLength(1); // 2-й раунд НЕ начат — projected свернул до него (не сожгли 400)
+    expect(reply.voice.toLowerCase()).toContain("память"); // честный частичный итог про переполнение окна
+  });
+
+  // Аудит контекста 2026-07-20 (rules) + ревью F9: примирение нудж↔бюджет. Под wrap-pressure примиряется
+  // ТОЛЬКО ТЕКСТ («ход ИЛИ честный итог», не «не сдавайся forever»); Opus-эскалация СОХРАНЯЕТСЯ (F9:
+  // лишить выполнимую задачу сильного шота → ложное «не могу» слабого тира проходит как честный исход).
+  it("§rules примирение: капитуляция под контекст-нуджем → примирённый текст, агрессивный НЕ впрыснут, Opus-шот сохранён", async () => {
+    process.env.JARVIS_CONTEXT_SOFT_TOKENS = "20000";
+    process.env.JARVIS_CONTEXT_HARD_TOKENS = "500000"; // высоко: HARD не свернёт, только SOFT-нудж
+    const session = fakeSession();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t0", name: "web_search", input: { query: "x" } }], usage: { inputTokens: 25_000 } }, // ≥SOFT
+      { text: "Не могу, это невозможно, сэр." }, // капитуляция ПОД взведённым контекст-нуджем
+      { text: "Частично: нашёл A, до B не дошёл." }, // после примирённого нуджа — честный итог
+    ]);
+    await handleUserText(session, "сделай отчёт по продажам", await makeDeps(llm));
+    delete process.env.JARVIS_CONTEXT_SOFT_TOKENS;
+    delete process.env.JARVIS_CONTEXT_HARD_TOKENS;
+    const joined = JSON.stringify(llm.requests);
+    expect(joined).toContain("бюджет на исходе"); // примирённый текст впрыснут
+    expect(joined).not.toContain("запрещённый ответ на выполнимую задачу"); // агрессивный анти-капитуляц. НЕ впрыснут
+    expect(llm.requests.map((r) => r.model)).toContain("f"); // F9: Opus (fable) ВСЁ ЖЕ активирован — сильный шот не отнят
   });
 
   it("анти-капитуляция: текст-отказ БЕЗ единого инструмента → нудж на попытку, затем инструмент (не сдаётся)", async () => {
@@ -741,6 +821,51 @@ describe("agent-loop (§7, §8)", () => {
     expect(statuses.some((s) => s.state === "running")).toBe(true);
     expect(statuses[statuses.length - 1]?.state).toBe("done");
     expect(tasks.list("u1")[0]?.state).toBe("done");
+  });
+
+  // Аудит окружения 2026-07-21 (P0-A): чип уходит СРАЗУ при старте содержательной задачи — даже на
+  // ТЕКСТ-ходе без инструментов (раньше break до :2141 → чипа не было вовсе; лаг «earcon есть, чип нет»).
+  it("P0-A §20: содержательная задача эмитит running-чип НА СТАРТЕ, даже без tool-use", async () => {
+    const tasks = new TaskManager();
+    const statuses: TaskStatus[] = [];
+    const send = vi.fn((type: string, payload: unknown) => {
+      if (type === "task.status") statuses.push(payload as TaskStatus);
+    });
+    const sendAction = vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 }));
+    const session = { sessionId: "s1", userId: "u1", sendAction, send } as unknown as Session;
+    const llm = new MockLlmProvider([{ text: "Составил сводку." }]); // ТЕКСТ-ход, НОЛЬ инструментов
+    await handleUserText(session, "составь сводку продаж за квартал", await makeDeps(llm, { tasks }));
+    expect(statuses[0]?.state).toBe("running"); // ПЕРВЫЙ статус — running, на старте (не после tool-раунда)
+    expect(statuses[statuses.length - 1]?.state).toBe("done"); // терминал корректно скрыл/завершил чип
+  });
+
+  // Аудит окружения 2026-07-21 (P0-B): QUALITY-эскалация. Раньше §7 эскалировал на Opus ТОЛЬКО по
+  // ошибкам инструментов ×2; недо-тщательность без ошибок (не сверил слепое действие) до Opus не доходила.
+  it("P0-B quality-эскалация: повторный промах сверки слепого действия → эскалация на сильную модель", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t0", name: "input_click", input: { by: "coords", x: 10, y: 10 } }] }, // слепое действие (blindMutatePending)
+      { text: "Готово, нажал." }, // не сверил исход → verify-нудж #1 (ещё на слабом тире)
+      { text: "Готово, нажал." }, // ОПЯТЬ не сверил → verify-нудж #2 → QUALITY-эскалация на fable
+      { text: "Сверил экран: кнопка нажата, панель закрылась." }, // терминал уже на сильной модели
+    ]);
+    await handleUserText(session, "нажми кнопку сохранить в панели", await makeDeps(llm));
+    const models = llm.requests.map((r) => r.model);
+    expect(models[0]).toBe("s"); // старт на слабом тире (sonnet)
+    expect(models).toContain("f"); // повторный промах сверки → эскалация на fable(Opus)
+  });
+
+  // Разговорный ход (вопрос) чипа на старте НЕ получает — не §20-задача (P0-A гейт !isConversational).
+  it("P0-A: разговорный вопрос без инструментов НЕ эмитит task.status (не задача)", async () => {
+    const tasks = new TaskManager();
+    const statuses: TaskStatus[] = [];
+    const send = vi.fn((type: string, payload: unknown) => {
+      if (type === "task.status") statuses.push(payload as TaskStatus);
+    });
+    const session = { sessionId: "s1", userId: "u1", sendAction: vi.fn(() => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 })), send } as unknown as Session;
+    const llm = new MockLlmProvider([{ text: "Четыре." }]);
+    await handleUserText(session, "сколько будет два плюс два", await makeDeps(llm, { tasks }));
+    expect(statuses.length).toBe(0); // вопрос — не задача, чипа нет
   });
 
   it("§7: модель застряла (инструменты падают подряд) → авто-эскалация тира sonnet→fable", async () => {

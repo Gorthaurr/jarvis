@@ -16,7 +16,7 @@ describe("toolEffect — классификация для verify-петли", (
     }
   });
   it("нейтральные (поиск/память/служебные) → neutral", () => {
-    for (const t of ["web_search", "memory_write", "skill_save", "tool_load", "browser_tabs"]) {
+    for (const t of ["web_search", "memory_write", "memory_forget", "skill_save", "tool_load", "browser_tabs"]) {
       expect(toolEffect(t)).toBe("neutral");
     }
   });

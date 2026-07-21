@@ -306,6 +306,9 @@ export interface TaskStatus {
   summary?: string;
   stepsDone?: number;
   stepsTotal?: number;
+  /** «Что делаю сейчас» (§20): метка текущего действия для чипа («Читаю страницу», «Кликаю»). Клиент
+   *  показывает только для running-задачи. Обновляется каждый раунд из инструментов. */
+  stepLabel?: string;
 }
 
 /** Карточка подробностей в renderer (§21). voice и экран — разные каналы. */

@@ -102,8 +102,17 @@ const MAX_TEXT = 3200;
 
 /** Результат консультации с базой знаний. */
 export interface ConsultResult {
+  /** Существует ли ДОМЕН (false → нет такого свода знаний). */
   found: boolean;
-  /** Релевантные разделы (или вступление при пустом/непопавшем запросе). */
+  /**
+   * Нашёлся ли РЕЛЕВАНТНЫЙ материал под запрос (аудит контекста 2026-07-20, честность). false =
+   * непустой запрос НЕ сматчил ни одного раздела: раньше тут молча возвращалось `intro` с found:true —
+   * эксперт считал, что «свериался с литературой», хотя релевантного раздела нет (мнимая консультация
+   * опаснее её отсутствия). Теперь промах ЧЕСТНЫЙ: matched:false, text пустой, topics для уточнения.
+   * Пустой запрос (обзор домена) — matched:true (intro = осознанно запрошенный обзор, не промах).
+   */
+  matched: boolean;
+  /** Релевантные разделы (или вступление при пустом запросе-обзоре; пусто при промахе). */
   text: string;
   /** Оглавление домена — чтобы модель уточнила запрос при промахе. */
   topics: string[];
@@ -144,21 +153,24 @@ export class KnowledgeBase {
     return this.docs.get(domain)?.sections.map((s) => s.heading) ?? [];
   }
 
-  /** Достать релевантные разделы домена под запрос (top-`limit`). Пустой/непопавший запрос → вступление. */
+  /** Достать релевантные разделы домена под запрос (top-`limit`). Пустой запрос → обзор; промах → честный matched:false. */
   consult(domain: string, query: string, limit = 2): ConsultResult {
     const doc = this.docs.get(domain);
-    if (!doc) return { found: false, text: "", topics: [] };
+    if (!doc) return { found: false, matched: false, text: "", topics: [] };
     const topics = doc.sections.map((s) => s.heading);
     const terms = tokenize(query);
-    if (terms.length === 0) return { found: true, text: doc.intro.slice(0, MAX_TEXT), topics };
+    // Пустой запрос = осознанный запрос ОБЗОРА домена → вступление (это НЕ промах).
+    if (terms.length === 0) return { found: true, matched: true, text: doc.intro.slice(0, MAX_TEXT), topics };
     const picked = doc.sections
       .map((s) => ({ s, score: scoreSection(s, terms) }))
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(1, limit))
       .map((x) => x.s);
-    if (picked.length === 0) return { found: true, text: doc.intro.slice(0, MAX_TEXT), topics };
+    // ЧЕСТНЫЙ ПРОМАХ (аудит контекста 2026-07-20): непустой запрос не сматчил разделы — НЕ подсовываем
+    // intro как «состоявшуюся консультацию». Пустой text + matched:false; хендлер отвечает честно + topics.
+    if (picked.length === 0) return { found: true, matched: false, text: "", topics };
     const text = picked.map((s) => `## ${s.heading}\n${s.body}`).join("\n\n");
-    return { found: true, text: text.slice(0, MAX_TEXT), topics };
+    return { found: true, matched: true, text: text.slice(0, MAX_TEXT), topics };
   }
 }

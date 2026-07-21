@@ -42,6 +42,9 @@ export interface Task {
   stepsDone: number;
   /** Всего шагов — известно для скилла; undefined для open-ended LLM-петли. */
   stepsTotal?: number;
+  /** «Что делаю сейчас» для чипа (§20): метка текущего действия («Читаю страницу», «Кликаю»). Обновляется
+   *  каждый раунд из инструментов; показывается на клиенте только для running-задачи (жалоба «не видно, что делает»). */
+  stepLabel?: string;
   /** unix ms старта (для порога нарративности >5 c, §20). */
   startedAt: number;
   /** unix ms завершения (done/failed/cancelled). */
@@ -318,5 +321,82 @@ export function actionTitle(toolName: string, input: Record<string, unknown>): s
       return "Громкость";
     default:
       return null; // screen_capture / browser_read / memory_* / skill_* / ui_ground / input_* — не суть
+  }
+}
+
+/**
+ * Человеческая метка ТЕКУЩЕГО действия для чипа (§20, «что делаю сейчас»). В отличие от {@link actionTitle}
+ * (суть задачи — null для «процессных» инструментов), НИКОГДА не null: процессные шаги (смотрю/читаю/кликаю)
+ * тоже показываем — это и есть «видно, что делает» (жалоба владельца). Для сути (Поиск/Запуск/Excel…) делегирует
+ * actionTitle; для процессных — глагольная метка; для незнакомого/MCP — общий фолбэк.
+ */
+export function stepLabelFor(toolName: string, input: Record<string, unknown>): string {
+  const s = (v: unknown): string => String(v ?? "").trim();
+  switch (toolName) {
+    case "browser_open":
+    case "web_open": {
+      const u = s(input.url);
+      return u ? `Открываю: ${hostName(u)}` : "Открываю сайт";
+    }
+    case "web_fetch": {
+      const u = s(input.url);
+      return u ? `Читаю: ${hostName(u)}` : "Читаю страницу";
+    }
+    case "screen_capture":
+      return "Смотрю на экран";
+    case "screen_read_text":
+      return "Читаю текст с экрана";
+    case "browser_read":
+      return "Читаю страницу";
+    case "browser_inspect":
+    case "browser_tabs":
+      return "Изучаю страницу";
+    case "browser_act":
+    case "browser_batch":
+      // play/pause/next/prev — конкретно (через actionTitle); click/type/scroll/батч — общая метка.
+      return actionTitle(toolName, input) ?? "Действую на странице";
+    case "ui_ground":
+    case "ui_snapshot":
+      return "Ищу элемент на экране";
+    case "ui_invoke":
+      return "Нажимаю элемент";
+    case "input_click":
+    case "input_mouse":
+      return "Кликаю";
+    case "input_type":
+    case "input_batch":
+      return "Печатаю";
+    case "input_key":
+      return "Ввод с клавиатуры";
+    case "wait_for":
+      return "Жду нужного состояния";
+    case "knowledge_consult":
+      return "Свериваюсь с базой знаний";
+    case "memory_search":
+      return "Вспоминаю";
+    case "fs_read":
+    case "fs_list":
+    case "fs_search":
+      return "Читаю файлы";
+    case "window_focus":
+    case "window_list":
+    case "app_focus":
+      return "Переключаю окно";
+    case "market_quote":
+    case "market_candles":
+    case "market_analyze":
+    case "market_backtest":
+    case "trade_predict":
+    case "trade_winrate":
+    case "trade_predictions":
+    case "tinkoff_portfolio":
+      return "Анализ рынка";
+    case "watch_create":
+    case "watch_cancel":
+    case "watch_list":
+      return "Настраиваю наблюдение";
+    default:
+      // Суть (Поиск/Запуск/Excel/Word/Файл/код/Telegram/OBS/медиа) → actionTitle; MCP/незнакомое → общий фолбэк.
+      return actionTitle(toolName, input) ?? (toolName.startsWith("mcp__") ? "Внешний инструмент" : "Работаю…");
   }
 }

@@ -58,7 +58,7 @@ import type { WatchService } from "../../proactive/watch/service.js";
 import type { ObligationStore } from "../../proactive/ambient/obligations.js";
 import type { ResolutionMemory } from "../../memory/resolution-memory.js";
 import { classifyTaskScope, isDuplicateGoal, looksLikeStatusQuery } from "../tasks/scope.js";
-import { type Task, actionTitle, formatActiveTasks, formatRecentTasks } from "../tasks/task.js";
+import { type Task, actionTitle, formatActiveTasks, formatRecentTasks, stepLabelFor } from "../tasks/task.js";
 import { SessionWarmth } from "./warmth.js";
 import { estimateCostUsd, metrics } from "../../obs/metrics.js";
 import { costUsd } from "../../obs/pricing.js";
@@ -139,6 +139,33 @@ const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
   "monitor_list", "window_list", "screen_probe", "browser_tabs",
   "skill_list", "tool_list", "list_reminders", "watch_list", "obligation_list",
 ]);
+
+/**
+ * Консервативная оценка токенов блоков tool_result — для PROACTIVE контекст-гарда (аудит 2026-07-20).
+ * Точный счёт не нужен: цель — спроектировать прирост промпта, чтобы свернуться ДО пробоя окна (400).
+ * ЗАНИЖЕНИЕ — единственное ОПАСНОЕ направление (недооценил → 400 без свёртка); ПЕРЕОЦЕНКА бесплатна
+ * (максимум пара ранних честных свёртков у самого потолка, коротких задач не касается). Поэтому делитель
+ * КОНСЕРВАТИВНЫЙ: длина/2.5 (адверс-ревью F8). У RU-ассистента доминирующий контент tool_result'ов —
+ * КИРИЛЛИЦА (web_fetch/browser_read капнуты 8000 симв, преимущественно русский текст), а её Claude
+ * токенизирует плотнее латиницы (~2.5 симв/ток против ~4). Делитель 3.5 (латинская калибровка) занижал
+ * бы именно доминирующий язык — там, где занижать нельзя. 2.5 над-оценивает латиницу (безопасно), покрывает
+ * кириллицу. Картинка (скрин) ≈ 2000 ток. Чистая функция (экспорт для юнит-теста); string- и блочный content.
+ */
+export function estimateResultTokens(blocks: ReadonlyArray<Record<string, unknown>>): number {
+  let t = 0;
+  for (const b of blocks) {
+    const c = b?.content;
+    if (typeof c === "string") {
+      t += Math.ceil(c.length / 2.5);
+    } else if (Array.isArray(c)) {
+      for (const part of c as Array<Record<string, unknown>>) {
+        if (part?.type === "text" && typeof part.text === "string") t += Math.ceil(part.text.length / 2.5);
+        else if (part?.type === "image") t += 2000; // скрин ~1.5-2K токенов
+      }
+    }
+  }
+  return t;
+}
 
 /** Зависимости агента (инъекция для тестируемости и разделения слоёв). */
 export interface AgentDeps {
@@ -726,6 +753,7 @@ export async function handleUserText(
   const reply = await runAgentLoop(session, clean, tier, deps, sink, {
     freshContext,
     conversational: decision.conversational === true,
+    smalltalk: decision.smalltalk === true,
     viaWake: meta?.viaWake,
   });
   deps.memory.pushTurn("assistant", reply.voice);
@@ -947,7 +975,7 @@ async function runAgentLoop(
   tier: Exclude<Tier, "tier0">,
   deps: AgentDeps,
   sink?: ReplySink,
-  opts?: { freshContext?: boolean; conversational?: boolean; suppressStepStream?: boolean; viaWake?: boolean },
+  opts?: { freshContext?: boolean; conversational?: boolean; smalltalk?: boolean; suppressStepStream?: boolean; viaWake?: boolean },
 ): Promise<AgentReply> {
   // §10 realtime: сигналим «думаю» КАК МОЖНО РАНЬШЕ (до retrieval/recall/LLM) — пайплайн
   // замаскирует пол латентности Opus коротким филлером «Секунду, сэр.», пока идёт генерация.
@@ -1087,20 +1115,31 @@ async function runAgentLoop(
   ]
     .filter(Boolean)
     .join("\n\n");
-  // Ревью памяти 2026-07-10 (А1): `facts` после спреда БЕЗУСЛОВНО затирал курируемые факты профиля
-  // пустым retrieval-результатом — профильные факты не доходили до промпта ни при каком наполнении.
-  // Мерж с дедупом: стабильные факты профиля + эпизодический recall. Профиль читаем ЖИВЬЁМ из кеша
-  // (не deps.userContext — тот снапшот момента коннекта: факты, записанные В ЭТОЙ сессии мостом/
-  // рефлексом, до reconnect не попадали бы в промпт — второе ревью).
-  const mergedFacts = [...new Set([...(getProfile(deps.userId).facts ?? []), ...facts])];
-  const sys = buildSystemPrompt({
-    ...deps.userContext,
-    facts: mergedFacts,
-    personaTone,
-    ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
-    ...(skillCatalog ? { skillCatalog } : {}),
-    ...(recentTasks ? { recentTasks } : {}),
-  });
+  // ПРОВЕНАНС фактов (аудит контекста 2026-07-20). Раньше курируемые факты профиля и эпизодический
+  // retrieval плоско мержились в один блок «Известные факты» — низкоуверенный сосед на шумном e5-small
+  // читался моделью как ТВЁРДЫЙ факт («вспоминает то, чего не было»). Теперь РАЗДЕЛЕНО:
+  //  • profile.facts → asserted «Известные факты» (курируемые; сохраняет фикс А1 — доходят всегда);
+  //  • эпизодический recall (уже отсечён порогом memoryMinScore) → ОТДЕЛЬНЫЙ хеджированный блок
+  //    «возможно, из прошлых разговоров — сверься» (persona/index.ts renderDynamic), с дедупом против
+  //    курируемых (не двоим то, что уже asserted). Профиль читаем ЖИВЬЁМ из кеша (факты этой сессии).
+  const curatedFacts = getProfile(deps.userId).facts ?? [];
+  const curatedSet = new Set(curatedFacts.map((f) => f.trim().toLowerCase()));
+  const recalledMemories = facts.filter((t) => !curatedSet.has(t.trim().toLowerCase()));
+  // §econ (лог-анализ 2026-07-21): тривиальный smalltalk («привет») не требует полной 33К-персоны — на холодном
+  // кеше (тир-свитч) это ~$0.2/ход, 11% трат. LEAN-ядро (~500 ток) за флагом; дефолт — полная персона (0 регресс).
+  const lean = opts?.smalltalk === true && process.env.JARVIS_LEAN_SMALLTALK === "1";
+  const sys = buildSystemPrompt(
+    {
+      ...deps.userContext,
+      facts: curatedFacts,
+      ...(recalledMemories.length ? { recalledMemories } : {}),
+      personaTone,
+      ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
+      ...(skillCatalog ? { skillCatalog } : {}),
+      ...(recentTasks ? { recentTasks } : {}),
+    },
+    { lean },
+  );
   // Набор = встроенные (минус служебные) + самописные инструменты (§8+ саморасширение):
   // выученные Джарвисом инструменты становятся вызываемыми наравне со штатными.
   // §15 ЛЕНИВАЯ ЗАГРУЗКА: «горячие» инструменты + холодные ТОЛЬКО если их подгрузили через tool_load
@@ -1223,6 +1262,12 @@ async function runAgentLoop(
   let contextNudged = false;
   let contextWrap = false;
   let lastPromptTokens = 0; // размер ПОСЛЕДНЕГО отправленного промпта (input+cache_read+cache_creation)
+  // Аудит контекста 2026-07-20 (PROACTIVE-гард): оценка токенов tool_result'ов ТЕКУЩЕГО раунда, которые
+  // попадут в СЛЕДУЮЩИЙ промпт, но ещё НЕ учтены в lastPromptTokens (тот — из usage прошлого ответа, до
+  // добавления результатов). Раньше гард сверял ТОЛЬКО lastPromptTokens прошлого раунда → один раунд с
+  // параллельными web_fetch/browser_read (по ~8000 симв) + screen_capture мог внести прирост больше
+  // headroom и пробить жёсткие ~200K (HTTP 400) РАНЬШЕ, чем гард увидит размер. Проекция закрывает окно.
+  let pendingResultTokens = 0;
   // Б3 (MEMORY_CONTEXT_REVIEW): в ДЛИННОЙ задаче системный снимок промпта заморожен на момент старта —
   // окна/вкладки/часы врут через минуты работы, и модель платит screen_capture (~2K ток) за то, что
   // приезжает бесплатно каждые 12с (client.system обновляет deps.userContext.systemContext ЖИВЬЁМ).
@@ -1361,6 +1406,21 @@ async function runAgentLoop(
   let strongLocked = false;
   let executorReverted = false;
   let cleanRoundsStreak = 0;
+  // QUALITY-ЭСКАЛАЦИЯ (аудит окружения 2026-07-21): §7-каскад эскалирует на Opus ТОЛЬКО failure-gated
+  // (весь раунд провалился ×2). Недо-ТЩАТЕЛЬНОСТЬ без ошибок инструментов (модель «закрыла» задачу
+  // поверхностно, не сверив исход или не достигнув цели) до Opus НЕ доходила → корень жалобы «не
+  // заёбывается». Этот хелпер поднимает тир на сильный по КАЧЕСТВЕННОМУ сигналу (повторный промах
+  // сверки / преждевременное «готово» vs цель) — сильная модель верифицирует и доводит лучше. Липкая
+  // эскалация (перекрывает family-boost), executor-даунгрейд её не спускает (strongLocked). Идемпотентна.
+  const escalateForQuality = (reason: string): void => {
+    if (currentTier === "fable" || deps.models.fable === model) return; // уже на сильной (или тиры схлопнуты)
+    escalatedFrom = escalatedFrom ?? { tier: currentTier, model };
+    currentTier = "fable";
+    model = deps.models.fable;
+    familyBoost = null;
+    strongLocked = true; // осознанная сила — executor вниз не спускает
+    log.info("§quality-эскалация: недо-тщательность → сильная модель", { reason, tier: currentTier });
+  };
   // Докрутка обрыва по лимиту вывода: модель не закончила (stop_reason=max_tokens) → продолжаем
   // генерацию с места обрыва, а не отдаём огрызок (большой код/реферат/курсовая). Кап продолжений
   // + общие потолки задачи (токены/шаги/время) защищают от runaway. Env JARVIS_MAX_CONTINUATIONS.
@@ -1452,6 +1512,14 @@ async function runAgentLoop(
       }
     }
   }
+  // ВНЕШНИЙ КОНТРАКТ ПРОГРЕССА (аудит окружения 2026-07-21; правки ревью F10/F11): чип уходит на клиент
+  // СРАЗУ при старте содержательной (не conversational) задачи — не дожидаясь первого tool-раунда (тот
+  // 2-13с на Sonnet/Opus). Раньше первый показ был на :2141 ПОСЛЕ первого tool-use → лаг на всю генерацию,
+  // а текст-ход (0 инструментов) не показывал чип ВОВСЕ. Место выбрано ПОСЛЕ admission-блока и ВНУТРИ try:
+  // (F10) очередная GUI-задача уже показала queued выше — не мигаем running перед queued; (F11) любой throw
+  // сборки промпта ниже ловится try → терминал корректно скроет чип (не осиротеет). shown уже true у
+  // queued-пути → не дублируем. Разговорный ход чипа НЕ получает (не §20-задача, isSubstantiveTask=false).
+  if (!isConversational && !shown) showStatus();
   // ── §8 МАКРОС, быстрый путь (§Волна3 3.1 — «реплей прежде петли», расширен): у recall'нутого
   // навыка есть авто-реплей → гоним ЕГО ($0, секунды), LLM остаётся одна сверка глазами. Провал
   // реплея — честный откат на полную процедуру с контекстом «дошёл до шага N». Гейты: только СВОЙ
@@ -1610,28 +1678,34 @@ async function runAgentLoop(
         log.info("§20 бюджет-нудж: 70% потолка времени — прошу сворачиваться", { taskId, leftSec });
         nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
       }
-      // Гард контекст-окна (по РАЗМЕРУ промпта прошлого раунда): HARD → ранний честный свёрток (не ждём
-      // 400 на середине); SOFT → одноразовый нудж «сворачивайся, окно почти исчерпано». Проверяем HARD
-      // первым (перекрывает soft). round>0 — на первом раунде промпт заведомо мал, watermark ещё не снят.
-      if (round > 0 && lastPromptTokens >= CONTEXT_HARD_TOKENS) {
-        log.warn("agent-loop: промпт у жёсткого потолка контекст-окна — сворачиваюсь заранее", {
+      // Гард контекст-окна PROACTIVE (аудит 2026-07-20): проектируем РАЗМЕР СЛЕДУЮЩЕГО промпта =
+      // lastPromptTokens (реальный из usage прошлого ответа) + pendingResultTokens (оценка результатов
+      // прошлого раунда, ещё не учтённых в usage). HARD → ранний честный свёрток ДО отправки, не ждём 400
+      // на середине; SOFT → одноразовый нудж. HARD первым (перекрывает soft). round>0 — на первом раунде
+      // промпт заведомо мал. Проекция монотонно ≥ lastPromptTokens → гард срабатывает НЕ ПОЗЖЕ прежнего
+      // (короткие задачи не затронуты: projected много ниже порога).
+      const projectedPromptTokens = lastPromptTokens + pendingResultTokens;
+      if (round > 0 && projectedPromptTokens >= CONTEXT_HARD_TOKENS) {
+        log.warn("agent-loop: проекция промпта у жёсткого потолка контекст-окна — сворачиваюсь заранее", {
           taskId,
           lastPromptTokens,
+          pendingResultTokens,
+          projectedPromptTokens,
           hardCap: CONTEXT_HARD_TOKENS,
         });
         timedOut = true;
         contextWrap = true; // причина провала — «контекст переполнен», не «превышен потолок времени»
         break;
       }
-      if (!contextNudged && round > 0 && lastPromptTokens >= CONTEXT_SOFT_TOKENS) {
+      if (!contextNudged && round > 0 && projectedPromptTokens >= CONTEXT_SOFT_TOKENS) {
         contextNudged = true;
         appendUserNote(
           convo,
-          `🧠 КОНТЕКСТ ПОЧТИ ЗАПОЛНЕН (~${Math.round(lastPromptTokens / 1000)}K из ~${Math.round(CONTEXT_HARD_TOKENS / 1000)}K токенов). ` +
+          `🧠 КОНТЕКСТ ПОЧТИ ЗАПОЛНЕН (~${Math.round(projectedPromptTokens / 1000)}K из ~${Math.round(CONTEXT_HARD_TOKENS / 1000)}K токенов). ` +
             `Не запускай новых длинных чтений/дампов (web_fetch/browser_read/OCR больших страниц): заверши ` +
             `текущий подшаг, сверь результат и дай ЧЕСТНЫЙ итог — окно вот-вот исчерпается.`,
         );
-        log.info("§контекст-нудж: soft-порог окна — прошу сворачиваться", { taskId, lastPromptTokens, softCap: CONTEXT_SOFT_TOKENS });
+        log.info("§контекст-нудж: soft-порог окна — прошу сворачиваться", { taskId, projectedPromptTokens, softCap: CONTEXT_SOFT_TOKENS });
         nudgeBoostNextRound = true;
       }
       if (round > 0 && roundDurTotalMs > 0) {
@@ -1892,6 +1966,9 @@ async function runAgentLoop(
     // Гард контекст-окна: реальный размер ТОЛЬКО ЧТО отправленного промпта (весь вход = не-кеш + чтение из
     // кеша + запись в кеш). Проверяется в блоке бюджета на следующей итерации (watermark прошлого раунда).
     lastPromptTokens = resp.usage.inputTokens + resp.usage.cacheReadTokens + resp.usage.cacheCreationTokens;
+    // PROACTIVE-гард: этот usage УЖЕ включает результаты прошлого раунда → сбрасываем их оценку; результаты
+    // ТЕКУЩЕГО раунда (ещё не отправленные) будут оценены после их формирования (см. ниже, у convo.push).
+    pendingResultTokens = 0;
     // Волна 1 (1.8): пер-раундовая телеметрия + WARN на перезапись кеш-префикса С ПРИЧИНОЙ. Норма
     // rolling-кеша: read >> creation (пишется только свежий хвост); creation > read = префикс
     // перезаписан (в эпизоде 2026-07-10 это съело $0.63 из $1.04 и было НЕВИДИМО в per-task метриках).
@@ -1984,9 +2061,18 @@ async function runAgentLoop(
         // спускает. Флаг ставим БЕЗУСЛОВНО (до ветки эскалации): если §7 УЖЕ подняла на fable, а модель
         // сдалась текстом на fable, ветка ниже (currentTier!=="fable") не сработает — без этой строки
         // executor-даунгрейд вернул бы слабый тир ровно там, где повтор должен быть УМНЕЕ. Как в trading.
+        // §rules ПРИМИРЕНИЕ нудж↔бюджет (аудит контекста 2026-07-20; уточнено ревью F9): под ВЗВЕДЁННЫМ
+        // budget/context-нуджем («сворачивайся») агрессивное «СТОП, не сдавайся, keep trying forever»
+        // ПРОТИВОРЕЧИТ «сворачивайся» в соседних раундах (док. боль). Примиряем ТОЛЬКО ТЕКСТ: когерентное
+        // «ОДИН ход ИЛИ честный частичный итог» вместо «не сдавайся бесконечно». Opus-эскалацию НЕ подавляем
+        // (ревью F9: на 70% ВРЕМЕНИ бюджет ещё есть — лишить выполнимую задачу сильного шота = слабый Sonnet
+        // выдаст «не могу», а masked-failure его не ловит → ложный отказ как честный исход). Один сильный
+        // повтор ограничен retryNudges-капом, а «лишние Opus поверх лимита» гасят кап + HARD контекст-гард.
+        // Verify/goal-check НЕ трогаем — честностные сверки исхода (подавление = ложный успех).
+        const underWrapPressure = budgetNudged || contextNudged;
         strongLocked = true;
         // На отказе СРАЗУ эскалируем на сильную модель (Opus) — повтор должен быть УМНЕЕ, а не на той же
-        // слабой, которая уже спасовала. Так «попробуй ещё» = реальный шанс выполнить, а не отписка.
+        // слабой, которая уже спасовала. Эскалация — ВСЕГДА (в т.ч. под бюджетом: последний сильный шот).
         if (currentTier !== "fable" && deps.models.fable !== model) {
           currentTier = "fable";
           model = deps.models.fable;
@@ -1996,10 +2082,19 @@ async function runAgentLoop(
         convo.push({ role: "assistant", content: resp.text });
         convo.push({
           role: "user",
-          content:
-            "СТОП. Ты НЕ говоришь «не могу/не умею» и НЕ перекладываешь на меня — это запрещённый ответ на выполнимую задачу. Задача на ЭТОМ ПК выполнима — СДЕЛАЙ её. Веб → через browser_open/browser_act (НЕ физический input, он не нужен). Не знаешь КАК → web_search найди способ. Нет инструмента → code_run (полный Windows) или построй свой (tool_create). Сделай ход ПРЯМО СЕЙЧАС и проверь результат глазами. Отказ — только после РЕАЛЬНЫХ попыток разными способами, и тогда это отчёт «пробовал A,B,C — упёрся в X», а не «не могу».",
+          content: underWrapPressure
+            ? "Голословное «не могу/не умею» — не ответ, но бюджет на исходе: НЕ начинай новых длинных подходов. " +
+              "Либо сделай ОДИН конкретный ход к цели (веб → browser_open/browser_act; не знаешь как → web_search; " +
+              "нет инструмента → code_run) и сверь результат, ЛИБО дай ЧЕСТНЫЙ ЧАСТИЧНЫЙ итог — что успел, что нет. " +
+              "Одно из двух, без противоречий."
+            : "СТОП. Ты НЕ говоришь «не могу/не умею» и НЕ перекладываешь на меня — это запрещённый ответ на выполнимую задачу. Задача на ЭТОМ ПК выполнима — СДЕЛАЙ её. Веб → через browser_open/browser_act (НЕ физический input, он не нужен). Не знаешь КАК → web_search найди способ. Нет инструмента → code_run (полный Windows) или построй свой (tool_create). Сделай ход ПРЯМО СЕЙЧАС и проверь результат глазами. Отказ — только после РЕАЛЬНЫХ попыток разными способами, и тогда это отчёт «пробовал A,B,C — упёрся в X», а не «не могу».",
         });
-        log.info("анти-капитуляция: нудж на попытку через инструменты", { retryNudges, tier: currentTier });
+        log.info(
+          underWrapPressure
+            ? "§rules: анти-капитуляция ПРИМИРЕНА с бюджет/контекст-нуджем (текст «ход ИЛИ честный итог»; Opus-шот сохранён)"
+            : "анти-капитуляция: нудж на попытку через инструменты",
+          { retryNudges, tier: currentTier, underWrapPressure },
+        );
         nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
         finalText = ""; // resp.text уже добавлен в finalText выше — сбрасываем, иначе отказ просочится в финал
         continue;
@@ -2017,6 +2112,10 @@ async function runAgentLoop(
         blindMutatePending
       ) {
         verifyNudges += 1;
+        // QUALITY-эскалация: слабый тир заявил «готово» по слепому действию и ПОСЛЕ первого напоминания
+        // СНОВА не сверил исход (2-й verify-нудж) → сильная модель верифицирует надёжнее. Не на 1-м
+        // (первый — нормальный ход), а на повторном промахе — сигнал недо-тщательности, не просто медленной сверки.
+        if (verifyNudges >= 2) escalateForQuality("повторный промах сверки исхода");
         const claimed = claimsObservedResult(resp.text);
         convo.push({ role: "assistant", content: resp.text.trim() || "…" }); // аудит [2]: пустой content → Anthropic 400 (как sibling ниже)
         convo.push({
@@ -2041,6 +2140,10 @@ async function runAgentLoop(
       const launchOnlyClaim = /(?<![\p{L}])(запущен|запустил|поднялс|стартовал|открыл)\p{L}*/iu.test(resp.text || "");
       if (resp.stopReason === "end_turn" && !goalCheckDone && round >= 2 && (!lastRoundHadVerify || launchOnlyClaim)) {
         goalCheckDone = true;
+        // QUALITY-эскалацию на goal-check НЕ вешаем (ревью cost): launchOnlyClaim ловит «открыл/включил» —
+        // частейшее ЛЕГИТИМНОЕ голосовое завершение (round≥2 «Открыл ютуб, включил видео») → эскалация на
+        // Opus жглась бы там, где задача уже сделана. Goal-check лишь НУДЖИТ сверку с целью; quality-
+        // эскалация остаётся на verify-2nd-nudge (повторный промах сверки — редкий, высокосигнальный).
         convo.push({ role: "assistant", content: resp.text.trim() || "…" }); // аудит [2]: пустой content → Anthropic 400
         convo.push({
           role: "user",
@@ -2072,7 +2175,9 @@ async function runAgentLoop(
       break;
     }
 
-    // Пошёл tool-use → это настоящая многошаговая задача: показываем прогресс (§20).
+    // Пошёл tool-use → это настоящая многошаговая задача: показываем прогресс (§20). Для содержательной
+    // задачи чип УЖЕ показан на старте (выше); здесь — страховка + путь для conversational-хода, реально
+    // делающего многошаговую работу инструментами (напр. «что у меня в памяти про X, разверни в план»).
     if (!shown) showStatus();
 
     // Реплеим ход ассистента (текст + tool_use) и результаты инструментов.
@@ -2161,6 +2266,9 @@ async function runAgentLoop(
           })
         : await dispatchTool(tu.name, tu.input, toolCtx);
       log.info("tool", { name: tu.name, isError: r.isError });
+      // §20 чип «что делаю сейчас» (жалоба «не видно, что делает»): метка текущего действия обновляется на
+      // КАЖДОМ инструменте; emitTaskStatus в конце раунда отдаст последнюю на клиент. Не для conversational.
+      if (!task.conversational) task.stepLabel = stepLabelFor(tu.name, tu.input as Record<string, unknown>);
       // §20 чип «по смыслу»: на первом значимом действии переименовываем задачу из сырой фразы
       // в суть («Яндекс Музыка», «Запуск OBS»). emitTaskStatus в конце раунда обновит чип.
       if (!semanticTitleSet) {
@@ -2269,6 +2377,12 @@ async function runAgentLoop(
       }
     }
     convo.push({ role: "user", content: resultBlocks });
+    // PROACTIVE-гард (аудит 2026-07-20): оцениваем токены tool_result'ов ЭТОГО раунда — они попадут в
+    // СЛЕДУЮЩИЙ промпт, но ещё не учтены в lastPromptTokens. Гард след. итерации сложит их с реальным
+    // размером и свернётся ДО пробоя окна. Оценка КОНСЕРВАТИВНАЯ (over-estimate безопасен: ранний честный
+    // свёрток, не 400). Прунинг старых скринов (ниже) только УМЕНЬШАЕТ след. промпт → проекция остаётся
+    // верхней границей.
+    pendingResultTokens = estimateResultTokens(resultBlocks);
     // §адаптация к цели: помним, была ли в ПОСЛЕДНЕМ инструментальном раунде сверка глазами.
     if (resp.toolUses.length > 0) lastRoundHadVerify = sawVerifyThisRound;
 
@@ -2787,6 +2901,8 @@ function emitTaskStatus(session: Session, task: Task): void {
     summary: task.goal,
     stepsDone: task.stepsDone,
     stepsTotal: task.stepsTotal,
+    // «Что делаю сейчас» — только для активной задачи; на терминале чип показывает итог, не последнее действие.
+    ...(task.state === "running" && task.stepLabel ? { stepLabel: task.stepLabel } : {}),
   };
   session.send("task.status", payload);
 }

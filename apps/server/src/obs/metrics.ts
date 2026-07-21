@@ -316,6 +316,17 @@ export class MetricsCollector {
     this.appendJsonl({ ts: new Date().toISOString(), type: "mouth_to_ear", ms, turnSeq, ...(userId ? { userId } : {}) });
   }
 
+  /**
+   * Скрытая ДЕГРАДАЦИЯ качества (пункт-6, наблюдаемость): read-инструмент отработал БЕЗ ошибки, но не дал
+   * пользы — пустой web_search=[], knowledge_consult без совпадения раздела и т.п. Раньше это было невидимо
+   * (ok=true, ошибки нет) → «почему недоработал» находилось археологией по логам. Durable JSONL-строка
+   * type:"degradation" (в ОЗУ-окно per-task агрегатов НЕ попадает — иной масштаб). Fail-safe: сбой ФС не
+   * критичен (общий appendJsonl). `kind` — короткий машинный слаг; `meta` — контекст (query/domain), без PII-лавины.
+   */
+  recordDegradation(kind: string, meta?: Record<string, unknown>): void {
+    this.appendJsonl({ ts: new Date().toISOString(), type: "degradation", kind, ...(meta ?? {}) });
+  }
+
   /** Записать событие задачи. При переполнении окна — выталкиваем старейшее (ring-buffer). */
   record(event: AgentMetricEvent): void {
     this.events.push(event);

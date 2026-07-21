@@ -41,7 +41,51 @@ vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
   },
 }));
 
-import { McpManager } from "./manager.js";
+import { McpManager, normalizeMcpImages } from "./manager.js";
+
+// Ревью MCP-контракта: image-нормализация под Anthropic (allowlist/data-URI/размер/кап) — иначе сторонний
+// mimeType (svg/bmp) или data-URI-префикс → HTTP 400 на ВЕСЬ ход. Чистая функция → юнит напрямую.
+describe("normalizeMcpImages — нормализация image-блоков MCP под Anthropic", () => {
+  it("поддерживаемые mime проходят; отсутствующий → png", () => {
+    const r = normalizeMcpImages([
+      { type: "image", data: "AAAA", mimeType: "image/jpeg" },
+      { type: "image", data: "BBBB" }, // нет mime → png
+      { type: "text" }, // не картинка — фильтр пропустит
+    ]);
+    expect(r.images).toEqual([
+      { mediaType: "image/jpeg", data: "AAAA" },
+      { mediaType: "image/png", data: "BBBB" },
+    ]);
+    expect(r.dropped).toBe(0);
+  });
+  it("неподдерживаемый mime (svg/bmp) ДРОПАЕТСЯ (не роняем ход), считается в dropped", () => {
+    const r = normalizeMcpImages([
+      { type: "image", data: "SVG", mimeType: "image/svg+xml" },
+      { type: "image", data: "BMP", mimeType: "image/bmp" },
+      { type: "image", data: "OK", mimeType: "image/webp" },
+    ]);
+    expect(r.images).toEqual([{ mediaType: "image/webp", data: "OK" }]);
+    expect(r.dropped).toBe(2);
+  });
+  it("data-URI-префикс срезается, mime извлекается из него", () => {
+    const r = normalizeMcpImages([{ type: "image", data: "data:image/gif;base64,R0lGOD", mimeType: "" }]);
+    expect(r.images).toEqual([{ mediaType: "image/gif", data: "R0lGOD" }]);
+  });
+  it("ревью-2: пустой payload после срезки data-URI ДРОПАЕТСЯ (пустой base64 → 400)", () => {
+    const r = normalizeMcpImages([{ type: "image", data: "data:image/png;base64," }]); // тело пустое
+    expect(r.images).toHaveLength(0);
+    expect(r.dropped).toBe(1); // честно посчитан
+  });
+  it("кап 4 (лишние в dropped) и size-guard >~3.75MB", () => {
+    const many = Array.from({ length: 6 }, () => ({ type: "image", data: "x", mimeType: "image/png" }));
+    const r = normalizeMcpImages(many);
+    expect(r.images).toHaveLength(4);
+    expect(r.dropped).toBe(2);
+    const big = normalizeMcpImages([{ type: "image", data: "y".repeat(5_000_001), mimeType: "image/png" }]);
+    expect(big.images).toHaveLength(0);
+    expect(big.dropped).toBe(1);
+  });
+});
 
 function mgr(servers: Record<string, { command: string; args?: string[] }>): McpManager {
   return new McpManager(new Set<string>(), { servers } as never);

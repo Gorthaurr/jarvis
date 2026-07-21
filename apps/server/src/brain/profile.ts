@@ -147,6 +147,53 @@ export async function addFact(userId: string, fact: string): Promise<void> {
   log.info("профиль: факт добавлен", { userId, count: p.facts.length, preview: f.slice(0, 60) });
 }
 
+const foldFact = (s: string) => s.trim().toLowerCase().replace(/ё/g, "е");
+/** Значимые токены (слова/числа ≥3 симв) нормализованной строки — для ПОСЛОВНОЙ сверки, не substring. */
+const factTokens = (s: string): string[] => foldFact(s).split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 3);
+
+/** Кап удаляемых за один forget профиль-фактов (defense-in-depth против массового сноса). */
+const MAX_FORGET_FACTS = 5;
+
+/**
+ * ЧЕСТНОЕ ЗАБЫВАНИЕ (аудит контекста 2026-07-20; УЖЕСТОЧЕНО адверс-ревью F1): убрать курируемые факты,
+ * соответствующие `needles`. Раньше факты только копились (FIFO по возрасту) — устаревший «работаю в
+ * Сбере» жил рядом с новым «в Яндексе».
+ *
+ * СВЕРКА ПОСЛОВНАЯ (не сырой substring — тот сносил несвязанное: «кот»⊂«скот», «люблю кофе»⊂компаундный
+ * эпизод-нидл). Факт удаляется, только если:
+ *   • folded факт РАВЕН folded needle (байт-идентичный мост эпизод↔профиль — доминирующий путь), ИЛИ
+ *   • ВСЕ значимые токены needle (их ≥2) содержатся в токенах факта (needle ⊆ fact): «работает в
+ *     Сбербанке» → «работает в Сбербанке аналитиком».
+ * НАПРАВЛЕНИЕ fact ⊆ needle УБРАНО — именно оно давало collateral (атомарный факт, случайно упомянутый
+ * в длинном эпизод-нидле). Одиночный/короткий needle (<2 токенов) снести профиль-факт НЕ может (кроме
+ * точного равенства) — «забудь Москву» больше не стирает и «работаю в Москве», и «живу в Москве».
+ * Кап MAX_FORGET_FACTS. Best-effort по словам; семантику несёт episodic.markStale в forgetUserMemory.
+ */
+export async function removeFactsMatching(userId: string, needles: readonly string[]): Promise<string[]> {
+  const p = entry(userId);
+  if (!p.facts || p.facts.length === 0) return [];
+  const specs = needles
+    .map((n) => ({ fold: foldFact(n), tokens: factTokens(n) }))
+    .filter((s) => s.fold.length >= 3);
+  if (specs.length === 0) return [];
+  const removed: string[] = [];
+  p.facts = p.facts.filter((f) => {
+    if (removed.length >= MAX_FORGET_FACTS) return true; // кап достигнут — прочие факты не трогаем
+    const ff = foldFact(f);
+    const ftoks = factTokens(f);
+    const hit = specs.some(
+      (s) => ff === s.fold || (s.tokens.length >= 2 && s.tokens.every((t) => ftoks.includes(t))),
+    );
+    if (hit) removed.push(f);
+    return !hit;
+  });
+  if (removed.length > 0) {
+    await persist(userId);
+    log.info("профиль: факт(ы) забыты", { userId, count: removed.length, remaining: p.facts.length });
+  }
+  return removed;
+}
+
 /** Сериализация записей НА ПОЛЬЗОВАТЕЛЯ: setX зовутся fire-and-forget (void) — без цепочки два
  *  writeFile в один файл могли интерливиться/побить JSON. Цепочка per-userId (разные юзеры параллельно). */
 const writeChains = new Map<string, Promise<void>>();

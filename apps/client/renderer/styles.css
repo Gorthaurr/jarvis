@@ -542,6 +542,16 @@ body {
   color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
+/* «что делаю сейчас» — текущее действие задачи (§20, жалоба «не видно, что делает») */
+.taskchip__action {
+  font-size: var(--fs-hint);
+  color: var(--text-mute);
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
 .taskchip--failed .taskchip__pct,
 .taskchip--cancelled .taskchip__pct {
   color: var(--danger);

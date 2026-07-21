@@ -15,7 +15,7 @@ import type { ResolutionMemory } from "../../memory/resolution-memory.js";
 import type { ToolResultContent } from "../../integrations/llm.js";
 import { ACTUATOR_TOOL_BY_KIND, COLD_TOOL_NAMES, TOOLS_BY_NAME } from "@jarvis/tools";
 import type { EpisodicMemory } from "../../memory/episodic.js";
-import { writeUserMemory } from "../../memory/user-memory.js";
+import { forgetUserMemory, writeUserMemory } from "../../memory/user-memory.js";
 import { knowledgeConsult, memorySearch, webFetch, webSearch } from "./handlers/info.js";
 import type { IWebProvider } from "../../integrations/web.js";
 /** Инструменты, навигирующие браузер по URL → SSRF-гард обязателен (C5: web_* раньше его обходили). */
@@ -32,7 +32,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, channelDownResult, err, numField, ok, untrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
 import { sleep } from "@jarvis/shared";
 import { type BrowserCondition, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 import {
@@ -92,7 +92,12 @@ export interface ToolContext {
   mcp?: {
     readonly connected: boolean;
     has(name: string): boolean;
-    callTool(name: string, input: Record<string, unknown>): Promise<{ content: string; isError: boolean }>;
+    callTool(
+      name: string,
+      input: Record<string, unknown>,
+    ): Promise<{ content: string; images?: Array<{ mediaType: string; data: string }>; isError: boolean }>;
+    /** §14 (MCP-контракт): требует ли МУТИРУЮЩИЙ MCP-инструмент confirm (декларация в mcp.json). Опционально. */
+    requiresConfirm?(name: string): boolean;
   };
   /** Провайдер выученных показом навыков (§8): каталог + резолв для skill_execute. */
   skills?: SkillProvider;
@@ -215,6 +220,8 @@ export async function dispatchTool(
       return memorySearch(ctx, input);
     case "memory_write":
       return memoryWrite(ctx, input);
+    case "memory_forget":
+      return memoryForget(ctx, input);
     case "telegram_send":
       return telegramSend(ctx, input);
     case "telegram_send_voice":
@@ -304,8 +311,53 @@ export async function dispatchTool(
   // § MCP-инструмент (mcp__server__tool): роутим в подключённый MCP-сервер. Строго ПОСЛЕ нативного
   // switch и KIND_BY_TOOL — MCP-tool никогда не затеняет штатный/confirm-гейтнутый. Ошибка → честный err.
   if (!KIND_BY_TOOL[name] && ctx.mcp?.has(name)) {
+    // §sec SSRF ДЛЯ MCP (аудит окружения 2026-07-21): MCP-ветка минула URL-гард, а Фаза A активирует
+    // relay-серверы (fetch/browser) — prompt-injected url-аргумент увёл бы MCP-запрос на внутренний
+    // адрес/loopback/метаданные/file:. Гейтим URL-подобные значения input тем же browserUrlBlocked, что
+    // web_*/browser_* (public http проходит; private/file:/chrome:/data: — блок; Windows-путь не задет).
+    const blockedUrl = findBlockedMcpUrl(input);
+    if (blockedUrl) {
+      return err(
+        `MCP ${name}: адрес «${blockedUrl.slice(0, 80)}» заблокирован (внутренняя сеть/loopback/облачные ` +
+          `метаданные/file:/chrome:/data: — SSRF-гард). Публичные http(s)-адреса разрешены.`,
+      );
+    }
+    const server = name.split("__")[1] || "mcp";
+    // §14 CONFIRM для мутирующих MCP (MCP-контракт 2026-07-21): раньше MCP-ветка минула confirm-гейт →
+    // сторонний create/delete/send-MCP исполнялся БЕЗ подтверждения. Владелец декларирует в mcp.json
+    // (confirm:true / массив bare-имён). Нет канала confirm при требовании → честный отказ (fail-closed, как §4).
+    if (ctx.mcp.requiresConfirm?.(name)) {
+      if (!ctx.confirm) return err(`MCP ${name}: требуется подтверждение (§14), но канал недоступен.`);
+      // Ревью: показываем АРГУМЕНТЫ (сенситив в них — delete{repo}/send{channel,text}), чтобы владелец
+      // подтверждал осознанно, а не по классу действия (ср. code/messaging-сводки). Превью капнуто.
+      const argsPreview = (() => {
+        try {
+          const s = JSON.stringify(input);
+          return s && s !== "{}" ? ` c аргументами ${s.length > 200 ? `${s.slice(0, 200)}…` : s}` : "";
+        } catch {
+          return "";
+        }
+      })();
+      const { approved } = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
+      if (!approved) return ok(`Отменено пользователем (${name}).`);
+    }
     const r = await ctx.mcp.callTool(name, input);
-    return r.isError ? err(r.content) : ok(r.content);
+    // §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (аудит контекста 2026-07-20 + ревью батча F7): вывод MCP-инструмента —
+    // ВНЕШНИЙ недоверенный текст (страницы/issues/PR/файлы через fetch/github/… MCP; арсенал растёт до 100+).
+    // Это был ЕДИНСТВЕННЫЙ read-канал БЕЗ untrusted-обёртки (web/browser/screen/ui/live-system — уже обёрнуты).
+    // Обе ветки обёрнуты: тело ОШИБКИ relay-MCP тоже несёт внешний текст (модель читает err для след. шага) →
+    // untrustedError сохраняет isError:true (провал не маскируется успехом, §честность), но метит как данные.
+    if (r.isError) return untrustedError(`mcp:${server}`, r.content);
+    // MCP-контракт 2026-07-21: image-блоки (скриншот/чарт-MCP) пробрасываем в vision-tool_result (текст в
+    // untrusted-обёртке + картинки), а не теряем в `[image]`-плейсхолдере. Текст пуст → короткая пометка.
+    if (r.images && r.images.length > 0) {
+      const content: ToolResultContent[] = [
+        { type: "text", text: wrapUntrusted(`mcp:${server}`, r.content || "(MCP вернул изображение)") },
+        ...r.images.map((im) => ({ type: "image" as const, source: { type: "base64" as const, media_type: im.mediaType, data: im.data } })),
+      ];
+      return { content, isError: false };
+    }
+    return untrusted(`mcp:${server}`, r.content);
   }
 
   // Вызов самописного инструмента по имени (§8+): рендерим шаблон → гард­ированный code.run.
@@ -570,6 +622,17 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
   const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text);
   return ok(outcome === "duplicate" ? "Уже помню это, сэр." : "Запомнил.");
+}
+
+async function memoryForget(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  // Аудит контекста 2026-07-20: честное забывание. Схема объявляет `query`; принимаем content/text
+  // для совместимости. Помечает stale близкие эпизоды (обратимо) + чистит совпадающий факт профиля.
+  const q = String(input.query ?? input.content ?? input.text ?? "").trim();
+  if (!q) return err("memory_forget: пустой query (что забыть?)");
+  const r = await forgetUserMemory(ctx.episodic, ctx.userId, q);
+  // Честный исход (§ErrorVoice): не нашли, что забыть, — так и говорим, а не мнимое «забыл».
+  if (r.forgotten === 0) return ok("В памяти не нашёл, что забыть, сэр.");
+  return ok(`Забыл, сэр${r.texts.length ? `: ${r.texts.slice(0, 3).join("; ")}` : ""}.`);
 }
 
 /**
