@@ -62,6 +62,7 @@ import type { KnowledgeBase } from "../knowledge/index.js";
 import { inputBatch, skillExecute, skillList, skillPromote, skillSave } from "./handlers/skills.js";
 import type { ReminderService } from "../../proactive/reminders/service.js";
 import type { WatchService } from "../../proactive/watch/service.js";
+import type { ActivityService } from "../activities.js";
 import type { ObligationStore } from "../../proactive/ambient/obligations.js";
 import { cancelReminder, listReminders, setReminder } from "./handlers/reminders.js";
 import { watchCancel, watchCreate, watchList } from "./handlers/watch.js";
@@ -117,6 +118,9 @@ export interface ToolContext {
   watch?: WatchService;
   /** Стор обязательств/счетов (§проактив-всё): add/remove/list; ambient-движок проактивно напоминает по датам. */
   obligations?: ObligationStore;
+  /** Фоновые активности (запрос 2026-07-25): работа, живущая ПОСЛЕ хода (автолистание Shorts) — чип виден
+   *  до конца, обновляется реальными числами из источника правды. */
+  activities?: ActivityService;
   /** Опытная память резолва получателей (§ концепт+100%+скорость): «помню, как зарезолвил» → быстро. */
   resolutionMemory?: ResolutionMemory;
   /** Id текущей сессии — адресат проактивных напоминаний (§9). */
@@ -161,6 +165,13 @@ export interface ToolResult {
    * reconnect и повторяет, а не считает раунд «провалившимся» и не жжёт Opus «от транспорта».
    */
   channelDown?: boolean;
+  /**
+   * §14 анти-дубль (ревью 2026-07-24): сообщение/заказ РЕАЛЬНО ушёл получателю. Честные отказы
+   * messaging-хендлеров («повтор не ушёл», «вы не подтвердили») — тоже isError:false, поэтому петля
+   * помечает задачу outboundSend ТОЛЬКО по этому флагу, а не по «инструмент не упал» (иначе
+   * пост-терминальный гейт врал бы «Уже отправил» после фактического НЕ-отправления).
+   */
+  sent?: boolean;
   /**
    * fix 2026-07-15: ЧИСТОЕ время БЛОКИРУЮЩЕГО ОЖИДАНИЯ внутри вызова (wait_for browser поллит DOM до
    * met/таймаута). Петля вычитает его из бюджета задачи (как queueWaitMs): идл-ожидание не должно

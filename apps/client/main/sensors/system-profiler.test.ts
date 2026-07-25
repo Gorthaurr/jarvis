@@ -78,6 +78,21 @@ describe("system-profiler (§9) — авто-детект окружения", (
     expect(tools.find((t) => t.id === "obs")?.surface).toMatch(/obs_request/);
   });
 
+  it("detectAutomationTools находит OfficeCLI по .cmd-шиму npm (реальный путь установки)", () => {
+    // npm -g кладёт officecli.cmd (не .exe) — onPath обязан ловить и его.
+    const has = (p: string): boolean => p === "C:\\Users\\u\\AppData\\Roaming\\npm\\officecli.cmd";
+    const tools = detectAutomationTools(has, "C:\\Users\\u\\AppData\\Roaming\\npm");
+    const office = tools.find((t) => t.id === "officecli");
+    expect(office).toBeDefined();
+    // surface несёт контракт целиком: программный путь + ЧИТАЕМАЯ сверка исхода + граница «открытый файл».
+    expect(office?.surface).toMatch(/code_run/);
+    expect(office?.surface).toMatch(/get --json/); // сверка = текстовый readback — закон честности
+    // Регресс адверс-ревью 2026-07-23: рендер НЕ «сверка» (агент не может увидеть PNG-файл — канала
+    // файл→vision нет), а office_word НЕ правит «открытый документ» (headless-COM открывает файл с диска).
+    expect(office?.surface).not.toMatch(/screenshot/);
+    expect(office?.surface).toMatch(/НЕ правь/); // граница: открытый в Office файл залочен
+  });
+
   it("formatHardwareSummary: компактная строка железа (CPU/GPU/VRAM/мать/мониторы)", () => {
     const s = formatHardwareSummary({
       cpu: "AMD Ryzen 7 7800X3D",

@@ -3,7 +3,7 @@
  * озвучка при срабатывании. create/cancel/list. Зеркалит хендлеры напоминаний; маршрутизация — в dispatch (switch).
  */
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { err, ok } from "../dispatch-util.js";
+import { browserUrlBlocked, err, ok } from "../dispatch-util.js";
 
 /**
  * §Волна3 ревью (#12): валидация предиката ПО СТРУКТУРЕ на постановке. Раньше проверялось лишь
@@ -60,6 +60,14 @@ function validatePredicate(raw: unknown): { ok: true; predicate: Record<string, 
       const validOps = [">=", "<=", ">", "<", "==", "!=", "contains"];
       if (p.op !== undefined && (typeof p.op !== "string" || !validOps.includes(p.op))) {
         return { ok: false, reason: "predicate browser: op должен быть одним из >= <= > < == != contains." };
+      }
+      // 🔴 SSRF/схема-гард на url (ревью 2026-07-24): с self-heal этот url стал ЦЕЛЬЮ НАВИГАЦИИ —
+      // наблюдение переоткрывает его фоновой вкладкой в ЗАЛОГИНЕННОМ Chrome владельца. Значит он обязан
+      // проходить тот же гард, что browser_open/web_* (file:/chrome:/loopback/внутренняя сеть/метаданные),
+      // иначе prompt-инъекция со страницы могла бы прописать наблюдение на локальный адрес или файл.
+      const purl = s(p.url);
+      if (purl && browserUrlBlocked(purl)) {
+        return { ok: false, reason: "predicate browser: адрес заблокирован (внутренняя сеть/loopback/метаданные/file:/chrome:)." };
       }
       return { ok: true, predicate: p };
     }

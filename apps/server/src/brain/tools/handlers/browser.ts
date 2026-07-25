@@ -268,7 +268,7 @@ export async function browserInspect(ctx: ToolContext, input: Record<string, unk
  */
 export async function browserAct(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   const intent = String(input.intent ?? "").trim();
-  if (!intent) return err("browser_act: нужен intent (play|pause|seek|next|prev|click|type|enter|submit|scroll)");
+  if (!intent) return err("browser_act: нужен intent (play|pause|seek|next|prev|click|type|enter|submit|scroll|feed_auto)");
   const params = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : input;
   if (ctx.ext?.connected) {
     const target = resolveBrowserTarget(ctx, input);
@@ -293,14 +293,50 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         checked?: boolean | string;
         submitted?: boolean;
         error?: string;
+        // feed_auto (автолистание Shorts): состояние поллера в странице — доверенные поля расширения.
+        running?: boolean;
+        advanced?: number;
+        maxCount?: number;
+        maxMinutes?: number;
+        stoppedReason?: string | null;
       };
       // Доверенные (НЕ задаваемые страницей) поля диагностики — числа/булевы/константные note расширения.
       // navigated/frameUrl/value/checked — page-controlled → в untrusted-блок ниже (M11). Ревью AX-Ref #6:
       // value/checked НЕ в diagObj (доверенное тело) — синхронный обработчик враждебного фрейма может
       // переписать el.value на инъекцию во время dispatch input/change, а readback перечитывает уже её.
       const diagObj: Record<string, unknown> = {};
-      for (const k of ["note", "already", "playing", "currentTime", "changed", "method", "frame", "submitted"] as const) {
+      for (const k of ["note", "already", "playing", "currentTime", "changed", "method", "frame", "submitted", "running", "advanced", "maxCount", "maxMinutes", "stoppedReason"] as const) {
         if (r[k] !== undefined) diagObj[k] = r[k];
+      }
+      // ФОНОВАЯ АКТИВНОСТЬ ВИДНА ДО КОНЦА (запрос владельца 2026-07-25: «хочу, чтобы фоновые задачи
+      // вроде перематывания шортсов отображались до конца, а не пропадали»). Автолистание живёт в
+      // СТРАНИЦЕ десятки минут, а ход агента закрывается сразу — чип гас, и владелец не видел ни
+      // прогресса, ни момента остановки. Заводим живую §20-задачу и обновляем её РЕАЛЬНЫМ состоянием
+      // поллера (source of truth — сама страница), пока листание идёт.
+      if (intent === "feed_auto" && ctx.activities && ctx.sessionId) {
+        const action = String((params as { action?: unknown }).action ?? "start");
+        if (action === "start" && r.running === true) {
+          const url = target.url;
+          const tabId = target.tabId;
+          ctx.activities.start({
+            kind: "feed_auto",
+            userId: ctx.userId,
+            sessionId: ctx.sessionId,
+            goal: "Листаю короткие видео по окончании ролика",
+            label: (done) => (done > 0 ? `Пролистал ${done}` : "Жду конца ролика"),
+            probe: async () => {
+              const s = ((await ctx.ext!.tabAct(url, "feed_auto", { action: "status" }, tabId, false)) ?? {}) as {
+                running?: boolean;
+                advanced?: number;
+                stoppedReason?: string | null;
+              };
+              return { running: s.running === true, done: s.advanced ?? 0, stoppedReason: s.stoppedReason ?? null };
+            },
+          });
+        } else if (action === "stop") {
+          const done = typeof r.advanced === "number" ? r.advanced : 0;
+          ctx.activities.finishKind(ctx.userId, "feed_auto", done > 0 ? `Пролистал ${done} — остановил` : "Остановил листание");
+        }
       }
       const diag = Object.keys(diagObj).length ? ` Результат: ${JSON.stringify(diagObj)}` : "";
       let body = `Сделал «${intent}» в браузере.${diag}`;

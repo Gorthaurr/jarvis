@@ -202,3 +202,33 @@ describe("stepLabelFor — «что делаю сейчас» для чипа (�
     expect(stepLabelFor("some_unknown_tool", {})).toBe("Работаю…");
   });
 });
+
+// 🔴 Живой провал 2026-07-25: на «ты отправлял ей сообщение?» модель, не найдя записи (вчерашняя
+// отправка вне окна), ответила категорично «я не отправлял, это не через меня» — превратила «не вижу»
+// в «этого не было». Список без ГРАНИЦ читается как полная история, поэтому окно называем прямо.
+describe("formatRecentTasks — границы памяти (эпистемическая честность)", () => {
+  const t = (over: Partial<Task> = {}): Task => ({
+    taskId: "t1", userId: "u1", sessionId: "s1", goal: "напиши кате", title: "Написать Кате",
+    state: "done", stepsDone: 1, startedAt: 0, finishedAt: 1_000, resultSummary: "Отправил",
+    cancel: { cancelled: false }, steer: { pending: [] }, ...over,
+  });
+
+  it("с окном: блок называет границу и запрещает отрицать факт за её пределами", () => {
+    const out = formatRecentTasks([t()], 2_000, 6 * 60 * 60_000);
+    expect(out).toMatch(/ВИДНО ТОЛЬКО ЗА ПОСЛЕДНИЕ/);
+    expect(out).toMatch(/НЕ вся твоя история/);
+    expect(out).toMatch(/не отрицай факт/);
+    expect(out).toContain("Написать Кате");
+  });
+
+  it("ПУСТОЙ список с окном тоже несёт границу (иначе «пусто» = «я ничего не делал»)", () => {
+    const out = formatRecentTasks([], 2_000, 6 * 60 * 60_000);
+    expect(out).toMatch(/ВИДНО ТОЛЬКО ЗА ПОСЛЕДНИЕ/);
+    expect(out).toMatch(/за это окно задач нет/i);
+  });
+
+  it("без окна (обратная совместимость) — прежнее поведение: пусто на пустом списке", () => {
+    expect(formatRecentTasks([], 2_000)).toBe("");
+    expect(formatRecentTasks([t()], 2_000)).not.toMatch(/ВИДНО ТОЛЬКО/);
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyTaskScope, isDuplicateGoal, looksLikeStatusQuery } from "./scope.js";
+import { classifyTaskScope, isDuplicateGoal, looksLikeDoneEcho, looksLikeStatusQuery } from "./scope.js";
 
 describe("classifyTaskScope — правка текущей vs новая задача (§20)", () => {
   it("явные маркеры правки → edit", () => {
@@ -132,3 +132,39 @@ describe("isDuplicateGoal — дубль-гейт активной задачи 
     expect(isDuplicateGoal("останови запуск поиска в доте", "запусти поиск в доте")).toBe(false);
   });
 });
+
+describe("looksLikeDoneEcho — эхо-статус сразу после терминала (эпизод «двойная отправка» 2026-07-24)", () => {
+  it("живой случай: «Это написал.» через секунду после «Отправил Кате» → эхо, не новая задача", () => {
+    expect(looksLikeDoneEcho("Это написал.")).toBe(true);
+  });
+
+  it("короткие подтверждения/статусы → эхо", () => {
+    expect(looksLikeDoneEcho("готово?")).toBe(true);
+    expect(looksLikeDoneEcho("ты отправил")).toBe(true);
+    expect(looksLikeDoneEcho("всё, сделано")).toBe(true);
+    expect(looksLikeDoneEcho("ну что, ушло?")).toBe(true);
+  });
+
+  it("содержательный токен вне allowlist → НЕ эхо (решает модель)", () => {
+    expect(looksLikeDoneEcho("написал брату?")).toBe(false);
+    expect(looksLikeDoneEcho("теперь напиши ей что сдал")).toBe(false);
+    expect(looksLikeDoneEcho("сообщи когда заказ будет доставлен")).toBe(false);
+    expect(looksLikeDoneEcho("открой ютуб")).toBe(false);
+  });
+
+  it("императив без заявки-прошедшего → НЕ эхо", () => {
+    expect(looksLikeDoneEcho("это напиши")).toBe(false); // «напиши» — императив, не заявка «написал»
+    expect(looksLikeDoneEcho("отправь это")).toBe(false);
+  });
+
+  it("«не» намеренно вне allowlist: претензия «не написал» уходит модели на перепроверку", () => {
+    expect(looksLikeDoneEcho("ты не написал")).toBe(false);
+    expect(looksLikeDoneEcho("нихуя не отправил")).toBe(false);
+  });
+
+  it("длинные фразы (>4 токенов) → НЕ эхо", () => {
+    expect(looksLikeDoneEcho("ты это точно уже правда написал")).toBe(false);
+    expect(looksLikeDoneEcho("")).toBe(false);
+  });
+});
+

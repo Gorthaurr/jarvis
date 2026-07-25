@@ -8,7 +8,9 @@
  * Сам `send` выполняет клиентский userbot (§12), отправитель инъектируется.
  */
 import type { MessageChannel } from "@jarvis/protocol";
+import { foldName } from "@jarvis/shared";
 import type { CadenceGuard } from "./cadence.js";
+import { normalizeSendBody } from "./resend-guard.js";
 
 export interface OutboundParams {
   userId: string;
@@ -46,12 +48,19 @@ export interface OutboundResult {
   messageKey?: string;
 }
 
-/** Экспортируется: telegram_send (messaging.ts) переиспользует тот же ключ для своей идемпотентности (M6). */
+/**
+ * Экспортируется: telegram_send (messaging.ts) переиспользует тот же ключ для своей идемпотентности (M6).
+ * Эпизод «двойная отправка» 2026-07-24: ключ по СЫРЫМ recipient/body пропускал дубль с другой
+ * пунктуацией/регистром/написанием имени → теперь адресат сворачивается foldName, текст —
+ * normalizeSendBody (регистр/пунктуация/пробелы не делают «другое сообщение»).
+ */
 export function idempotencyKey(p: { userId: string; channel: string; recipient: string; body: string }): string {
+  const recipient = foldName(p.recipient) || p.recipient.trim().toLowerCase();
+  const body = normalizeSendBody(p.body);
   let h = 5381;
-  const s = `${p.userId}|${p.channel}|${p.recipient}|${p.body}`;
+  const s = `${p.userId}|${p.channel}|${recipient}|${body}`;
   for (let i = 0; i < s.length; i += 1) h = (h * 33) ^ s.charCodeAt(i);
-  return `${p.channel}:${p.recipient}:${(h >>> 0).toString(36)}`;
+  return `${p.channel}:${recipient}:${(h >>> 0).toString(36)}`;
 }
 
 export async function sendOutbound(params: OutboundParams, deps: OutboundDeps): Promise<OutboundResult> {

@@ -27,6 +27,7 @@ import { metrics } from "../obs/metrics.js";
 import { type FileLogSink, initFileLog } from "../obs/file-log.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { flushTaskStores, loadTaskManager } from "../brain/tasks/task-store.js";
+import { ActivityService } from "../brain/activities.js";
 import { flushResolutionStores, loadResolutionMemory } from "../memory/resolution-memory.js";
 import { flushWorkingStores } from "../memory/working-store.js";
 import { DynamicToolStore } from "../brain/tools/dynamic.js";
@@ -38,7 +39,7 @@ import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "..
 import { claimConsolidationRun, consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
 import { ReminderService } from "../proactive/reminders/service.js";
 import { createWatchChecker } from "../proactive/watch/checker.js";
-import { evalBrowserCondition, isBrowserCondition } from "../brain/tools/browser-condition.js";
+import { BlankPageError, evalBrowserCondition, isBrowserCondition } from "../brain/tools/browser-condition.js";
 import { WatchService } from "../proactive/watch/service.js";
 import { AmbientEngine } from "../proactive/ambient/engine.js";
 import { AmbientSeenStore } from "../proactive/ambient/store.js";
@@ -219,6 +220,9 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     createObligationsSource(obligationStore),
     createTelegramSource(extBridge, DEV_USER, { enabled: () => process.env.JARVIS_AMBIENT_TELEGRAM !== "0" }),
   ]);
+  // Реестр задач нужен ДВУМ потребителям: агенту (§20) и сервису фоновых активностей (чип живёт, пока
+  // идёт автолистание) — поэтому создаём его отдельной переменной, а не инлайном в brain.
+  const taskManager = loadTaskManager();
   const brain: BrainProviders = {
     llm: anthropicLlm,
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
@@ -230,7 +234,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     spend: new SpendGuards({ spendCap: config.defaultSpendCap }), // §6B/B5: реестр гвардов по userId
     models: config.models,
     tierThinking: config.tierThinking,
-    tasks: loadTaskManager(), // §20: реестр долгих задач, ПЕРЕЖИВАЕТ рестарт (диск-персист §5) — для «сделал?»
+    tasks: taskManager, // §20: реестр долгих задач, ПЕРЕЖИВАЕТ рестарт (диск-персист §5) — для «сделал?»
     warmth: new SessionWarmth(), // §15: кешируем префикс только в тёплых сессиях
     dynamicTools, // §8+ самописные инструменты
     skills: createSkillProvider(embedder, skillDistiller), // §8 навыки; recall СЕМАНТИЧЕСКИЙ (e5); мульти-демо дистилляция (BrowserBC)
@@ -241,6 +245,9 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     watch: new WatchService(createWatchChecker({ llm: anthropicLlm, web, model: config.models.sonnet, tier: "sonnet" })),
     obligations: obligationStore, // §проактив-всё: счета/обязательства (инструменты + ambient-источник)
     ambient: ambientEngine, // §проактив-всё: движок проактивной осведомлённости (старт в listen)
+    // Фоновые активности (2026-07-25): автолистание Shorts и подобная работа, живущая ПОСЛЕ хода —
+    // чип на панели держится, пока она идёт, и обновляется реальными числами из источника правды.
+    activities: new ActivityService(taskManager),
     resolutionMemory: loadResolutionMemory(), // §: опытная память резолва получателей (скорость), переживает рестарт
     mcp, // § MCP-host: инструменты подключённых MCP-серверов (опционально, по mcp.json)
   };
@@ -262,9 +269,14 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // parseInt(env ?? "") → NaN на пустом/незаданном/пробельном (а Number("")===0 ловушка: схлопнул бы
   // retention до 60с и вычистил задачи через минуту). Зеркалит парсинг JARVIS_TASK_MAX_MS.
   const parsedRetention = Number.parseInt(process.env.JARVIS_TASK_RETENTION_MS ?? "", 10);
+  // Дефолт 6ч → 7 СУТОК (живой эпизод 2026-07-25): на вопрос «ты отправлял ей сообщение?» про вчерашнее
+  // действие реестр был уже вычищен sweep'ом, и модель, не найдя записи, УВЕРЕННО отрицала факт («я не
+  // отправлял, это не через меня») — хотя отправка была. Хранение дешёвое (задача ≈ пара сотен байт,
+  // durable в data/tasks.json), а «помню, что делал вчера» — базовая честность ассистента. В КОНТЕКСТ
+  // по-прежнему инжектится только окно RECENT_TASKS_WINDOW_MS — промпт не раздувается.
   const taskRetentionMs = Number.isFinite(parsedRetention)
-    ? Math.min(7 * 24 * 60 * 60_000, Math.max(60_000, parsedRetention))
-    : 6 * 60 * 60_000;
+    ? Math.min(30 * 24 * 60 * 60_000, Math.max(60_000, parsedRetention))
+    : 7 * 24 * 60 * 60_000;
   const taskSweep = setInterval(() => brain.tasks.sweep(Date.now(), taskRetentionMs), 5 * 60_000);
   taskSweep.unref?.();
 
@@ -490,11 +502,25 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
         if (!extBridge.connected) return { met: false, detail: "", error: "расширение не подключено", transient: true };
         if (!isBrowserCondition(predicate)) return { met: false, detail: "", error: "не browser-условие" };
         try {
-          const r = await evalBrowserCondition(extBridge, predicate);
-          return { met: r.met, detail: r.detail };
+          // recover:true (эпизод «перекрыл вкладку» 2026-07-24) — наблюдение ЧИНИТ свою вкладку само:
+          // выгруженную Chrome'ом перезагружает, закрытую переоткрывает фоновой. Джарвис не «сдаётся»
+          // на первой же слепоте, а делает то, что нужно для выполнения durable-задачи.
+          const r = await evalBrowserCondition(extBridge, predicate, { recover: true });
+          return { met: r.met, detail: r.detail, patch: r.patch };
         } catch (e) {
-          // вкладка закрыта / нет медиа / расширение моргнуло — транзиентно (не суспендим наблюдение).
-          return { met: false, detail: "", error: e instanceof Error ? e.message : String(e), transient: true };
+          // Классификация «повторить или честно доложить» (ревью 2026-07-24, 2 раунда). ТРАНЗИЕНТНЫ
+          // только инфраструктурные заминки: расширение отключено (Chrome закрыт) или мост не ответил —
+          // они проходят сами. ВСЁ ОСТАЛЬНОЕ (пустая страница даже после ремонта, вкладки нет и
+          // переоткрыть нечем, элемент/селектор не найден на каждом тике) — УСТОЙЧИВАЯ слепота: пусть
+          // растит счётчик и через dead-watch честно доложит «не смог наблюдать, приостановил».
+          // Прежняя логика (транзиент по умолчанию) оставляла ровно ту тишину, из-за которой владелец
+          // и не узнал о доставке; а список «фраз про отсутствие вкладки» ещё и не совпадал с реальными
+          // текстами расширения («вкладка X не открыта» / «нет подходящей вкладки») — гейт был мёртв.
+          const msg = e instanceof Error ? e.message : String(e);
+          // + слепота, где починка ещё не получила права сработать (кулдаун) — тоже временная.
+          const transient =
+            (e instanceof BlankPageError && e.throttled) || /не подключено|нет ответа|timeout|таймаут|socket|разорв/i.test(msg);
+          return { met: false, detail: "", error: msg, transient };
         }
       });
       await brain.watch?.start(); // §долгие-задачи: поднять наблюдения с диска, завести recurring-таймер проверок

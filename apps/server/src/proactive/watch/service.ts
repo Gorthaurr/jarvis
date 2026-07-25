@@ -42,6 +42,12 @@ export interface BrowserProbeResult {
   /** Ошибка проверки (расширение отключено / нет вкладки). transient=true → НЕ инкрементит dead-watch. */
   error?: string;
   transient?: boolean;
+  /**
+   * Self-heal (эпизод «перекрыл вкладку» 2026-07-24): вкладку перезагрузили/переоткрыли — её адрес
+   * изменился. Патч ВПИСЫВАЕТСЯ в predicate наблюдения, иначе следующий тик стучался бы в мёртвый
+   * tabId и наблюдение ослепло бы навсегда после первого же ремонта.
+   */
+  patch?: { tabId?: number; url?: string };
 }
 
 export class WatchService {
@@ -199,6 +205,14 @@ export class WatchService {
         return { met: false, summary: "", error: "браузерная проверка недоступна (расширение не подключено)", transient: true };
       }
       const r = await this.browserProbe(w.predicate);
+      // Self-heal: вкладку починили (перезагрузили/переоткрыли) → ФИКСИРУЕМ новый адрес в предикате,
+      // чтобы следующий тик смотрел на живую вкладку, а не на мёртвый tabId (persist — в runCheck).
+      if (r.patch && w.predicate && typeof w.predicate === "object") {
+        const p = w.predicate as Record<string, unknown>;
+        if (r.patch.tabId !== undefined) p.tabId = r.patch.tabId;
+        if (r.patch.url) p.url = r.patch.url;
+        log.info("наблюдение: вкладка восстановлена — адресация обновлена", { id: w.id, ...r.patch });
+      }
       if (r.error) return { met: false, summary: "", error: r.error, transient: r.transient };
       return { met: r.met, value: r.detail ? r.detail.slice(0, 200) : undefined, summary: r.met ? `Сработало: ${w.condition}.` : "" };
     }

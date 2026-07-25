@@ -50,6 +50,7 @@ import { isEmotion } from "../integrations/tts-emotion.js";
 import type { ReminderService } from "../proactive/reminders/service.js";
 import type { WatchService } from "../proactive/watch/service.js";
 import type { AmbientEngine } from "../proactive/ambient/engine.js";
+import type { ActivityService } from "../brain/activities.js";
 import type { ObligationStore } from "../proactive/ambient/obligations.js";
 import type { ResolutionMemory } from "../memory/resolution-memory.js";
 import { verbalize } from "../brain/verbalize/index.js";
@@ -125,6 +126,9 @@ export interface BrainProviders {
   obligations?: ObligationStore;
   /** Движок ambient-осведомлённости (§проактив-всё): проактивно сообщает важное (счета/Telegram) — один на gateway. */
   ambient?: AmbientEngine;
+  /** Фоновые активности (2026-07-25): работа, живущая ПОСЛЕ хода (автолистание Shorts) — чип на панели
+   *  держится, пока она реально идёт, и обновляется фактами из источника правды. Один на gateway. */
+  activities?: ActivityService;
   /** Опытная память резолва получателей (§ скорость) — одна на gateway, переживает рестарт. */
   resolutionMemory?: ResolutionMemory;
   /** §: MCP-host — подключённые MCP-серверы (инструменты как у Claude Code). Опционален (нет конфига → пуст). */
@@ -264,6 +268,7 @@ export function makeSessionContext(
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
     obligations: brain.obligations, // §проактив-всё: счета/обязательства (инструменты obligation_*)
+    activities: brain.activities, // фоновые активности: чип живёт, пока идёт работа (автолистание Shorts)
     resolutionMemory: brain.resolutionMemory, // §: опытная память резолва получателей (скорость)
   };
   // §9 «не мешать»: поздняя привязка к ctx — пайплайн читает занятость пользователя из client.context.
@@ -403,6 +408,9 @@ export function makeSessionContext(
   );
   // §проактив-всё: ambient-осведомлённость (счета/Telegram). urgent (день оплаты) проходит даже при занятости.
   brain.ambient?.registerSpeaker(session.sessionId, session.userId, (text, urgent) => voice.speakQueued(verbalize(text), urgent));
+  // Фоновые активности: чип «идёт автолистание, пролистал N» живёт, пока работа реально идёт (запрос
+  // владельца 2026-07-25). Канал — тот же task.status, что у §20-задач: панель уже умеет его рисовать.
+  brain.activities?.registerStatus(session.sessionId, session.userId, (payload) => session.send("task.status", payload));
   // §6B/B5: начальный снимок расхода/лимитов для вкладки «Оплата» (read-only; per-user SpendGuard).
   sendUsage(session, brain.spend.forUser(session.userId));
   // Отписать каналы проактивной озвучки ЭТОГО соединения (голосовой пайплайн умирает). Проактивные
@@ -412,6 +420,7 @@ export function makeSessionContext(
     brain.watch?.unregisterSpeaker(session.sessionId); // §долгие-задачи: больше не доставляем сюда
     brain.watch?.unregisterActions(session.sessionId); // §Волна3 (3.4): канал предикат-проверок этой сессии мёртв
     brain.ambient?.unregisterSpeaker(session.sessionId); // §проактив-всё: больше не доставляем сюда
+    brain.activities?.unregisterStatus(session.sessionId); // чипы фоновых активностей — в другую сессию
   };
   // H8: обрыв сокета (resume-grace) — НЕ убиваем фоновые §20-задачи. Раньше disposeAgent синхронно звал
   // cancelSession → reconnect в 120с находил задачу УБИТОЙ (результат потерян), хотя память цела. Теперь
