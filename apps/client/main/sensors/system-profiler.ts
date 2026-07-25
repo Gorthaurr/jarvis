@@ -208,6 +208,13 @@ const TOOL_SPECS: readonly ToolSpec[] = [
   { id: "dotnet", name: ".NET SDK", cmd: "dotnet", surface: "сборка/запуск .NET — через code_run" },
   { id: "psql", name: "PostgreSQL CLI", cmd: "psql", surface: "SQL к Postgres — через code_run (psql)" },
   { id: "obs", name: "OBS Studio", paths: [join(env("ProgramFiles"), "obs-studio\\bin\\64bit\\obs64.exe")], surface: "ПРОГРАММНО через инструмент obs_request (obs-websocket) — стрим/сцены/настройки, НЕ клики" },
+  // OfficeCLI: правка ФАЙЛОВ Office на диске БЕЗ установленного MS Office — основной путь для .pptx
+  // (дедик-актуатора нет), headless-фолбэк Word/Excel. Честность (адверс-ревью 2026-07-23):
+  // (1) office_word/office_excel ТОЖЕ правят файл с диска собственным headless-COM — «открытый документ»
+  // они НЕ правят (attach к живому инстансу в системе нет); файл, открытый в видимом Office, залочен —
+  // файловым путём не править вообще. (2) Сверка исхода — ТЕКСТОВЫЙ readback `get --json`: PNG-рендер
+  // (`view … screenshot`) агент увидеть не может (канала файл→vision нет), рендер — лишь показ юзеру.
+  { id: "officecli", name: "OfficeCLI", cmd: "officecli", surface: "правка ФАЙЛОВ .docx/.xlsx/.pptx БЕЗ MS Office: `officecli create/get/set/add <файл>` (пути /slide[1]/shape[1], --json) — через code_run; сверка исхода — перечитай `officecli get --json`. Для .pptx это основной путь (актуатора нет; фолбэк python-pptx). Файл, открытый сейчас в Office, НЕ правь (залочен); живой документ — только COM через code_run" },
 ];
 
 /** Команда есть на PATH? (проверяем .exe/.cmd/.bat и без расширения). Чистая — exists/pathStr инжектятся. */

@@ -1603,3 +1603,143 @@ describe("replayUnsafe — гарды слепого реплея (ревью ф
     expect(reply.voice).toContain("Сделал по процедуре");
   });
 });
+
+describe("§20 пост-терминальный эхо-гейт (эпизод «двойная отправка Кате» 2026-07-24)", () => {
+  /** Задача «только что успешно отправила сообщение»: done, substantive. */
+  function doneSendTask(tasks: TaskManager, goal: string): void {
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal });
+    tasks.progress(t.taskId, 1); // substantive (stepsDone>0)
+    tasks.finish(t.taskId, "Отправил Кате, сэр.");
+  }
+
+  it("живой эпизод: «Это написал.» через секунду после терминала → честный статус, НЕ вторая петля", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате, я люблю тебя");
+    const reply = await handleUserText(session, "Это написал.", await makeDeps(llm, { tasks }));
+    expect(reply.voice).toBe("Отправил Кате, сэр."); // повтор терминального итога — честный статус
+    expect(llm.requests).toHaveLength(0); // LLM-петля НЕ поднималась → второго telegram_send не будет
+    expect(session.sendAction).not.toHaveBeenCalled();
+  });
+
+  it("«готово?» сразу после завершения → статус-ответ без петли", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате, я люблю тебя");
+    const reply = await handleUserText(session, "готово?", await makeDeps(llm, { tasks }));
+    expect(reply.voice).toBe("Отправил Кате, сэр.");
+    expect(llm.requests).toHaveLength(0);
+  });
+
+  // Контрольное ревью (2 HIGH): лексический дубль-гейт по ЦЕЛИ убран сознательно — лексика не
+  // отличала повтор от ПОПРАВКИ/другого адресата и глотала реальный приказ с ложным «Уже отправил».
+  // Повтор/поправка уходят МОДЕЛИ; от дубля страхует ресенд-гард messaging-слоя (confirm/блок).
+  it("повтор ЦЕЛИ после терминала уходит МОДЕЛИ (не молчаливое «уже отправил»)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате я люблю тебя");
+    const reply = await handleUserText(session, "напиши кате я люблю тебя", await makeDeps(llm, { tasks }));
+    expect(reply.voice).not.toMatch(/Уже отправил/);
+    expect(llm.requests.length).toBeGreaterThan(0);
+  });
+
+  it("ПОПРАВКА после отправки («…что я НЕ приду») НЕ глотается — уходит модели (ревью HIGH)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате что я приду");
+    const reply = await handleUserText(session, "напиши кате что я не приду", await makeDeps(llm, { tasks }));
+    expect(reply.voice).not.toMatch(/Уже отправил/);
+    expect(llm.requests.length).toBeGreaterThan(0);
+  });
+
+  it("«то же — ДРУГОМУ человеку» («напиши маме…») НЕ глотается — уходит модели (ревью HIGH)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате что я приду в восемь");
+    const reply = await handleUserText(session, "напиши маме что я приду в восемь", await makeDeps(llm, { tasks }));
+    expect(reply.voice).not.toMatch(/Уже отправил/);
+    expect(llm.requests.length).toBeGreaterThan(0);
+  });
+
+  it("повтор запускной команды (открой ютуб ×2) исполняется заново — эхо-гейт команд не трогает", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "открой ютуб" });
+    tasks.progress(t.taskId, 1);
+    tasks.finish(t.taskId, "Открыл ютуб, сэр.");
+    const reply = await handleUserText(session, "открой ютуб", await makeDeps(llm, { tasks }));
+    expect(reply.voice).not.toMatch(/Уже отправил/);
+    expect(session.sendAction).toHaveBeenCalled(); // tier0 исполнился штатно
+  });
+
+  it("окно истекло → «Это написал.» уходит модели (гейт только про «сразу после»)", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = fakeSession();
+      const llm = new MockLlmProvider();
+      const tasks = new TaskManager();
+      doneSendTask(tasks, "напиши кате я люблю тебя");
+      vi.advanceTimersByTime(100_000); // > JARVIS_POST_TERMINAL_GATE_MS (деф 90с)
+      await handleUserText(session, "Это написал.", await makeDeps(llm, { tasks }));
+      expect(llm.requests.length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("при ЖИВОЙ задаче гейт молчит (реплика может относиться к ней — решают штатные пути §20)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате я люблю тебя");
+    tasks.create({ userId: "u1", sessionId: "s1", goal: "скачай отчёт и разбери" }); // активная running
+    const reply = await handleUserText(session, "Это написал.", await makeDeps(llm, { tasks }));
+    // Реплика ушла штатным путём активной задачи (steer/scope), а не пост-терминальным статусом.
+    expect(reply.voice).not.toBe("Отправил Кате, сэр.");
+  });
+
+  it("ДВЕ свежие терминальные задачи → эхо-гейт молчит (итог «не той» задачи не озвучивается)", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате я люблю тебя");
+    const t2 = tasks.create({ userId: "u1", sessionId: "s1", goal: "поставь таймер на пять минут" });
+    tasks.progress(t2.taskId, 1);
+    tasks.finish(t2.taskId, "Таймер поставил, сэр.");
+    const reply = await handleUserText(session, "Это написал.", await makeDeps(llm, { tasks }));
+    // Неоднозначно, о какой задаче речь → решает модель с полным контекстом, не гейт.
+    expect(reply.voice).not.toBe("Таймер поставил, сэр.");
+    expect(llm.requests.length).toBeGreaterThan(0);
+  });
+
+  it("НАДМНОЖЕСТВО цели (повтор + новое поручение) проходит к модели, не глотается «уже отправил»", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    doneSendTask(tasks, "напиши кате я люблю тебя");
+    const reply = await handleUserText(
+      session,
+      "напиши кате я люблю тебя и что приду в восемь ужинать",
+      await makeDeps(llm, { tasks }),
+    );
+    expect(reply.voice).not.toMatch(/Уже отправил/);
+    expect(llm.requests.length).toBeGreaterThan(0);
+  });
+
+  it("провалившаяся задача НЕ отвечает «сделал» — «готово?» после провала идёт модели на честный разбор", async () => {
+    const session = fakeSession();
+    const llm = new MockLlmProvider();
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "напиши кате я люблю тебя" });
+    tasks.progress(t.taskId, 1);
+    tasks.fail(t.taskId, "расширение не ответило");
+    await handleUserText(session, "готово?", await makeDeps(llm, { tasks }));
+    expect(llm.requests.length).toBeGreaterThan(0); // разбор через модель, не эхо «сделал»
+  });
+});

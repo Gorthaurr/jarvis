@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { type BrowserReader, compareBrowserValue, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
+import { BlankPageError, type BrowserReader, compareBrowserValue, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 
 describe("compareBrowserValue — сравнение DOM-значения с условием (чистая)", () => {
   it("числовые операторы (currentTime ≥/≤/>/<)", () => {
@@ -86,7 +86,8 @@ describe("evalBrowserCondition — чтение через ext + сравнен�
     const ext = mockExt();
     const r = await evalBrowserCondition(ext, { kind: "browser", selector: ".title", prop: "textContent", op: "contains", value: "LIVE" });
     expect(r.met).toBe(true);
-    expect(ext.tabAct).toHaveBeenCalledWith("", "getValue", { selector: ".title", prop: "textContent" }, undefined);
+    // contains уходит В СТРАНИЦУ (сравнение по полному тексту — фикс «слово дальше 200-го символа»).
+    expect(ext.tabAct).toHaveBeenCalledWith("", "getValue", { selector: ".title", prop: "textContent", contains: "LIVE" }, undefined);
   });
 
   it("расширение не подключено → бросает (вызывающий трактует как «ещё не дождались»/транзиент)", async () => {
@@ -97,7 +98,7 @@ describe("evalBrowserCondition — чтение через ext + сравнен�
   it("(ревью #6) при selector дефолтный prop = textContent, НЕ currentTime", async () => {
     const ext = mockExt();
     await evalBrowserCondition(ext, { kind: "browser", selector: ".title", op: "contains", value: "LIVE" }); // prop опущен
-    expect(ext.tabAct).toHaveBeenCalledWith("", "getValue", { selector: ".title", prop: "textContent" }, undefined);
+    expect(ext.tabAct).toHaveBeenCalledWith("", "getValue", { selector: ".title", prop: "textContent", contains: "LIVE" }, undefined);
   });
 
   it("(ревью #6) НЕЧИТАЕМОЕ значение (undefined) → met:false даже с gone:true (не ложное «исчезло»)", async () => {
@@ -107,5 +108,155 @@ describe("evalBrowserCondition — чтение через ext + сравнен�
     expect(r1.met).toBe(false);
     const r2 = await evalBrowserCondition(ext, { kind: "browser", selector: "#x", prop: "nope", op: "contains", value: "y", gone: true });
     expect(r2.met).toBe(false); // gone НЕ инвертирует нечитаемое в met:true
+  });
+});
+
+describe("BlankPageError — слепая вкладка (эпизод «не сказал про доставку» 2026-07-24)", () => {
+  const blankExt = (): BrowserReader => ({
+    connected: true,
+    tabAct: vi.fn(async () => ({ value: "\n        \n                \n              \n" })),
+  });
+
+  it("пустой textContent по body → BlankPageError (слепота ≠ «условие не выполнено»)", async () => {
+    const cond = { kind: "browser", selector: "body", prop: "textContent", op: "contains", value: "доставлен" } as never;
+    await expect(evalBrowserCondition(blankExt(), cond)).rejects.toThrow(/пустой текст/);
+  });
+
+  it("gone:true по body при пустой странице ТОЖЕ бросает (иначе выгруженная вкладка = ложное «исчезло»)", async () => {
+    const cond = { kind: "browser", selector: "body", prop: "textContent", op: "contains", value: "доставлен", gone: true } as never;
+    await expect(evalBrowserCondition(blankExt(), cond)).rejects.toThrow(/пустой текст/);
+  });
+
+  it("УЗКИЙ селектор с пустым текстом — легитимное состояние, НЕ слепота (met по семантике)", async () => {
+    const cond = { kind: "browser", selector: "#status-badge", prop: "textContent", op: "contains", value: "доставлен" } as never;
+    const r = await evalBrowserCondition(blankExt(), cond);
+    expect(r.met).toBe(false); // честное «не содержит», без throw
+  });
+
+  it("непустая страница → обычное сравнение (регресс)", async () => {
+    const ext: BrowserReader = {
+      connected: true,
+      tabAct: vi.fn(async () => ({ value: "Ваш заказ доставлен. Приятного аппетита!" })),
+    };
+    const cond = { kind: "browser", selector: "body", prop: "textContent", op: "contains", value: "доставлен" } as never;
+    const r = await evalBrowserCondition(ext, cond);
+    expect(r.met).toBe(true);
+  });
+});
+
+describe("recover — self-heal наблюдаемой вкладки (эпизод «перекрыл вкладку» 2026-07-24)", () => {
+  const textCond = { kind: "browser", selector: "body", prop: "textContent", op: "contains", value: "доставлен", tabId: 1 } as never;
+
+  it("recover:true → расширению уходит флаг починки вкладки", async () => {
+    const tabAct = vi.fn(async (_u: string, _i: string, _p?: Record<string, unknown>, _t?: number) => ({ value: "заказ доставлен" }));
+    await evalBrowserCondition({ connected: true, tabAct }, textCond, { recover: true });
+    expect(tabAct.mock.calls[0]?.[2]).toMatchObject({ recover: true, selector: "body", prop: "textContent" });
+  });
+
+  it("без recover флаг НЕ уходит (обычные чтения вкладку пользователя не чинят)", async () => {
+    const tabAct = vi.fn(async (_u: string, _i: string, _p?: Record<string, unknown>, _t?: number) => ({ value: "заказ доставлен" }));
+    await evalBrowserCondition({ connected: true, tabAct }, textCond);
+    expect(tabAct.mock.calls[0]?.[2]).not.toHaveProperty("recover");
+  });
+
+  it("МЕДИА-условие не чинится даже при recover:true (reload сбросил бы позицию, которую ждём)", async () => {
+    const tabAct = vi.fn(async (_u: string, _i: string, _p?: Record<string, unknown>, _t?: number) => ({ currentTime: 1600, duration: 3600, paused: false }));
+    const mediaCond = { kind: "browser", prop: "currentTime", op: ">=", value: 1560, tabId: 1 } as never;
+    await evalBrowserCondition({ connected: true, tabAct }, mediaCond, { recover: true });
+    expect(tabAct.mock.calls[0]?.[2]).not.toHaveProperty("recover");
+  });
+
+  it("вкладку переоткрыли → патч с новым tabId/url наверх (следующий тик смотрит на живую вкладку)", async () => {
+    const tabAct = vi.fn(async () => ({ value: "заказ доставлен", matched: true, len: 900, tabId: 777, tabUrl: "https://shop.ru/order/1", recovered: "reopened" }));
+    const cond = { ...(textCond as object), url: "https://shop.ru/order/1" } as never;
+    const r = await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true });
+    expect(r.met).toBe(true);
+    expect(r.patch).toEqual({ tabId: 777 });
+    expect(r.detail).toMatch(/восстановлена: reopened/);
+  });
+
+  // Ревью 2026-07-24 (CRITICAL): без ремонта патча быть не должно — findTargetTab мог подставить ЧУЖУЮ
+  // вкладку (фолбэк по хосту/активная), и патч НАВСЕГДА переклеил бы наблюдение на чужую страницу.
+  it("БЕЗ ремонта (recovered отсутствует) патча нет, даже если tabId в ответе другой", async () => {
+    const tabAct = vi.fn(async () => ({ value: "заказ доставлен", matched: true, len: 900, tabId: 999, tabUrl: "https://other.ru/x" }));
+    const r = await evalBrowserCondition({ connected: true, tabAct }, textCond, { recover: true });
+    expect(r.patch).toBeUndefined();
+  });
+
+  it("ремонт увёл на ДРУГОЙ хост → url в патч НЕ пишем (это уже не та страница)", async () => {
+    const tabAct = vi.fn(async () => ({ value: "заказ доставлен", matched: true, len: 900, tabId: 5, tabUrl: "https://evil.ru/x", recovered: "reopened" }));
+    const cond = { ...(textCond as object), url: "https://shop.ru/order/1" } as never;
+    const r = await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true });
+    expect(r.patch).toEqual({ tabId: 5 });
+    expect(r.patch?.url).toBeUndefined();
+  });
+
+  it("пусто ДАЖЕ после починки → честная BlankPageError (не «условие не выполнено»)", async () => {
+    const tabAct = vi.fn(async () => ({ value: "", len: 0, tabId: 1, recovered: "reloaded" }));
+    await expect(evalBrowserCondition({ connected: true, tabAct }, textCond, { recover: true })).rejects.toThrow(/пустой текст/);
+  });
+});
+
+// 🔴 ПЕРВОПРИЧИНА живого эпизода «не сказал про доставку» (ревью 2026-07-24, CRITICAL): расширение
+// отдаёт значение обрезанным до 200 символов, а «Доставлен» на реальной странице стоит дальше — серверный
+// includes по обрезку не находил его НИКОГДА. Теперь сравнение подстроки делается НА СТРАНИЦЕ.
+describe("contains — сравнение по ПОЛНОМУ тексту страницы, а не по обрезку", () => {
+  const cond = { kind: "browser", selector: "body", prop: "textContent", op: "contains", value: "доставлен", tabId: 1 } as never;
+
+  it("искомая подстрока уходит в страницу параметром contains", async () => {
+    const tabAct = vi.fn(async (_u: string, _i: string, _p?: Record<string, unknown>, _t?: number) => ({ value: "…заказ доставлен…", matched: true, len: 5000 }));
+    await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true });
+    expect(tabAct.mock.calls[0]?.[2]).toMatchObject({ contains: "доставлен", recoverIfBlank: true });
+  });
+
+  it("matched:true при значении-СНИППЕТЕ → met (слово было за 200-м символом — прежде терялось)", async () => {
+    const tabAct = vi.fn(async () => ({ value: "…ваш заказ доставлен курьером…", matched: true, len: 12000 }));
+    const r = await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true });
+    expect(r.met).toBe(true);
+  });
+
+  it("matched:false при непустой странице → честное «ещё не выполнено», без ошибки слепоты", async () => {
+    const tabAct = vi.fn(async () => ({ value: "Готовим ваш заказ", matched: false, len: 8000 }));
+    const r = await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true });
+    expect(r.met).toBe(false);
+  });
+
+  it("gone:true инвертирует matched (ждём ИСЧЕЗНОВЕНИЯ текста)", async () => {
+    const tabAct = vi.fn(async () => ({ value: "…", matched: false, len: 8000 }));
+    const goneCond = { ...(cond as object), gone: true } as never;
+    const r = await evalBrowserCondition({ connected: true, tabAct }, goneCond, { recover: true });
+    expect(r.met).toBe(true);
+  });
+
+  // Ревью р2 (HIGH): выгруженная вкладка отдаёт не "", а «\n   \n» — по сырой длине это «непусто»,
+  // и слепота снова маскировалась бы под честное «условие не выполнено» (симптом живого эпизода).
+  it("страница из ОДНИХ ПРОБЕЛОВ (blank:true при len>0) → BlankPageError, а не «условие не выполнено»", async () => {
+    const tabAct = vi.fn(async () => ({ value: "", matched: false, len: 16, blank: true }));
+    await expect(evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true })).rejects.toThrow(/пустой текст/);
+  });
+
+  it("ремонт на кулдауне → BlankPageError.throttled (наблюдение НЕ суспендится преждевременно)", async () => {
+    const tabAct = vi.fn(async () => ({ value: "", matched: false, len: 8, blank: true, reviveThrottled: true }));
+    await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true }).then(
+      () => expect.fail("ожидалась BlankPageError"),
+      (e: unknown) => {
+        expect(e).toBeInstanceOf(BlankPageError);
+        expect((e as InstanceType<typeof BlankPageError>).throttled).toBe(true);
+      },
+    );
+  });
+
+  it("непустая страница без совпадения (blank:false) → met:false без ошибки", async () => {
+    const tabAct = vi.fn(async () => ({ value: "Готовим заказ", matched: false, len: 500, blank: false }));
+    const r = await evalBrowserCondition({ connected: true, tabAct }, cond, { recover: true });
+    expect(r.met).toBe(false);
+  });
+
+  it("УЗКИЙ селектор: recoverIfBlank НЕ ставится (пустой элемент законен — reload живой вкладки запрещён)", async () => {
+    const tabAct = vi.fn(async (_u: string, _i: string, _p?: Record<string, unknown>, _t?: number) => ({ value: "", matched: false, len: 0 }));
+    const narrow = { kind: "browser", selector: "#status", prop: "textContent", op: "contains", value: "доставлен", tabId: 1 } as never;
+    const r = await evalBrowserCondition({ connected: true, tabAct }, narrow, { recover: true });
+    expect(tabAct.mock.calls[0]?.[2]).not.toHaveProperty("recoverIfBlank");
+    expect(r.met).toBe(false); // честное «ещё нет», без BlankPageError
   });
 });

@@ -56,6 +56,33 @@ describe("voice state machine (§10)", () => {
     expect(r.context.state).toBe("speaking");
   });
 
+  // 🔴 Живой корень «Джарвис не договаривает / молчит» (2026-07-24): раньше ЛЮБОЙ сырой VAD speech_start
+  // в раздумье слал cancel_tts → gen++ → готовый ответ выбрасывался целиком и молча. Эмпирика: 7 из 23
+  // реплик за сессию не зазвучали, и у ВСЕХ потерянных было переоткрытие STT (маркер cancel_tts) внутри
+  // окна раздумья. Шороха/ТВ/кашля хватало, чтобы убить ответ.
+  it("thinking + speech_start (сырой VAD) → слушаем, но ход НЕ отменяем (нет cancel_tts)", () => {
+    const ctx: VoiceContext = { state: "thinking", followupActive: false };
+    const r = reduce(ctx, { type: "speech_start" });
+    expect(r.context.state).toBe("listening");
+    expect(types(r.actions)).toContain("open_stt");
+    expect(types(r.actions)).not.toContain("cancel_tts"); // ответ доживёт до озвучки
+  });
+
+  it("thinking + barge_in (устойчивая речь) → ход ОТМЕНЯЕТСЯ (перебивание работает)", () => {
+    const ctx: VoiceContext = { state: "thinking", followupActive: false };
+    const r = reduce(ctx, { type: "barge_in" });
+    expect(r.context.state).toBe("listening");
+    expect(types(r.actions)).toContain("cancel_tts");
+    expect(types(r.actions)).toContain("open_stt");
+  });
+
+  it("thinking + stop («заткнись») по-прежнему рубит ход", () => {
+    const ctx: VoiceContext = { state: "thinking", followupActive: false };
+    const r = reduce(ctx, { type: "stop" });
+    expect(r.context.state).toBe("idle");
+    expect(types(r.actions)).toContain("cancel_tts");
+  });
+
   it("thinking + speak_done (синтез без звука) → listening+follow-up, НЕ виснет (§10)", () => {
     // Регресс: при сбое/нуле чанков TTS speak_done приходит из thinking (не было speak_start).
     // Раньше это был noop → цикл навсегда висел в thinking. Теперь — штатный возврат к слуху.

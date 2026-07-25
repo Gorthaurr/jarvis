@@ -425,12 +425,110 @@ function inspectPageInPage(query, cap, refMode) {
   return { url: location.href, title: document.title || "", count: out.length, truncated, gen, elements: out };
 }
 
+/**
+ * SELF-HEAL наблюдаемой вкладки (эпизод «перекрыл вкладку — Джарвис сдался» 2026-07-24). Chrome
+ * (Memory Saver) ВЫГРУЖАЕТ фоновую вкладку, когда её перекрыли другой: DOM пуст, чтение отдаёт пустой
+ * textContent, а durable-наблюдение вечно видит «условие не выполнено». Здесь — ремонт БЕЗ кражи
+ * фокуса: выгруженную вкладку перезагружаем (chrome.tabs.reload не активирует её), закрытую —
+ * переоткрываем ФОНОВОЙ (active:false). Включается ТОЛЬКО params.recover=true, который сервер ставит
+ * лишь для watch-предиката/wait_for — обычные act/read вкладки пользователя не трогают.
+ */
+/**
+ * Анти-флаппинг ремонта: когда ПОСЛЕДНИЙ раз чинили вкладку (ключ — tabId||url). Окно 60с: достаточно
+ * редко, чтобы не дёргать сайт и не мигать пользователю, но КОРОЧЕ бюджета dead-watch (10 провалов
+ * подряд × период тика ≥10с ⇒ ≥100с) — иначе повторное выгружение вкладки приостанавливало бы
+ * ИСПРАВИМОЕ наблюдение раньше, чем ремонт вообще получил бы право сработать (ревью р2 #12).
+ */
+const reviveAt = new Map();
+const REVIVE_COOLDOWN_MS = 60_000;
+
+/**
+ * Только http(s) — предикат наблюдения НЕ должен становиться каналом навигации в file:/chrome:/data:
+ * (ревью). Голый хост («shop.ru/order/1» — LLM сплошь даёт именно его, см. hostOf) нормализуем в https,
+ * иначе переоткрыть страницу было бы нечем, а гард дал бы ложное «адрес небезопасен».
+ */
+function safeHttpUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return null;
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : "https://" + raw);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+async function reviveTab(tab, url, key) {
+  const k = String(key || (tab && tab.id) || url || "");
+  const last = reviveAt.get(k) || 0;
+  // Ремонт не чаще раза в 5 минут на цель: наблюдение тикает каждые 5-30с, и без кулдауна одна упрямая
+  // страница означала бы reload каждые несколько секунд (нагрузка на сайт + мигание у пользователя).
+  if (Date.now() - last < REVIVE_COOLDOWN_MS) return { tab, recovered: null, throttled: true };
+  reviveAt.set(k, Date.now());
+  if (!tab || tab.id == null) {
+    const safe = safeHttpUrl(url);
+    if (!safe) return { tab: null, recovered: null };
+    // Сначала ИЩЕМ уже открытую вкладку с этим адресом — иначе каждый тик плодил бы новую (ревью #9).
+    try {
+      const existing = await chrome.tabs.query({ url: safe.split("#")[0] });
+      if (existing && existing.length && existing[0].id != null) return { tab: existing[0], recovered: "found" };
+    } catch { /* query по url может отвергнуть шаблон — падаем на создание */ }
+    const fresh = await chrome.tabs.create({ url: safe, active: false });
+    await waitTabComplete(fresh.id);
+    let t = fresh;
+    try { t = await chrome.tabs.get(fresh.id); } catch { /* оставим исходный снимок */ }
+    return { tab: t, recovered: "reopened" };
+  }
+  await chrome.tabs.reload(tab.id, { bypassCache: false });
+  await waitTabComplete(tab.id);
+  let t = tab;
+  try { t = await chrome.tabs.get(tab.id); } catch { /* закрылась во время reload */ }
+  return { tab: t, recovered: "reloaded" };
+}
+
+/**
+ * Чтение вернуло ПУСТУЮ страницу — признак выгруженной/неотрендеренной вкладки. ⚠️ Только для ШИРОКОГО
+ * таргета (сервер ставит recoverIfBlank лишь для body/html/main/#root — у живой страницы там пусто не
+ * бывает). Легитимно пустой УЗКИЙ элемент («статус ещё не проставлен») и «элемента ещё нет» (not_found)
+ * поводом к ремонту НЕ считаются — иначе перезагружали бы живую вкладку пользователя каждый тик,
+ * стирая его ввод (ревью 2026-07-24, CRITICAL). `len` — полная длина текста ДО обрезки.
+ */
+function looksBlankRead(res) {
+  if (!res || res.ok !== true) return false;
+  if (typeof res.blank === "boolean") return res.blank; // blank считается по TRIM (пробелы = пусто)
+  return typeof res.value === "string" && res.value.trim() === "";
+}
+
 /** Выполнить действие В ЦЕЛЕВОЙ вкладке (play/pause/next/click/type/scroll) через chrome.scripting. */
 async function tabAct(url, intent, params, tabId, refMode) {
-  const tab = await findTargetTab(url, tabId);
+  const P = params || {};
+  // Self-heal (см. reviveTab) — ТОЛЬКО текстовое чтение наблюдения и только по явному recover.
+  // readMedia сознательно НЕ чиним: reload сбросил бы позицию воспроизведения (а условие «видео дошло
+  // до N секунд» именно её и ждёт) — лечение оказалось бы хуже болезни.
+  const mayRevive = P.recover === true && intent === "getValue";
+  // Пустое чтение чиним ТОЛЬКО когда сервер подтвердил ШИРОКИЙ таргет (body/html/main/#root): у живой
+  // страницы там пусто не бывает. Узкий селектор пустым бывает законно — его reload'ить нельзя (ревью).
+  const mayReviveBlank = mayRevive && P.recoverIfBlank === true;
+  let tab = await findTargetTab(url, tabId);
+  let recovered = null;
+  // ⚠️ У findTargetTab есть фолбэк «активная вкладка» (нет живого tabId и нет хоста) — для НАБЛЮДЕНИЯ он
+  // недопустим: читать/перезагружать вкладку, которую пользователь сейчас смотрит, значит и врать
+  // «Сработало» по чужой странице, и портить его работу (ревью, CRITICAL). Поэтому в recover-режиме
+  // ТРЕБУЕМ доказанную идентичность цели: тот же tabId ЛИБО тот же хост. Не доказана → честная ошибка
+  // «нет вкладки» (наблюдение дойдёт до dead-watch и доложит). Обычные browser_act/read этим не задеты.
+  if (mayRevive && tab) {
+    const wantHost = hostOf(url);
+    const sameTab = tabId != null && tab.id === tabId;
+    const sameSite = Boolean(wantHost) && hostOf(tab.url || "") === wantHost;
+    if (!sameTab && !sameSite) tab = null;
+  }
+  if (mayRevive && (!tab || tab.id == null || tab.discarded === true)) {
+    // Вкладку закрыли (нет tab) ИЛИ Chrome выгрузил её из памяти (discarded) → чиним ДО чтения.
+    const rev = await reviveTab(tab, url, tabId != null ? "t" + tabId : url);
+    if (rev.tab) { tab = rev.tab; recovered = rev.recovered; }
+  }
   if (!tab || tab.id == null) throw noTabError(url);
   if (tab.status !== "complete") await waitForTabReady(tab.id);
-  const P = params || {};
   // Явный frameId из browser_inspect (элемент в iframe) — целимся точно в тот фрейм.
   const fidRaw = Number(P.frameId);
   let explicitFrame = Number.isFinite(fidRaw) && fidRaw > 0 ? fidRaw : undefined;
@@ -573,8 +671,38 @@ async function tabAct(url, intent, params, tabId, refMode) {
     if (!rm.ok) throw new Error("tab.act " + intent + ": " + (rm.error || "не вышло"));
     return rm;
   }
+  // АВТОЛИСТАНИЕ ЛЕНТЫ КОРОТКИХ ВИДЕО (Shorts/Reels, 2026-07-25 по просьбе владельца): ставим в СТРАНИЦУ
+  // persistent-поллер, который сам переключает на следующий ролик, когда текущий доиграл. Без него задача
+  // «листай шортсы по окончании» требовала бы LLM-раунда на КАЖДЫЙ ролик (дорого и медленно) — а так это
+  // $0 и работает, пока владелец смотрит. Живёт в ISOLATED-world (как ref-реестр) → переживает SPA-переходы
+  // между роликами; полная перезагрузка страницы его снимает (честно сообщаем это в описании инструмента).
+  if (intent === "feed_auto") {
+    const rr = await runInPage(
+      null,
+      feedAutoInPage,
+      [{ action: String(P.action || "start"), maxCount: Number(P.maxCount) || 0, maxMinutes: Number(P.maxMinutes) || 0 }],
+      explicitFrame,
+    );
+    if (!rr || rr.ok !== true) throw new Error("tab.act feed_auto: " + ((rr && rr.error) || "не вышло"));
+    return rr;
+  }
   const Pm = { ...P, refMode: Boolean(refMode) }; // refMode → pageActInPage гейтит Яндекс-навигацию хардкода
   let r = await runInPage(null, pageActInPage, [intent, Pm], explicitFrame);
+  // Self-heal ПОСЛЕ чтения: страница ответила, но ВЕСЬ её текст ПУСТ (Chrome выгрузил содержимое
+  // перекрытой вкладки — discarded ставится не всегда) → перезагружаем и перечитываем. Иначе durable-
+  // наблюдение молча считало бы «условие не выполнено» (живой эпизод: 35 минут тишины про доставку).
+  // ⚠️ Только широкий таргет (mayReviveBlank) и только НЕ активная вкладка: перезагрузка страницы,
+  // которую пользователь сейчас читает/заполняет, — это порча его работы, а не помощь.
+  let reviveThrottled = false;
+  if (mayReviveBlank && !recovered && looksBlankRead(r) && tab.active !== true) {
+    const rev = await reviveTab(tab, url || tab.url || "", tabId != null ? "t" + tabId : url);
+    reviveThrottled = rev.throttled === true;
+    if (rev.tab) {
+      tab = rev.tab;
+      recovered = rev.recovered;
+      if (recovered) r = await runInPage(null, pageActInPage, [intent, Pm], explicitFrame);
+    }
+  }
   if (shouldProbe(r)) {
     // type: поле может жить в iframe (embed-форма); seek: медиа в embed-плеере. Прочие интенты не щупаем.
     const probeArg =
@@ -588,7 +716,170 @@ async function tabAct(url, intent, params, tabId, refMode) {
     }
   }
   if (!r.ok) throw new Error("tab.act " + intent + ": " + (r.error || "не вышло"));
+  // Актуальные координаты вкладки (могла быть переоткрыта → НОВЫЙ tabId) — сервер обновит ими предикат
+  // наблюдения, иначе следующий тик снова искал бы мёртвый tabId. tabUrl нужен для будущих переоткрытий.
+  if (mayRevive) {
+    r.tabId = tab.id;
+    if (tab.url) r.tabUrl = tab.url;
+    if (recovered) r.recovered = recovered;
+    // Ремонт был нужен, но упёрся в кулдаун — сервер посчитает такую слепоту ВРЕМЕННОЙ и не станет
+    // приостанавливать наблюдение раньше, чем починка вообще получила право сработать (ревью р2 #12).
+    if (reviveThrottled) r.reviveThrottled = true;
+  }
   return r;
+}
+
+/**
+ * АВТОЛИСТАНИЕ ЛЕНТЫ КОРОТКИХ ВИДЕО (YouTube Shorts и подобные) — инжектируется в СТРАНИЦУ (ISOLATED
+ * world, self-contained: executeScript сериализует функцию БЕЗ замыканий — никаких внешних хелперов).
+ *
+ * Зачем: «листай шортсы, когда доигрывают» через LLM-петлю стоило бы раунда на каждый ролик (секунды и
+ * центы за штуку) и упиралось бы в потолок задачи. Здесь — обычный поллер в странице: $0, реагирует за
+ * доли секунды, живёт, пока владелец смотрит.
+ *
+ * Как ловим «ролик кончился»: Shorts ЗАЦИКЛЕНЫ (loop) — события `ended` обычно НЕ будет. Поэтому
+ * детектируем ЗАВЁРНУТЫЙ круг: время было у самого конца, а стало около нуля у ТОГО ЖЕ ролика. Плюс
+ * честный `ended` (если loop выключен). Смена ролика узнаётся по currentSrc — счётчик не путается.
+ *
+ * Рельсы (анти-runaway, чтобы не листать вечно): лимит роликов и лимит минут; по исчерпании поллер сам
+ * останавливается с внятной причиной, которую видно в status. Повторный start перезапускает (не плодит
+ * второй поллер). Полная перезагрузка страницы снимает автолистание — это ЧЕСТНО сообщается в схеме.
+ */
+function feedAutoInPage(cfg) {
+  const KEY = "__jarvisFeedAuto";
+  const state = globalThis[KEY];
+  const action = (cfg && cfg.action) || "start";
+
+  if (action === "stop") {
+    const advanced = state ? state.advanced : 0;
+    if (state && state.timer) clearInterval(state.timer);
+    globalThis[KEY] = undefined;
+    return { ok: true, running: false, advanced, note: state ? "автолистание остановлено" : "автолистание и не было запущено" };
+  }
+  if (action === "status") {
+    // Три РАЗЛИЧИМЫХ исхода (ревью: раньше самоостановка стирала состояние, и «остановилось по лимиту»
+    // было неотличимо от «не запускалось» — модель не могла честно доложить владельцу, что случилось).
+    if (!state) return { ok: true, running: false, advanced: 0, note: "автолистание не запускалось" };
+    if (!state.timer) {
+      return { ok: true, running: false, advanced: state.advanced, stoppedReason: state.stoppedReason || "остановлено", note: "автолистание остановлено" };
+    }
+    return { ok: true, running: true, advanced: state.advanced, stoppedReason: null };
+  }
+
+  // ── start ──────────────────────────────────────────────────────────────────────────────────────
+
+  const pickVideo = () => {
+    let best = null;
+    let bestArea = 0;
+    for (const v of document.querySelectorAll("video")) {
+      const r = v.getBoundingClientRect();
+      const st = getComputedStyle(v);
+      if (st.display === "none" || st.visibility === "hidden" || Number(st.opacity) === 0) continue;
+      const area = r.width * r.height;
+      if (r.width < 120 || r.height < 120) continue; // 1×1-трекеры и превью-миниатюры мимо
+      if (area > bestArea) { bestArea = area; best = v; }
+    }
+    return best;
+  };
+  const nextButton = () => {
+    const sels = [
+      "#navigation-button-down button",
+      'button[aria-label*="Следующее видео" i]',
+      'button[aria-label*="Next video" i]',
+      'button[aria-label*="Следующий" i]',
+    ];
+    for (const s of sels) {
+      const el = document.querySelector(s);
+      if (el && !el.disabled) return el;
+    }
+    return null;
+  };
+  const advance = () => {
+    const btn = nextButton();
+    if (btn) { btn.click(); return "button"; }
+    // Фолбэк: лента Shorts — вертикальный скролл-снап; листаем на высоту окна.
+    const scroller = document.querySelector("#shorts-container, ytd-shorts") || document.scrollingElement || document.body;
+    if (scroller && typeof scroller.scrollBy === "function") { scroller.scrollBy({ top: window.innerHeight, behavior: "smooth" }); return "scroll"; }
+    window.scrollBy(0, window.innerHeight);
+    return "scroll";
+  };
+
+  // Предусловия проверяем ДО демонтажа прежнего поллера (ревью): иначе неудачный start глушил живое
+  // автолистание, оставлял состояние — и status докладывал «листаю», когда уже никто не листает.
+  const v0 = pickVideo();
+  if (!v0) return { ok: false, code: "not_found", error: "на странице нет видимого видео — открой ленту коротких видео (Shorts) и повтори" };
+  if (state && state.timer) clearInterval(state.timer); // рестарт: один поллер на документ
+
+  const maxCount = cfg && cfg.maxCount > 0 ? Math.min(cfg.maxCount, 500) : 50;
+  const maxMinutes = cfg && cfg.maxMinutes > 0 ? Math.min(cfg.maxMinutes, 240) : 60;
+  const deadline = Date.now() + maxMinutes * 60000;
+  // ЯКОРЬ ЛЕНТЫ (ревью): запоминаем, ГДЕ включили. SPA-переход прочь из ленты (тап по каналу, обычное
+  // видео) документ не перезагружает — без якоря поллер продолжал бы жить и по концу 40-минутной лекции
+  // кликнул бы «Следующее видео», уведя просмотр, которого владелец не просил.
+  const anchorHost = location.host;
+  const anchorSeg = (location.pathname.split("/")[1] || "").toLowerCase();
+  // Ленты коротких видео: ролики КОРОТКИЕ. Длинное видео — не наш случай (не листаем чужой контент).
+  const MAX_CLIP_SEC = 300;
+
+  const st = {
+    advanced: 0, lastSrc: null, lastT: 0, lastEnded: false, stoppedReason: null, timer: null,
+    startedAt: Date.now(), pending: null, failed: 0, lastAdvanceAt: 0,
+  };
+  const halt = (reason) => { st.stoppedReason = reason; clearInterval(st.timer); st.timer = null; }; // состояние ЖИВЁТ для status
+  st.timer = setInterval(() => {
+    try {
+      if (Date.now() > deadline) return halt("истёк лимит времени");
+      // Ушли из ленты (SPA-навигация) — останавливаемся честно, чужой страницей не управляем.
+      if (location.host !== anchorHost || (location.pathname.split("/")[1] || "").toLowerCase() !== anchorSeg) {
+        return halt("страница ушла из ленты коротких видео");
+      }
+      const v = pickVideo();
+      if (!v) return; // между роликами SPA на миг сносит элемент — ждём следующий тик
+      const src = v.currentSrc || v.src || "";
+      const dur = Number(v.duration);
+      // ПОДТВЕРЖДЕНИЕ переключения (ревью, CRITICAL): advance() возвращает лишь СПОСОБ попытки. Считаем
+      // ролик пролистанным ТОЛЬКО когда реально сменился currentSrc — иначе Джарвис рапортовал бы
+      // «пролистал 40», пока владелец 40 раз смотрел один и тот же ролик по кругу.
+      if (st.pending) {
+        if (src && src !== st.pending.src) {
+          st.advanced += 1;
+          st.failed = 0;
+          st.pending = null;
+          st.lastSrc = src;
+          st.lastT = v.currentTime || 0;
+          st.lastEnded = false;
+          if (st.advanced >= maxCount) return halt("достигнут лимит роликов");
+          return;
+        }
+        if (Date.now() - st.pending.at < 2500) return; // ждём смены ролика
+        st.failed += 1;
+        st.pending = null;
+        if (st.failed >= 3) return halt("не удалось переключить ролик (кнопка «Следующее» не сработала)");
+        return;
+      }
+      if (src !== st.lastSrc) { st.lastSrc = src; st.lastT = v.currentTime || 0; st.lastEnded = false; return; } // новый ролик
+      if (!Number.isFinite(dur) || dur <= 0) return; // длительность ещё не известна
+      if (dur > MAX_CLIP_SEC) return; // длинное видео — не лента коротких, не трогаем
+      const t = v.currentTime || 0;
+      // «Круг завершён»: были у самого конца, а теперь снова у начала ТОГО ЖЕ ролика (loop). ended берём
+      // ПО ФРОНТУ (false→true): он залипает до перемотки, и проверка по уровню давала шторм переключений.
+      const wrapped = st.lastT >= dur - 0.6 && t < Math.min(1.2, st.lastT);
+      const endedEdge = v.ended === true && st.lastEnded === false;
+      st.lastEnded = v.ended === true;
+      if ((wrapped || endedEdge) && Date.now() - st.lastAdvanceAt > 1500) {
+        st.lastMethod = advance();
+        st.lastAdvanceAt = Date.now();
+        st.pending = { src, at: Date.now() }; // ждём подтверждения смены — счётчик растёт только тогда
+        return;
+      }
+      st.lastT = t;
+    } catch (e) {
+      halt("ошибка автолистания: " + String((e && e.message) || e));
+    }
+  }, 400);
+
+  globalThis[KEY] = st;
+  return { ok: true, running: true, advanced: 0, maxCount, maxMinutes, note: "листаю следующий ролик, как только текущий доигрывает" };
 }
 
 /**
@@ -1594,10 +1885,29 @@ async function pageActInPage(intent, params) {
       // readback-пути (inspect/type). Иначе секрет / огромный textContent утёк бы СЫРЫМ в tool_result,
       // серверный лог и durable data/watches.json.
       const isPw = el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() === "password";
-      if (isPw && (prop === "value" || prop === "textContent")) return { ok: true, value: el.value ? "•••" : "" };
+      if (isPw && (prop === "value" || prop === "textContent")) return { ok: true, value: el.value ? "•••" : "", len: el.value ? 3 : 0 };
       const raw = el[prop];
       const out = typeof raw === "object" ? String(raw) : raw;
-      return { ok: true, value: typeof out === "string" ? out.slice(0, 200) : out };
+      if (typeof out !== "string") return { ok: true, value: out };
+      // 🔴 ПОИСК ПОДСТРОКИ ДЕЛАЕТСЯ ЗДЕСЬ, ПО ПОЛНОМУ ТЕКСТУ (ревью 2026-07-24, CRITICAL — первопричина
+      // «не сказал про доставку»): наружу значение отдаётся ОБРЕЗАННЫМ (кап 200 симв. против утечки
+      // секретов и раздувания durable-стора), поэтому серверное `contains` по обрезку НИКОГДА не находило
+      // слово, стоящее дальше 200-го символа — статус «Доставлен» на реальной странице заказа именно там.
+      // Теперь сервер передаёт искомую подстроку сюда, а мы возвращаем ЧЕСТНЫЙ matched по всему тексту +
+      // короткий сниппет-контекст вокруг совпадения (для человекочитаемого detail, без слива страницы).
+      const needle = typeof P.contains === "string" ? P.contains : "";
+      const len = out.length;
+      // blank = страница ПУСТА ПО СУТИ. Считаем по TRIM (ревью 2026-07-24): выгруженная вкладка отдаёт
+      // не "", а «\n   \n  \n» — по сырой длине это «непусто», и слепота снова маскировалась бы под
+      // честное «условие не выполнено» (ровно симптом живого эпизода с доставкой).
+      const blank = out.trim() === "";
+      if (needle) {
+        const at = out.toLowerCase().indexOf(needle.toLowerCase());
+        const snippet =
+          at >= 0 ? out.slice(Math.max(0, at - 40), Math.min(len, at + needle.length + 40)).trim() : out.slice(0, 200);
+        return { ok: true, value: snippet, matched: at >= 0, len, blank };
+      }
+      return { ok: true, value: out.slice(0, 200), len, blank };
     }
     return { ok: false, error: "неизвестный intent: " + intent };
   } catch (e) {

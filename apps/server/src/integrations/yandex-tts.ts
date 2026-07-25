@@ -139,7 +139,12 @@ class YandexHttpStream implements TtsStream {
         throw new Error(`HTTP ${resp.status} ${detail.slice(0, 160)}`);
       }
       const audio = await resp.arrayBuffer();
-      if (this._cancelled) return;
+      if (this._cancelled) {
+        // ВИДИМОСТЬ ПОТЕРИ (ревью 2026-07-24): синтез оплачен и получен, но ход уже отменён — раньше
+        // это уходило в тишину, и по логу «реплика не прозвучала» было неотличимо от «TTS упал».
+        log.info("TTS синтез отменён (перебивание/стоп) — аудио отброшено", { bytes: audio.byteLength, voice });
+        return;
+      }
       log.info("TTS синтез готов", { bytes: audio.byteLength, voice });
       this.chunkCb?.({ audio, seq: 0, last: true });
       this.finish();

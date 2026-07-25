@@ -56,8 +56,9 @@ import { TaskManager } from "../tasks/manager.js";
 import type { ReminderService } from "../../proactive/reminders/service.js";
 import type { WatchService } from "../../proactive/watch/service.js";
 import type { ObligationStore } from "../../proactive/ambient/obligations.js";
+import type { ActivityService } from "../activities.js";
 import type { ResolutionMemory } from "../../memory/resolution-memory.js";
-import { classifyTaskScope, isDuplicateGoal, looksLikeStatusQuery } from "../tasks/scope.js";
+import { classifyTaskScope, isDuplicateGoal, looksLikeDoneEcho, looksLikeStatusQuery } from "../tasks/scope.js";
 import { type Task, actionTitle, formatActiveTasks, formatRecentTasks, stepLabelFor } from "../tasks/task.js";
 import { SessionWarmth } from "./warmth.js";
 import { estimateCostUsd, metrics } from "../../obs/metrics.js";
@@ -254,6 +255,8 @@ export interface AgentDeps {
   watch?: WatchService;
   /** Стор обязательств/счетов (§проактив-всё): ambient-движок проактивно напоминает по датам. Общий с gateway. */
   obligations?: ObligationStore;
+  /** Фоновые активности (2026-07-25): чип живёт, пока идёт работа ПОСЛЕ хода (автолистание Shorts). */
+  activities?: ActivityService;
   /** Опытная память резолва получателей (§ скорость): «помню, как зарезолвил». Общий с gateway. */
   resolutionMemory?: ResolutionMemory;
   /**
@@ -315,6 +318,19 @@ function dupSemanticMin(): number {
 
 /** Фрагмент ли реплика (≤3 токенов) — только такие пускаем в семантический дубль-слой. */
 const DUP_FRAGMENT_MAX_TOKENS = 3;
+
+/**
+ * Инструменты «исходящее сообщение/заказ ЧЕЛОВЕКУ» (ревью 2026-07-24): их ok-результат — успех-мутация
+ * ТОЛЬКО при `ToolResult.sent:true` (честные отказы «не подтвердили»/«повтор не ушёл» — тоже
+ * isError:false, но дела не было; взводить по ним anyMutateSucceeded = слепить masked-failure).
+ */
+const OUTBOUND_SEND_TOOLS = new Set(["telegram_send", "telegram_send_voice", "message_send", "order_place"]);
+
+/** Окно пост-терминального гейта (мс): реплика-эхо/повтор в это окно после завершения задачи. 0 = выкл. */
+function postTerminalGateMs(): number {
+  const raw = Number(process.env.JARVIS_POST_TERMINAL_GATE_MS ?? 90_000);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 90_000;
+}
 
 /**
  * Семантический слой дубль-гейта §20 (Волна 1): реплика против целей ЖИВЫХ задач сессии (e5-косинус).
@@ -695,6 +711,35 @@ export async function handleUserText(
     deps.pendingClarify = undefined;
     const resolved = resolveClarifyAnswer(pend.key, clean);
     if (resolved) return finishReply(await runTier0(session, resolved, deps, sink)); // sink → консьерж-открытие тоже sync-first
+  }
+
+  // §20 ПОСТ-ТЕРМИНАЛЬНЫЙ ЭХО-ГЕЙТ (эпизод «двойная отправка Кате» 2026-07-24): пользователь
+  // договаривает мысль, пока задача летит — обрывок («Это написал.») эндпоинтится через СЕКУНДУ ПОСЛЕ
+  // терминала. Активной задачи уже нет → гейты §20 слепы → вторая петля, и модель ПОВТОРЯЕТ действие.
+  // Здесь перехватывается ТОЛЬКО короткое эхо-подтверждение/статус без содержательных токенов
+  // («Это написал.», «готово?») → честный статус-ответ, не петля. ⚠️ Лексический дубль-гейт по цели
+  // («повтор» → «Уже отправил») здесь СОЗНАТЕЛЬНО НЕ СТОИТ (контрольное ревью, 2 HIGH): лексика не
+  // отличает повтор от ПОПРАВКИ («…что я НЕ приду») или ДРУГОГО адресата («…маме») — молчаливый
+  // перехват глотал бы реальный приказ с ложным «Уже отправил». Повтор цели уходит МОДЕЛИ: дубль по
+  // содержанию встретит ресенд-гард messaging-слоя (identical → «повтор не ушёл», similar → confirm).
+  // hasAnyActive (вкл. скрытые разговорные и при выключенном scope): при ЛЮБОЙ живой задаче гейт молчит —
+  // реплика может относиться к ней, пусть решают штатные пути §20/модель.
+  const postTermMs = postTerminalGateMs();
+  if (!activeTask && postTermMs > 0 && deps.tasks && !deps.tasks.hasAnyActive(deps.userId)) {
+    const nowMs = Date.now();
+    const recentTerm = deps.tasks.recentTerminal(deps.userId, { limit: 3, maxAgeMs: postTermMs, now: nowMs });
+    // Эхо-статус — ТОЛЬКО при ЕДИНСТВЕННОМ свежем терминале, и он успешен (ревью: при двух свежих
+    // задачах «отправил?» мог получить итог НЕ ТОЙ — новейшей — задачи; после провала «готово?»
+    // обязан получить честный разбор моделью, а не «сделал» от более старой done-задачи).
+    const newest = recentTerm[0];
+    if (recentTerm.length === 1 && newest?.state === "done" && looksLikeDoneEcho(clean)) {
+      log.info("§20 пост-терминальный гейт: эхо-статус после завершения — отвечаю статусом, не петлёй", {
+        taskId: newest.taskId, title: newest.title, text: clean.slice(0, 60),
+      });
+      const reply: AgentReply = { voice: verbalize(newest.resultSummary || `Сделал, сэр — ${newest.title}.`) };
+      deps.memory.pushTurn("assistant", reply.voice);
+      return finishReply(reply);
+    }
   }
 
   const decision = classifyTier(clean);
@@ -1111,7 +1156,9 @@ async function runAgentLoop(
   const nowMs = Date.now();
   const recentTasks = [
     formatActiveTasks(tasks.activeForUser(deps.userId, taskId), nowMs),
-    formatRecentTasks(tasks.recentTerminal(deps.userId, { limit: 5, maxAgeMs: RECENT_TASKS_WINDOW_MS }), nowMs),
+    // windowMs → блок явно называет ГРАНИЦЫ памяти: «не вижу» не должно превращаться в «этого не было»
+    // (живой провал 2026-07-25 — категоричное «я не отправлял» о вчерашней реальной отправке).
+    formatRecentTasks(tasks.recentTerminal(deps.userId, { limit: 5, maxAgeMs: RECENT_TASKS_WINDOW_MS }), nowMs, RECENT_TASKS_WINDOW_MS),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -1196,6 +1243,7 @@ async function runAgentLoop(
     reminders: deps.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: deps.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
     obligations: deps.obligations, // §проактив-всё: счета/обязательства (ambient напоминает по датам)
+    activities: deps.activities, // фоновые активности: чип виден, пока идёт работа (автолистание Shorts)
     origin: "user" as const, // §бесшумный-ввод: agent-петля исполняет реплику юзера → физ.ввод не гейтить присутствием
 
     resolutionMemory: deps.resolutionMemory, // §: опытная память резолва (скорость)
@@ -2335,7 +2383,11 @@ async function runAgentLoop(
           lastAcquireWaitMs = 0;
         }
         if (eff === "mutate") {
-          anyMutateSucceeded = true; // P0.1: реальное дело сделано (не просто нейтральный поиск)
+          // P0.1: реальное дело сделано (не просто нейтральный поиск). Для ИСХОДЯЩИХ сендов человеку —
+          // строго r.sent (ревью 2026-07-24): честные отказы хендлера («не подтвердили», «повтор не
+          // ушёл») — тоже isError:false, но НЕ отправка; взводить по ним anyMutateSucceeded = отключать
+          // masked-failure/анти-капитуляцию без реального дела (ложное «Готово, отправил» не поймалось бы).
+          if (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true) anyMutateSucceeded = true;
           if (sendCommit) {
             blindMutatePending = true;
             sendCommitDebt = true; // исход отправки сверяется ТОЛЬКО реальным взглядом

@@ -460,13 +460,19 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
       {
         intent: {
           type: "string",
-          enum: ["play", "pause", "seek", "next", "prev", "scroll", "click", "type", "enter", "submit", "back", "forward"],
-          description: "Интент действия в браузере.",
+          enum: ["play", "pause", "seek", "next", "prev", "scroll", "click", "type", "enter", "submit", "back", "forward", "feed_auto"],
+          description:
+            "Интент действия в браузере. feed_auto — АВТОЛИСТАНИЕ ленты коротких видео (YouTube Shorts и " +
+            "подобные): страница сама переключает следующий ролик, как только текущий доигрывает. Это " +
+            "ПРАВИЛЬНЫЙ ответ на «листай шортсы, когда заканчиваются» — НЕ поллинг скриншотами и НЕ раунд " +
+            "LLM на каждый ролик. Работает, пока страница не перезагружена; выключается params.action:'stop'.",
         },
         params: {
           type: "object",
           additionalProperties: true,
-          description: "Параметры: ref (АДРЕСАЦИЯ ПО ИДЕНТИЧНОСТИ из browser_inspect — предпочтительно), text/selector (fallback; selector как есть, вкл. ' >>> '), enter/submit:true (type — сразу запустить поиск), dy (scroll), seconds (seek ±сек) или to (seek абсолютно, сек), frameId (элемент в iframe — число из browser_inspect; в ref уже зашит).",
+          description:
+            "Параметры: ref (АДРЕСАЦИЯ ПО ИДЕНТИЧНОСТИ из browser_inspect — предпочтительно), text/selector (fallback; selector как есть, вкл. ' >>> '), enter/submit:true (type — сразу запустить поиск), dy (scroll), seconds (seek ±сек) или to (seek абсолютно, сек), frameId (элемент в iframe — число из browser_inspect; в ref уже зашит). " +
+            "Для feed_auto: action ('start' | 'stop' | 'status'), maxCount (сколько роликов пролистать, деф 50), maxMinutes (сколько минут листать, деф 60).",
         },
         tabId: {
           type: "integer",
@@ -752,6 +758,13 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         },
         to: { type: "string", description: "Получатель (id/username/контакт в канале)." },
         body: { type: "string", description: "Текст сообщения." },
+        resend: {
+          type: "boolean",
+          description:
+            "TRUE ТОЛЬКО если пользователь ЯВНО попросил отправить ПОВТОРНО то же/почти то же сообщение " +
+            "(«отправь ещё раз»). Без него недавний повтор молча не уходит (защита от дублей); с ним — уйдёт " +
+            "после подтверждения владельцем. НЕ ставь по собственной инициативе.",
+        },
       },
       ["channel", "to", "body"],
     ),
@@ -1203,6 +1216,13 @@ const MESSAGING_TOOLS: ToolSchema[] = [
             "кандидата. peerId открывает чат точно, в обход выбора по имени — это единственный способ адресовать " +
             "короткое имя, которое носят несколько человек.",
         },
+        resend: {
+          type: "boolean",
+          description:
+            "TRUE ТОЛЬКО если пользователь ЯВНО попросил отправить ПОВТОРНО то же/почти то же сообщение " +
+            "(«отправь ещё раз»). Без него недавний повтор молча не уходит (защита от дублей); с ним — уйдёт " +
+            "после подтверждения владельцем. НЕ ставь по собственной инициативе.",
+        },
       },
       ["to", "text"],
     ),
@@ -1446,6 +1466,13 @@ const WATCH_TOOLS: ToolSchema[] = [
             value: { description: "browser: ожидаемое значение (число секунд, true/false, строка)." },
             selector: { type: "string", description: "browser: CSS-селектор (деф <video>/<audio>)." },
             tabId: { type: "integer", description: "browser: id вкладки (деф активная медиа-вкладка)." },
+            url: {
+              type: "string",
+              description:
+                "browser: АДРЕС наблюдаемой страницы. Указывай ВСЕГДА вместе с tabId для долгих наблюдений: " +
+                "по нему наблюдение САМО переоткроет страницу фоновой вкладкой, если её закроют, и продолжит " +
+                "следить (без url — только перезагрузка выгруженной вкладки, а закрытую восстановить нечем).",
+            },
             gone: { type: "boolean", description: "true — ждать ИСЧЕЗНОВЕНИЯ (окно закрылось / источник замолчал / условие перестало выполняться)." },
           },
         },

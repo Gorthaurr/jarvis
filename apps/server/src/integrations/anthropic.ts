@@ -262,8 +262,9 @@ export class AnthropicLlmProvider implements ILlmProvider {
       // Поведение модели рулим персоной (§11), не temperature.
       system,
       // Блоки messages могут нести cache_control (брейкпоинт растущего диалога
-      // в agent-loop, §15) — пробрасываем как есть.
-      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      // в agent-loop, §15) — пробрасываем как есть; пустые thinking-каркасы вычищаются
+      // (страховка к parseResponse — реплей пустого блока = гарантированный HTTP 400).
+      messages: req.messages.map((m) => ({ role: m.role, content: sanitizeThinkingContent(m.content) })),
       ...(req.tools && req.tools.length > 0
         ? {
             tools: req.tools.map((t) => ({
@@ -349,6 +350,31 @@ export function buildSystemBlocks(
   return blocks;
 }
 
+/**
+ * Вычистить из content ПУСТЫЕ thinking-блоки перед отправкой в API (живой 400 2026-07-24:
+ * «each thinking block must contain thinking» ломал КАЖДЫЙ follow-up-раунд хода → стаб «связь
+ * прервалась»). Чистая функция (тестируется): строковый content не трогает; cache_control
+ * выброшенного блока переносится на последний оставшийся (rolling-брейкпоинт §15 не теряется);
+ * если выбросить пришлось ВСЁ — подставляется text-заглушка «…» (пустой content — тоже 400).
+ */
+export function sanitizeThinkingContent(content: unknown): unknown {
+  if (!Array.isArray(content)) return content;
+  const blocks = content as Array<Record<string, unknown>>;
+  const isBlankThinking = (b: Record<string, unknown>): boolean =>
+    Boolean(b) && b.type === "thinking" && typeof b.thinking === "string" && (b.thinking as string).trim() === "";
+  if (!blocks.some(isBlankThinking)) return content;
+  const dropped = blocks.filter(isBlankThinking);
+  const kept = blocks.filter((b) => !isBlankThinking(b));
+  const cc = dropped.find((b) => b.cache_control)?.cache_control;
+  if (kept.length === 0) {
+    return [{ type: "text", text: "…", ...(cc ? { cache_control: cc } : {}) }];
+  }
+  if (cc && !kept[kept.length - 1]!.cache_control) {
+    kept[kept.length - 1] = { ...kept[kept.length - 1]!, cache_control: cc };
+  }
+  return kept;
+}
+
 /** Разобрать ответ SDK в LlmResponse (чистая функция — тестируется отдельно). */
 export function parseResponse(resp: RawResponse): LlmResponse {
   const toolUses: ToolUse[] = [];
@@ -358,8 +384,11 @@ export function parseResponse(resp: RawResponse): LlmResponse {
     if (b.type === "text" && b.text) text += b.text;
     else if (b.type === "tool_use" && b.id && b.name) {
       toolUses.push({ id: b.id, name: b.name, input: b.input ?? {} });
-    } else if (b.type === "thinking" && typeof b.thinking === "string") {
+    } else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim() !== "") {
       // Сохраняем дословно с подписью — agent-loop вернёт ПЕРВЫМИ в assistant-ход при tool-use.
+      // ПУСТОЙ thinking-каркас (живой 400 2026-07-24: Opus adaptive может отдать блок без текста;
+      // реплей такого блока → «each thinking block must contain thinking» → стаб «связь прервалась»
+      // на КАЖДОМ follow-up-раунде) — НЕ сохраняем: информации нет, а реплей ломает ход.
       thinkingBlocks.push({ type: "thinking", thinking: b.thinking, signature: b.signature ?? "" });
     } else if (b.type === "redacted_thinking" && typeof b.data === "string") {
       thinkingBlocks.push({ type: "redacted_thinking", data: b.data });

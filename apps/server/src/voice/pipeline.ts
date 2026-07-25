@@ -90,6 +90,16 @@ const FILLER_DELAY_MS = 250;
 /** Интервал опроса семантического эндпоинта после паузы (§10): чаще → отзывчивее, но не спамим. */
 const SILENCE_POLL_MS = 150;
 
+/**
+ * СРОК ГОДНОСТИ отложенной озвучки (ревью 2026-07-24, жалоба «договаривает спустя 2 минуты всё скопом»).
+ * Итог фоновой задачи, пролежавший в очереди дольше — уже не помощь, а шум: контекст ушёл, а владелец
+ * слышит ответ на забытый вопрос. Текст при этом НЕ теряется (он ушёл в чат/транскрипт ходом).
+ * СРОЧНОЕ (напоминания-будильники) не протухает НИКОГДА — оно и через час обязано прозвучать.
+ */
+const QUEUE_TTL_MS = envInt("JARVIS_SPEECH_QUEUE_TTL_MS", 120_000);
+/** Кап очереди озвучки: «пачка» из десятка реплик подряд — сама по себе плохой UX (та же жалоба). */
+const QUEUE_MAX = envInt("JARVIS_SPEECH_QUEUE_MAX", 4);
+
 /** Инкремент 0: ВЕРХНИЙ SANITY-потолок mouth-to-ear (env JARVIS_M2E_MAX_MS, деф 10 мин). Это НЕ клип
  *  легитимного хвоста: главная защита от мис-атрибуции проактива/фона — СТРУКТУРНАЯ (их речь не тегается
  *  turn-seq, ack не доходит). Потолок ловит лишь АБСУРД (clock-skew/грубая мис-корреляция → «минуты»),
@@ -254,8 +264,10 @@ export class VoicePipeline {
   private m2eSnap: { seq: number; turnEndTs: number } | undefined;
   /** Говорит ли сейчас пользователь (между speech_start и финалом) — не перебиваем его фоном. */
   private userSpeaking = false;
+  /** Идёт ли ход агента прямо сейчас (гард «один ход за раз», ревью фиксов речи 2026-07-24). */
+  private turnInflight = false;
   /** Очередь озвучки фоновых результатов (§20 async): произносим, когда канал свободен (и юзер не занят, §9). */
-  private pendingSpeech: { text: string; urgent: boolean }[] = [];
+  private pendingSpeech: { text: string; urgent: boolean; at: number }[] = [];
   /** Wake word (§3): активен ли разговор + когда было ПОСЛЕДНЕЕ взаимодействие (любая сторона). */
   private readonly requireWake: boolean;
   private readonly convWindowMs: number;
@@ -536,7 +548,14 @@ export class VoicePipeline {
    */
   speakQueued(text: string, urgent = false): void {
     if (!text.trim()) return;
-    this.pendingSpeech.push({ text, urgent });
+    this.pendingSpeech.push({ text, urgent, at: this.now() });
+    // Кап очереди (ревью 2026-07-24): бесконечная очередь = «скопом через минуты». Держим последние
+    // QUEUE_MAX, вытесняя САМЫЕ СТАРЫЕ несрочные — свежий итог важнее протухшего.
+    while (this.pendingSpeech.length > QUEUE_MAX) {
+      const victim = this.pendingSpeech.findIndex((p) => !p.urgent);
+      const dropped = this.pendingSpeech.splice(victim >= 0 ? victim : 0, 1)[0];
+      this.log.warn("очередь озвучки переполнена — старая реплика отброшена", { chars: dropped?.text.length ?? 0 });
+    }
     this.maybeDrainSpeech();
   }
 
@@ -587,6 +606,19 @@ export class VoicePipeline {
 
   private maybeDrainSpeech(): void {
     if (this.pendingSpeech.length === 0) return;
+    // СРОК ГОДНОСТИ (ревью 2026-07-24, живая жалоба «договаривает спустя минуты 2 сразу всё скопом»):
+    // итог, пролежавший в очереди дольше QUEUE_TTL_MS, произносить ВРЕДНО — контекст ушёл, владелец
+    // слышит ответ на вопрос, о котором уже забыл. Роняем с логом (текст ход уже отдал в чат).
+    const now = this.now();
+    const fresh = this.pendingSpeech.filter((p) => p.urgent || now - p.at <= QUEUE_TTL_MS);
+    if (fresh.length !== this.pendingSpeech.length) {
+      this.log.warn("отложенная озвучка протухла — не произносим", {
+        dropped: this.pendingSpeech.length - fresh.length,
+        ttlMs: QUEUE_TTL_MS,
+      });
+      this.pendingSpeech = fresh;
+      if (this.pendingSpeech.length === 0) return;
+    }
     if (this.ctx.state === "speaking" || this.ctx.state === "thinking") return;
     if (this.ttsStream || this.userSpeaking) return;
     // §10 realtime: пофразная сессия между фразами держит ttsStream=null, но канал ЗАНЯТ —
@@ -736,16 +768,21 @@ export class VoicePipeline {
   /** «Заткнись» — рубит TTS, задача (если есть) живёт; цикл в idle. */
   stop(): void {
     this.dispatch({ type: "stop" });
+    this.silenceSalvage(); // владелец сказал «молчи» — реплика в полёте не воскреснет из очереди
   }
 
   /** Честный mute (§0.6) — стоп захвата, в idle. */
   mute(): void {
     this.dispatch({ type: "mute" });
+    this.silenceSalvage();
   }
 
   /** Сбросить очередь отложенных фоновых озвучек — на явный «стоп»/«отмени»: слушать стейл не нужно. */
   clearPendingSpeech(): void {
     this.pendingSpeech = [];
+    // Сюда приходят «стоп»/«отмени» из task-control: это тоже НАМЕРЕННОЕ глушение — реплика хода,
+    // который договорит секундой позже, не должна всплыть из очереди (ревью, CRITICAL).
+    this.silenceSalvage();
   }
 
   /** Освободить ресурсы (закрытие сессии). */
@@ -898,7 +935,27 @@ export class VoicePipeline {
   // ── brain → TTS ────────────────────────────────────────────
 
   private async runAgent(text: string): Promise<void> {
+    // 🔴 ОДИН ХОД ЗА РАЗ (ревью фиксов речи 2026-07-24, HIGH). Раньше параллельные ходы были невозможны
+    // структурно: сырой speech_start в thinking бампал gen и убивал первый ход. Теперь шорох ход НЕ
+    // убивает (это и был корень «молчит»), значит настоящая ВТОРАЯ КОМАНДА может прийти, пока первый ход
+    // жив — и без этого гарда мы получили бы два живых TTS-стрима, льющих чанки в один аккумулятор
+    // клиента (каша из двух ответов) и рассинхрон speak_done. Новая команда ЯВНО отменяет предыдущий ход
+    // (его текст сохранит salvage) — это осознанное «перебил новой командой», а не шум.
+    if (this.turnInflight) {
+      this.log.info("новая команда во время незавершённого хода — прежний ход отменён (один ход за раз)");
+      this.cancelTts(); // gen++ → salvage прежнего хода отдаст текст в чат, голос в очередь
+    }
     const myGen = this.gen;
+    this.turnInflight = true;
+    try {
+      await this.runAgentInner(text, myGen);
+    } finally {
+      if (myGen === this.gen) this.turnInflight = false; // свой ход закончил; чужой (после отмены) — не трогаем
+    }
+  }
+
+  /** Тело хода (см. runAgent — гард «один ход за раз» стоит снаружи). */
+  private async runAgentInner(text: string, myGen: number): Promise<void> {
     if (this.latency.report().marks.turn_end === undefined) {
       this.latency.mark("turn_end");
       this.captureM2eSnapshot(); // фолбэк-путь turn_end → тоже снимаем снапшот хода
@@ -923,8 +980,11 @@ export class VoicePipeline {
       reply = { voice: "Что-то пошло не так. Повторишь?" };
     }
     if (myGen !== this.gen) {
-      // Юзер перебил, пока думали (barge-in на thinking) — этот ответ выбрасываем, но канал
-      // мог освободиться: пробуем пролить отложенный фоновый итог (иначе застрял бы в очереди).
+      // Ход инвалидирован (перебили/стоп). FAIL-SAFE как в стриминговом пути: работа СДЕЛАНА — текст
+      // отдаём в чат, голос (если это не намеренное глушение) в очередь. Здесь речь ещё не начиналась —
+      // startTts вызывается ниже, поэтому spokeAlready=false.
+      this.salvageCancelledReply(reply.voice, myGen, false);
+      // Канал мог освободиться: пробуем пролить отложенный фоновый итог (иначе застрял бы в очереди).
       this.maybeDrainSpeech();
       return;
     }
@@ -994,7 +1054,12 @@ export class VoicePipeline {
         this.deps.sendDisplay?.(d);
       },
       done: (full) => {
-        if (myGen !== this.gen) return;
+        if (myGen !== this.gen) {
+          // Ход инвалидирован (перебивание/стоп/реконнект). speaker.speechStarted=true → часть реплики
+          // владелец УЖЕ слышал: озвучивать её заново целиком нельзя (см. salvageCancelledReply).
+          this.salvageCancelledReply(full, myGen, speaker.speechStarted);
+          return;
+        }
         this.clearFillerTimer();
         // Дисплей — без аудио-тегов интонации (в TTS-фразы они уже ушли с тегами).
         const fullText = stripAudioTags(full);
@@ -1160,7 +1225,16 @@ export class VoicePipeline {
     this.ttsStream = stream;
     let first = true;
     stream.onChunk((c) => {
-      if (myGen !== this.gen) return;
+      if (myGen !== this.gen) {
+        // Видимость потери (ревью 2026-07-24): готовые байты отбрасываются из-за отмены хода — раньше
+        // молча. Логируем ПЕРВЫЙ отброшенный чанк (не спамим на каждом), чтобы «почему не прозвучало»
+        // читалось из лога, а не выводилось дедукцией по коду.
+        if (first) {
+          first = false;
+          this.log.warn("аудио-чанк отброшен: ход инвалидирован (перебивание/стоп)", { myGen, gen: this.gen });
+        }
+        return;
+      }
       if (first) {
         first = false;
         this.latency.mark("tts_first_chunk");
@@ -1193,6 +1267,55 @@ export class VoicePipeline {
       this.phraseSpeaker.cancel();
       this.phraseSpeaker = null;
     }
+    // 🔴 ОСИРОТЕВШИЙ STT (ревью фиксов речи 2026-07-24): gen++ инвалидирует onPartial УЖЕ ОТКРЫТОГО
+    // стрима, а ensureStt при живом this.sttStream делает ранний return — стрим оставался «мёртвым»:
+    // кадры летят, транскрипты режутся гардом gen, команда владельца исчезает молча. Закрываем сами —
+    // редьюсер следом даёт open_stt, и ensureStt откроет свежий стрим с актуальным gen.
+    if (this.sttStream) {
+      void this.sttStream.close();
+      this.sttStream = null;
+    }
+  }
+
+  /**
+   * НАМЕРЕННОЕ глушение (ревью фиксов речи 2026-07-24, CRITICAL): «стоп»/«заткнись»/mute — владелец
+   * СКАЗАЛ не говорить. Fail-safe (salvage) обязан это уважать: текст отменённой реплики он по-прежнему
+   * отдаёт в чат, но в ОЧЕРЕДЬ ОЗВУЧКИ не ставит — иначе запрещённая реплика воскресала и звучала через
+   * несколько секунд. Помечаем поколение: всё, что было сгенерировано до него, озвучке не подлежит.
+   */
+  // -1, а НЕ 0: поколения начинаются с 0, и при инициализации нулём самый первый ход считался бы
+  // «заглушённым» (myGen 0 <= 0) — его реплика никогда не попадала бы в очередь.
+  private silencedUpToGen = -1;
+  private silenceSalvage(): void {
+    this.silencedUpToGen = this.gen;
+  }
+
+  /**
+   * FAIL-SAFE отменённой реплики (живой корень «молчит/не договаривает», 2026-07-24 + ревью фиксов).
+   * Ход инвалидирован, но ответ УЖЕ сгенерирован и оплачен — раньше он исчезал молча. Теперь:
+   *  • ТЕКСТ всегда доезжает в транскрипт/чат (владелец видит ответ, даже если не слышит);
+   *  • ГОЛОС ставится в очередь — но НЕ ВСЕГДА:
+   *      – намеренное глушение («стоп»/«заткнись»/mute/«отмени») → НЕ озвучиваем НИКОГДА (иначе
+   *        запрещённая реплика воскресала через пару секунд — ревью, CRITICAL);
+   *      – речь этой реплики УЖЕ ЧАСТИЧНО ПРОЗВУЧАЛА (перебили на середине) → НЕ переозвучиваем
+   *        целиком с начала: barge-in означает «хватит», а не «повтори длиннее» (ревью, HIGH).
+   * Потеря/сохранение всегда логируются — потеря голоса обязана быть видимой.
+   */
+  private salvageCancelledReply(full: string, myGen: number, spokeAlready: boolean): void {
+    const text = stripAudioTags(full).trim();
+    if (!text) return;
+    this.deps.sendTranscript?.({ text, final: true });
+    this.deps.sendChat?.({ role: "assistant", text }); // §22: ответ виден в чате в любом случае
+    const silenced = myGen <= this.silencedUpToGen;
+    if (silenced || spokeAlready) {
+      this.log.warn("реплика хода отменена — текст сохранён, озвучка НЕ ставится в очередь", {
+        chars: text.length,
+        reason: silenced ? "владелец попросил молчать" : "речь уже частично прозвучала",
+      });
+      return;
+    }
+    this.log.warn("реплика хода отменена перебиванием — текст сохранён, голос в очередь", { chars: text.length, myGen, gen: this.gen });
+    this.speakQueued(text);
   }
 
   // ── таймеры ────────────────────────────────────────────────
