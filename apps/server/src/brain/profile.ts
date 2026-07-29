@@ -11,7 +11,7 @@
  *   • loadProfile(userId) грузит раздел в кеш на старте сессии (зовётся в handshake ДО makeSessionContext);
  *     getProfile(userId) — синхронно из кеша; setX(userId,…) мутируют раздел + персист на пользователя.
  */
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { dataDir } from "../paths.js";
@@ -39,6 +39,8 @@ export interface UserProfile {
   lastGreetedAt?: number;
   /** Когда последний раз прогонялся «сон-цикл» консолидации памяти (unix ms) — триггер Б1, раз в день. */
   lastConsolidatedAt?: number;
+  /** Когда последний раз звучал брифинг дня (волна D) — гейт «раз в календарный день». */
+  lastBriefedAt?: number;
 }
 
 const cache = new Map<string, UserProfile>();
@@ -125,16 +127,48 @@ export async function setLastGreeted(userId: string): Promise<void> {
   await persist(userId);
 }
 
+/** Отметить произнесённый брифинг дня (волна D: не повторяем сводку на каждом коннекте). */
+export async function setLastBriefed(userId: string): Promise<void> {
+  entry(userId).lastBriefedAt = Date.now();
+  await persist(userId);
+}
+
 /** Отметить прогон «сон-цикла» консолидации памяти (Б1, раз в день). */
 export async function setLastConsolidated(userId: string): Promise<void> {
   entry(userId).lastConsolidatedAt = Date.now();
   await persist(userId);
 }
 
-/** Кап курируемых фактов профиля (ревью памяти 2026-07-10, А2): профиль — выжимка, не дамп. */
-const MAX_PROFILE_FACTS = 20;
+/** Кап курируемых фактов профиля (ревью памяти 2026-07-10, А2): профиль — выжимка, не дамп.
+ *  Аудит 2026-07-28: прежний кап 20 вытеснял важное МОЛЧА (21-й факт «любит пиццу» бесследно
+ *  выталкивал «жена — Оля»). Кап поднят и настраиваем (env JARVIS_PROFILE_FACTS_MAX, деф 50,
+ *  кламп [10,500] — факты идут в НЕкешируемый хвост промпта, безлимит = плата токенами каждый ход),
+ *  а вытеснение стало НЕ бесследным: durable-архив + WARN (archiveEvictedFact). Семантическая копия
+ *  обычно остаётся в episodic (мост user-memory) — архив здесь страховка честности, не вторая память. */
+function maxProfileFacts(): number {
+  const raw = Number.parseInt(process.env.JARVIS_PROFILE_FACTS_MAX ?? "", 10);
+  if (!Number.isFinite(raw)) return 50;
+  return Math.min(500, Math.max(10, raw));
+}
 
-/** Добавить факт о пользователе (без дублей; при переполнении вытесняется старейший). */
+/** Путь append-only архива вытесненных фактов (рядом с партициями профиля). */
+function evictedArchiveFile(userId: string): string {
+  const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
+  return join(DATA_DIR, "profile", `evicted-${safe}.jsonl`);
+}
+
+/** Вытесненный факт — в durable-архив (fail-safe: сбой ФС не роняет addFact). */
+async function archiveEvictedFact(userId: string, fact: string): Promise<void> {
+  try {
+    const file = evictedArchiveFile(userId);
+    await mkdir(dirname(file), { recursive: true });
+    await appendFile(file, `${JSON.stringify({ ts: new Date().toISOString(), fact })}\n`, "utf8");
+  } catch (e) {
+    log.warn("профиль: не удалось заархивировать вытесненный факт", { userId, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** Добавить факт о пользователе (без дублей; при переполнении старейший вытесняется В АРХИВ, не бесследно). */
 export async function addFact(userId: string, fact: string): Promise<void> {
   const f = fact.trim();
   if (!f) return;
@@ -142,7 +176,14 @@ export async function addFact(userId: string, fact: string): Promise<void> {
   p.facts = p.facts ?? [];
   if (p.facts.includes(f)) return;
   p.facts.push(f);
-  while (p.facts.length > MAX_PROFILE_FACTS) p.facts.shift(); // FIFO: старейшее уступает свежему
+  const cap = maxProfileFacts();
+  while (p.facts.length > cap) {
+    const evicted = p.facts.shift(); // FIFO: старейшее уступает свежему
+    if (evicted) {
+      log.warn("профиль: кап фактов — старейший вытеснен (заархивирован)", { userId, evicted: evicted.slice(0, 80) });
+      await archiveEvictedFact(userId, evicted);
+    }
+  }
   await persist(userId);
   log.info("профиль: факт добавлен", { userId, count: p.facts.length, preview: f.slice(0, 60) });
 }

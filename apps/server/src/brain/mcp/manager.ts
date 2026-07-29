@@ -229,6 +229,19 @@ export class McpManager {
     return Array.isArray(c) ? c.includes(ref.bare) : false;
   }
 
+  /**
+   * Декларативный toolEffect MCP-инструмента (последний кусок MCP-контракта, аудит 2026-07-28): владелец
+   * в mcp.json объявляет карту bare-имя → verify|mutate|neutral (ключ "*" — дефолт сервера). Возвращает
+   * undefined, если декларации нет — агент-петля тогда падает на прежнюю эвристику по имени (toolEffect()).
+   */
+  declaredEffect(name: string): "verify" | "mutate" | "neutral" | undefined {
+    const ref = this.index.get(name);
+    if (!ref) return undefined;
+    const map = this.cfg.servers?.[ref.server]?.toolEffect;
+    if (!map) return undefined;
+    return map[ref.bare] ?? map["*"];
+  }
+
   /** Все MCP-инструменты в формате Anthropic (для активированных через tool_load). */
   asToolSchemas(): ToolSchema[] {
     const out: ToolSchema[] = [];

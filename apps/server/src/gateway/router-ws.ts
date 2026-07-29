@@ -16,6 +16,7 @@ import {
   type ActionResult,
   type AudioFrame,
   type AudioPlayed,
+  type PlaybackState,
   type ClientContext,
   type ClientEnv,
   type ClientSystem,
@@ -37,7 +38,13 @@ import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, setLanguage, setContext } from "../brain/profile.js";
+import { getProfile, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { takeIncidentReport } from "../proactive/incidents.js";
+import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
+import { upcomingDue } from "../proactive/ambient/obligations.js";
+import { parseCalendarChips } from "../proactive/ambient/calendar-parse.js";
+import type { CalendarReadResult } from "../proactive/ambient/calendar-source.js";
+import { isDevSession } from "./dev-session.js";
 import { DEFAULT_LIMITS, type SpendGuard, type SpendGuards } from "../billing/index.js";
 import { setCredential } from "../db/credentials.js";
 import type { ILlmProvider } from "../integrations/llm.js";
@@ -166,6 +173,15 @@ export interface SessionContext {
    * сессию) и снимаем её незавершённые задачи. Вызывается gateway по ws-close.
    */
   disposeAgent(): void;
+  /**
+   * ВЛАДЕЛЕЦ ЗАВЕДОМО ЗДЕСЬ (первая реплика сессии на любом канале — голос/чат/dev-текст). Отдаёт
+   * то, что нельзя говорить в пустую комнату: доклад о сбоях Джарвиса и сводку дня. При коннекте
+   * этого делать нельзя — клиент переподключается сам ночью из трея, а оба сообщения ПОТРЕБЛЯЮТ
+   * durable-маркер (доклад — «прочитано», брифинг — «сегодня уже»): сказанное в тишину пропало бы
+   * навсегда. ЕДИНАЯ точка вместо двух флашей — чтобы новый канал не забыл половину.
+   * Идемпотентно в пределах сессии.
+   */
+  onOwnerPresent(): void;
 }
 
 /** §контекст: компактная сводка открытых вкладок браузера для live-хвоста промпта (с ♪ у звучащей). */
@@ -208,6 +224,8 @@ export function makeSessionContext(
   heartbeat: HeartbeatHandle,
   providers: VoiceProviders,
   brain: BrainProviders,
+  /** clientVersion из hello — чтобы dev-сессии (текст-драйвер) не съедали одноразовые доклады владельцу. */
+  clientVersion?: string,
 ): SessionContext {
   // §5 resume + персист: память диалога СКОУПЛЕНА на Session (переживает reconnect) И грузится С ДИСКА
   // по userId (переживает рестарт сервера/клиента) — иначе «забывал, о чём говорили». На новой сессии
@@ -273,6 +291,125 @@ export function makeSessionContext(
   };
   // §9 «не мешать»: поздняя привязка к ctx — пайплайн читает занятость пользователя из client.context.
   let ctxForBusy: SessionContext | undefined;
+  /**
+   * ДОКЛАД О СОБСТВЕННЫХ СБОЯХ — при ПЕРВОЙ РЕПЛИКЕ ВЛАДЕЛЬЦА, не при коннекте (адверс-ревью
+   * 2026-07-28, находки [1][2][6][7]). Раньше доклад произносился через 800мс после подключения и
+   * СРАЗУ двигал маркер прочитанного: ночью клиент переподключается САМ через секунду после
+   * рестарта → Джарвис говорил в пустую комнату (владелец спит), маркер уезжал, и утром владелец
+   * НИЧЕГО не узнавал — ровно тот сценарий, ради которого фича делалась. Теперь:
+   *  • триггер — первая реплика владельца (он заведомо здесь и слушает);
+   *  • ДВЕ копии: голос (speakQueued — не перебивает) И текст в чат (переживает провал TTS/barge-in);
+   *  • маркер двигается только в этот момент (takeIncidentReport вызывается здесь, а не при коннекте).
+   */
+  // Dev-сессия (текст-драйвер `_jarvis_cmd.mjs`, смоуки) — НЕ владелец: доклад одноразовый и
+  // потребляет durable-маркер, поэтому прогон драйвера утром «съел» бы ночной инцидент, и владелец
+  // не узнал бы о нём НИКОГДА (контрольное ревью; тот же гейт стоит у приветствия и сон-цикла).
+  const devSession = isDevSession(clientVersion);
+  let incidentReportFlushed = false;
+  /** День (toDateString), в который брифинг УЖЕ пробовали в этом соединении, и латч in-flight. */
+  let briefingTriedDay: string | undefined;
+  let briefingInFlight = false;
+  /** Занят ли владелец ПРЯМО СЕЙЧАС (полный экран/звонок/блокировка) — §9 «не мешать». */
+  const ownerBusy = (): boolean => {
+    const c = ctxForBusy?.lastContext;
+    return !!c && (c.micBusyByOtherApp || c.fullscreen || c.locked);
+  };
+  const flushIncidentReport = (): void => {
+    if (incidentReportFlushed || devSession) return;
+    // §9: владелец ЗАНЯТ — НЕ потребляем доклад: несрочная очередь держит реплику и через
+    // QUEUE_TTL_MS выбрасывает её, а маркер уже был бы сдвинут → доклад потерян навсегда
+    // (контрольное ревью [4]). Ждём следующей реплики, когда он свободен.
+    if (ownerBusy()) {
+      log.info("инциденты: доклад отложен — владелец занят (полный экран/звонок/блокировка)");
+      return;
+    }
+    incidentReportFlushed = true; // одна попытка на сессию — не долбим владельца на каждой реплике
+    try {
+      const line = takeIncidentReport();
+      if (!line) return;
+      voice.speakQueued(verbalize(line));
+      session.send("chat", { role: "assistant", text: line }); // текстовая копия — голос не единственный канал
+      log.info("инциденты: доклад отдан владельцу (голос + чат)");
+    } catch (e) {
+      log.warn("доклад об инцидентах не удался", e instanceof Error ? e.message : String(e));
+    }
+  };
+  /**
+   * Волна D: сводка дня («Коротко по дню, сэр: …») — раз в календарный день, ПО ПЕРВОЙ РЕПЛИКЕ.
+   * Собирается ЧИСТОЙ функцией из уже существующих сторов (без LLM: справка о фактах не должна ни
+   * стоить денег, ни выдумывать). Гейт `lastBriefedAt` в профиле двигаем ТОЛЬКО когда реально
+   * сказали — пустой день не должен съедать брифинг настоящего.
+   */
+  const flushDailyBriefing = async (): Promise<void> => {
+    if (devSession) return;
+    // 🔴 ГЕЙТ — КАЛЕНДАРНЫЙ ДЕНЬ, А НЕ СОЕДИНЕНИЕ (финальное ревью, HIGH): пожизненный флаг соединения
+    // означал бы РОВНО ОДИН брифинг за всё время работы клиента — а он живёт в трее сутками (сервер
+    // держит супервизор, WS не переподключается), и во вторник сводка уже не звучала бы. Источник
+    // истины — `lastBriefedAt` в профиле (переживает и рестарт); в замыкании держим лишь маркер
+    // ПОПЫТКИ за сегодня, чтобы «пустой день» не пересчитывался (и не дёргал календарь) на каждой реплике.
+    const now = Date.now();
+    const today = new Date(now).toDateString();
+    if (briefingTriedDay === today || briefingInFlight) return;
+    if (!shouldBrief({ lastBriefedAt: getProfile(session.userId).lastBriefedAt }, now)) {
+      briefingTriedDay = today; // сегодня уже брифинговали (в этой сессии или до рестарта)
+      return;
+    }
+    if (ownerBusy()) {
+      log.info("брифинг дня отложен — владелец занят (гейт не потрачен)");
+      return; // маркер НЕ ставим: попробуем на следующей реплике, когда он освободится
+    }
+    briefingTriedDay = today;
+    briefingInFlight = true;
+    try {
+      // D-4: встречи из УЖЕ открытой вкладки календаря. Не прочиталось (нет вкладки/расширения) —
+      // брифинг всё равно звучит по остальным источникам, просто без встреч: календарь тут БОНУС,
+      // а не условие. Открывать вкладку ради сводки не просим (open=false) — это фон, не приказ.
+      let events: Array<{ startAt: number; title: string; allDay: boolean }> = [];
+      try {
+        const raw = (await brain.extBridge.calendarRead(false)) as CalendarReadResult | undefined;
+        if (raw?.ok && Array.isArray(raw.events)) events = parseCalendarChips(raw.events, Date.now()).events;
+      } catch (e) {
+        log.debug("брифинг: календарь не прочитан", e instanceof Error ? e.message : String(e));
+      }
+      // Пока читали календарь (до 8 с), соединение могло оборваться: session.send в мёртвый сокет
+      // только пишет WARN, речь уходит в очередь умирающего пайплайна — а суточный гейт был бы
+      // потрачен, и сводка пропала бы до завтра (финальное ревью). Проверяем канал ПЕРЕД тратой.
+      if (!session.channelUp()) {
+        briefingTriedDay = undefined; // соединение мертво — пусть следующая сессия попробует сегодня же
+        log.info("брифинг дня отменён — канал закрылся, пока читали календарь (гейт не потрачен)");
+        return;
+      }
+      const now = Date.now();
+      const line = buildBriefing(
+        {
+          reminders: (brain.reminders?.list(session.userId) ?? []).map((r) => ({ fireAt: r.fireAt, text: r.text })),
+          obligations: (brain.obligations?.list(session.userId) ?? [])
+            .map((o) => ({ dueAt: upcomingDue(o, now), title: o.what }))
+            .filter((o): o is { dueAt: number; title: string } => o.dueAt !== null),
+          watches: (brain.watch?.list({ userId: session.userId }) ?? []).map((w) => ({ what: w.what })),
+          events,
+        },
+        now,
+      );
+      if (!line) return; // нечего сказать — молчим и метку НЕ ставим (день ещё «не отбрифингован»)
+      voice.speakQueued(verbalize(line));
+      session.send("chat", { role: "assistant", text: line });
+      void setLastBriefed(session.userId).catch((e) =>
+        log.warn("брифинг: метка дня не сохранилась", e instanceof Error ? e.message : String(e)),
+      );
+      log.info("брифинг дня произнесён");
+    } catch (e) {
+      log.warn("брифинг дня не собрался", e instanceof Error ? e.message : String(e));
+    } finally {
+      briefingInFlight = false;
+    }
+  };
+  /** ЕДИНАЯ точка «владелец здесь»: всё, что нельзя говорить в пустую комнату. */
+  const onOwnerPresent = (): void => {
+    flushIncidentReport();
+    // Брифинг ждёт чтения календаря (сеть/расширение) — не задерживаем реплику владельца.
+    void flushDailyBriefing();
+  };
   // §Волна2 (2.6): пост-STT нормализатор лексики. Источники: статика роутера (сервисы/алиасы),
   // приложения/игры из client.env (объект мутируется хендлером client.env ниже), имена/триггеры
   // выученных навыков. Сборка ленивая/фоновая — normalize синхронный (gateWake).
@@ -347,6 +484,7 @@ export function makeSessionContext(
     // перехват на обоих каналах; ctxForBusy замыкается после создания ctx (как для isUserBusy).
     onUserTurn: (text, meta) => {
       if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) return Promise.resolve({ voice: "" });
+      onOwnerPresent(); // доклад о ночных сбоях + сводка дня — при ПЕРВОЙ реплике владельца (он точно тут)
       // §P0: meta.viaWake (реплика из окна разговора без «Джарвис») гейтит слепой авто-реплей макроса.
       return handleUserText(session, text, agentDeps, undefined, meta);
     },
@@ -360,6 +498,7 @@ export function makeSessionContext(
               sink.done(""); // ack уже озвучен внутри handleTaskControl; ход закрывается тихо
               return Promise.resolve();
             }
+            onOwnerPresent(); // доклад о ночных сбоях + сводка дня — при ПЕРВОЙ реплике владельца
             // §P0: meta.viaWake гейтит слепой авто-реплей (жесты только по явному «Джарвис»).
             return handleUserText(session, text, agentDeps, sink, meta).then(() => undefined);
           },
@@ -399,15 +538,64 @@ export function makeSessionContext(
   // (speakQueued произнесёт, когда канал свободен — не перебивая пользователя). Текст вербализуем
   // (числа/латиница), как обычные реплики. Снимаем регистрацию на закрытии сессии.
   // §9: напоминание — СРОЧНОЕ (будильник): озвучивается даже если пользователь занят (urgent=true).
-  brain.reminders?.registerSpeaker(session.sessionId, session.userId, (text) => voice.speakQueued(verbalize(text), true));
-  // §долгие-задачи: тот же канал проактивной речи для срабатываний наблюдений (мониторинг).
-  brain.watch?.registerSpeaker(session.sessionId, session.userId, (text) => voice.speakQueued(verbalize(text), true));
+  // DEV-СЕССИЯ НЕ ПОЛУЧАТЕЛЬ (контроль-4 волны D): у обоих сервисов есть `flushPending` — ночное
+  // напоминание, сработавшее при закрытом клиенте, утренний прогон текст-драйвера произнёс бы в свой
+  // сокет и пометил доставленным, и владелец не услышал бы его НИКОГДА. Тот же гейт уже стоит у
+  // приветствия, сон-цикла, доклада об инцидентах, брифинга и ambient.
+  if (!devSession) {
+    brain.reminders?.registerSpeaker(session.sessionId, session.userId, (text, onOutcome) =>
+      // retriable: недоставленное лежит в durable-сторе — очередь честно откажет и мы повторим;
+      // onOutcome сообщает РЕАЛЬНЫЙ исход (прозвучало / сброшено по TTL, «стоп», смерти сессии).
+      voice.speakQueued(verbalize(text), true, { retriable: true, ...(onOutcome ? { onOutcome } : {}) }),
+    );
+    // §долгие-задачи: тот же канал проактивной речи для срабатываний наблюдений (мониторинг).
+    brain.watch?.registerSpeaker(session.sessionId, session.userId, (text, onOutcome) =>
+      voice.speakQueued(verbalize(text), true, { retriable: true, ...(onOutcome ? { onOutcome } : {}) }),
+    );
+  }
   // §Волна3 (3.4): канал sendAction для ПРЕДИКАТ-наблюдений — проверка на клиенте владельца ($0).
-  brain.watch?.registerActions(session.sessionId, session.userId, (cmd, timeoutMs) =>
-    session.sendAction(cmd as never, timeoutMs).then((r) => ({ ok: r.ok, data: r.data, error: r.error })),
-  );
-  // §проактив-всё: ambient-осведомлённость (счета/Telegram). urgent (день оплаты) проходит даже при занятости.
-  brain.ambient?.registerSpeaker(session.sessionId, session.userId, (text, urgent) => voice.speakQueued(verbalize(text), urgent));
+  // ТОЖЕ НЕ В DEV-СЕССИИ (контроль-5, MEDIUM): текст-драйвер отвечает на любой action.command
+  // фальшивым `ok:true` БЕЗ data, а это трактуется как ДОСТОВЕРНОЕ «условие не выполнено» (не
+  // транзиентная ошибка) → durable `metStreak` сбрасывается, и следующий НАСТОЯЩИЙ met запускает
+  // поручение ПОВТОРНО — второе сообщение живому человеку. Ровно то, против чего вводили edge-триггер.
+  if (!devSession) {
+    brain.watch?.registerActions(session.sessionId, session.userId, (cmd, timeoutMs) =>
+      session.sendAction(cmd as never, timeoutMs).then((r) => ({ ok: r.ok, data: r.data, error: r.error })),
+    );
+  }
+  // P0 «watch умеет ДЕЙСТВОВАТЬ» (аудит 2026-07-28): срабатывание наблюдения с поручением (action)
+  // заходит в агентскую петлю ЭТОЙ сессии как отложенная реплика владельца — «когда доставят — напиши
+  // Кате» исполняется само, цепочка «событие → действие» не рвётся на пользователе. Итог — тем же
+  // speakResult-каналом, что фоновые задачи (голос + чат + карточка). Реплика составлена ТОЛЬКО из
+  // доверенных полей создания наблюдения (см. WatchService.actionGoal — анти-инъекция M11).
+  // И ЭТО — НЕ В DEV-СЕССИИ (контроль-5, HIGH): registerRunner внутри зовёт flushPendingActions,
+  // который durable-очищает отложенное поручение и ИСПОЛНЯЕТ его. В сессии драйвера §14-подтверждение
+  // выдал бы тестовый скрипт, актуаторы вернули бы фейковый ok, итог ушёл бы в сокет драйвера — а
+  // владелец не узнал бы ни об исполнении, ни о провале (поручение уже вычеркнуто из стора).
+  if (!devSession) brain.watch?.registerRunner(session.sessionId, session.userId, (goal) => {
+    // origin="watch-action" (адверс-ревью [6][20][24]): машинный реэнтри обходит steer/дубль-гейты
+    // живой речи и не съедает висящее уточнение консьержа.
+    void handleUserText(session, goal, agentDeps, undefined, { origin: "watch-action" })
+      .then((reply) => {
+        if (reply.voice.trim() || reply.display) agentDeps.speakResult?.(reply);
+      })
+      .catch((e: unknown) => log.error("watch-action: ошибка исполнения поручения", e instanceof Error ? e.message : String(e)));
+  });
+  // §проактив-всё: ambient-осведомлённость (счета/Telegram/календарь/почта). urgent (день оплаты)
+  // проходит даже при занятости; несрочное движок придержит, пока владелец занят (иначе очередь
+  // выбросит фразу по TTL, а durable-seen уже будет стоять → уведомление потеряно навсегда).
+  // DEV-СЕССИЯ НЕ РЕГИСТРИРУЕТСЯ (финальное ревью): утренний прогон текст-драйвера иначе СЪЕДАЛ бы
+  // накопленные за ночь уведомления владельца и durable-помечал их доставленными — тот же гейт стоит
+  // у приветствия, доклада об инцидентах и брифинга.
+  if (!devSession) {
+    brain.ambient?.registerSpeaker(
+      session.sessionId,
+      session.userId,
+      (text, urgent, onOutcome) =>
+        voice.speakQueued(verbalize(text), urgent, { retriable: true, ...(onOutcome ? { onOutcome } : {}) }),
+      ownerBusy,
+    );
+  }
   // Фоновые активности: чип «идёт автолистание, пролистал N» живёт, пока работа реально идёт (запрос
   // владельца 2026-07-25). Канал — тот же task.status, что у §20-задач: панель уже умеет его рисовать.
   brain.activities?.registerStatus(session.sessionId, session.userId, (payload) => session.send("task.status", payload));
@@ -419,6 +607,7 @@ export function makeSessionContext(
     brain.reminders?.unregisterSpeaker(session.sessionId); // §9: больше не доставляем сюда
     brain.watch?.unregisterSpeaker(session.sessionId); // §долгие-задачи: больше не доставляем сюда
     brain.watch?.unregisterActions(session.sessionId); // §Волна3 (3.4): канал предикат-проверок этой сессии мёртв
+    brain.watch?.unregisterRunner(session.sessionId); // P0 «watch действует»: запускатель этой сессии мёртв
     brain.ambient?.unregisterSpeaker(session.sessionId); // §проактив-всё: больше не доставляем сюда
     brain.activities?.unregisterStatus(session.sessionId); // чипы фоновых активностей — в другую сессию
   };
@@ -447,6 +636,7 @@ export function makeSessionContext(
     agentDeps,
     envLexicon, // §Волна2 (2.6): client.env-хендлер мутирует списки → лексикон нормализатора живой
     disposeAgent,
+    onOwnerPresent, // доклад о сбоях + сводка дня — на первой реплике владельца (любой канал, см. выше)
     speakerVerifier: providers.speakerVerifier,
     speakerStore: providers.speakerStore,
   };
@@ -591,6 +781,13 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       if (typeof p?.gen === "number" && typeof p?.ts === "number") ctx.voice.onAudioPlayed(p.gen, p.ts);
       break;
     }
+    case "audio.playback": {
+      // Волна B: динамик клиента занят/свободен — по нему пайплайн решает, когда отдавать
+      // следующую очередную реплику (раньше знал только про конец СИНТЕЗА → фразы «пачкой»).
+      const p = env.payload as PlaybackState;
+      if (typeof p?.active === "boolean") ctx.voice.setClientPlayback(p.active);
+      break;
+    }
     case "screen.capture.result":
       // Результат screen.capture коррелируется как ActionResult в проде;
       // M0 — лог. TODO(M2): связать со screen.capture command.
@@ -636,6 +833,7 @@ export async function onDevText(ctx: SessionContext, payload: DevText): Promise<
   if (handleControlUtterance(ctx, text, "text")) return;
 
   ctx.session.send("chat", { role: "user", text }); // §22 чат: напечатанная реплика в историю
+  ctx.onOwnerPresent(); // владелец печатает → он здесь: доклад о ночных сбоях + сводка дня
   ctx.session.send("client.state", { state: "thinking" });
   let reply: AgentReply;
   try {

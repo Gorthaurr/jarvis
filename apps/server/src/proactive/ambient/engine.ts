@@ -10,6 +10,13 @@ import type { AmbientPhraser, AmbientSignal, AmbientSource } from "./signal.js";
 
 const log: Logger = createLogger("ambient");
 
+/** Сколько НЕсрочных отложенных отдаём за один заход: очередь озвучки держит немного и вытесняет
+ *  старейшие, поэтому остальное ждёт следующего тика, а не помечается доставленным впустую. */
+const FLUSH_BATCH = 2;
+
+/** Сколько НЕсрочных сигналов озвучиваем за ОДИН тик. Сверх — ждут следующего (ничего не помечаем). */
+const TICK_SPEAK_BUDGET = 2;
+
 export interface AmbientEngineOpts {
   now?: () => number;
   /** Период опроса источников (мс). Деф 90с (env JARVIS_AMBIENT_INTERVAL_MS). Дёшево → можно часто. */
@@ -23,9 +30,12 @@ export interface AmbientEngineOpts {
 export class AmbientEngine {
   private timer?: ReturnType<typeof setInterval>;
   private ticking = false;
-  private readonly speakers = new Map<string, { userId: string; speak: (text: string, urgent: boolean) => void }>();
+  private readonly speakers = new Map<
+    string,
+    { userId: string; speak: (text: string, urgent: boolean, onOutcome?: (spoken: boolean) => void) => unknown; isBusy?: () => boolean }
+  >();
   /** Недоставленное (сессии не было в момент сигнала) → проговорить при подключении владельца. */
-  private pending: Array<{ userId: string; text: string; urgent: boolean; seenKey: string }> = [];
+  private pending: Array<{ userId: string; text: string; urgent: boolean; seenKey: string; expiresAt?: number }> = [];
   /** Аудит-2 [6]: сигналы, поставленные в pending В ЭТОМ ПРОЦЕССЕ (анти-дубль на тиках), НЕ persist —
    *  durable «seen» ставится ЛИШЬ при реальной доставке, иначе рестарт до flush терял бы срочный сигнал. */
   private readonly queuedKeys = new Set<string>();
@@ -64,9 +74,17 @@ export class AmbientEngine {
     await this.store.flush();
   }
 
-  /** Зарегистрировать канал озвучки сессии (с владельцем) и сразу отдать отложенные ЭТОГО юзера. */
-  registerSpeaker(sessionId: string, userId: string, speak: (text: string, urgent: boolean) => void): void {
-    this.speakers.set(sessionId, { userId, speak });
+  /**
+   * Зарегистрировать канал озвучки сессии (с владельцем) и сразу отдать отложенные ЭТОГО юзера.
+   * isBusy (опц.) — «владелец сейчас занят» (§9): несрочное не отдаём, чтобы очередь его не выбросила.
+   */
+  registerSpeaker(
+    sessionId: string,
+    userId: string,
+    speak: (text: string, urgent: boolean, onOutcome?: (spoken: boolean) => void) => unknown,
+    isBusy?: () => boolean,
+  ): void {
+    this.speakers.set(sessionId, { userId, speak, ...(isBusy ? { isBusy } : {}) });
     this.flushPending(userId);
   }
 
@@ -84,17 +102,30 @@ export class AmbientEngine {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      // Сначала дренируем остаток прошлой порции отложенных (flushPending отдаёт их не разом, чтобы
+      // очередь озвучки не выбросила помеченные доставленными) — иначе хвост завис бы до реконнекта.
+      for (const userId of new Set([...this.speakers.values()].map((s) => s.userId))) this.flushPending(userId);
+      // БЮДЖЕТ ОЗВУЧКИ НА ТИК (контроль-6): очередь пайплайна держит немного и вытесняет старейшие,
+      // поэтому за один проход отдаём ограниченное число НЕсрочных. Сверх бюджета сигнал НЕ трогаем
+      // вовсе (ни seen, ни pending) — на следующем тике он рассмотрится снова и дойдёт до владельца.
+      // Так «важное письмо под тремя рассылками» не голодает: рассылки уходят ниже порога и бюджет не
+      // тратят, а всё, что не влезло, просто ждёт следующего тика.
+      const budget = { left: TICK_SPEAK_BUDGET };
+      // Сперва СОБИРАЕМ со всех источников, потом рассматриваем ПО УБЫВАНИЮ ВАЖНОСТИ (контроль-7):
+      // раздача бюджета в порядке массива источников голодала важное — «через 20 мин созвон»
+      // (salience 0.9) не звучал НИ РАЗУ, пока в Telegram шла переписка (0.7), потому что telegram
+      // стоит в списке раньше. Приоритет должен решать смысл сигнала, а не порядок регистрации.
+      const collected: AmbientSignal[] = [];
       for (const src of this.sources) {
         if (!src.enabled()) continue;
-        let signals: AmbientSignal[];
         try {
-          signals = await src.poll();
+          collected.push(...(await src.poll()));
         } catch (e) {
           log.info("ambient: источник не отдал сигналы (пропуск)", { source: src.id, error: e instanceof Error ? e.message : String(e) });
-          continue;
         }
-        for (const sig of signals) await this.consider(sig);
       }
+      collected.sort((a, b) => (b.urgent === true ? 1 : 0) - (a.urgent === true ? 1 : 0) || b.salience - a.salience);
+      for (const sig of collected) await this.consider(sig, budget);
       this.store.prune(this.now());
     } finally {
       this.ticking = false;
@@ -104,13 +135,16 @@ export class AmbientEngine {
   // ── внутреннее ──────────────────────────────────────────────
 
   /** Рассмотреть один сигнал: новый (не seen) + салиентный → сформулировать и проактивно сообщить. */
-  private async consider(sig: AmbientSignal): Promise<void> {
+  private async consider(sig: AmbientSignal, budget?: { left: number }): Promise<void> {
     const seenKey = `${sig.sourceId}:${sig.key}`;
     if (this.store.has(seenKey) || this.queuedKeys.has(seenKey)) return; // доставлено durable ИЛИ уже в очереди процесса
     if (sig.salience < this.minSalience) {
       this.store.mark(seenKey, this.now()); // не важно — durable-помечаем, чтобы не пересматривать каждый тик
       return;
     }
+    // Бюджет тика исчерпан → НИЧЕГО не помечаем и не ставим в очередь: сигнал вернётся следующим тиком
+    // (иначе пачка из ящика вытеснила бы сама себя из очереди озвучки и была бы «доставлена» молча).
+    if (budget && !sig.urgent && budget.left <= 0) return;
     // ЛИШЬ ТЕПЕРЬ (новое важное) — опц. LLM-фразировка. Дорого ровно на событиях, не на тиках.
     let phrase = sig.title;
     if (this.phraser) {
@@ -125,34 +159,104 @@ export class AmbientEngine {
     // in-memory pending, durable НЕ помечаем (queuedKeys гасит дубль в рамках процесса). Рестарт до flush
     // потеряет pending, но seenKey на диске НЕ осядет → сигнал пересмотрится и прозвучит (раньше срочный
     // «оплати счёт» глох навсегда на 14 дней TTL).
-    const speak = this.speakerFor(sig.userId);
-    if (speak) {
+    const ch = this.channelFor(sig.userId);
+    // §9 «не мешать» + честность (финальное ревью): владелец ЗАНЯТ (полный экран/звонок/блокировка) —
+    // НЕсрочную фразу пайплайн подержит в очереди и через TTL ВЫБРОСИТ, а durable-seen уже стоял бы →
+    // «через 20 минут созвон» не прозвучало бы НИ РАЗУ и больше не пересматривалось. Ждём следующий тик
+    // (ровно как доклад об инцидентах не потребляется при занятом владельце).
+    if (ch && !sig.urgent && ch.isBusy?.()) {
+      log.info("ambient: уведомление отложено — владелец занят", { source: sig.sourceId, key: sig.key.slice(0, 40) });
+      return;
+    }
+    if (ch) {
+      // durable-seen ТОЛЬКО если очередь озвучки РЕАЛЬНО приняла реплику (контроль-7): очередь общая на
+      // все проактивные каналы, и «отдал» ≠ «прозвучит». Не приняли → сигнал остаётся непомеченным и
+      // вернётся следующим тиком.
+      // durable-seen ТОЛЬКО по факту ОЗВУЧКИ (контроль-9): «принято в очередь» ещё не «прозвучало» —
+      // TTL/стоп/смерть сессии роняют принятое, и сигнал молча считался бы доставленным.
+      // Помечаем при ПРИЁМЕ, но ОТКАТЫВАЕМ, если реплика так и не прозвучала (контроль-9): очередь
+      // роняет принятое по TTL, на «стоп» и на смерти сессии — без отката сигнал считался бы
+      // доставленным навсегда, и владелец о нём не узнал бы.
+      const ok =
+        ch.speak(phrase, sig.urgent === true, (spoken) => {
+          if (spoken) return;
+          this.store.unmark(seenKey);
+          log.info("ambient: реплика не прозвучала (очередь сбросила) — вернём следующим тиком", { key: seenKey.slice(0, 40) });
+        }) !== false;
+      if (!ok) {
+        log.info("ambient: очередь озвучки не приняла — сигнал ждёт следующего тика", { key: seenKey.slice(0, 40) });
+        return;
+      }
       this.store.mark(seenKey, this.now());
-      speak(phrase, sig.urgent === true);
+      if (budget && !sig.urgent) budget.left -= 1;
       log.info("ambient: проактивное уведомление", { source: sig.sourceId, key: sig.key.slice(0, 40), urgent: sig.urgent === true });
     } else {
       this.queuedKeys.add(seenKey);
-      this.pending.push({ userId: sig.userId, text: phrase, urgent: sig.urgent === true, seenKey });
+      this.pending.push({
+        userId: sig.userId,
+        text: phrase,
+        urgent: sig.urgent === true,
+        seenKey,
+        ...(sig.ttlMs !== undefined ? { expiresAt: sig.ts + sig.ttlMs } : {}),
+      });
       log.info("ambient: уведомление отложено (владелец офлайн)", { source: sig.sourceId, key: sig.key.slice(0, 40), urgent: sig.urgent === true });
     }
   }
 
-  private speakerFor(userId: string): ((text: string, urgent: boolean) => void) | undefined {
-    for (const s of this.speakers.values()) if (s.userId === userId) return s.speak;
+  private channelFor(userId: string): { speak: (t: string, u: boolean, cb?: (spoken: boolean) => void) => unknown; isBusy?: () => boolean } | undefined {
+    for (const s of this.speakers.values()) if (s.userId === userId) return s;
     return undefined;
   }
 
   private flushPending(userId: string): void {
     if (this.pending.length === 0) return;
-    const speak = this.speakerFor(userId);
-    if (!speak) return;
-    const mine = this.pending.filter((p) => p.userId === userId);
-    this.pending = this.pending.filter((p) => p.userId !== userId);
-    for (const p of mine) {
-      this.store.mark(p.seenKey, this.now()); // Аудит-2 [6]: доставлено из очереди → ТЕПЕРЬ durable seen
+    const ch = this.channelFor(userId);
+    if (!ch) return;
+    const now = this.now();
+    let expired = false;
+    // ВЫЛИВАТЬ ВСЮ ОЧЕРЕДЬ РАЗОМ НЕЛЬЗЯ (контроль-5): очередь озвучки держит лишь несколько несрочных
+    // и вытесняет старейшие, а durable-seen мы ставим ЗДЕСЬ — за ночь накопленные письма были бы
+    // помечены доставленными и не прозвучали бы НИКОГДА. Отдаём порцию, остальное остаётся в pending
+    // и уйдёт следующими тиками (tickNow дренирует остаток).
+    // ...И ТОЛЬКО КОГДА ВЛАДЕЛЕЦ СВОБОДЕН (контроль-6, HIGH — гард стоял лишь в consider()): занятому
+    // владельцу пайплайн несрочное не отдаёт и через TTL выбрасывает, а seen здесь уже стоял бы →
+    // потеря навсегда. Срочное (будильник/день оплаты) проходит всегда, как и в consider().
+    const busy = ch.isBusy?.() === true;
+    const mineAll = this.pending.filter((p) => p.userId === userId);
+    const fresh = mineAll.filter((p) => !(p.expiresAt !== undefined && now > p.expiresAt));
+    if (fresh.length !== mineAll.length) expired = true;
+    const urgent = fresh.filter((p) => p.urgent);
+    const rest = busy ? [] : fresh.filter((p) => !p.urgent);
+    const held = busy ? fresh.filter((p) => !p.urgent) : rest.slice(FLUSH_BATCH);
+    const batch = [...urgent, ...rest.slice(0, FLUSH_BATCH)];
+    const keep = new Set(held.map((p) => p.seenKey));
+    if (busy && held.length > 0) log.info("ambient: очередь придержана — владелец занят", { ждут: held.length });
+    // Протухшие выбрасываем (их seenKey durable НЕ помечаем — источник сформулирует заново).
+    for (const p of mineAll) if (!keep.has(p.seenKey) && !batch.includes(p)) this.queuedKeys.delete(p.seenKey);
+    this.pending = this.pending.filter((p) => p.userId !== userId || keep.has(p.seenKey));
+    if (expired) log.info("ambient: отложенные уведомления протухли — не зачитываю (будут пересобраны)");
+    if (keep.size > 0) log.info("ambient: очередь отдана порцией, остаток ждёт", { остаток: keep.size });
+    for (const p of batch) {
+      // Приняла ли очередь озвучки — решает она (контроль-7). Не приняла → возвращаем в pending.
+      const ok =
+        ch.speak(p.text, p.urgent, (spoken) => {
+          if (spoken) return;
+          // Не прозвучала → откатываем пометку и возвращаем в ожидание (контроль-9).
+          this.store.unmark(p.seenKey);
+          this.queuedKeys.add(p.seenKey);
+          this.pending.push(p);
+          log.info("ambient: отложенная реплика не прозвучала — вернулась в ожидание", { key: p.seenKey.slice(0, 40) });
+        }) !== false;
+      if (!ok) {
+        this.pending.push(p);
+        continue;
+      }
+      this.store.mark(p.seenKey, this.now()); // отдано в канал → durable seen (откат в колбэке)
       this.queuedKeys.delete(p.seenKey);
-      speak(p.text, p.urgent);
     }
+    // Что-то выбросили как протухшее → СРАЗУ пере-опрашиваем источники: событие могло остаться
+    // актуальным, и владелец должен услышать его со СВЕЖЕЙ формулировкой, а не ждать целый тик.
+    if (expired) void this.tickNow();
   }
 }
 

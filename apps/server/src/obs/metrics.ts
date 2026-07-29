@@ -9,10 +9,10 @@
  *
  * Это НЕ биллинг (тот — SpendGuard §14, в нормализованных единицах). Здесь — наблюдаемость в $/мс.
  */
-import { appendFileSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync, statfsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataPath } from "../paths.js";
+import { dataDir, dataPath } from "../paths.js";
 import { MODEL_PRICING, type TokenUsage, costUsd } from "./pricing.js";
 
 const log: Logger = createLogger("obs:metrics");
@@ -171,6 +171,8 @@ export class MetricsCollector {
   private readonly maxJsonlBytes: number;
   /** Таймер периодической строки здоровья процесса (type:"process_health"); unref, стоп на dispose/тестах. */
   private healthTimer: ReturnType<typeof setInterval> | null = null;
+  /** Троттл WARN «диск почти полон» (не чаще раза в час — деградация медленная, спам не нужен). */
+  private lastDiskWarnAt = 0;
 
   constructor(cap?: number, opts?: { maxJsonlBytes?: number }) {
     const n = Number.parseInt(process.env.JARVIS_METRICS_WINDOW ?? "", 10);
@@ -263,6 +265,15 @@ export class MetricsCollector {
     const tick = (): void => {
       const mem = process.memoryUsage();
       const cpu = process.cpuUsage();
+      // Аудит 2026-07-28: свободное место тома с data/ — раньше «диск полон» деградировал МОЛЧА
+      // (все сторы catch+warn и живут дальше, а сами логи тоже перестают писаться → диагноз слеп).
+      let diskFreeMb: number | undefined;
+      try {
+        const st = statfsSync(dataDir());
+        diskFreeMb = Math.round((st.bavail * st.bsize) / 1_048_576);
+      } catch {
+        // fail-safe: статистика ФС не критична для здоровья процесса
+      }
       this.appendJsonl({
         ts: new Date().toISOString(),
         type: "process_health",
@@ -272,8 +283,20 @@ export class MetricsCollector {
         heapTotalMb: Math.round(mem.heapTotal / 1_048_576),
         cpuUserMs: Math.round(cpu.user / 1000),
         cpuSystemMs: Math.round(cpu.system / 1000),
+        diskFreeMb,
         node: process.version,
       });
+      const minFree = Number.parseInt(process.env.JARVIS_DISK_MIN_FREE_MB ?? "2048", 10);
+      if (
+        diskFreeMb !== undefined &&
+        Number.isFinite(minFree) &&
+        minFree > 0 &&
+        diskFreeMb < minFree &&
+        Date.now() - this.lastDiskWarnAt > 3_600_000
+      ) {
+        this.lastDiskWarnAt = Date.now();
+        log.warn("диск почти полон — персистенция (память/задачи/логи) может молча деградировать", { diskFreeMb, minFree });
+      }
     };
     tick(); // durable-baseline сразу на старте (не ждём первый интервал)
     this.healthTimer = setInterval(tick, intervalMs);

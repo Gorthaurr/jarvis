@@ -15,6 +15,10 @@ import { type CheckResult, type Watch, type WatchChecker, dueAt } from "./watch.
 
 const log: Logger = createLogger("watch");
 
+/** Сколько отложенных уведомлений отдаём за один заход (остальное — следующим тиком). См. flushPending. */
+const FLUSH_BATCH = 2;
+const FLUSH_DRAIN_MS = 20_000;
+
 /** Потолок setTimeout (~24.8 дня): на больших интервалах спим максимум столько и пере-планируемся. */
 const MAX_DELAY = 2 ** 31 - 1;
 
@@ -52,10 +56,16 @@ export interface BrowserProbeResult {
 
 export class WatchService {
   private timer?: ReturnType<typeof setTimeout>;
+  private drainTimer?: ReturnType<typeof setTimeout>;
   private ticking = false; // защита от перекрытия тиков (checker асинхронный, может быть долгим)
-  private readonly speakers = new Map<string, { userId: string; speak: (text: string) => void }>();
+  private readonly speakers = new Map<
+    string,
+    { userId: string; speak: (text: string, onOutcome?: (spoken: boolean) => void) => unknown }
+  >();
   /** §Волна3 (3.4): каналы sendAction живых сессий — для предикат-наблюдений (проверка на клиенте). */
   private readonly actions = new Map<string, { userId: string; send: PredicateSender }>();
+  /** P0 «watch действует» (2026-07-28): реестр запускателей агентской петли (реэнтри по срабатыванию). */
+  private readonly runners = new Map<string, { userId: string; run: (goal: string) => void }>();
   private readonly now: () => number;
   private readonly minIntervalMs: number;
   private readonly minPredicateIntervalMs: number;
@@ -104,6 +114,8 @@ export class WatchService {
     continuous?: boolean;
     /** §Волна3 (3.4): локальный предикат (WaitCondition) — проверка на клиенте вместо LLM-чекера. */
     predicate?: unknown;
+    /** P0 «watch действует»: отложенное поручение владельца — исполнить при срабатывании. */
+    action?: string;
   }): { ok: true; watch: Watch } | { ok: false; reason: "limit" | "invalid" } {
     const what = input.what.trim();
     const condition = input.condition.trim();
@@ -124,6 +136,7 @@ export class WatchService {
       status: "active",
       createdAt: this.now(),
       ...(input.predicate ? { predicate: input.predicate } : {}),
+      ...(input.action?.trim() ? { action: input.action.trim() } : {}),
     };
     this.store.add(w);
     this.reschedule();
@@ -131,19 +144,41 @@ export class WatchService {
     return { ok: true, watch: w };
   }
 
-  /** Снять наблюдение по id или по совпадению в `what` (последнее). Возвращает снятую запись или null. */
+  /** Снять наблюдение по id или по совпадению в `what` (последнее). Возвращает снятую запись или null.
+   *  Адверс-ревью [3]: снимает и НЕВЫПОЛНЕННОЕ отложенное действие (pendingAction) — в т.ч. у уже
+   *  fired/suspended записи (раньше поручение между срабатыванием и коннектом было неотменяемо). */
   cancel(idOrQuery: string, userId?: string): Watch | null {
     const byId = this.store.get(idOrQuery);
     // §sec (M12): by-id fast-path ТОЖЕ уважает userId-фильтр (как text-fallback ниже) — иначе, зная
     // эхнутый id, можно снять ЧУЖОЕ наблюдение. С userId — id обязан принадлежать этому пользователю.
     let target = byId && byId.status === "active" && (!userId || byId.userId === userId) ? byId : undefined;
-    if (!target) {
+    // Не-активная запись с висящим поручением — тоже отменяемая цель (только своя).
+    let pendingOnly =
+      byId && byId.status !== "active" && byId.pendingAction !== undefined && (!userId || byId.userId === userId) ? byId : undefined;
+    if (!target && !pendingOnly) {
       const q = idOrQuery.toLowerCase().trim();
       const matches = this.store.list(userId ? { userId } : undefined).filter((w) => w.what.toLowerCase().includes(q));
       target = matches[matches.length - 1];
+      if (!target && userId) {
+        const pend = this.store.withPendingAction(userId).filter((w) => w.what.toLowerCase().includes(q));
+        pendingOnly = pend[pend.length - 1];
+      }
+    }
+    if (pendingOnly) {
+      pendingOnly.pendingAction = undefined;
+      pendingOnly.pendingActionAt = undefined;
+      this.store.update(pendingOnly);
+      log.info("наблюдение: отложенное действие снято (запись уже не активна)", { id: pendingOnly.id });
+      return pendingOnly;
     }
     if (!target) return null;
     this.store.cancel(target.id);
+    // Снятое наблюдение не должно оставить «мину»: висящее поручение уходит вместе с ним.
+    if (target.pendingAction !== undefined) {
+      target.pendingAction = undefined;
+      target.pendingActionAt = undefined;
+      this.store.update(target);
+    }
     this.reschedule();
     log.info("наблюдение снято", { id: target.id });
     return target;
@@ -154,9 +189,28 @@ export class WatchService {
   }
 
   /** Зарегистрировать канал озвучки сессии (с владельцем) и сразу отдать отложенные уведомления ЭТОГО юзера. */
-  registerSpeaker(sessionId: string, userId: string, speak: (text: string) => void): void {
+  registerSpeaker(
+    sessionId: string,
+    userId: string,
+    speak: (text: string, onOutcome?: (spoken: boolean) => void) => unknown,
+  ): void {
     this.speakers.set(sessionId, { userId, speak });
     this.flushPending(userId);
+  }
+
+  /**
+   * P0 «watch умеет ДЕЙСТВОВАТЬ» (аудит 2026-07-28): зарегистрировать запускатель агентской петли
+   * сессии. Срабатывание наблюдения с `action` заходит в петлю как отложенное поручение владельца —
+   * цепочка «событие → действие» больше не рвётся на пользователе. Регистрация сразу исполняет
+   * действия, отложенные пока сессий не было (pendingAction — зеркало pendingNotify).
+   */
+  registerRunner(sessionId: string, userId: string, run: (goal: string) => void): void {
+    this.runners.set(sessionId, { userId, run });
+    this.flushPendingActions(userId);
+  }
+
+  unregisterRunner(sessionId: string): void {
+    this.runners.delete(sessionId);
   }
 
   unregisterSpeaker(sessionId: string): void {
@@ -226,7 +280,22 @@ export class WatchService {
       // сенсора (OCR-путь sensors-cheap до 20с), иначе КАЖДЫЙ полл = «нет result за 8000ms». Даём 25с.
       const res = await send({ kind: "wait.for", condition: w.predicate, timeoutMs: 1_500, pollMs: 700 }, 25_000);
       if (!res.ok) return { met: false, summary: "", error: res.error?.message ?? res.error?.code ?? "wait.for failed" };
-      const data = res.data as { met?: boolean; detail?: string; gsiState?: "fresh" | "stale" | "none" } | undefined;
+      const data = res.data as
+        | { met?: boolean; detail?: string; gsiState?: "fresh" | "stale" | "none"; unknown?: boolean }
+        | undefined;
+      // «НЕ СМОГ ПРОВЕРИТЬ» (сайдкар лёг, RPC-сбой, зависший опрос) — ТРАНЗИЕНТНАЯ ошибка, а не
+      // достоверное «условие не выполняется» (финальное контрольное ревью 2026-07-28). Иначе один
+      // моргнувший тик сбрасывал metStreak и следующий met запускал side-effect действие ПОВТОРНО
+      // («второе письмо»/второй клик). Зеркало report{unknown:true} у LLM-чекера; transient=true —
+      // не копится к dead-watch (сенсор вернётся).
+      if (data?.unknown === true) {
+        return {
+          met: false,
+          summary: "",
+          error: `сенсор не смог проверить условие: ${(data.detail ?? "").slice(0, 120)}`,
+          transient: true,
+        };
+      }
       let met = data?.met === true;
       // Ревью фиксов, 2-й проход (R4) — STATEFUL-детект исчезновения gsi+gone. Клиентское окно
       // recentlyGone (~135с) короче произвольного интервала наблюдения: тик реже окна (или даунтайм
@@ -255,38 +324,178 @@ export class WatchService {
 
   /** Канал озвучки: точная сессия → ЛЮБАЯ сессия ТОГО ЖЕ userId (reconnect/мульти-девайс) → undefined.
    *  НИКОГДА не доставляем в сессию ДРУГОГО пользователя (как у напоминаний, §6B/B3). */
-  private speakerFor(w: Watch): ((text: string) => void) | undefined {
+  private speakerFor(w: Watch): ((text: string, onOutcome?: (spoken: boolean) => void) => unknown) | undefined {
     const exact = this.speakers.get(w.sessionId);
     if (exact) return exact.speak;
     for (const s of this.speakers.values()) if (s.userId === w.userId) return s.speak;
     return undefined;
   }
 
-  /** Доставить уведомление (озвучить) — или пометить pendingNotify, если активной озвучки нет. */
+  /**
+   * Доставить уведомление (озвучить) — или пометить pendingNotify, если активной озвучки НЕТ либо она
+   * ОТКАЗАЛА (контроль-8): раньше живой путь безусловно гасил pendingNotify и выставлял
+   * `lastNotifiedSummary` — при полной очереди уведомление пропадало навсегда, а у continuous ещё и
+   * включался антидребезг по тексту, который его глушил и в следующие разы.
+   */
   private notify(w: Watch, summary: string): void {
     const speak = this.speakerFor(w);
-    if (speak) {
-      speak(summary);
+    // pendingNotify гасим ТОЛЬКО по факту ОЗВУЧКИ (контроль-9): «принято в очередь» ещё не
+    // «прозвучало» (TTL/стоп/смерть сессии роняют принятое). Сначала помечаем «ждёт», снимает — колбэк.
+    const accepted =
+      speak !== undefined &&
+      speak(summary, (spoken) => {
+        if (spoken) return;
+        // Откат (контроль-9): приняли, но не прозвучало → снова ждёт доставки.
+        w.pendingNotify = summary;
+        this.store.update(w);
+        log.info("наблюдение: уведомление не прозвучало (очередь сбросила) — ждёт снова", { id: w.id });
+        this.armDrain(w.userId);
+      }) !== false;
+    if (accepted) {
       w.lastNotifiedSummary = summary;
       w.pendingNotify = undefined;
       log.info("наблюдение: уведомление озвучено", { id: w.id });
     } else {
       w.pendingNotify = summary;
-      log.info("наблюдение сработало, но нет активной сессии — отложено до подключения", { id: w.id });
+      log.info(
+        speak
+          ? "наблюдение: очередь озвучки не приняла — уведомление ждёт доставки"
+          : "наблюдение сработало, но нет активной сессии — отложено до подключения",
+        { id: w.id },
+      );
+      if (speak) this.armDrain(w.userId); // повторим, когда канал освободится
+    }
+  }
+
+  /** Завести/продлить таймер дренажа отложенных уведомлений (общий для notify и flushPending). */
+  private armDrain(userId: string): void {
+    if (this.drainTimer) clearTimeout(this.drainTimer);
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = undefined;
+      this.flushPending(userId);
+    }, FLUSH_DRAIN_MS);
+    if (typeof this.drainTimer === "object" && "unref" in this.drainTimer) this.drainTimer.unref?.();
+  }
+
+  /** Запускатель петли: точная сессия → любая сессия ТОГО ЖЕ userId (правило §6B/B3, как speakerFor). */
+  private runnerFor(w: { sessionId: string; userId: string }): ((goal: string) => void) | undefined {
+    const exact = this.runners.get(w.sessionId);
+    if (exact && exact.userId === w.userId) return exact.run;
+    for (const r of this.runners.values()) if (r.userId === w.userId) return r.run;
+    return undefined;
+  }
+
+  /**
+   * Реплика-реэнтри для агентской петли. ТОЛЬКО доверенные поля создания наблюдения (what/condition/
+   * action — подтверждены владельцем через confirm при постановке); наблюдённое value НЕ включается —
+   * текст со страницы/из игры не должен становиться инструкцией (анти-инъекция, M11). Фрейминг ЧЕСТНЫЙ
+   * (адверс-ревью [10]): поручение поставлено ЗАРАНЕЕ при создании наблюдения, а не «владелец только
+   * что сказал» — рискованное/чувствительное действие модель должна сверить с владельцем.
+   */
+  private actionGoal(w: Watch): string {
+    return (
+      `Сработало наблюдение «${w.what}» (условие: ${w.condition}). Выполни поручение, поставленное ЗАРАНЕЕ ` +
+      `при создании этого наблюдения: ${w.action ?? ""}`.trim() +
+      " Если действие выглядит рискованным или обстоятельства могли измениться — сначала уточни у владельца."
+    );
+  }
+
+  /** Запустить действие срабатывания (или отложить до появления живой сессии). */
+  private dispatchAction(w: Watch): void {
+    if (!w.action) return;
+    // Анти-флап (контрольное ревью) решён В КОРНЕ: «нет данных» у LLM-чекера теперь возвращается как
+    // ТРАНЗИЕНТНАЯ ошибка (report{unknown:true} → checker.ts), а не как достоверное «условие не
+    // выполнено» — metStreak такой тик не сбрасывает, второго письма нет. Кулдаун по времени сюда НЕ
+    // ставим: он давил бы и ЛЕГИТИМНЫЙ повтор («сборка упала → починили → упала снова через час»).
+    w.lastActionAt = this.now(); // durable-след последнего запуска (диагностика/будущие политики)
+    const goal = this.actionGoal(w);
+    const run = this.runnerFor(w);
+    if (!run) {
+      w.pendingAction = goal;
+      w.pendingActionAt = this.now(); // TTL: протухшее поручение не исполнится молча (адверс-ревью [3])
+      log.info("наблюдение сработало с действием, но нет живой сессии — действие отложено", { id: w.id });
+      return;
+    }
+    w.pendingAction = undefined;
+    w.pendingActionAt = undefined;
+    log.info("наблюдение: запускаю отложенное действие", { id: w.id, action: w.action.slice(0, 80) });
+    try {
+      run(goal);
+    } catch (e) {
+      log.warn("наблюдение: запуск действия упал", { id: w.id, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  /**
+   * Отложенные ДЕЙСТВИЯ этого userId — исполнить через только что подключившуюся сессию.
+   * TTL (адверс-ревью [3]): side-effect-поручение трёхдневной давности НЕ исполняется молча при
+   * коннекте — владельцу честно сообщается, что оно устарело, решение за ним.
+   */
+  private flushPendingActions(userId: string): void {
+    const ttlMs = envInt("JARVIS_WATCH_PENDING_ACTION_TTL_MS", 30 * 60_000);
+    for (const w of this.store.withPendingAction(userId)) {
+      const run = this.runnerFor(w);
+      if (!run || !w.pendingAction) continue;
+      const goal = w.pendingAction;
+      const ageMs = this.now() - (w.pendingActionAt ?? w.firedAt ?? w.createdAt);
+      w.pendingAction = undefined;
+      w.pendingActionAt = undefined;
+      this.store.update(w);
+      if (ageMs > ttlMs) {
+        log.info("наблюдение: отложенное действие ПРОТУХЛО — не исполняю без подтверждения", { id: w.id, ageMin: Math.round(ageMs / 60_000) });
+        this.notify(
+          w,
+          `Пока вас не было, сработало наблюдение «${w.what}», но поручение «${w.action ?? ""}» уже устарело ` +
+            `(${Math.round(ageMs / 60_000)} мин назад) — не стал выполнять без подтверждения. Скажите, если ещё актуально.`,
+        );
+        this.store.update(w);
+        continue;
+      }
+      log.info("наблюдение: отложенное действие исполняется при подключении", { id: w.id });
+      try {
+        run(goal);
+      } catch (e) {
+        log.warn("наблюдение: отложенное действие упало", { id: w.id, error: e instanceof Error ? e.message : String(e) });
+      }
     }
   }
 
   /** Отложенные уведомления ЭТОГО userId (включая сработавшие one-shot fired) — проговорить через только
    *  что подключившуюся сессию (приложение было закрыто в момент срабатывания). */
+  /** Отдать отложенные уведомления ПОРЦИЕЙ (контроль-6): очередь озвучки капнута и вытесняет даже
+   *  срочное, а мы гасим `pendingNotify` сразу — залп после долгого офлайна терял бы почти всё.
+   *  Остаток остаётся в сторе и уйдёт следующим тиком наблюдений (`tickNow` зовёт flushPending). */
   private flushPending(userId: string): void {
-    for (const w of this.store.withPendingNotify(userId)) {
+    const queue = this.store.withPendingNotify(userId);
+    let sent = 0;
+    for (const w of queue) {
+      if (sent >= FLUSH_BATCH) break;
       const speak = this.speakerFor(w);
       if (!speak || !w.pendingNotify) continue;
-      speak(w.pendingNotify);
-      w.lastNotifiedSummary = w.pendingNotify;
+      // Гасим pendingNotify ТОЛЬКО если очередь озвучки приняла (контроль-7): очередь общая на все
+      // проактивные каналы, «отдал» ≠ «прозвучит».
+      const summary = w.pendingNotify;
+      const ok =
+        speak(summary, (spoken) => {
+          if (spoken) return;
+          w.pendingNotify = summary; // откат: не прозвучало
+          this.store.update(w);
+          log.info("наблюдение: отложенное уведомление не прозвучало — ждёт снова", { id: w.id });
+          this.armDrain(userId);
+        }) !== false;
+      if (!ok) break;
+      w.lastNotifiedSummary = summary;
       w.pendingNotify = undefined;
       this.store.update(w);
-      log.info("наблюдение: отложенное уведомление доставлено при подключении", { id: w.id });
+      log.info("наблюдение: отложенное уведомление доставлено", { id: w.id });
+      sent += 1;
+    }
+    const left = queue.filter((w) => w.pendingNotify).length;
+    if (left > 0) {
+      log.info("наблюдения: уведомления отданы порцией, остаток ждёт дренажа", { остаток: left });
+      // Свой таймер дренажа (контроль-7): `reschedule` заводит таймер ТОЛЬКО при непустом `active()`,
+      // а хвост как раз копится у СРАБОТАВШИХ (status=fired) — без него остаток висел бы до реконнекта.
+      this.armDrain(userId);
     }
   }
 
@@ -297,6 +506,9 @@ export class WatchService {
     this.ticking = true;
     try {
       const now = this.now();
+      // Хвост отложенных уведомлений (flushPending отдаёт их порцией — иначе очередь озвучки выбросит
+      // помеченные доставленными) дренируем на каждом тике, а не только при подключении.
+      for (const userId of new Set([...this.speakers.values()].map((s) => s.userId))) this.flushPending(userId);
       const due = this.store.active().filter((w) => dueAt(w, now) <= now);
       // §Волна3 ревью (#14): проверки НЕЗАВИСИМЫ (каждая мутирует свою запись) → гоним ПАРАЛЛЕЛЬНО, а не
       // последовательно. Раньше один невыполненный предикат держал клиентский wait.for до 1.5с (мёртвый
@@ -321,6 +533,13 @@ export class WatchService {
       res = w.predicate ? await this.checkPredicate(w) : await this.checker(w);
     } catch (e) {
       res = { met: false, summary: "", error: e instanceof Error ? e.message : String(e) };
+    }
+    // КОНТРОЛЬНОЕ ревью: проверка асинхронна — за время await наблюдение могли СНЯТЬ (watch_cancel)
+    // или приостановить. Без пере-проверки статуса снятое наблюдение всё равно исполнило бы action
+    // и перезаписало бы `cancelled` на `fired` (ложное «сработало» после отмены).
+    if (w.status !== "active") {
+      log.info("наблюдение сняли во время проверки — исход отбрасываю", { id: w.id, status: w.status });
+      return;
     }
     if (res.value !== undefined) w.lastValue = res.value;
     if (res.error) {
@@ -350,15 +569,27 @@ export class WatchService {
     w.consecutiveFailures = 0; // успешная проверка (met или нет) — серия провалов сброшена
     if (res.met) {
       const summary = res.summary.trim() || `Сработало наблюдение: ${w.what}.`;
+      // EDGE-ТРИГГЕР действия (адверс-ревью 2026-07-28 [1]): у LLM-чекера summary дрейфует (значение в
+      // тексте меняется каждый тик при удерживающемся met) → строковый антидребезг промахивался и action
+      // исполнялся ПОВТОРНО каждые ~5 мин. Действие привязано к ПЕРЕХОДУ not-met → met (durable metStreak),
+      // а не к тексту уведомления.
+      const freshMet = w.metStreak !== true;
+      w.metStreak = true;
       // continuous: не дублируем идентичное уведомление подряд (антидребезг); состояние «отлипло» — снова уведомим.
       if (!(w.continuous && w.lastNotifiedSummary === summary)) {
         w.firedAt = this.now();
         this.notify(w, summary);
         if (!w.continuous) w.status = "fired"; // one-shot завершилось
       }
-    } else if (w.continuous) {
-      // состояние перестало удовлетворять условию → сбрасываем антидребезг (следующее met снова прозвучит).
-      w.lastNotifiedSummary = undefined;
+      // P0 «watch действует»: поручение «когда X — сделай Y» уходит в агентскую петлю ОДИН раз на
+      // серию met (новый запуск — только после реального «отлипло»).
+      if (freshMet) this.dispatchAction(w);
+    } else {
+      w.metStreak = false; // «отлипло» → следующий переход в met снова запустит действие
+      if (w.continuous) {
+        // состояние перестало удовлетворять условию → сбрасываем антидребезг (следующее met снова прозвучит).
+        w.lastNotifiedSummary = undefined;
+      }
     }
     this.store.update(w);
   }

@@ -33,9 +33,15 @@ describe("decideRoundThinking", () => {
     expect(decideRoundThinking({ ...base, nudgeBoost: true, hasRecalledSkill: true })).toBe("adaptive");
   });
 
-  it("механика: recall-навык / follow-up после слепого действия → off", () => {
+  it("механика: recall-навык → off", () => {
     expect(decideRoundThinking({ ...base, hasRecalledSkill: true })).toBe("off");
-    expect(decideRoundThinking({ ...base, blindMutatePending: true })).toBe("off");
+  });
+
+  // Аудит 2026-07-28: сверка после слепого действия — честностно-критичный раунд, thinking НЕ глушится
+  // (вердикт «получилось или нет» выносит интерпретация наблюдения). Приоритет над механикой навыка.
+  it("verify-раунд (blindMutatePending) — думаем, даже при recall-навыке", () => {
+    expect(decideRoundThinking({ ...base, blindMutatePending: true })).toBe("adaptive");
+    expect(decideRoundThinking({ ...base, blindMutatePending: true, hasRecalledSkill: true })).toBe("adaptive");
   });
 
   it("обычная середина задачи — как настроено (консервативно)", () => {

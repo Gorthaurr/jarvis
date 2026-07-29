@@ -100,6 +100,10 @@ async function handle(msg) {
       return telegramDiag(String(msg.query || ""));
     case "telegram.unread":
       return telegramUnread();
+    case "calendar.read":
+      return calendarRead(msg.open === true);
+    case "mail.read":
+      return mailRead(msg.open === true);
     case "telegram.send_voice":
       return telegramSendVoice(String(msg.to || ""), String(msg.audioB64 || ""));
     case "tab.openOrFocus":
@@ -2143,6 +2147,287 @@ function tgUnreadInPage() {
     return { ok: true, unread, total: unread.length };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e), unread: [] };
+  }
+}
+
+/** Хосты календарей, которые умеем читать из уже открытой вкладки (расширять — строкой сюда). */
+const CALENDAR_TAB_PATTERNS = [
+  "*://calendar.google.com/*",
+  "*://calendar.yandex.ru/*",
+  "*://calendar.yandex.com/*",
+  "*://outlook.live.com/calendar/*",
+  "*://outlook.office.com/calendar/*",
+  "*://outlook.office365.com/calendar/*",
+];
+
+/**
+ * D-4: события календаря из УЖЕ ОТКРЫТОЙ вкладки (Google/Яндекс/Outlook) — БЕЗ OAuth, в сессии
+ * владельца. Ambient зовёт с open=false (неинвазивно: нет вкладки → {noTab:true}, окна не создаём).
+ * Явная просьба владельца («какие у меня встречи?») идёт с open=true — тогда открываем ФОНОВУЮ
+ * вкладку (active:false — фокус не крадём) и ждём отрисовки.
+ * ЧЕСТНОСТЬ: пустая (выгруженная) страница → {ok:false, blank:true}, а НЕ «событий нет».
+ */
+async function calendarRead(open) {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: CALENDAR_TAB_PATTERNS });
+  } catch (e) { return { ok: false, error: "tabs.query: " + (e && e.message) }; }
+  // Кандидатов пробуем по очереди и берём ПЕРВОГО, где нашлись элементы событий (та же грабля, что у
+  // почты: под паттерн может попасть служебная страница вендора, а настоящий календарь — второй).
+  const cands = tabs.filter((t) => t.id !== undefined);
+  if (cands.length === 0 && !open) return { ok: true, noTab: true, events: [] }; // неинвазивно
+  const readTab = async (t, created) => {
+    try {
+      // Chrome выгрузил фоновую вкладку — оживляем, иначе прочитаем пустоту и решим «встреч нет».
+      if (t.discarded) { await chrome.tabs.reload(t.id); await waitTabComplete(t.id, 20000); await sleep(1500); }
+      const results = await chrome.scripting.executeScript({ target: { tabId: t.id }, func: calendarEventsInPage });
+      const out = (results && results[0] && results[0].result) || { ok: false, error: "нет результата" };
+      if (created) out.openedTab = true;
+      return out;
+    } catch (e) {
+      return { ok: false, error: "scripting: " + (e && e.message) };
+    }
+  };
+  let best = null;
+  for (const t of cands.slice(0, 4)) {
+    const out = await readTab(t, false);
+    if (out && out.ok && Array.isArray(out.events) && out.events.length > 0) return out;
+    if (!best || (out && out.ok && !best.ok)) best = out;
+  }
+  if (best) return best;
+  try {
+    const t = await chrome.tabs.create({ url: "https://calendar.google.com/calendar/r/day", active: false });
+    await waitTabComplete(t.id, 20000);
+    await sleep(1500); // SPA дорисовывает сетку уже после complete
+    return await readTab(t, true);
+  } catch (e) { return { ok: false, error: "tabs.create: " + (e && e.message) }; }
+}
+
+/**
+ * Внутри вкладки календаря (self-contained — executeScript сериализует функцию без замыканий):
+ * собрать чипы событий с их aria-label. Разбор в момент времени делает СЕРВЕР (чистая функция,
+ * покрыта тестами) — здесь только сбор сырья, чтобы разметка одного вендора не диктовала логику.
+ */
+function calendarEventsInPage() {
+  try {
+    const text = (document.body ? document.body.innerText || "" : "").trim();
+    // Выгруженная/не отрисованная вкладка: честное «не прочитал», а не спокойное «встреч нет».
+    if (!text) return { ok: false, blank: true, error: "страница пуста (вкладка выгружена или не отрисована)" };
+    const nodes = [].slice.call(document.querySelectorAll(
+      '[data-eventid], [data-eventchip], [role="gridcell"] [role="button"][aria-label], [role="listitem"][aria-label], [role="row"][aria-label]',
+    ));
+    const seen = {};
+    const events = [];
+    for (let i = 0; i < nodes.length && events.length < 60; i += 1) {
+      const el = nodes[i];
+      const label = ((el.getAttribute("aria-label") || el.textContent || "") + "").replace(/\s+/g, " ").trim();
+      if (label.length < 3) continue;
+      // День-контейнер: подпись даты и признак «сегодня» (запасной источник даты для сервера).
+      let day = "", today = false, p = el;
+      for (let d = 0; d < 8 && p; d += 1) {
+        p = p.parentElement;
+        if (!p || !p.getAttribute) break;
+        if (p.getAttribute("aria-current") === "date") today = true;
+        const cls = typeof p.className === "string" ? p.className : "";
+        if (/(^|[\s_-])today([\s_-]|$)/i.test(cls)) today = true;
+        if (!day) {
+          const dl = p.getAttribute("data-date") || (p.getAttribute("role") === "gridcell" ? p.getAttribute("aria-label") : "");
+          if (dl) day = (dl + "").replace(/\s+/g, " ").trim().slice(0, 80);
+        }
+      }
+      const key = label.slice(0, 120) + "|" + day;
+      if (seen[key]) continue;
+      seen[key] = 1;
+      events.push({ label: label.slice(0, 200), day: day, today: today });
+    }
+    return { ok: true, events: events, text: text.replace(/\n{3,}/g, "\n\n").slice(0, 4000), host: location.hostname };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) };
+  }
+}
+
+/** Хосты почты, которые умеем читать из уже открытой вкладки (расширять — строкой сюда). */
+const MAIL_TAB_PATTERNS = [
+  "*://mail.google.com/*",
+  "*://mail.yandex.ru/*",
+  "*://mail.yandex.com/*",
+  "*://mail.ru/*",
+  "*://e.mail.ru/*",
+  "*://outlook.live.com/mail/*",
+  "*://outlook.office.com/mail/*",
+  "*://outlook.office365.com/mail/*",
+];
+
+/**
+ * Похож ли URL на список ВХОДЯЩИХ. Gmail без хеша (`/mail/u/0/`) — тоже входящие; «Отправленные»,
+ * «Черновики», ярлыки и категории — нет. Используется и при ВЫБОРЕ вкладки, и внутри страницы, чтобы
+ * сервер знал: пустой список непрочитанных получен из входящих (тогда «писем нет» — правда) или из
+ * другой папки (тогда это НЕ ответ на вопрос владельца).
+ */
+function looksLikeInbox(u) {
+  const s = (u || "") + "";
+  if (/(#|\/)(inbox|входящие)/i.test(s)) return true;
+  if (/(#|\/)(sent|drafts|spam|trash|archive|junk|outbox|отправленные|черновики|спам|корзина)/i.test(s)) return false;
+  if (/#(category|label|search|settings)/i.test(s)) return false;
+  return /mail\.google\.com\/mail\/[^#]*$/i.test(s); // Gmail без хеша = входящие
+}
+
+/**
+ * D-5: НЕПРОЧИТАННЫЕ письма из УЖЕ ОТКРЫТОЙ вкладки почты — без OAuth, в сессии владельца.
+ * Правила те же, что у календаря: ambient зовёт с open=false (нет вкладки → {noTab:true}), явная
+ * просьба — с open=true (фоновая вкладка, фокус не крадём). Пустая страница → {blank:true}, НЕ «писем нет».
+ * ⚠️ ЧИТАЕМ ТОЛЬКО СПИСОК (отправитель/тема/сниппет) — тело письма не трогаем: в ambient оно не нужно,
+ * а утечка его в промпт — лишний вектор инъекции.
+ */
+async function mailRead(open) {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: MAIL_TAB_PATTERNS });
+  } catch (e) { return { ok: false, error: "tabs.query: " + (e && e.message) }; }
+  // Предпочитаем вкладку со ВХОДЯЩИМИ (контроль-6): открытые «Отправленные»/«Промоакции» разбираются
+  // успешно и дают ПУСТОЙ список непрочитанных → сервер уверенно говорил «писем нет» при полном ящике.
+  // ВЫБИРАЕМ ВКЛАДКУ ПО ФАКТУ РАЗБОРА, а не по URL (живой прогон 2026-07-29): у владельца под паттерн
+  // `mail.google.com/*` попала СТРАНИЦА РЕГИСТРАЦИИ Gmail, а настоящая почта (e.mail.ru) осталась в
+  // стороне — «предпочтение входящих» по URL выбрало именно мусорную вкладку и D-5 читала не то.
+  // Поэтому пробуем кандидатов по очереди (сперва похожие на входящие) и берём ПЕРВУЮ, где список
+  // реально разобрался; если нигде — отдаём первый ответ (честный текст-фолбэк).
+  const cands = [
+    ...tabs.filter((t) => t.id !== undefined && looksLikeInbox(t.url)),
+    ...tabs.filter((t) => t.id !== undefined && !looksLikeInbox(t.url)),
+  ];
+  if (cands.length === 0 && !open) return { ok: true, noTab: true, mail: [] };
+  const readTab = async (t, created) => {
+    try {
+      if (t.discarded) { await chrome.tabs.reload(t.id); await waitTabComplete(t.id, 20000); await sleep(1500); }
+      const results = await chrome.scripting.executeScript({ target: { tabId: t.id }, func: mailUnreadInPage });
+      const out = (results && results[0] && results[0].result) || { ok: false, error: "нет результата" };
+      if (created) out.openedTab = true;
+      // Какую папку читали (решает СЕРВЕР, вправе ли он говорить «писем нет»).
+      if (out && out.ok) out.inbox = looksLikeInbox(t.url);
+      return out;
+    } catch (e) {
+      return { ok: false, error: "scripting: " + (e && e.message) };
+    }
+  };
+  let best = null;
+  for (const t of cands.slice(0, 4)) {
+    const out = await readTab(t, false);
+    if (out && out.ok && out.recognized) return out; // список реально разобран — это она
+    if (!best || (out && out.ok && !best.ok)) best = out;
+  }
+  if (best) return best;
+  try {
+    const t = await chrome.tabs.create({ url: "https://mail.google.com/mail/u/0/#inbox", active: false });
+    await waitTabComplete(t.id, 20000);
+    await sleep(1500);
+    return await readTab(t, true);
+  } catch (e) { return { ok: false, error: "tabs.create: " + (e && e.message) }; }
+}
+
+/**
+ * Внутри вкладки почты (self-contained): собрать НЕПРОЧИТАННЫЕ письма списка.
+ * Gmail помечает непрочитанную строку классом zE, Яндекс/Mail.ru — «unread» в классе, Outlook — в aria-label.
+ * Ничего не узнали → отдаём сырой текст: пусть модель читает сама (это честнее, чем «писем нет»).
+ */
+function mailUnreadInPage() {
+  try {
+    const text = (document.body ? document.body.innerText || "" : "").trim();
+    if (!text) return { ok: false, blank: true, error: "страница пуста (вкладка выгружена или не отрисована)" };
+    // ВЕНДОРНЫЕ селекторы строк списка — по ним же судим, «узнали ли мы вёрстку». Катч-олл `[aria-label]`
+    // отсюда УБРАН: он матчит пол-страницы, поэтому «строки нашлись» переставало что-либо значить.
+    // ⚠️ Mail.ru (e.mail.ru) добавлен по ЖИВОМУ прогону 2026-07-29: у владельца открыт именно он, и
+    // прежние селекторы (Gmail/Яндекс/Outlook) его не узнавали — D-5 честно падала в текст-фолбэк.
+    // Классы `llc`/`ll-crpt`/`ll-sj` НЕ подтверждены живым inspect (React, DOM закрыт) — если промах,
+    // `recognized` останется false и поведение не изменится (тот же честный фолбэк), поэтому добавление
+    // безопасно; подтвердить/поправить — на живой странице владельца.
+    const rows = [].slice.call(document.querySelectorAll(
+      'tr.zA, [class*="MessageSnippet" i], [class*="messageLine" i], [class*="llc" i], [data-convid], [role="row"]',
+    ));
+    const clean = (s) => ((s || "") + "").replace(/\s+/g, " ").trim();
+    // ⚠️ ТОЛЬКО валидные CSS-матчеры (=, ~=, |=, ^=, $=, *=): «+=» не существует, и ОДИН такой терм
+    // делает невалидным ВЕСЬ список → querySelector бросает SyntaxError на первой же строке (D-5
+    // «работала», лишь пока писем не было). Список селекторов не forgiving.
+    const fieldsOf = (el) => {
+      const fromEl = el.querySelector(
+        '[email], .yW span[name], .zF, [class*="-from" i], [class*="sender" i], [class*="Sender" i], [class*="ll-crpt" i], [class*="correspondent" i]',
+      );
+      const subjEl = el.querySelector('.bog, [class*="subject" i], [class*="Subject" i], [class*="ll-sj" i]');
+      const from = clean(fromEl ? fromEl.getAttribute("name") || fromEl.getAttribute("email") || fromEl.textContent : "").slice(0, 60);
+      const subject = clean(subjEl ? subjEl.textContent : "").slice(0, 120);
+      return { from: from, subject: subject };
+    };
+    const seen = {};
+    const mail = [];
+    let parsedRows = 0; // строк, из которых РЕАЛЬНО достали отправителя/тему — этим и меряем «узнали вёрстку»
+    let unreadTotal = 0; // всего непрочитанных (может быть больше отданных 25 — см. `truncated`)
+    for (let i = 0; i < rows.length; i += 1) {
+      const el = rows[i];
+      const f = fieldsOf(el);
+      if (f.from || f.subject) parsedRows += 1;
+      const cls = typeof el.className === "string" ? el.className : "";
+      const aria = el.getAttribute ? el.getAttribute("aria-label") || "" : "";
+      // Признак непрочитанного у разных вендоров.
+      const unread =
+        /(^|\s)zE(\s|$)/.test(cls) ||                       // Gmail
+        /unread|_unread|is-unread/i.test(cls) ||            // Яндекс/Mail.ru
+        /непрочит|unread/i.test(aria);                      // Outlook/локализации
+      if (!unread) continue;
+      unreadTotal += 1; // считаем ДО разбора полей: непрочитанная строка не должна пропасть из счёта
+      if (!f.from && !f.subject) continue;
+      const key = f.from + "|" + f.subject;
+      if (seen[key]) continue;
+      seen[key] = 1;
+      if (mail.length < 25) mail.push({ from: f.from, subject: f.subject }); // кап отдачи, но СЧИТАЕМ все
+    }
+    // «ВЁРСТКУ УЗНАЛИ» = сумели ВЫТАЩИТЬ СОДЕРЖИМОЕ хотя бы одной строки, а НЕ «нашлись элементы,
+    // похожие на строки» (контроль-5, HIGH: `rows.length > 0` матчился любым `[role="row"]`, поля же
+    // тянутся ДРУГИМИ селекторами — на Outlook с обфусцированными классами получалось recognized:true
+    // + пустой список → уверенное «Непрочитанных писем нет» при полном ящике, без текста-фолбэка и без
+    // деградации). Разобрали хоть одну строку → селекторы работают → пустому списку можно верить.
+    const recognized = parsedRows > 0;
+    // ...НО «умеем читать строки» ещё НЕ значит «умеем отличать непрочитанное» (контроль-10): это
+    // РАЗНЫЕ семейства селекторов. Если маркер непрочитанного у вендора другой (React-бейдж, data-*),
+    // мы получим пустой список при полном ящике — и уверенное «писем нет» будет ЛОЖЬЮ. Поэтому отдаём
+    // отдельный признак: убедились ли мы, что понимаем маркер. Gmail (строки tr.zA) — конвенция zE
+    // проверена; на прочих вендорах уверены, только если реально видели непрочитанную строку.
+    const gmailRows = document.querySelector("tr.zA") !== null;
+    const markerConfident = gmailRows || unreadTotal > 0;
+    // ПРИВАТНОСТЬ: сырой текст страницы отдаём ТОЛЬКО когда список распознать не удалось (иначе он не
+    // нужен), и это ЧЕСТНО объявлено вызывающему через `textIsWholePage`. Финальное ревью (MEDIUM):
+    // раньше innerText уходил ВСЕГДА — при открытом письме в облако уезжало его ТЕЛО и цитируемая
+    // переписка, хотя схема инструмента обещала «тело писем НЕ читается». Обещание должно совпадать с
+    // поведением: либо не тянем, либо говорим прямо.
+    // Вёрстка узнана (разобрали содержимое строк) → отдаём ТОЛЬКО список, даже если он пуст. Текст
+    // страницы (а с ним тело открытого письма) не покидает машину.
+    // `unreadTotal`/`truncated` — против ЛОЖНОЙ ПОЛНОТЫ (контроль-6): список режется на 25, и модель,
+    // считая пункты, называла «двадцать пять писем» при 60 в ящике. Молчаливый выброс = ложная полнота.
+    if (recognized) {
+      return {
+        ok: true,
+        mail: mail,
+        recognized: true,
+        unreadTotal: unreadTotal,
+        markerConfident: markerConfident,
+        truncated: unreadTotal > mail.length,
+        rows: rows.length,
+        host: location.hostname,
+      };
+    }
+    return {
+      ok: true,
+      mail: mail,
+      recognized: false,
+      text: text.replace(/\n{3,}/g, "\n\n").slice(0, 4000),
+      textIsWholePage: true,
+      host: location.hostname,
+    };
+  } catch (e) {
+    // Сбой разбора — тоже честный фолбэк на текст (иначе владелец не узнает о письмах вообще).
+    try {
+      const t = (document.body ? document.body.innerText || "" : "").trim();
+      if (t) return { ok: true, mail: [], recognized: false, text: t.slice(0, 4000), textIsWholePage: true, parseError: String((e && e.message) || e), host: location.hostname };
+    } catch (e2) { /* ниже честная ошибка */ }
+    return { ok: false, error: String((e && e.message) || e) };
   }
 }
 

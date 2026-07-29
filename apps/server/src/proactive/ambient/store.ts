@@ -50,6 +50,17 @@ export class AmbientSeenStore {
     this.persist();
   }
 
+  /**
+   * СНЯТЬ пометку (контроль-9): реплику приняли в очередь озвучки, но она так и не прозвучала —
+   * TTL/«стоп»/смерть сессии. Без отката сигнал считался бы доставленным и не пересматривался бы
+   * никогда, а владелец о нём не узнал. Идемпотентно.
+   */
+  unmark(key: string): void {
+    const before = this.seen.length;
+    this.seen = this.seen.filter((e) => e.key !== key);
+    if (this.seen.length !== before) this.persist();
+  }
+
   /** Выбросить протухшие ключи (TTL) — чтобы файл не рос и повторное легитимное событие снова прозвучало. */
   prune(now: number): void {
     const before = this.seen.length;

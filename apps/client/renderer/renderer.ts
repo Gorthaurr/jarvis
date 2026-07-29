@@ -140,6 +140,31 @@ const chatLog = $("chatLog");
 const chatForm = $<HTMLFormElement>("chatForm");
 const chatInput = $<HTMLInputElement>("chatInput");
 
+// §0.6 mic-kill-switch (аудит 2026-07-28): честный mute МИКРОФОНА — раньше UI умел глушить только
+// озвучку, а перестать СЛУШАТЬ можно было лишь закрытием приложения. jarvis.mute() закрывает гейт в
+// main (кадры не уходят на сервер/в облако), jarvis.activate() открывает обратно. Состояние персистим:
+// перезапуск клиента не включает слух втихую, если владелец его выключил (старт см. ensureCapture ниже).
+const micBtn = $("micBtn");
+let micMuted = localStorage.getItem("jarvis.micMuted") === "1";
+function applyMicMute(sendToMain: boolean): void {
+  micBtn.classList.toggle("icon-btn--danger", micMuted);
+  micBtn.title = micMuted
+    ? "Микрофон выключен — Джарвис не слышит (нажмите, чтобы включить)"
+    : "Выключить микрофон (Джарвис перестанет слышать)";
+  if (sendToMain) {
+    if (micMuted) jarvis.mute();
+    else jarvis.activate();
+  }
+}
+applyMicMute(false); // на старте — только вид; гейт откроет/оставит закрытым старт захвата ниже
+micBtn.addEventListener("click", () => {
+  micMuted = !micMuted;
+  localStorage.setItem("jarvis.micMuted", micMuted ? "1" : "0");
+  applyMicMute(true);
+  // Адверс-ревью [5]: центр экрана обязан отражать mute — «listening» при выключенном микрофоне = ложь.
+  setOrbState(micMuted ? "idle" : "listening");
+});
+
 let outputMuted = localStorage.getItem("jarvis.muted") === "1";
 function applyMute(): void {
   muteBtn.classList.toggle("icon-btn--danger", outputMuted);
@@ -346,7 +371,15 @@ initVoiceEnrollment(jarvis); // §3 запись голоса — кнопка +
 initMonitorPanel(jarvis); // фабрика строк + onMonitors + listMonitors внутри
 
 // инициализация — ambient (§3): Джарвис слушает СРАЗУ с запуска. Центр — гало+волна, состояние снизу.
+// §0.6: если владелец выключил микрофон (mic-kill-switch), гейт НЕ открываем — слух не включается втихую.
 setLink({ online: false });
-setOrbState("listening");
+setOrbState(micMuted ? "idle" : "listening");
 buildWave();
-void ensureCapture().then(() => jarvis.activate());
+void ensureCapture().then(() => {
+  // Контрольное ревью: волю владельца сообщаем main ВСЕГДА — и «включить», и «выключить». Раньше при
+  // персистнутом mute мы просто НЕ звали activate: гейт был закрыт, но main.micKillSwitch оставался
+  // false → запись голоса (она открывает гейт) после рестарта клиента больше его не закрывала, и
+  // красная кнопка «Джарвис не слышит» врала при живом потоке в облако.
+  if (micMuted) jarvis.mute();
+  else jarvis.activate();
+});

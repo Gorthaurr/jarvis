@@ -40,7 +40,8 @@ import { emotionName, emotionOverlay, matchEmotionCommand } from "../persona/emo
 import { claimsObservedResult, isBlindMutate, isHollowSuccess, looksLikeGiveUp, maskedFailureReply, toolEffect } from "./error-voice.js";
 import { decideRoundThinking, stripThinkingBlocks, thinkingEnabled } from "./thinking-policy.js";
 import { prefillNeedsLlmSteps } from "./skill-prefill.js";
-import { autoReplayBlocked } from "./replay-gate.js";
+import { autoReplayBlocked, looksLikeCommandUtterance } from "./replay-gate.js";
+import { hasCommitmentMarker, reflectCommitmentFromUtterance } from "./commitment-reflect.js";
 import { type LocalIntent, classifyTier, resolveClarifyAnswer } from "../router/index.js";
 import { cap, failurePhrase, pick, successPhrase } from "../verbalize/action-phrases.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
@@ -139,6 +140,7 @@ const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
   "tinkoff_portfolio", "trade_winrate", "trade_predictions",
   "monitor_list", "window_list", "screen_probe", "browser_tabs",
   "skill_list", "tool_list", "list_reminders", "watch_list", "obligation_list",
+  "calendar_read", "mail_read",
 ]);
 
 /**
@@ -350,6 +352,12 @@ async function findSemanticDuplicate(
   if (tasks.length === 0) return undefined;
   const tokenCount = foldText(text).split(" ").filter(Boolean).length;
   if (tokenCount === 0 || tokenCount > DUP_FRAGMENT_MAX_TOKENS) return undefined;
+  // Аудит 2026-07-28 (P0 «дубль-гейт ест реальные команды»): фрагмент с КОМАНДНЫМ глаголом — не
+  // STT-эхо цели, а самостоятельный приказ. Живой случай: «напиши его.» (2 токена, sim 0.868 к
+  // активной цели) съедался ложным «Уже делаю» — прямая потеря реплики. Слой рассчитан на
+  // БЕЗГЛАГОЛЬНЫЕ обрывки («в доте»); команда уходит дальше по штатным гейтам — точный повтор
+  // всё равно ловит лексический слой scope.isDuplicateGoal (стем-Жаккар/фрагмент-overlap).
+  if (looksLikeCommandUtterance(text)) return undefined;
   try {
     // Все эмбеддинги ПАРАЛЛЕЛЬНО под ОДНИМ бюджетом (ревью 2026-07-10: последовательные await при
     // 3 задачах давали до 1.4с worst-case на пути приёмки каждой реплики). Сбой/таймаут одной цели
@@ -559,7 +567,11 @@ export async function handleUserText(
   // §P0 (гейт авто-реплея): метаданные хода от голосового пайплайна. viaWake=false — реплика принята
   // КАТЯЩИМСЯ ОКНОМ разговора без «Джарвис» (главный вход чужой речи, форензика 2026-07-14) → слепой
   // авто-реплей макроса запрещён. undefined (dev.text/чат/тесты) = явное обращение.
-  meta?: { viaWake?: boolean },
+  // origin="watch-action" (адверс-ревью 2026-07-28 [6][20][24]): МАШИННЫЙ реэнтри сервиса наблюдений —
+  // НЕ речь владельца: обходит steer/дубль-гейты активной задачи (глагол правки в поручении уводил его
+  // в ЧУЖУЮ задачу с ложным «Принял, поправляю» — поручение не исполнялось) и НЕ съедает висящее
+  // уточнение консьержа (pendingClarify остаётся для НАСТОЯЩЕГО ответа владельца).
+  meta?: { viaWake?: boolean; origin?: "watch-action" },
 ): Promise<AgentReply> {
   // §10 realtime: если задан sink — реплика отдаётся пофразно. Короткие/детерминированные
   // пути (имя/режим/tier0/фоновый ack) стримить нечего — финализируем целиком через done()
@@ -633,8 +645,11 @@ export async function handleUserText(
   // HIGH-3 (ревью 2026-07-10): активная задача — по USERID, не sessionId: после reconnect sessionId
   // новый, и scope/steer/дубль-гейт не видели живую задачу старой сессии (реплики плодили дубли).
   const activeTask = scopeEnabled ? deps.tasks?.activeForUser(deps.userId)[0] : undefined;
-  const freshContext = Boolean(activeTask) && classifyTaskScope(clean) === "new";
-  if (activeTask) {
+  // Машинный реэнтри (watch-action) — всегда ОТДЕЛЬНОЕ дело со свежим контекстом: scope/steer/дубль-гейты
+  // калиброваны под ЖИВУЮ речь (STT-шум/правки/повторы) и к сгенерированному поручению неприменимы.
+  const machineTurn = meta?.origin === "watch-action";
+  const freshContext = Boolean(activeTask) && (machineTurn || classifyTaskScope(clean) === "new");
+  if (activeTask && !machineTurn) {
     log.info("§20 область реплики при активной задаче", {
       active: activeTask.title,
       scope: freshContext ? "new (свежий контекст)" : "edit (контекст текущей)",
@@ -704,9 +719,29 @@ export async function handleUserText(
     });
   }
 
+  // Волна D «мажордом»: реплика-ОБЯЗАТЕЛЬСТВО со сроком («завтра надо позвонить маме») → фоновая
+  // экстракция и напоминание САМО. Раньше владелец был обязан отдельно диктовать команду. Машинный
+  // реэнтри (watch-action) сюда не идёт — это не речь владельца. Джарвис ОБЯЗАН сказать, что взял
+  // дело на себя (onCreated → очередь озвучки), молчаливых будильников не ставим.
+  if (!machineTurn && deps.reminders && hasCommitmentMarker(clean)) {
+    void reflectCommitmentFromUtterance({
+      llm: deps.llm,
+      model: deps.models.sonnet,
+      reminders: deps.reminders,
+      sessionId: session.sessionId,
+      userId: deps.userId,
+      utterance: clean,
+      spend: deps.spend,
+      // verbalize — как у всех проактивных каналов (числа словами, латиница в фонетику): без него
+      // «Поставил напоминание через 20 ч» звучало бы сырой строкой (ревью волны D).
+      onCreated: (line) => deps.speakResult?.({ voice: verbalize(line) }),
+    });
+  }
+
   // Консьерж (§): висит уточнение → пробуем реплику как ОТВЕТ на него (мгновенно, без LLM).
   // Одноразово: подошло — действуем; не подошло (сменил тему) — снимаем и маршрутизируем обычно.
-  if (deps.pendingClarify) {
+  // Машинный реэнтри (watch-action) уточнение НЕ трогает — оно ждёт настоящего ответа владельца.
+  if (deps.pendingClarify && !machineTurn) {
     const pend = deps.pendingClarify;
     deps.pendingClarify = undefined;
     const resolved = resolveClarifyAnswer(pend.key, clean);
@@ -761,7 +796,13 @@ export async function handleUserText(
   // §15 Семантический кэш ответа: на близкий ФАКТИЧЕСКИЙ вопрос, на который уже был чисто-вербальный
   // ответ, отдаём кэш СРАЗУ — без вызова LLM (мгновенно, $0). Безопасно: кэшируются лишь ходы без
   // tool-use (см. store) → реплей не врёт «сделано»; lookup сам отсекает непригодные/командные запросы.
-  if (deps.responseCache) {
+  // 🔴 СТРУКТУРНЫЙ ГАРД (живой прогон волны D): «отмени напоминание про таблетки» получило ОТВЕТ ИЗ
+  // КЭША (sim 1.0) — команда НЕ ИСПОЛНИЛАСЬ, а владельцу озвучили утверждение о состоянии, которого
+  // уже нет («их два — в 9 утра и в 9 вечера»). Денилист `isCacheableQuery` дыру не закрыл и закрыть
+  // не может (стем «напомн» не ловит «напомин-а-ние», «отмен» вообще не было) — денилист принципиально
+  // неполон, ровно как в lean-smalltalk. Поэтому решает ПОЛОЖИТЕЛЬНЫЙ признак роутера: кэш работает
+  // ТОЛЬКО на РАЗГОВОРНОМ ходе (вопрос). Всё, что роутер счёл действием, идёт в петлю всегда.
+  if (deps.responseCache && decision.conversational === true) {
     const cached = await deps.responseCache.lookup(deps.userId, clean);
     if (cached) {
       deps.memory.pushTurn("assistant", cached);
@@ -2350,7 +2391,9 @@ async function runAgentLoop(
       // сверка состоялась в том же раунде: verify-долг не взводится/снимается БЕЗ отдельного раунда.
       // Строгость verify-LAW не ослаблена — наблюдение реальное, а не доверие к «ok» действия.
       if (!r.isError) {
-        const eff = toolEffect(tu.name);
+        // MCP-контракт (аудит 2026-07-28): декларация владельца в mcp.json главнее эвристики по имени —
+        // «think»≠mutate (не слепит masked-failure), мутирующий get_* не проскочит neutral'ом.
+        const eff = (tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolEffect(tu.name);
         const observed = r.observed === true;
         const realVerify = eff === "verify"; // ЯВНЫЙ взгляд (screen_capture/ui_snapshot/browser_read/…)
         const combo = (tu.input as { combo?: unknown }).combo;
@@ -2890,7 +2933,10 @@ async function runAgentLoop(
   // §15 семантический кэш: запоминаем ТОЛЬКО чисто-вербальный ход (НИ ОДНОГО инструмента → нет
   // побочных эффектов, реплей не соврёт «сделано»). store сам отсекает непригодные/командные запросы
   // (isCacheableQuery). Fire-and-forget — эмбеддинг async, не задерживает ответ.
-  if (deps.responseCache && toolTrajectory.length === 0) {
+  // ...и ЗАПИСЫВАЕМ тоже только разговорный ход (симметрично гарду на lookup выше): ответ на команду
+  // в кэше — мина, даже если инструментов в том ходе не было (модель могла лишь ПЕРЕСПРОСИТЬ, и этот
+  // переспрос с числами/состоянием оседал как «готовый ответ» на любую будущую такую команду).
+  if (deps.responseCache && toolTrajectory.length === 0 && opts?.conversational === true) {
     void deps.responseCache.store(deps.userId, text, spokenFinal);
   }
   return terminal(spokenFinal);

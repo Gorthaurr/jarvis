@@ -104,4 +104,22 @@ describe("parseMcpConfig — HTTP-транспорт + нормализация 
     expect(out.servers.junk?.confirm).toBeUndefined();
     expect(out.servers.none?.confirm).toBeUndefined();
   });
+
+  // Декларативный toolEffect (последний кусок MCP-контракта, аудит 2026-07-28).
+  it("toolEffect: валидные записи (вкл. '*') проходят, невалидные значения отбрасываются поэлементно", () => {
+    const out = parseMcpConfig({
+      servers: {
+        think: { command: "npx", toolEffect: { "*": "neutral" } } as never,
+        mixed: { command: "npx", toolEffect: { get_x: "neutral", boom: "explode", snap: "verify" } } as never,
+        junk: { command: "npx", toolEffect: "neutral" } as never, // не объект → поля нет
+        arr: { command: "npx", toolEffect: ["neutral"] } as never, // массив → поля нет
+        none: { command: "npx" },
+      },
+    });
+    expect(out.servers.think?.toolEffect).toEqual({ "*": "neutral" });
+    expect(out.servers.mixed?.toolEffect).toEqual({ get_x: "neutral", snap: "verify" }); // boom отброшен, остальные целы
+    expect(out.servers.junk?.toolEffect).toBeUndefined();
+    expect(out.servers.arr?.toolEffect).toBeUndefined();
+    expect(out.servers.none?.toolEffect).toBeUndefined();
+  });
 });

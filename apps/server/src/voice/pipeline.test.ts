@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ISttProvider,
   ITtsProvider,
@@ -197,6 +197,13 @@ describe("VoicePipeline (§10)", () => {
     tts.last!.push(0, true);
     expect(typeof chunks[chunks.length - 1]!.gen).toBe("number"); // собственный ответ хода — тегирован
     tts.last!.finish();
+    // Волна B: динамик клиента доиграл ответ хода (иначе фоновый итог ЖДЁТ — это и есть новый гейт).
+    // В проде между чанком и «доиграл» проходят секунды; в синхронном тесте обнуляем grace-окно.
+    const prevGrace = process.env.JARVIS_PLAYBACK_FALSE_GRACE_MS;
+    process.env.JARVIS_PLAYBACK_FALSE_GRACE_MS = "0";
+    pipe.setClientPlayback(false);
+    if (prevGrace === undefined) delete process.env.JARVIS_PLAYBACK_FALSE_GRACE_MS;
+    else process.env.JARVIS_PLAYBACK_FALSE_GRACE_MS = prevGrace;
     // фоновый итог из покоя (turnSeq тот же, снапшот хода мог висеть) — БЕЗ тега
     pipe.speakQueued("Кате отправил, сэр.");
     tts.last!.push(0, true);
@@ -803,6 +810,173 @@ describe("VoicePipeline — само-восстановление прослуш
     // 3. Следующий кадр в listening с закрытым STT → САМО-восстановление: открывается новый стрим.
     pipe.onAudioFrame(new Int16Array([5, 6, 7, 8]).buffer);
     expect(stt.last).not.toBe(stream1); // переоткрылся — Джарвис снова слышит
+  });
+});
+
+// ВОЛНА B (2026-07-29): очередь озвучки дренится по факту РЕАЛЬНОГО воспроизведения у клиента, а не
+// по концу СИНТЕЗА. Раньше сервер, закончив синтез, сразу отдавал следующую реплику — плеер клиента
+// ещё доигрывал предыдущую, и владелец слышал фразы «пачкой» без пауз.
+describe("VoicePipeline — дренаж очереди по факту воспроизведения (волна B)", () => {
+  // В ПРОДЕ между отправкой чанка и сигналом «доиграл» проходят секунды воспроизведения, поэтому
+  // grace-окно «отставшего false» (JARVIS_PLAYBACK_FALSE_GRACE_MS) там не мешает. В синхронных тестах
+  // сигнал приходит через миллисекунды, поэтому для кейсов «клиент РЕАЛЬНО доиграл» окно обнуляем —
+  // сама его семантика проверяется отдельным тестом ниже («отставший сигнал»).
+  const graceKey = "JARVIS_PLAYBACK_FALSE_GRACE_MS";
+  let savedGrace: string | undefined;
+  beforeEach(() => {
+    savedGrace = process.env[graceKey];
+    process.env[graceKey] = "0";
+  });
+  afterEach(() => {
+    if (savedGrace === undefined) delete process.env[graceKey];
+    else process.env[graceKey] = savedGrace;
+  });
+
+  it("динамик ещё играет → следующая очередная реплика НЕ уходит; освободился → уходит", async () => {
+    const { pipe, tts } = makePipeline();
+    pipe.setClientPlayback(true); // клиент: звук идёт прямо сейчас
+    pipe.speakQueued("Первый итог, сэр.");
+    expect(tts.last).toBeNull(); // синтез не начат — ждём, пока динамик освободится
+    pipe.setClientPlayback(false); // плеер доиграл
+    expect(tts.last).not.toBeNull(); // сразу отдаём накопленное
+  });
+
+  it("ПРОТУХШИЙ сигнал воспроизведения не запирает очередь навсегда (fail-safe: молчать нельзя)", async () => {
+    const prev = process.env.JARVIS_PLAYBACK_SIGNAL_STALE_MS;
+    process.env.JARVIS_PLAYBACK_SIGNAL_STALE_MS = "30";
+    try {
+      const { pipe, tts } = makePipeline();
+      pipe.setClientPlayback(true); // «играю» — и клиент замолчал навсегда (отвалился/старая версия)
+      pipe.speakQueued("Итог, сэр.");
+      expect(tts.last).toBeNull();
+      await new Promise((r) => setTimeout(r, 60)); // сигнал протух
+      pipe.speakQueued("Второй итог, сэр."); // любая следующая попытка дренажа
+      expect(tts.last).not.toBeNull(); // не верим стейл-сигналу → Джарвис говорит
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_PLAYBACK_SIGNAL_STALE_MS;
+      else process.env.JARVIS_PLAYBACK_SIGNAL_STALE_MS = prev;
+    }
+  });
+
+  // АДВЕРС-РЕВЬЮ волны B (воспроизведено живым прогоном): прод-порядок — ОБЕ реплики уже в очереди,
+  // и v1-TTS отдаёт чанк+finish в ОДНОМ тике. Сигнал клиента физически не успевает (WS→renderer→IPC→WS),
+  // поэтому гейт пропускал вторую реплику подряд — та самая «пачка». Лечится оптимистичной пометкой
+  // «динамик занят» в момент ОТПРАВКИ чанка.
+  it("две реплики в очереди + мгновенный finish синтеза → вторая НЕ уходит, пока клиент не отчитался", () => {
+    const { pipe, tts } = makePipeline();
+    pipe.speakQueued("Первый итог, сэр.");
+    pipe.speakQueued("Второй итог, сэр.");
+    const first = tts.last;
+    expect(first).not.toBeNull(); // первая пошла в синтез
+    first!.push(0, true); // чанк ушёл клиенту (динамик помечен занятым оптимистично)
+    first!.finish(); // v1: finish в том же тике — здесь раньше прорывалась вторая
+    expect(tts.last).toBe(first); // вторая ЖДЁТ реального освобождения динамика
+    pipe.setClientPlayback(false); // клиент доиграл
+    expect(tts.last).not.toBe(first); // теперь можно
+  });
+
+  // Оптимистичная метка не должна запирать очередь, если клиент НИКОГДА не подтвердит воспроизведение
+  // (выключена озвучка §22 — renderer не играет чанки; или старый клиент без сигнала).
+  it("клиент не подтвердил воспроизведение (mute/старая версия) → очередь освобождается по короткому дедлайну", async () => {
+    const prev = process.env.JARVIS_PLAYBACK_CONFIRM_MS;
+    process.env.JARVIS_PLAYBACK_CONFIRM_MS = "40";
+    try {
+      const { pipe, tts } = makePipeline();
+      pipe.speakQueued("Первый итог, сэр.");
+      const first = tts.last!;
+      first.push(0, true);
+      first.finish();
+      pipe.speakQueued("Второй итог, сэр.");
+      expect(tts.last).toBe(first); // сразу — ждём подтверждения
+      await new Promise((r) => setTimeout(r, 70)); // подтверждения нет
+      pipe.speakQueued("Третий итог, сэр.");
+      expect(tts.last).not.toBe(first); // не ждём вечно: Джарвис заговорил
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_PLAYBACK_CONFIRM_MS;
+      else process.env.JARVIS_PLAYBACK_CONFIRM_MS = prev;
+    }
+  });
+
+  // Контрольное ревью поймало вырожденный тест (`expect(true).toBe(true)` не отличал рабочий фикс от
+  // отсутствующего — мутация проходила). Утверждение теперь ДИСКРИМИНИРУЮЩЕЕ: без сброса clientPlayback
+  // в dispose() гейт молча съел бы дренаж, и синтез не стартовал бы вовсе.
+  it("dispose() сбрасывает состояние динамика (осиротевший после resume пайплайн не заперт)", () => {
+    const { pipe, tts } = makePipeline();
+    pipe.setClientPlayback(true); // клиент отчитался «играю» — и связь оборвалась
+    pipe.dispose();
+    pipe.speakQueued("Итог после обрыва, сэр."); // фоновая задача старого соединения ещё договаривает
+    expect(tts.last).not.toBeNull(); // синтез пошёл: залипшее «занято» не заперло очередь навсегда
+  });
+
+  // Контрольное ревью: сигнал описывает состояние динамика на момент ОТПРАВКИ клиентом и может долететь
+  // ПОСЛЕ того, как сервер выдал свежий звук (пауза между фразами многофразного ответа). Поверив ему
+  // слепо, дренаж выпустил бы фоновый итог поверх играющей реплики — возврат к «пачке».
+  // 🔴 КОНТРОЛЬНОЕ ревью (HIGH): клиентский setActive EDGE-триггерный — проглоченный grace-гардом
+  // `false` НЕ повторится, и подтверждённое «занято» держало бы очередь до стейл-окна (120с), заглушив
+  // даже СРОЧНОЕ напоминание. Отброшенный сигнал понижается до оптимистичной метки (вера 1.5с).
+  it("проглоченный «свободен» НЕ запирает очередь надолго (понижение до оптимистичной метки)", async () => {
+    process.env[graceKey] = "400";
+    const prevConfirm = process.env.JARVIS_PLAYBACK_CONFIRM_MS;
+    process.env.JARVIS_PLAYBACK_CONFIRM_MS = "40";
+    try {
+      const { pipe, tts } = makePipeline();
+      pipe.speakQueued("Первая, сэр.");
+      const first = tts.last!;
+      first.push(0, true);
+      pipe.setClientPlayback(true); // клиент подтвердил воспроизведение
+      first.push(1, true); // свежий чанк
+      first.finish();
+      pipe.setClientPlayback(false); // РЕАЛЬНОЕ окончание, но попало в grace → понижение, не отбрасывание
+      pipe.speakQueued("Срочно, сэр.", true);
+      expect(tts.last).toBe(first); // сразу — ещё ждём
+      await new Promise((r) => setTimeout(r, 120)); // вера в метку истекла
+      pipe.drainPending();
+      expect(tts.last).not.toBe(first); // срочное прозвучало, а не молчало 120с
+    } finally {
+      if (prevConfirm === undefined) delete process.env.JARVIS_PLAYBACK_CONFIRM_MS;
+      else process.env.JARVIS_PLAYBACK_CONFIRM_MS = prevConfirm;
+    }
+  });
+
+  // Глушение речи (стоп/barge-in → cancelTts) снимает метку динамика: сервер САМ знает, что клиент
+  // остановил плеер, и не должен ждать его edge-триггерного `false` (тот может попасть в grace-окно).
+  // Проверяем через stop() — он идёт тем же cancelTts, но без «владелец сейчас говорит» (у barge-in
+  // дренаж законно блокируется userSpeaking, пока владелец не договорит).
+  it("стоп снимает метку динамика — очередь не заперта прерванной репликой", () => {
+    process.env[graceKey] = "400";
+    const { pipe, tts } = makePipeline();
+    pipe.speakQueued("Длинная реплика, сэр.");
+    const first = tts.last!;
+    first.push(0, false);
+    pipe.setClientPlayback(true); // клиент играет
+    pipe.stop(); // «замолчи» → cancelTts: плеер у клиента заглушен
+    pipe.speakQueued("Срочное напоминание.", true);
+    expect(tts.last).not.toBe(first); // новая озвучка пошла: залипшего «занято» нет
+  });
+
+  it("«отставший» сигнал «динамик свободен» НЕ выпускает очередь поверх свежего звука", () => {
+    process.env[graceKey] = "400"; // боевое окно: сигнал не мог родиться позже только что посланного звука
+    const { pipe, tts } = makePipeline();
+    pipe.speakQueued("Первый итог, сэр.");
+    const first = tts.last!;
+    first.push(0, true); // свежий чанк только что ушёл клиенту
+    first.finish();
+    pipe.speakQueued("Второй итог, сэр.");
+    pipe.setClientPlayback(false); // ОТСТАВШИЙ false (клиент отправил его до нашего чанка)
+    expect(tts.last).toBe(first); // не поверили — вторая реплика ждёт
+  });
+
+  it("сигнал active:false сам дёргает дренаж (не ждём следующего события)", () => {
+    const { pipe, tts } = makePipeline();
+    pipe.speakQueued("Готово, сэр."); // очередь пуста-свободна → уйдёт сразу
+    expect(tts.last).not.toBeNull();
+    tts.last!.push(0, true);
+    tts.last!.finish();
+    pipe.setClientPlayback(true);
+    pipe.speakQueued("Второе.");
+    const before = tts.last;
+    pipe.setClientPlayback(false);
+    expect(tts.last).not.toBe(before); // новая синтез-сессия стартовала по освобождению динамика
   });
 });
 

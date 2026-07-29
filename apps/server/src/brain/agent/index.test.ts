@@ -619,6 +619,34 @@ describe("agent-loop (§7, §8)", () => {
     expect(tasks.list("u1")).toHaveLength(1);
   });
 
+  // Аудит 2026-07-28 (P0 «дубль-гейт ест реальные команды»): фрагмент с КОМАНДНЫМ глаголом — приказ,
+  // не STT-эхо. Эмбеддер-мок отдаёт ОДИНАКОВЫЙ вектор всем текстам (sim=1.0 ≥ порога 0.86) — без фикса
+  // «напиши его.» съелся бы ложным «Уже делаю» (живой случай, sim 0.868). Безглагольный обрывок при
+  // этом ДОЛЖЕН дедупиться по-прежнему (слой жив, а не выключен целиком).
+  it("§20 семантический дубль-слой: командный фрагмент («напиши его.») НЕ съедается, безглагольный — дедупится", async () => {
+    const sameVec = new Float32Array([1, 0, 0]);
+    const embedder = { embed: async () => sameVec } as never;
+    {
+      const session = fakeSession();
+      const llm = new MockLlmProvider(); // дефолт-ответ, важно лишь что LLM ПОЗВАН (реплика не съедена)
+      const tasks = new TaskManager();
+      tasks.create({ userId: "u1", sessionId: "s1", goal: "напиши кате что я задержусь" }); // running
+      const reply = await handleUserText(session, "напиши его.", await makeDeps(llm, { tasks, embedder }));
+      expect(reply.voice).not.toContain("Уже делаю"); // команда дошла до модели, не проглочена
+      await vi.waitFor(() => expect(llm.requests.length).toBeGreaterThan(0), { timeout: 3000 }); // петля (возможно фоновая) позвана
+    }
+    {
+      const session = fakeSession();
+      const llm = new MockLlmProvider();
+      const tasks = new TaskManager();
+      tasks.create({ userId: "u1", sessionId: "s1", goal: "запусти поиск в доте" }); // running
+      const reply = await handleUserText(session, "в доте.", await makeDeps(llm, { tasks, embedder }));
+      expect(reply.voice).toContain("Уже делаю"); // безглагольный обрывок — по-прежнему дубль
+      expect(llm.requests).toHaveLength(0);
+      expect(tasks.list("u1")).toHaveLength(1);
+    }
+  });
+
   it("§20 реджект-повтор («нет, не то — …та же цель») — это STEER (правка), а не «Уже делаю»", async () => {
     const session = fakeSession();
     const llm = new MockLlmProvider();

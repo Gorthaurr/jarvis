@@ -31,8 +31,10 @@
   "servers": {
     "_pin_note": "§sec (H16): версии MCP-серверов ЗАПИНЕНЫ (не `@latest`/без пина) — иначе каждый boot тянет свежий npm-пакет в дочерний процесс = supply-chain RCE при компрометации/тайпсквоттинге. Бамп версии — ОСОЗНАННО (поправить число + проверить). Свежесть: `npm view <pkg> version`. Записи на `_`-ключах сервером игнорируются.",
     "think": {
+      "_effect_note": "Декларативный toolEffect (MCP-контракт, аудит 2026-07-28): 'мысль' — не действие. Без декларации эвристика по имени считала think мутирующим -> размышление взводило anyMutateSucceeded и слепило masked-failure/анти-капитуляцию. '*' = дефолт всех инструментов сервера; значения verify|mutate|neutral.",
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking@2025.12.18"]
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking@2025.12.18"],
+      "toolEffect": { "*": "neutral" }
     },
     "github": {
       "_note": "Проверено end-to-end: 26 инструментов (репы/файлы/issues/PR/поиск). Токен GITHUB_PERSONAL_ACCESS_TOKEN в .env (сейчас — токен gh CLI, scopes repo/gist/read:org). Версия запинена (H16).",

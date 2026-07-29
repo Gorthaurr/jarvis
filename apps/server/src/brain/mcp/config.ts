@@ -28,7 +28,18 @@ export interface McpServerConfig {
    * (нет поля) — без confirm (read-only/доверенные серверы; привилегированное всё равно первопартийное).
    */
   confirm?: boolean | string[];
+  /**
+   * Декларативный ЭФФЕКТ инструментов сервера для честностных гейтов петли (последний кусок MCP-контракта,
+   * аудит 2026-07-28): раньше эффект угадывался ПО ИМЕНИ (READONLY_NAME_RE) — «think» классифицировался как
+   * mutate (мысль взводила anyMutateSucceeded → слепила masked-failure/анти-капитуляцию), а мутирующий
+   * инструмент с именем get_* становился neutral и обходил гард ложного «Готово». Карта bare-имя →
+   * "verify"|"mutate"|"neutral"; ключ "*" — дефолт ВСЕХ инструментов сервера. Нет поля/имени → прежняя
+   * эвристика по имени (консервативный mutate).
+   */
+  toolEffect?: Record<string, McpToolEffect>;
 }
+/** Эффект MCP-инструмента для verify-петли (значения = toolEffect() в error-voice). */
+export type McpToolEffect = "verify" | "mutate" | "neutral";
 export interface McpConfig {
   servers: Record<string, McpServerConfig>;
 }
@@ -82,6 +93,22 @@ function parseConfirm(c: unknown): { confirm?: boolean | string[] } {
   return {};
 }
 
+/** Нормализация декларативного toolEffect: карта bare-имя → verify|mutate|neutral ("*" — дефолт сервера).
+ *  Невалидные значения отбрасываются ПОЭЛЕМЕНТНО с WARN (прецедент parseConfirm: одна опечатка не роняет
+ *  всю декларацию — иначе fail-open на эвристику для ВСЕХ инструментов сервера). */
+const TOOL_EFFECT_VALUES: ReadonlySet<string> = new Set(["verify", "mutate", "neutral"]);
+function parseToolEffect(t: unknown): { toolEffect?: Record<string, McpToolEffect> } {
+  if (!t || typeof t !== "object" || Array.isArray(t)) return {};
+  const out: Record<string, McpToolEffect> = {};
+  let dropped = 0;
+  for (const [k, v] of Object.entries(t as Record<string, unknown>)) {
+    if (typeof v === "string" && TOOL_EFFECT_VALUES.has(v)) out[k] = v as McpToolEffect;
+    else dropped++;
+  }
+  if (dropped > 0) log.warn("MCP config: невалидные значения toolEffect отброшены (валидные сохранены)", { dropped });
+  return Object.keys(out).length > 0 ? { toolEffect: out } : {};
+}
+
 export function parseMcpConfig(raw: McpConfig): McpConfig {
   const servers: Record<string, McpServerConfig> = {};
   for (const [name, sc] of Object.entries(raw?.servers ?? {})) {
@@ -98,6 +125,7 @@ export function parseMcpConfig(raw: McpConfig): McpConfig {
         url,
         headers: Object.fromEntries(Object.entries(sc.headers ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
         ...parseConfirm(sc.confirm),
+        ...parseToolEffect(sc.toolEffect),
       };
       continue;
     }
@@ -108,6 +136,7 @@ export function parseMcpConfig(raw: McpConfig): McpConfig {
       args: (sc.args ?? []).map(resolveEnvVars),
       env: Object.fromEntries(Object.entries(sc.env ?? {}).map(([k, v]) => [k, resolveEnvVars(String(v))])),
       ...parseConfirm(sc.confirm),
+      ...parseToolEffect(sc.toolEffect),
     };
   }
   return { servers };

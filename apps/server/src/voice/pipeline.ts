@@ -267,7 +267,19 @@ export class VoicePipeline {
   /** Идёт ли ход агента прямо сейчас (гард «один ход за раз», ревью фиксов речи 2026-07-24). */
   private turnInflight = false;
   /** Очередь озвучки фоновых результатов (§20 async): произносим, когда канал свободен (и юзер не занят, §9). */
-  private pendingSpeech: { text: string; urgent: boolean; at: number }[] = [];
+  /**
+   * retriable — источник хранит реплику durable и повторит; такую НЕЛЬЗЯ вытеснять (см. speakQueued).
+   * onOutcome — ЧЕСТНЫЙ исход реплики: true = отдана в синтез, false = выброшена (TTL/стоп/смерть
+   * сессии). Источник помечает запись доставленной ТОЛЬКО по true — «принято в очередь» ещё не
+   * «прозвучало» (контроль-9: TTL и сброс очереди роняли уже «доставленное»).
+   */
+  private pendingSpeech: {
+    text: string;
+    urgent: boolean;
+    at: number;
+    retriable?: boolean;
+    onOutcome?: (spoken: boolean) => void;
+  }[] = [];
   /** Wake word (§3): активен ли разговор + когда было ПОСЛЕДНЕЕ взаимодействие (любая сторона). */
   private readonly requireWake: boolean;
   private readonly convWindowMs: number;
@@ -546,17 +558,62 @@ export class VoicePipeline {
    * канал свободен (не во время раздумья/речи Джарвиса и не поверх говорящего пользователя).
    * Так разговор не блокируется задачей, а её итог всё равно проговаривается по готовности.
    */
-  speakQueued(text: string, urgent = false): void {
-    if (!text.trim()) return;
-    this.pendingSpeech.push({ text, urgent, at: this.now() });
-    // Кап очереди (ревью 2026-07-24): бесконечная очередь = «скопом через минуты». Держим последние
-    // QUEUE_MAX, вытесняя САМЫЕ СТАРЫЕ несрочные — свежий итог важнее протухшего.
-    while (this.pendingSpeech.length > QUEUE_MAX) {
-      const victim = this.pendingSpeech.findIndex((p) => !p.urgent);
-      const dropped = this.pendingSpeech.splice(victim >= 0 ? victim : 0, 1)[0];
+  /**
+   * Поставить проактивную реплику в очередь озвучки.
+   *
+   * 🔴 ВОЗВРАЩАЕТ, ПРИНЯТА ЛИ РЕПЛИКА (контроль-7 волны D — корневой фикс целого класса потерь).
+   * Очередь ОДНА на все проактивные источники (напоминания, наблюдения, ambient), ёмкость QUEUE_MAX.
+   * Каждый источник, «отдав» реплику, СРАЗУ помечал её доставленной в своём durable-сторе (`done`,
+   * `pendingNotify=undefined`, `seen`) — а очередь в этот момент могла её вытеснить, в том числе
+   * СРОЧНОЕ напоминание. После ночи офлайна три флаша синхронно вливали 8 реплик в 4 слота: звучала
+   * одна, три пропадали НАВСЕГДА (текстовой копии у этих каналов нет). Каждый сервис подбирал свой
+   * размер порции, не зная о двух других, — угадать тут нельзя, поэтому решает сама очередь:
+   * НЕ ПРИНЯЛИ → `false`, и вызывающий ОСТАВЛЯЕТ запись недоставленной и повторит позже.
+   * Соответственно retriable-реплику НЕЛЬЗЯ ни отбросить при переполнении, ни вытеснить позже ради
+   * чужой: она уже считается доставленной у источника. Отказываем НОВОЙ — её есть кому повторить.
+   * (Контроль-8 поймал ровно эту щель: «вытеснения нет» было верно только для retriable-ветки, а
+   * НЕповторяемая реплика продолжала выбрасывать из очереди уже принятое срочное напоминание.)
+   */
+  speakQueued(
+    text: string,
+    urgent = false,
+    opts?: { retriable?: boolean; onOutcome?: (spoken: boolean) => void },
+  ): boolean {
+    if (!text.trim()) return false;
+    if (this.pendingSpeech.length >= QUEUE_MAX) {
+      if (opts?.retriable) {
+        // Источник ХРАНИТ реплику у себя и повторит → честно отказываем НОВОЙ, ничего не выбрасывая.
+        this.log.warn("очередь озвучки полна — реплика НЕ принята (источник повторит позже)", {
+          chars: text.length,
+          urgent,
+        });
+        return false;
+      }
+      // Прежнее поведение для НЕповторяемых реплик (итог задачи): свежее важнее протухшего —
+      // вытесняем самое старое несрочное (ревью 2026-07-24 «скопом через минуты»). НО ЖЕРТВОЙ НЕ МОЖЕТ
+      // быть retriable-реплика (контроль-8): источник УЖЕ пометил её доставленной в durable-сторе и
+      // повторять не станет — выбросить её значит потерять напоминание навсегда. Нет подходящей
+      // жертвы → отказываем НОВОЙ (у итога задачи есть текстовая копия в чате, у напоминания — нет).
+      const victim = this.pendingSpeech.findIndex((p) => !p.urgent && !p.retriable);
+      if (victim < 0) {
+        this.log.warn("очередь озвучки полна и занята непереигрываемым — новая реплика не принята", {
+          chars: text.length,
+        });
+        return false;
+      }
+      const dropped = this.pendingSpeech.splice(victim, 1)[0];
+      dropped?.onOutcome?.(false);
       this.log.warn("очередь озвучки переполнена — старая реплика отброшена", { chars: dropped?.text.length ?? 0 });
     }
+    this.pendingSpeech.push({
+      text,
+      urgent,
+      at: this.now(),
+      retriable: opts?.retriable === true,
+      ...(opts?.onOutcome ? { onOutcome: opts.onOutcome } : {}),
+    });
     this.maybeDrainSpeech();
+    return true;
   }
 
   /**
@@ -616,6 +673,9 @@ export class VoicePipeline {
         dropped: this.pendingSpeech.length - fresh.length,
         ttlMs: QUEUE_TTL_MS,
       });
+      // Источник обязан узнать, что реплика НЕ прозвучала: durable-запись он пометил доставленной
+      // только на onOutcome(true), поэтому здесь она вернётся в «ждёт доставки» (контроль-9).
+      for (const p of this.pendingSpeech) if (!fresh.includes(p)) p.onOutcome?.(false);
       this.pendingSpeech = fresh;
       if (this.pendingSpeech.length === 0) return;
     }
@@ -624,6 +684,10 @@ export class VoicePipeline {
     // §10 realtime: пофразная сессия между фразами держит ttsStream=null, но канал ЗАНЯТ —
     // не вклиниваемся фоновым итогом посреди реплики.
     if (this.phraseSpeaker?.active) return;
+    // Волна B: динамик клиента ещё ДОИГРЫВАЕТ прошлую реплику (синтез кончился раньше звука) —
+    // ждём сигнала `audio.playback{active:false}`, он сам дёрнет дренаж (setClientPlayback).
+    // Стейл-фолбэк внутри: потерянный сигнал не запирает очередь навсегда.
+    if (this.clientPlaybackBusy()) return;
     // §9 «не мешать»: пользователь занят (звонок/полный экран/блокировка) → отдаём только СРОЧНОЕ
     // (напоминания-будильники), несрочное (итоги фоновых задач) держим до освобождения.
     const busy = this.deps.isUserBusy?.() ?? false;
@@ -633,7 +697,8 @@ export class VoicePipeline {
     // Фоновый итог/проактивная реплика — НЕ ответ текущего пользовательского хода: m2eSeq=undefined
     // (не тегаем turn-seq), иначе её ack замкнулся бы на висящий снапшот хода = ложные «минуты» (fix
     // мис-атрибуции). Собственный ответ хода тегается только в runAgent/runAgentStreaming/playFiller.
-    if (next) this.startTts(next.text, this.gen);
+    // Колбэк исхода отдаём ВНУТРЬ синтеза: «взяли из очереди» ещё не «прозвучало» (контроль-11).
+    if (next) this.startTts(next.text, this.gen, true, undefined, next.onOutcome);
   }
 
   /**
@@ -779,6 +844,7 @@ export class VoicePipeline {
 
   /** Сбросить очередь отложенных фоновых озвучек — на явный «стоп»/«отмени»: слушать стейл не нужно. */
   clearPendingSpeech(): void {
+    for (const p of this.pendingSpeech) p.onOutcome?.(false); // «стоп» — не доставили, пусть источник вернёт
     this.pendingSpeech = [];
     // Сюда приходят «стоп»/«отмени» из task-control: это тоже НАМЕРЕННОЕ глушение — реплика хода,
     // который договорит секундой позже, не должна всплыть из очереди (ревью, CRITICAL).
@@ -791,7 +857,12 @@ export class VoicePipeline {
     this.clearSilenceTimer();
     this.clearThinkEarcon();
     this.cancelTts();
+    for (const p of this.pendingSpeech) p.onOutcome?.(false); // сессия умерла — реплики не прозвучали
     this.pendingSpeech = []; // не держим отложенные фоновые реплики мёртвой сессии
+    // Адверс-ревью волны B: состояние динамика — свойство ЖИВОГО соединения. После resume сигналы
+    // клиента идут в НОВЫЙ пайплайн, и залипший здесь `active:true` навсегда запер бы очередь
+    // осиротевшего (фоновые задачи старого соединения ещё могут озвучивать через speakResult).
+    this.clientPlayback = null;
     void this.sttStream?.close();
     this.sttStream = null;
   }
@@ -1011,7 +1082,7 @@ export class VoicePipeline {
     this.lastActiveAt = this.now();
     const speaker = new PhraseSpeaker({
       synthesize: (t) => this.deps.tts.synthesize(t, this.voiceOpts()),
-      sendChunk: (c) => this.deps.sendSpeakChunk({ ...c, gen: this.turnSeq }), // инкремент 0: тег хода для mouth-to-ear
+      sendChunk: (c) => this.emitSpeakChunk({ ...c, gen: this.turnSeq }), // инкремент 0: тег хода для mouth-to-ear
       onSpeaking: () => {
         this.latency.mark("tts_first_chunk");
         this.latency.mark("audio"); // первый звук ОТПРАВЛЕН клиенту (mouth-to-ear замкнёт audio.played)
@@ -1104,20 +1175,132 @@ export class VoicePipeline {
   /** Прекеш earcon приёмки (Волна 1): собирается один раз при первом использовании. */
   private earconBuf: ArrayBuffer | null = null;
 
+  /**
+   * Волна B (2026-07-29): РЕАЛЬНОЕ состояние динамика у клиента (сообщение `audio.playback`).
+   * Сервер знал только про конец СИНТЕЗА, а плеер к тому моменту ещё доигрывал очередь — следующая
+   * фоновая реплика уезжала сразу, и владелец слышал фразы «пачкой». Теперь дренаж очереди ждёт,
+   * пока динамик реально освободится. `at` — когда сигнал пришёл: по нему ФОЛБЭК против «залипшего
+   * active» (старый клиент/потерянный сигнал/mute) — молчать вечно Джарвис не должен.
+   */
+  private clientPlayback: { active: boolean; at: number; optimistic?: boolean } | null = null;
+
+  /**
+   * Клиент сообщил, играет ли динамик. Освободился → сразу пробуем отдать следующую очередную реплику.
+   */
+  setClientPlayback(active: boolean): void {
+    // «ОТСТАВШИЙ» false (контрольное ревью): сигнал описывает состояние динамика на момент ОТПРАВКИ
+    // клиентом, а долететь может уже после того, как мы выдали свежий звук (пауза между фразами
+    // многофразного ответа: очередь плеера на миг пустеет → false → а сервер тем временем шлёт
+    // следующую фразу). Слепо поверив, дренаж выпустил бы фоновый итог поверх ещё играющей реплики —
+    // возврат к «пачке». Свежесть проверяем по времени последнего отправленного чанка: клиент
+    // физически не мог успеть проиграть и отчитаться за такой срок.
+    if (!active) {
+      const graceMs = envInt("JARVIS_PLAYBACK_FALSE_GRACE_MS", 400);
+      if (this.now() - this.lastChunkSentAt < graceMs) {
+        // 🔴 НЕ выбрасываем сигнал совсем (контрольное ревью, HIGH): клиентский `setActive`
+        // EDGE-триггерный — второго `false` не будет НИКОГДА, и подтверждённое «занято» держало бы
+        // очередь до стейл-окна (120с), заглушив в том числе СРОЧНОЕ напоминание §9. Деградируем до
+        // ОПТИМИСТИЧНОЙ метки: ей веры максимум JARVIS_PLAYBACK_CONFIRM_MS (1.5с), после чего динамик
+        // считается свободным. Плюс будильник на дренаж — иначе никто не дёрнул бы очередь.
+        this.log.debug("сигнал «динамик свободен» отстал от свежего звука — понижаю до оптимистичной метки");
+        this.clientPlayback = { active: true, at: this.now(), optimistic: true };
+        this.armPlaybackRecheck();
+        return;
+      }
+    }
+    this.clearPlaybackRecheck();
+    this.clientPlayback = { active, at: this.now() }; // подтверждение клиента снимает оптимистичную метку
+    if (!active) this.maybeDrainSpeech();
+  }
+
+  /**
+   * ОПТИМИСТИЧНАЯ пометка «динамик занят» в момент ОТПРАВКИ звука (адверс-ревью волны B): решение о
+   * следующей очередной реплике принимается в ТОМ ЖЕ тике, где чанк только записан в сокет — сигнал
+   * `audio.playback{active:true}` физически не успевает (WS→renderer→IPC→main→WS), и гейт пропускал
+   * вторую реплику подряд. Помечаем сами; реальный сигнал клиента затем уточняет состояние.
+   */
+  private markSpeakerBusy(): void {
+    if (this.clientPlayback?.active && !this.clientPlayback.optimistic) {
+      // Клиент уже подтвердил «играю» — метку не понижаем, но освежаем время: стейл-окно должно
+      // отсчитываться от ПОСЛЕДНЕГО звука, иначе длинная реплика ложно «протухала» бы в середине.
+      this.clientPlayback = { ...this.clientPlayback, at: this.now() };
+      return;
+    }
+    this.clientPlayback = { active: true, at: this.now(), optimistic: true };
+  }
+
+  /** Таймер «переспросить очередь», когда истечёт вера в оптимистичную метку (иначе дренаж никто не дёрнет). */
+  private playbackRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private armPlaybackRecheck(): void {
+    this.clearPlaybackRecheck();
+    const ms = envInt("JARVIS_PLAYBACK_CONFIRM_MS", 1_500) + 50;
+    this.playbackRecheckTimer = setTimeout(() => {
+      this.playbackRecheckTimer = null;
+      this.maybeDrainSpeech();
+    }, ms);
+    if (typeof this.playbackRecheckTimer.unref === "function") this.playbackRecheckTimer.unref();
+  }
+
+  private clearPlaybackRecheck(): void {
+    if (this.playbackRecheckTimer) {
+      clearTimeout(this.playbackRecheckTimer);
+      this.playbackRecheckTimer = null;
+    }
+  }
+
+  /** Когда последний раз отправляли звук клиенту — водяной знак свежести для «отставших» сигналов. */
+  private lastChunkSentAt = 0;
+
+  /** Отправить звуковой чанк клиенту, пометив динамик занятым (единая точка выхода аудио). */
+  private emitSpeakChunk(chunk: TtsChunk): void {
+    this.markSpeakerBusy();
+    this.lastChunkSentAt = this.now();
+    this.deps.sendSpeakChunk(chunk);
+  }
+
+  /** Занят ли динамик клиента ПРЯМО СЕЙЧАС (со стейл-фолбэком: сигнал старше окна = не верим). */
+  private clientPlaybackBusy(): boolean {
+    const p = this.clientPlayback;
+    if (!p || !p.active) return false;
+    // Оптимистичная метка живёт КОРОТКО: если клиент не подтвердил воспроизведение (старая версия
+    // без сигнала ИЛИ выключена озвучка §22 — при mute renderer чанки не играет и active:true НЕ
+    // пришлёт), очередь не должна ждать полный стейл-таймаут.
+    if (p.optimistic) {
+      const confirmMs = envInt("JARVIS_PLAYBACK_CONFIRM_MS", 1_500);
+      return this.now() - p.at <= confirmMs;
+    }
+    const staleMs = envInt("JARVIS_PLAYBACK_SIGNAL_STALE_MS", 120_000);
+    if (this.now() - p.at > staleMs) {
+      // Сигнал протух (клиент отвалился/не шлёт) — считаем динамик свободным, иначе очередь замерла бы
+      // навсегда: «Джарвис молчит» страшнее, чем «две фразы подряд».
+      this.log.warn("сигнал воспроизведения протух — считаю динамик свободным", { ageMs: this.now() - p.at });
+      this.clientPlayback = null;
+      return false;
+    }
+    return true;
+  }
+
   /** §P1: таймер earcon-тика «услышал, думаю» на sync-first пути (см. armThinkEarcon). */
   private thinkEarconTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * §P1 EARCON РАЗДУМЬЯ (форензика 2026-07-14): earcon Волны 1.1 звучал ТОЛЬКО на приёмке фоновой
    * задачи — sync-first ход молчал до первой фразы (36% ходов ~10с тишины, медиана m2e 3.4–3.9с при
-   * цели 800мс; владелец повторял команды в тишину). Теперь: через JARVIS_THINK_EARCON_MS (деф 1800,
-   * 0=выкл) после начала раздумья, если ни звука, ни ответа ещё нет — ОДИН короткий тон «услышал,
-   * думаю». Состояние машины не трогаем (это не речь); голосовой филлер («Секунду, сэр»), если он
-   * включён, замещает тик (не дублируем). env читается на КАЖДОМ вызове (тестируемость, как
-   * JARVIS_STRICT_WAKE_IN_NOISE).
+   * цели 800мс; владелец повторял команды в тишину). Теперь: через JARVIS_THINK_EARCON_MS после
+   * начала раздумья, если ни звука, ни ответа ещё нет — ОДИН короткий тон «услышал, думаю».
+   * Состояние машины не трогаем (это не речь); голосовой филлер («Секунду, сэр»), если он включён,
+   * замещает тик (не дублируем). env читается на КАЖДОМ вызове (тестируемость).
+   *
+   * ВОЛНА B «мгновенный голос» (2026-07-29, порог 1800 → 700): ЖИВОЙ ЗАМЕР показал, что первый текст
+   * ответа приходит через 1.8–4.4с (это TTFT LLM; TTS добавляет лишь ~180мс — измерено A/B v1 vs v3).
+   * На пороге 1800мс тик успевал прозвучать впритык к самому ответу или уже после «мысленного»
+   * дедлайна владельца — то есть маскировал не ту часть тишины. 700мс: быстрые ходы (tier0-открытия,
+   * кеш-хиты) остаются ЧИСТЫМИ (успевают ответить раньше), а любой поход к модели даёт слышимое
+   * «услышал» ещё до того, как молчание начинает читаться как «не понял/не работает».
    */
   private armThinkEarcon(myGen: number): void {
-    const ms = envInt("JARVIS_THINK_EARCON_MS", 1_800);
+    const ms = envInt("JARVIS_THINK_EARCON_MS", 700);
     if (ms <= 0) return;
     // Голосовой филлер («Секунду, сэр») замещает тик — но ТОЛЬКО на стриминговом пути: playFiller
     // взводится через sink.thinking, которого у классического onUserTurn нет (ревью: скип по одному
@@ -1182,7 +1365,7 @@ export class VoicePipeline {
     this.latency.mark("tts_first_chunk");
     this.latency.mark("audio"); // первый звук (филлер) пошёл к клиенту
     this.dispatch({ type: "speak_start" }); // thinking → speaking
-    this.deps.sendSpeakChunk({ audio, seq: 0, last: true, gen: this.turnSeq }); // инкремент 0: тег хода
+    this.emitSpeakChunk({ audio, seq: 0, last: true, gen: this.turnSeq }); // инкремент 0: тег хода
     this.log.info("realtime: филлер проигран (маскировка пола латентности Opus)", this.latency.report());
   }
 
@@ -1217,7 +1400,23 @@ export class VoicePipeline {
    *   пользовательского хода (runAgent). undefined (проактив/онбординг/фоновый итог) → чанки БЕЗ тега,
    *   их ack не замкнётся на висящий снапшот хода (fix мис-атрибуции: ложные «минуты» mouth-to-ear).
    */
-  private startTts(voiceText: string, myGen: number, drive = true, m2eSeq?: number): void {
+  private startTts(
+    voiceText: string,
+    myGen: number,
+    drive = true,
+    m2eSeq?: number,
+    onOutcome?: (spoken: boolean) => void,
+  ): void {
+    // ИСХОД — ПО ФАКТУ ЗВУКА (контроль-11): раньше onOutcome(true) звался ДО синтеза, и отказ TTS
+    // (сеть/квота/429) навсегда помечал напоминание доставленным, хотя не прозвучало ни звука, а лог
+    // рапортовал «озвучено». Сообщаем  на ПЕРВОМ реально отправленном чанке,  — если
+    // синтез кончился/упал/был инвалидирован, не дав ни одного.
+    let outcomeSent = false;
+    const settle = (spoken: boolean): void => {
+      if (outcomeSent) return;
+      outcomeSent = true;
+      onOutcome?.(spoken);
+    };
     // Джарвис заговорил → открываем окно активного разговора (продолжение без wake word).
     this.awake = true;
     this.lastActiveAt = this.now();
@@ -1237,16 +1436,21 @@ export class VoicePipeline {
       }
       if (first) {
         first = false;
+        settle(true); // первый байт реально ушёл клиенту — вот теперь «прозвучало»
         this.latency.mark("tts_first_chunk");
         this.latency.mark("audio"); // первый звук ОТПРАВЛЕН клиенту (mouth-to-ear замкнёт audio.played)
         if (drive) this.dispatch({ type: "speak_start" });
         this.log.info(`latency: ${this.latency.report().summary}`);
       }
       // Инкремент 0: gen=m2eSeq (undefined → router опустит поле → клиент не тегирует эту озвучку).
-      this.deps.sendSpeakChunk({ ...c, gen: m2eSeq });
+      this.emitSpeakChunk({ ...c, gen: m2eSeq });
     });
-    stream.onError((e) => this.log.warn("ошибка TTS-стрима", e.message));
+    stream.onError((e) => {
+      this.log.warn("ошибка TTS-стрима", e.message);
+      settle(false); // синтез упал — источник вернёт запись в «ждёт доставки»
+    });
     stream.onDone(() => {
+      settle(false); // дошли до конца, не отдав ни одного чанка → не прозвучало
       if (myGen !== this.gen) return;
       this.ttsStream = null;
       if (drive) this.dispatch({ type: "speak_done" });
@@ -1258,6 +1462,11 @@ export class VoicePipeline {
     this.gen += 1; // инвалидируем все колбэки текущего оборота (barge-in/stop)
     this.clearFillerTimer(); // §10: отложенный филлер тоже отменяем (barge-in во время раздумья)
     this.clearThinkEarcon(); // §P1: earcon раздумья на оборванном ходе не нужен
+    // Волна B (контрольное ревью): barge-in/стоп = клиент ГЛУШИТ плеер (renderer playback.stop()).
+    // Его edge-триггерный `false` может попасть в grace-окно и быть понижен — но мы и так ЗНАЕМ, что
+    // динамик освобождён. Снимаем метку сами, иначе очередь (вкл. срочные напоминания) ждала бы зря.
+    this.clientPlayback = null;
+    this.clearPlaybackRecheck();
     if (this.ttsStream) {
       this.ttsStream.cancel();
       this.ttsStream = null;

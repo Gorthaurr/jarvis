@@ -90,6 +90,10 @@ const NEUTRAL_TOOLS = new Set([
   "skill_promote", "tool_load", "tool_create", "browser_tabs", "set_reminder", "cancel_reminder", "list_reminders",
   "watch_create", "watch_cancel", "watch_list", // §долгие-задачи: durable-конфиг наблюдения, не меняет экран
   "obligation_add", "obligation_remove", "obligation_list", // §проактив-всё: durable-конфиг счетов, не меняет экран
+  // D-4: calendar_read — ЧТЕНИЕ вкладки календаря (может открыть фоновую вкладку, но экран владельца
+  // не трогает и дела не делает). Как mutate он взводил бы anyMutateSucceeded → «посмотрел календарь
+  // и сдался» проходило бы успехом.
+  "calendar_read", "mail_read",
   // H3 (ревью 2026-07-02): чисто ЧИТАЮЩИЕ инструменты — «посмотрел» ≠ «сделал дело». Дефолт mutate
   // взводил anyMutateSucceeded на первом же чтении → анти-капитуляция/masked-failure отключались:
   // «прочитал файл/котировку и сдался словами» или пустое «Готово» после одних чтений проходили успехом.

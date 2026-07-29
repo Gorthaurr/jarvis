@@ -9,7 +9,7 @@ const TMP = vi.hoisted(() => {
   return dir;
 });
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { addFact, getProfile, loadProfile, removeFactsMatching, setDisplayName, setLanguage } from "./profile.js";
 
@@ -92,5 +92,26 @@ describe("profile — партиция по userId (§6B/B3: фикс утечк
     expect(await removeFactsMatching(D, ["ой"])).toEqual([]); // <3 симв — игнор
     expect(await removeFactsMatching("no-such-user", ["горы"])).toEqual([]); // пустой профиль
     expect(getProfile(D).facts).toEqual(["любит горы"]); // ничего не стёрто
+  });
+
+  // Аудит 2026-07-28: вытеснение по капу НЕ бесследно — старейший факт уходит в durable-архив
+  // (evicted-<user>.jsonl), кап настраиваем через JARVIS_PROFILE_FACTS_MAX (кламп снизу 10).
+  it("кап фактов: старейший вытесняется В АРХИВ, не бесследно; кап управляем env", async () => {
+    const F = "ffffffff-1111-2222-3333-555555555555";
+    const saved = process.env.JARVIS_PROFILE_FACTS_MAX;
+    process.env.JARVIS_PROFILE_FACTS_MAX = "3"; // клампится до 10 (минимум)
+    try {
+      for (let i = 1; i <= 11; i++) await addFact(F, `факт номер ${i}`);
+      const facts = getProfile(F).facts ?? [];
+      expect(facts).toHaveLength(10); // кламп снизу: меньше 10 кап не бывает
+      expect(facts[0]).toBe("факт номер 2"); // старейший («факт номер 1») вытеснен
+      const archive = join(TMP, "profile", `evicted-${F}.jsonl`);
+      expect(existsSync(archive)).toBe(true); // …но НЕ бесследно — заархивирован
+      const lines = readFileSync(archive, "utf8").trim().split("\n");
+      expect(JSON.parse(lines[0]!).fact).toBe("факт номер 1");
+    } finally {
+      if (saved === undefined) delete process.env.JARVIS_PROFILE_FACTS_MAX;
+      else process.env.JARVIS_PROFILE_FACTS_MAX = saved;
+    }
   });
 });

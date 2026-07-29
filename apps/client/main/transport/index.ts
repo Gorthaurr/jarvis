@@ -47,6 +47,7 @@ import type {
   ClientState,
   VadEvent,
   AudioPlayed,
+  PlaybackState,
   DemoEvent,
   DemoSave,
   SkillSaved,
@@ -196,6 +197,12 @@ export class Transport extends EventEmitter {
   /** Realtime инкремент 0: рендерер начал воспроизведение первого звука хода gen в момент ts (mouth-to-ear). */
   sendAudioPlayed(gen: number, ts: number): void {
     this.send(makeEnvelope<AudioPlayed>("audio.played", { gen, ts, seq: 0 }));
+  }
+
+  /** Волна B: динамик занят/свободен — сервер по этому сигналу не начинает следующую очередную реплику,
+   *  пока предыдущая РЕАЛЬНО играет (иначе фоновые итоги слышны «пачкой»). */
+  sendPlaybackState(active: boolean): void {
+    this.send(makeEnvelope<PlaybackState>("audio.playback", { active }));
   }
 
   /** Отправить результат подтверждения пользователя (§14). */

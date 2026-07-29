@@ -88,6 +88,14 @@ export interface WaitOutcome {
    * «попал ли редкий тик в окно recentlyGone».
    */
   gsiState?: "fresh" | "stale" | "none";
+  /**
+   * «НЕ СМОГ ПРОВЕРИТЬ» ≠ «условие не выполнено» (финальное контрольное ревью 2026-07-28). Сенсор был
+   * недоступен/не ответил (сайдкар лежит, RPC-сбой, опрос не уложился в кап) — met:false тут выражает
+   * НЕЗНАНИЕ. Серверный watch по этому флагу НЕ считает состояние «отлипшим»: иначе один моргнувший
+   * тик посреди удерживающегося met сбрасывал metStreak и повторно запускал side-effect действие
+   * («второе письмо человеку»). Зеркало `report{unknown:true}` LLM-чекера (checker.ts).
+   */
+  unknown?: boolean;
 }
 
 const WAIT_DEFAULT_TIMEOUT_MS = 30_000;
@@ -107,21 +115,24 @@ function validateCondition(cond: WaitCondition): void {
   if (cond.kind === "text" && !cond.text.trim()) throw new Error("wait_for text: пустой текст");
 }
 
-/** Один опрос условия → [выполнено?, что видели, gsi-состояние?]. Сенсорные сбои НЕ бросают (описываются в detail). */
-async function checkOnce(cond: WaitCondition): Promise<[boolean, string, WaitOutcome["gsiState"]?]> {
+/** Один опрос условия → [выполнено?, что видели, gsi-состояние?, не-смог-проверить?]. Сенсорные сбои НЕ
+ *  бросают (описываются в detail); 4-й элемент отличает НЕЗНАНИЕ от достоверного «не выполнено». */
+type CheckTuple = [boolean, string, WaitOutcome["gsiState"]?, boolean?];
+async function checkOnce(cond: WaitCondition): Promise<CheckTuple> {
   switch (cond.kind) {
     case "ui": {
       // Ревью Волны 2: лежащий сайдкар ≠ «элемент исчез» — gone:true при недоступном сенсоре
-      // давал бы ЛОЖНЫЙ met:true. Недоступность — честное «не выполнено» с причиной в detail.
-      if (!sidecar().ready) return [false, "сайдкар недоступен — UIA-условие не проверить"];
+      // давал бы ЛОЖНЫЙ met:true. Недоступность — честное «не выполнено» с причиной в detail
+      // И с пометкой unknown (финальное ревью): это НЕЗНАНИЕ, не смена состояния.
+      if (!sidecar().ready) return [false, "сайдкар недоступен — UIA-условие не проверить", undefined, true];
       try {
         const g = await ground({ role: cond.role, name: cond.name, nameMode: cond.nameMode });
         return [!cond.gone, `элемент найден (handle=${g.handle})`];
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        // Различаем «не найден» (легитимный исход для gone) и сбой сенсора (RPC/таймаут).
+        // Различаем «не найден» (легитимный исход для gone) и сбой сенсора (RPC/таймаут → unknown).
         if (/не найден|пустой handle/iu.test(msg)) return [Boolean(cond.gone), "элемент не найден"];
-        return [false, `сбой UIA-опроса: ${msg}`];
+        return [false, `сбой UIA-опроса: ${msg}`, undefined, true];
       }
     }
     case "window": {
@@ -193,11 +204,12 @@ async function checkOnce(cond: WaitCondition): Promise<[boolean, string, WaitOut
  * 1.5с). raceWithCap (модуль race-cap, тестируется отдельно) гонит опрос наперегонки с капом; зависший опрос
  * честно = «не выполнено», ожидание живёт по своему timeout. Кап ≤ остатка бюджета и жёсткого потолка.
  */
-function checkOnceCapped(cond: WaitCondition, budgetMs: number): Promise<[boolean, string, WaitOutcome["gsiState"]?]> {
-  return raceWithCap(
+function checkOnceCapped(cond: WaitCondition, budgetMs: number): Promise<CheckTuple> {
+  return raceWithCap<CheckTuple>(
     () => checkOnce(cond),
     budgetMs,
-    () => [false, `опрос сенсора (${cond.kind}) не ответил вовремя — пропускаю`],
+    // Зависший опрос — НЕЗНАНИЕ (unknown), а не «условие не выполнено» (финальное ревью).
+    () => [false, `опрос сенсора (${cond.kind}) не ответил вовремя — пропускаю`, undefined, true],
   );
 }
 
@@ -213,23 +225,35 @@ export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: 
   let polls = 0;
   let detail = "";
   let gsiState: WaitOutcome["gsiState"];
+  // «Не смог проверить» ПОСЛЕДНИМ опросом (финальное ревью): met:false с unknown — незнание, а не
+  // достоверное «условие не выполняется». Серверный watch по нему не считает состояние отлипшим.
+  let unknown = false;
   log.info("wait.for", { kind: cond.kind, timeout, poll });
 
   for (;;) {
     polls += 1;
     try {
       // Кап опроса = остаток бюджета (чтобы зависший OCR не переехал timeout wait_for).
-      const [met, seen, state] = await checkOnceCapped(cond, timeout - (Date.now() - startedAt));
+      const [met, seen, state, unsure] = await checkOnceCapped(cond, timeout - (Date.now() - startedAt));
       detail = seen;
+      unknown = unsure === true;
       if (state) gsiState = state; // R4: состояние источника последнего опроса — серверному watch
       if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}) };
     } catch (e) {
       // Транзиентный сбой сенсора (в т.ч. на ПЕРВОМ опросе, ревью Волны 2) не роняет ожидание —
       // условие могло ещё не наступить; сбой виден в detail, честный met:false по таймауту.
       detail = e instanceof Error ? e.message : String(e);
+      unknown = true; // брошенный опрос — тоже незнание, а не «условие не выполнено»
     }
     if (Date.now() - startedAt + poll > timeout) {
-      return { met: false, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}) };
+      return {
+        met: false,
+        elapsedMs: Date.now() - startedAt,
+        polls,
+        detail,
+        ...(gsiState ? { gsiState } : {}),
+        ...(unknown ? { unknown: true } : {}),
+      };
     }
     await sleep(poll);
   }
