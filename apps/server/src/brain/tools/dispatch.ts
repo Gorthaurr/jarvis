@@ -67,6 +67,8 @@ import type { ObligationStore } from "../../proactive/ambient/obligations.js";
 import { cancelReminder, listReminders, setReminder } from "./handlers/reminders.js";
 import { watchCancel, watchCreate, watchList } from "./handlers/watch.js";
 import { obligationAdd, obligationList, obligationRemove } from "./handlers/obligations.js";
+import { calendarRead } from "./handlers/calendar.js";
+import { mailRead } from "./handlers/mail.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
@@ -142,6 +144,10 @@ export interface ToolContext {
     tabList(): Promise<unknown>;
     tabClose(url?: string, tabId?: number): Promise<unknown>;
     exportCookies(domains?: string[]): Promise<unknown>;
+    // D-4: события календаря из вкладки владельца (без OAuth). Опционально — старые ext-моки в тестах
+    // остаются валидными; хендлер проверяет наличие метода и честно отказывает, если её нет.
+    calendarRead?(open?: boolean): Promise<unknown>;
+    mailRead?(open?: boolean): Promise<unknown>;
   };
 }
 
@@ -314,6 +320,10 @@ export async function dispatchTool(
       return obligationRemove(ctx, input);
     case "obligation_list":
       return obligationList(ctx);
+    case "calendar_read":
+      return calendarRead(ctx, input);
+    case "mail_read":
+      return mailRead(ctx, input);
     // Зрение (§): снять экран и ВЕРНУТЬ картинку модели (а не stringify) — она «видит» пиксели.
     case "screen_capture":
       return lookAtScreen(ctx, input);

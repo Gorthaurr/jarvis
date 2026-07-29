@@ -38,6 +38,21 @@ describe("isCacheableQuery", () => {
     expect(isCacheableQuery("отправь сообщение герману")).toBe(false); // отправ
     expect(isCacheableQuery("сделай погромче немного")).toBe(false); // сдела
   });
+  // ЖИВОЙ ПРОГОН волны D: «отмени напоминание про таблетки» прошло как «фактический вопрос» → команда
+  // НЕ исполнилась, а владельцу зачитали кэш с состоянием, которого уже нет («их два — в 9 и в 21»).
+  // Корень: стем «напомн» не ловит «напомин-А-ние», а «отмени» в списке команд не было вовсе.
+  it("команды и запросы о ЛИЧНОМ ИЗМЕНЯЕМОМ состоянии — НЕ кэшируем", () => {
+    expect(isCacheableQuery("отмени напоминание про таблетки")).toBe(false);
+    expect(isCacheableQuery("какие напоминания сейчас стоят")).toBe(false);
+    expect(isCacheableQuery("какие у меня сегодня встречи")).toBe(false);
+    expect(isCacheableQuery("мне что-нибудь на почту пришло")).toBe(false);
+    expect(isCacheableQuery("что там с моими задачами")).toBe(false);
+    expect(isCacheableQuery("прекрати наблюдение за курсом")).toBe(false);
+  });
+  it("нормальные фактические вопросы гардом не задеты", () => {
+    expect(isCacheableQuery("чем отличается кофе арабика от робусты")).toBe(true);
+    expect(isCacheableQuery("как работает двигатель внутреннего сгорания")).toBe(true);
+  });
 });
 
 describe("SemanticResponseCache", () => {

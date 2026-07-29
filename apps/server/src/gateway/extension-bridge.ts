@@ -134,6 +134,17 @@ export class ExtensionBridge {
     return this.request({ type: "telegram.unread" }, 8_000);
   }
 
+  /** D-4: события календаря из вкладки владельца (БЕЗ OAuth). open=false — неинвазивно, только уже
+   *  открытая вкладка (ambient); open=true — по явной просьбе можно открыть ФОНОВУЮ вкладку (дольше). */
+  calendarRead(open = false): Promise<unknown> {
+    return this.request({ type: "calendar.read", open }, open ? 40_000 : 8_000);
+  }
+
+  /** D-5: непрочитанные письма из вкладки владельца (БЕЗ OAuth). Только список (кто/тема), тело не читаем. */
+  mailRead(open = false): Promise<unknown> {
+    return this.request({ type: "mail.read", open }, open ? 40_000 : 8_000);
+  }
+
   /**
    * Открыть URL в браузере пользователя С УЧЁТОМ открытых вкладок (§): есть вкладка сервиса →
    * фокус на неё, нет → новая. Решает «постоянно новые вкладки». Возвращает {focused|created}.

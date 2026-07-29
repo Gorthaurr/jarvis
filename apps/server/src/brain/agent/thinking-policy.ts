@@ -47,8 +47,13 @@ export function decideRoundThinking(s: RoundThinkingState): ThinkingEffort | und
   if (s.tier === "fable") return s.base; // ГРАБЛЯ Opus (§4.7): планирование/эскалацию не глушим
   if (s.nudgeBoost) return s.base; // после нуджа — переосмысление, полное рассуждение
   if (s.step === 0) return s.base; // первый раунд — план (даже с навыком: примерка процедуры к задаче)
-  // Механика: процедура известна (recall) ИЛИ раунд — сверка после слепого действия.
-  if (s.hasRecalledSkill || s.blindMutatePending) return "off";
+  // Сверка после слепого действия — честностно-критичный раунд (аудит 2026-07-28): вердикт
+  // «получилось или нет» выносит ИНТЕРПРЕТАЦИЯ наблюдения — глушить рассуждение здесь опаснее,
+  // чем потратить секунды (ресёрч ENV_QUALITY «raise effort on verification»). Приоритет над
+  // механикой навыка; API-легальность off→on страхует forcedOff-гард петли.
+  if (s.blindMutatePending) return s.base;
+  // Механика: процедура известна (recall) — реплей без рассуждения.
+  if (s.hasRecalledSkill) return "off";
   return s.base; // прочая середина задачи — как настроено (консервативно)
 }
 

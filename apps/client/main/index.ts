@@ -13,7 +13,7 @@
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
  */
-import { app, BrowserWindow, Menu, ipcMain, powerMonitor, session } from "electron";
+import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, powerMonitor, session } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
 import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep, ClientSettings } from "@jarvis/protocol";
@@ -38,12 +38,30 @@ import { runSkill } from "./skill-runner/index.js";
 import { createClientActuator } from "./skill-runner/client-actuator.js";
 import { IPC } from "./ipc-contract.js";
 import type { ConfirmResultPayload, SkillRecState, SettingsPatch } from "./ipc-contract.js";
+import { disposeClientFileLog, initClientFileLog } from "./obs/file-log.js";
 
 const log = createLogger("main");
 
 // §10: Джарвис говорит сам (онбординг/проактивность) без жеста пользователя.
 // Без этого Chromium держит AudioContext в suspended — голос молчит.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+
+// §живёт-сам (адверс-ревью 2026-07-28 [15]): ОДИН экземпляр. С автозапуском+треем повторный запуск
+// (ярлык при уже живущем в трее клиенте) давал бы ДВА полных экземпляра — двойной захват микрофона,
+// двойной WS, двойные актуаторы. Второй экземпляр показывает окно первого и выходит.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (win) {
+      win.show();
+      win.focus();
+    } else {
+      createWindow();
+    }
+  });
+}
 
 // Сборка main идёт в CommonJS (esbuild format=cjs), поэтому __dirname доступен нативно
 // и указывает на dist/main. Пути к preload/renderer строим относительно него.
@@ -54,6 +72,29 @@ let audio: AudioCoordinator | null = null;
 let audioSeq = 0;
 /** Текущее состояние связи — чтобы переслать его, когда renderer догрузится (race-fix). */
 let linkOnline = false;
+// §живёт-сам (аудит 2026-07-28, P0 «случайный крестик убивает слух/голос/сенсоры»): закрытие окна
+// теперь прячет его в ТРЕЙ, приложение продолжает слушать. Явный выход — только из меню трея /
+// before-quit. isQuitting отличает «спрятать» от настоящего завершения.
+let tray: Tray | null = null;
+let isQuitting = false;
+// §0.6 mic-kill-switch (адверс-ревью 2026-07-28 [2]): main ПОМНИТ волю владельца «микрофон выключен».
+// Раньше запись голоса (voiceEnrollStart → activate) открывала гейт НАВСЕГДА при взведённом mute в UI —
+// красная кнопка врала «не слышит», а кадры уходили в облако. Теперь после done/cancel записи гейт
+// восстанавливается по этому флагу.
+let micKillSwitch = false;
+/** Идёт запись голосового отпечатка (гейт открыт ВРЕМЕННО) — чтобы вернуть mute на любом её исходе. */
+let voiceEnrollInFlight = false;
+/** Вернуть гейт микрофона в состояние, выбранное владельцем (после временного открытия на запись голоса). */
+function restoreMicMute(reason: string): void {
+  voiceEnrollInFlight = false;
+  if (micKillSwitch && audio) {
+    audio.mute();
+    log.info("§0.6 гейт микрофона закрыт обратно (mic-kill-switch владельца)", { reason });
+  }
+}
+/** 16×16 иконка трея (синий орб) — data-URL, без файловых зависимостей (работает и в dev, и в упаковке). */
+const TRAY_ICON_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAO0lEQVR42mNgoAWw6fn/HxumSDNRhhDSjNcQYjVjNYRUzRiGYJN89gEVj0QDaB4T1E9IVEnKVMlMpAIAk4jBmKEfHTcAAAAASUVORK5CYII=";
 
 // ── запись/повтор навыков демонстрацией (§8) ───────────────────
 /** Активная сессия записи навыка: имя + накопленные UIA-события из sidecar-хука. */
@@ -115,6 +156,13 @@ function createWindow(): void {
   });
 
   win.loadFile(join(__dirname, "../renderer/index.html"));
+  // §живёт-сам: крестик = спрятать в трей (слух/сенсоры живут), НЕ завершение. Выход — меню трея.
+  win.on("close", (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      win?.hide();
+    }
+  });
   win.on("closed", () => {
     win = null;
   });
@@ -211,6 +259,10 @@ function startTransport(): void {
   transport.on("disconnected", () => {
     linkOnline = false;
     win?.webContents.send(IPC.link, { online: false });
+    // Контрольное ревью: обрыв WS/рестарт сервера ПОСРЕДИ записи голоса убивает серверный enroll —
+    // voice.enroll.done не придёт НИКОГДА, и временно открытый гейт микрофона остался бы открыт
+    // навсегда при красной кнопке «Джарвис не слышит». Возвращаем волю владельца на любом исходе.
+    if (voiceEnrollInFlight) restoreMicMute("voice-enroll-interrupted");
   });
 
   transport.on("transcript", (t) => win?.webContents.send(IPC.transcript, t));
@@ -227,7 +279,10 @@ function startTransport(): void {
   });
   // §3 верификация диктора: прогресс/итог записи отпечатка + список голосов → renderer (вкладка «Голоса»).
   transport.on("voiceEnrollProgress", (p) => win?.webContents.send(IPC.voiceEnrollProgress, p));
-  transport.on("voiceEnrollDone", (d) => win?.webContents.send(IPC.voiceEnrollDone, d));
+  transport.on("voiceEnrollDone", (d) => {
+    win?.webContents.send(IPC.voiceEnrollDone, d);
+    restoreMicMute("voice-enroll-done"); // адверс-ревью [2]: запись кончилась → возвращаем волю владельца
+  });
   transport.on("voiceList", (l) => win?.webContents.send(IPC.voiceVoices, l));
   transport.on("protocolError", (e) => {
     // version_mismatch -> «требуется обновление»: показываем карточкой в renderer (§5).
@@ -394,13 +449,24 @@ function registerIpc(): void {
   });
   // Аудио из renderer (§3): кадры захвата + управление микрофоном.
   ipcMain.on(IPC.pushPcm, (_e, buf: ArrayBuffer) => audio?.ingest(new Int16Array(buf)));
-  ipcMain.on(IPC.playbackActive, (_e, active: boolean) => audio?.setPlaybackActive(Boolean(active)));
+  ipcMain.on(IPC.playbackActive, (_e, active: boolean) => {
+    audio?.setPlaybackActive(Boolean(active));
+    // Волна B: тот же факт — серверу. Он ждёт РЕАЛЬНОГО освобождения динамика, прежде чем отдать
+    // следующую очередную реплику (раньше знал только про конец СИНТЕЗА → фразы шли «пачкой»).
+    transport?.sendPlaybackState(Boolean(active));
+  });
   // Realtime инкремент 0: рендерер начал воспроизведение первого звука хода → на сервер (mouth-to-ear).
   ipcMain.on(IPC.audioPlayed, (_e, gen: number, ts: number) => {
     if (typeof gen === "number" && typeof ts === "number") transport?.sendAudioPlayed(gen, ts);
   });
-  ipcMain.on(IPC.activate, () => audio?.activate());
-  ipcMain.on(IPC.mute, () => audio?.mute());
+  ipcMain.on(IPC.activate, () => {
+    micKillSwitch = false; // владелец явно включил слух
+    audio?.activate();
+  });
+  ipcMain.on(IPC.mute, () => {
+    micKillSwitch = true; // §0.6: main помнит волю владельца — enroll/прочие пути не откроют гейт «навсегда»
+    audio?.mute();
+  });
   // Запись/повтор навыков демонстрацией (§8).
   ipcMain.on(IPC.skillStart, (_e, name: string) => void startSkillRecording(name));
   ipcMain.on(IPC.skillStop, () => void stopSkillRecording());
@@ -408,11 +474,18 @@ function registerIpc(): void {
   ipcMain.on(IPC.skillRun, (_e, id: string) => void runSavedSkill(id));
   // §3 верификация диктора. Запись отпечатка использует ТОТ ЖЕ аудиопоток (audio.frame) — поэтому
   // открываем гейт (activate), чтобы кадры пошли; сервер маршрутизирует их в enrollment.
+  // Адверс-ревью 2026-07-28 [2]: при взведённом mic-kill-switch запись голоса открывает гейт ВРЕМЕННО
+  // (владелец явно записывает голос) — после done/cancel гейт ЗАКРЫВАЕТСЯ ОБРАТНО (restoreMicMute),
+  // иначе UI («Микрофон выключен») врал бы, а кадры уходили в облако навсегда.
   ipcMain.on(IPC.voiceEnrollStart, (_e, name: string) => {
+    voiceEnrollInFlight = true;
     audio?.activate();
     transport?.sendVoiceEnrollStart(name);
   });
-  ipcMain.on(IPC.voiceEnrollCancel, () => transport?.sendVoiceEnrollCancel());
+  ipcMain.on(IPC.voiceEnrollCancel, () => {
+    transport?.sendVoiceEnrollCancel();
+    restoreMicMute("voice-enroll-cancel");
+  });
   ipcMain.on(IPC.voiceList, () => transport?.sendVoiceList());
   ipcMain.on(IPC.voiceRemove, (_e, name: string) => transport?.sendVoiceRemove(name));
   // §6B/B5 вкладка «Оплата»: запрос свежего расхода/лимитов → серверу (ответ придёт usage.info).
@@ -580,10 +653,73 @@ function startSidecar(): void {
   }
 }
 
-app.whenReady().then(() => {
+/** §живёт-сам: иконка в трее — показать окно / выйти. Приложение живёт в трее и без окна. */
+function createTray(): void {
+  try {
+    const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
+    tray = new Tray(icon);
+    tray.setToolTip("Джарвис — слушает в фоне");
+    const showWindow = (): void => {
+      if (win) {
+        win.show();
+        win.focus();
+      } else {
+        createWindow();
+      }
+    };
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: "Показать Джарвиса", click: showWindow },
+        { type: "separator" },
+        {
+          label: "Выйти (остановить Джарвиса)",
+          click: () => {
+            isQuitting = true;
+            app.quit();
+          },
+        },
+      ]),
+    );
+    tray.on("double-click", showWindow);
+  } catch (e) {
+    log.warn("трей не поднялся — работаем без него", { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/**
+ * §живёт-сам: автозапуск клиента с Windows. ЯВНОЕ управление через env (не трогаем реестр молча):
+ * JARVIS_AUTOSTART=1 → зарегистрировать (в dev-режиме прописывает electron.exe + путь приложения),
+ * JARVIS_AUTOSTART=0 → снять. Не задан → ничего не меняем (уважение к ручной настройке владельца).
+ */
+function applyAutostart(): void {
+  const v = process.env.JARVIS_AUTOSTART;
+  if (v !== "1" && v !== "0") return;
+  try {
+    if (v === "1") {
+      // Адверс-ревью [13]: путь приложения в args ОБЯЗАН быть квотирован — реестровая строка Run
+      // склеивается в командную строку, путь с пробелом иначе рассыпается на два аргумента.
+      app.setLoginItemSettings({ openAtLogin: true, path: process.execPath, args: [`"${app.getAppPath()}"`] });
+      log.info("автозапуск с Windows включён", { exe: process.execPath });
+    } else {
+      app.setLoginItemSettings({ openAtLogin: false });
+      log.info("автозапуск с Windows снят");
+    }
+  } catch (e) {
+    log.warn("не удалось применить настройку автозапуска", { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+// Контрольное ревью: бутстрап ТОЛЬКО у владельца лока — иначе второй экземпляр успевал поднять
+// IPC/трей/транспорт/сайдкар до того, как отработает app.quit() (гонка между whenReady и quit).
+if (gotSingleInstanceLock) void app.whenReady().then(bootstrap);
+
+function bootstrap(): void {
+  initClientFileLog(); // §наблюдаемость (аудит 2026-07-28): durable-лог клиента — «вчера не слышал» больше не слеп
   registerIpc();
   startGsiListener(); // §Волна3 (3.4): локальный приёмник JSON-пушей игр/программ (GSI) — сенсор kind:"gsi"
   createWindow();
+  createTray(); // §живёт-сам: окно можно закрыть — Джарвис остаётся в трее
+  applyAutostart();
   startTransport();
   startSidecar();
   // jarvis SDK (среда исполнения «1 раунд = вся задача»): поднимаем loopback-мост актуаторов и отдаём
@@ -599,16 +735,19 @@ app.whenReady().then(() => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
+}
 
 app.on("window-all-closed", () => {
-  // На Windows закрытие всех окон завершает приложение.
-  if (process.platform !== "darwin") app.quit();
+  // §живёт-сам (аудит 2026-07-28): раньше закрытие окна ЗАВЕРШАЛО приложение — случайный крестик
+  // останавливал слух/голос/сенсоры/GSI. Теперь Джарвис живёт в трее; выход — только меню трея.
 });
 
 app.on("before-quit", () => {
+  isQuitting = true; // штатный quit (вкл. системный shutdown) не должен блокироваться close-to-tray
   transport?.stop();
   sidecar().stop();
   void actBridge?.stop(); // jarvis SDK: гасим loopback-мост актуаторов
   void browserController().close(); // §6: гасим управляемый браузер (не оставляем висеть)
+  tray?.destroy();
+  disposeClientFileLog(); // дослать хвост durable-лога
 });

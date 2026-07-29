@@ -17,62 +17,62 @@ function ctxWith(add: ReturnType<typeof okAdd> = okAdd()) {
 const base = { what: "матч в доте", condition: "матч найден" };
 
 describe("watchCreate — валидация предиката (§Волна3 ревью #12)", () => {
-  it("валидный gsi-предикат принимается и уходит в add", () => {
+  it("валидный gsi-предикат принимается и уходит в add", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "map.game_state", contains: "IN_PROGRESS" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "map.game_state", contains: "IN_PROGRESS" } });
     expect(res.isError).toBeFalsy();
     expect(add).toHaveBeenCalledTimes(1);
     expect((add.mock.calls[0]![0] as { predicate?: unknown }).predicate).toMatchObject({ kind: "gsi" });
   });
 
-  it("опечатка в kind → честная ошибка, add НЕ зовётся", () => {
+  it("опечатка в kind → честная ошибка, add НЕ зовётся", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "windows", titleContains: "Принять" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "windows", titleContains: "Принять" } });
     expect(res.isError).toBe(true);
     expect(res.content).toMatch(/неизвестный kind/i);
     expect(add).not.toHaveBeenCalled();
   });
 
-  it("gsi без path → честная ошибка (иначе клиент вечно met:false)", () => {
+  it("gsi без path → честная ошибка (иначе клиент вечно met:false)", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi" } });
     expect(res.isError).toBe(true);
     expect(res.content).toMatch(/path/i);
     expect(add).not.toHaveBeenCalled();
   });
 
-  it("window без titleContains/process → честная ошибка", () => {
+  it("window без titleContains/process → честная ошибка", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "window" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "window" } });
     expect(res.isError).toBe(true);
     expect(add).not.toHaveBeenCalled();
   });
 
-  it("без предиката (веб/LLM-наблюдение) — по-прежнему принимается", () => {
+  it("без предиката (веб/LLM-наблюдение) — по-прежнему принимается", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base });
+    const res = await watchCreate(ctxWith(add), { ...base });
     expect(res.isError).toBeFalsy();
     expect(add).toHaveBeenCalledTimes(1);
   });
 
-  it("(fix 2026-07-15) валидный browser-предикат (video.currentTime) принимается", () => {
+  it("(fix 2026-07-15) валидный browser-предикат (video.currentTime) принимается", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=", value: 1560 } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=", value: 1560 } });
     expect(res.isError).toBeFalsy();
     expect((add.mock.calls[0]![0] as { predicate?: unknown }).predicate).toMatchObject({ kind: "browser", value: 1560 });
   });
 
-  it("(fix 2026-07-15) browser без value → честная ошибка (иначе мёртвый предикат)", () => {
+  it("(fix 2026-07-15) browser без value → честная ошибка (иначе мёртвый предикат)", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=" } });
     expect(res.isError).toBe(true);
     expect(res.content).toMatch(/value/i);
     expect(add).not.toHaveBeenCalled();
   });
 
-  it("(fix 2026-07-15) browser с кривым op → честная ошибка", () => {
+  it("(fix 2026-07-15) browser с кривым op → честная ошибка", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", value: 1560, op: "≥" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "browser", value: 1560, op: "≥" } });
     expect(res.isError).toBe(true);
     expect(res.content).toMatch(/op/i);
     expect(add).not.toHaveBeenCalled();
@@ -80,30 +80,55 @@ describe("watchCreate — валидация предиката (§Волна3 �
 
   // Ревью фиксов Волны 3 (#9): типы критерия gsi. Клиент сравнивает String(value) со СТРОКОЙ —
   // boolean/number-критерий без коэрции давал «принят, но не сработает никогда» (тот же класс #12).
-  it("(#9) gsi equals:true (boolean) коэрсится в строку «true» — предикат живой", () => {
+  it("(#9) gsi equals:true (boolean) коэрсится в строку «true» — предикат живой", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "map.paused", equals: true } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "map.paused", equals: true } });
     expect(res.isError).toBeFalsy();
     expect((add.mock.calls[0]![0] as { predicate?: { equals?: unknown } }).predicate?.equals).toBe("true");
   });
 
-  it("(#9) gsi contains:5 (number) коэрсится в «5»; объект в equals — честный отказ", () => {
+  it("(#9) gsi contains:5 (number) коэрсится в «5»; объект в equals — честный отказ", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "hero.level", contains: 5 } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "hero.level", contains: 5 } });
     expect(res.isError).toBeFalsy();
     expect((add.mock.calls[0]![0] as { predicate?: { contains?: unknown } }).predicate?.contains).toBe("5");
 
     const add2 = okAdd();
-    const res2 = watchCreate(ctxWith(add2), { ...base, predicate: { kind: "gsi", path: "x", equals: { deep: 1 } } });
+    const res2 = await watchCreate(ctxWith(add2), { ...base, predicate: { kind: "gsi", path: "x", equals: { deep: 1 } } });
     expect(res2.isError).toBe(true);
     expect(add2).not.toHaveBeenCalled();
   });
 
-  it("(#9) gone не-булев («true» строкой) — честный отказ на постановке (полумёртвый предикат)", () => {
+  it("(#9) gone не-булев («true» строкой) — честный отказ на постановке (полумёртвый предикат)", async () => {
     const add = okAdd();
-    const res = watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "map.game_state", gone: "true" } });
+    const res = await watchCreate(ctxWith(add), { ...base, predicate: { kind: "gsi", path: "map.game_state", gone: "true" } });
     expect(res.isError).toBe(true);
     expect(res.content).toMatch(/gone/i);
     expect(add).not.toHaveBeenCalled();
+  });
+});
+
+// §14 (адверс-ревью 2026-07-28 [10]): наблюдение с action = отложенное действие от имени владельца →
+// подтверждение на ПОСТАНОВКЕ (иначе prompt-инъекция «отмывалась» бы в доверенное поручение).
+describe("watchCreate — confirm на постановке action", () => {
+  it("action без канала confirm → fail-closed отказ, add не зовётся", async () => {
+    const add = okAdd();
+    const res = await watchCreate(ctxWith(add), { ...base, action: "напиши Кате" });
+    expect(res.isError).toBe(true);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("отказ владельца → не ставим; approve → ставим с action", async () => {
+    const add = okAdd();
+    const deny = { ...(ctxWith(add) as object), confirm: async () => ({ approved: false }) } as unknown as ToolContext;
+    const res = await watchCreate(deny, { ...base, action: "напиши Кате" });
+    expect(res.isError).toBe(true);
+    expect(add).not.toHaveBeenCalled();
+
+    const add2 = okAdd();
+    const allow = { ...(ctxWith(add2) as object), confirm: async () => ({ approved: true }) } as unknown as ToolContext;
+    const res2 = await watchCreate(allow, { ...base, action: "напиши Кате" });
+    expect(res2.isError).toBeFalsy();
+    expect((add2.mock.calls[0]![0] as { action?: string }).action).toBe("напиши Кате");
   });
 });

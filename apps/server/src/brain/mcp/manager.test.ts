@@ -27,13 +27,14 @@ vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
     }
   },
 }));
+let mockTools: unknown[] = []; // инструменты, которые «отдаёт» замоканный сервер (для index/declaredEffect)
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
   Client: class {
     async connect(): Promise<void> {
       await connectGate; // тест управляет моментом резолва коннекта
     }
     async listTools(): Promise<{ tools: unknown[] }> {
-      return { tools: [] };
+      return { tools: mockTools };
     }
     async close(): Promise<void> {
       /* graceful no-op */
@@ -95,8 +96,30 @@ beforeEach(() => {
   killed.length = 0;
   pidSeq = 1000;
   connectGate = Promise.resolve();
+  mockTools = [];
 });
 afterEach(() => vi.clearAllMocks());
+
+// Декларативный toolEffect (последний кусок MCP-контракта, аудит 2026-07-28): декларация владельца в
+// mcp.json главнее эвристики по имени — «think» не взводит anyMutateSucceeded, мутирующий get_* не
+// проскакивает neutral'ом. Нет декларации → undefined (петля падает на прежнюю эвристику).
+describe("McpManager.declaredEffect — декларативный toolEffect", () => {
+  it("точное bare-имя главнее '*'-дефолта; сервер без декларации → undefined", async () => {
+    mockTools = [{ name: "get_x" }, { name: "boom" }];
+    const m = new McpManager(new Set<string>(), {
+      servers: {
+        s: { command: "npx", toolEffect: { "*": "mutate", get_x: "neutral" } },
+        bare: { command: "npx" },
+      },
+    } as never);
+    await m.connectAll();
+    expect(m.declaredEffect("mcp__s__get_x")).toBe("neutral"); // точное имя
+    expect(m.declaredEffect("mcp__s__boom")).toBe("mutate"); // '*'-дефолт сервера
+    expect(m.declaredEffect("mcp__bare__get_x")).toBeUndefined(); // нет декларации → эвристика
+    expect(m.declaredEffect("mcp__nope__tool")).toBeUndefined(); // незнакомое имя
+    await m.dispose();
+  });
+});
 
 describe("McpManager — жизненный цикл детей (аудит-2 [1]/[2])", () => {
   it("[1] dispose ПОСРЕДИ connect → сервер НЕ заселён, свежий transport убит (не сирота)", async () => {

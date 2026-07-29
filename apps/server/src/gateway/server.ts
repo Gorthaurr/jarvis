@@ -36,6 +36,7 @@ import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
 import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "../brain/profile.js";
+import { verbalize } from "../brain/verbalize/index.js";
 import { claimConsolidationRun, consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
 import { ReminderService } from "../proactive/reminders/service.js";
 import { createWatchChecker } from "../proactive/watch/checker.js";
@@ -45,6 +46,8 @@ import { AmbientEngine } from "../proactive/ambient/engine.js";
 import { AmbientSeenStore } from "../proactive/ambient/store.js";
 import { ObligationStore, createObligationsSource } from "../proactive/ambient/obligations.js";
 import { createTelegramSource } from "../proactive/ambient/telegram-source.js";
+import { createCalendarSource } from "../proactive/ambient/calendar-source.js";
+import { createMailSource } from "../proactive/ambient/mail-source.js";
 import { VoiceProfileStore } from "../voice/speaker/store.js";
 import { createSpeakerVerifier } from "../voice/speaker/sherpa-verifier.js";
 import { createSpeakerVerifierSidecar } from "../voice/speaker/verifier-sidecar.js";
@@ -69,9 +72,12 @@ import { forgetClientContext } from "../proactive/salience.js";
 import { DEV_USER, resolveAndProvision } from "./identity.js";
 import { isLoopbackHost, resolveBindHost } from "./bind.js";
 import { buildGreeting } from "../proactive/greeting.js";
+import { takeIncidentReport } from "../proactive/incidents.js";
 import { ExtensionBridge, type ExtSocket } from "./extension-bridge.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
+import { PreHandshakeBuffer } from "./pre-handshake-buffer.js";
+import { isDevSession } from "./dev-session.js";
 import {
   type BrainProviders,
   type SessionContext,
@@ -219,6 +225,10 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const ambientEngine = new AmbientEngine([
     createObligationsSource(obligationStore),
     createTelegramSource(extBridge, DEV_USER, { enabled: () => process.env.JARVIS_AMBIENT_TELEGRAM !== "0" }),
+    // D-4: встречи из УЖЕ ОТКРЫТОЙ вкладки календаря (без OAuth). Вкладки нет → молчит, окон не открывает.
+    createCalendarSource(extBridge, DEV_USER, { enabled: () => process.env.JARVIS_AMBIENT_CALENDAR !== "0" }),
+    // D-5: непрочитанные письма из УЖЕ ОТКРЫТОЙ вкладки почты. Рассылки ниже порога — не будят.
+    createMailSource(extBridge, DEV_USER, { enabled: () => process.env.JARVIS_AMBIENT_MAIL !== "0" }),
   ]);
   // Реестр задач нужен ДВУМ потребителям: агенту (§20) и сервису фоновых активностей (чип живёт, пока
   // идёт автолистание) — поэтому создаём его отдельной переменной, а не инлайном в brain.
@@ -653,14 +663,35 @@ function onConnection(
   let handshakeDone = false;
   // Single-flight (§6B): handshake стал async (валидация/провижн БД). Латч не даёт второму hello /
   // гонке reconnect запустить ВТОРОЙ doHandshake (двойной провижн / двойная сессия). Ставится
-  // СИНХРОННО до любого await — между hello и резолвом промиса handshakeDone ещё false, поэтому любой
-  // промежуточный кадр падает в ту же ignore-ветку, что и сегодня (буфер не нужен, семантика та же).
+  // СИНХРОННО до любого await. Кадр, пришедший между hello и резолвом промиса, попадает в ту же
+  // ветку (`handshakeDone` ещё false), но с 2026-07-28 она его НЕ игнорирует, а БУФЕРИЗУЕТ и
+  // реплеит после подъёма сессии (см. preHandshakeBuf ниже) — латч теперь стережёт только второй
+  // doHandshake, дубль client.hello в буфер осознанно не кладётся.
   let handshakeStarted = false;
   // H7: сокет мог закрыться ПОКА doHandshake ждал БД (resolveAndProvision/hydrate). ws.on('close')
   // тогда срабатывает с ctx===null и выходит БЕЗ scheduleRemove; затем промис резолвится и без этого
   // флага вставил бы Session + heartbeat + приветствие в МЁРТВЫЙ сокет, который уже не закроется →
   // перманентная утечка сессии. Флаг ставится в close, сверяется после await (см. .then ниже).
   let socketClosed = false;
+  // Аудит 2026-07-28 (P0 «речь теряется»): кадры, пришедшие ПОКА async-handshake в полёте (3-5с после
+  // каждого рестарта/reconnect — резолв БД/hydrate), раньше МОЛЧА игнорились → первая фраза владельца
+  // после деплоя пропадала (87% дневных warn «кадр до handshake» по форензике). Теперь буферизуем и
+  // проигрываем ПОСЛЕ подъёма сессии в исходном порядке (реплей — синхронный проход в .then, до
+  // следующего ws-события → живой кадр буферные не обгоняет). Кап — анти-OOM при зависшем handshake;
+  // переполнение вытесняет старейшие (конец фразы ценнее её начала) с одним итоговым WARN.
+  // Политика буфера — в чистом модуле `pre-handshake-buffer.ts` (юнит-тесты на вытеснение/жирный
+  // кадр). Кап по байтам меряет размер СЫРОГО ws-сообщения (ws-дефолт maxPayload = 100 МиБ).
+  const PRE_HANDSHAKE_BUF_MAX_BYTES = 4 * 1024 * 1024;
+  const preHandshakeBuf = new PreHandshakeBuffer<Envelope>(600, PRE_HANDSHAKE_BUF_MAX_BYTES);
+  /** Размер входящего ws-сообщения в байтах (Buffer/ArrayBuffer/строка/массив фрагментов). */
+  const rawMessageBytes = (raw: unknown): number => {
+    if (typeof raw === "string") return Buffer.byteLength(raw);
+    if (Buffer.isBuffer(raw)) return raw.length;
+    if (raw instanceof ArrayBuffer) return raw.byteLength;
+    if (ArrayBuffer.isView(raw)) return raw.byteLength;
+    if (Array.isArray(raw)) return raw.reduce((n: number, part) => n + rawMessageBytes(part), 0);
+    return 256; // неизвестная форма — консервативная константа накладных
+  };
 
   // Адаптер RawWs → SessionSocket (минимальный контракт Session).
   const sock: SessionSocket = {
@@ -682,6 +713,7 @@ function onConnection(
   if (typeof handshakeTimer.unref === "function") handshakeTimer.unref();
 
   ws.on("message", (raw: unknown) => {
+    const rawBytes = handshakeDone ? 0 : rawMessageBytes(raw); // считаем только на пути до-handshake
     const env = parseEnvelope(raw, log);
     if (!env) {
       sendError(ws, { code: "internal", message: "bad envelope" });
@@ -691,6 +723,20 @@ function onConnection(
     // До handshake принимаем только client.hello (и только ОДИН — single-flight латч).
     if (!handshakeDone) {
       if (env.type !== "client.hello" || handshakeStarted) {
+        // Handshake уже в полёте → кадр НЕ теряем: в буфер, проиграем после подъёма сессии.
+        // Дубль client.hello в буфер не кладём (single-flight латч); до первого hello — как раньше, игнор.
+        if (handshakeStarted && env.type !== "client.hello") {
+          const outcome = preHandshakeBuf.push(env, rawBytes);
+          if (outcome.rejectedOversize) {
+            log.warn("pre-handshake буфер: кадр толще байтового капа — отброшен (буфер речи цел)", {
+              type: env.type,
+              bytes: rawBytes,
+              capBytes: PRE_HANDSHAKE_BUF_MAX_BYTES,
+              droppedTotal: preHandshakeBuf.droppedCount,
+            });
+          }
+          return;
+        }
         log.warn("кадр до handshake — игнор", { type: env.type });
         return;
       }
@@ -716,6 +762,23 @@ function onConnection(
           ctx = c;
           handshakeDone = c !== null; // null (version_mismatch/unauthorized/internal) → сокет уже закрыт в doHandshake
           if (c) liveCtxs.set(c.session.sessionId, c); // §dev /dev/say
+          // Реплей кадров, накопленных за время handshake (P0 «речь теряется», 2026-07-28): тот же
+          // dispatch в исходном порядке. Синхронный проход в микротаске → следующий ws-кадр их не обгонит.
+          const buffered = preHandshakeBuf.drain();
+          if (preHandshakeBuf.droppedCount > 0) {
+            // Потеря ВСЕГДА оставляет след (молчаливый дроп = слепой разбор «речь пропала»).
+            log.warn("pre-handshake буфер: часть кадров отброшена", { dropped: preHandshakeBuf.droppedCount });
+          }
+          if (c && buffered.length > 0) {
+            log.info("реплей кадров, накопленных за время handshake", { count: buffered.length });
+            for (const b of buffered) {
+              void dispatch(c, b).catch((e: unknown) => {
+                log.error("ошибка dispatch (pre-handshake буфер)", e instanceof Error ? e.message : String(e));
+              });
+            }
+          } else if (buffered.length > 0) {
+            log.warn("pre-handshake кадры отброшены — сессия не поднялась", { count: buffered.length });
+          }
         })
         .catch((e: unknown) => {
           log.error("ошибка handshake/инициализации сессии — закрываю соединение", e instanceof Error ? e.message : String(e));
@@ -833,7 +896,7 @@ async function doHandshake(
     const orphaned = brain.tasks.cancelOrphanedTasks(userId, session.sessionId, (sid) => registry.get(sid)?.channelUp() ?? false);
     if (orphaned.length > 0) log.info("Б4: осиротевшие задачи прерваны (resume не удался, петли на мёртвой сессии)", { count: orphaned.length });
   }
-  const ctx = makeSessionContext(session, heartbeat, providers, brain);
+  const ctx = makeSessionContext(session, heartbeat, providers, brain, hello.clientVersion);
 
   // §8: пробрасываем ранее записанные навыки в UI (список «Навыки» + возможность повтора).
   pushSavedSkills(ctx);
@@ -857,7 +920,7 @@ async function doHandshake(
  */
 function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logger, clientVersion?: string): void {
   if (!consolidationEnabled()) return;
-  if (/cmd|test|driver/i.test(clientVersion ?? "")) return;
+  if (isDevSession(clientVersion)) return;
   const userId = ctx.session.userId;
   const p = getProfile(userId);
   const last = p.lastConsolidatedAt ?? 0;
@@ -893,10 +956,14 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
   // (а) dev-сессии текст-драйвера не здороваются (и не съедают кулдаун живого клиента);
   // (б) кулдаун JARVIS_GREETING_COOLDOWN_MS (деф 6ч) от последнего произнесённого приветствия;
   // (в) диалог шёл меньше часа назад (восстановленная working memory) → уже общаемся, не здороваемся.
-  if (/cmd|test|driver/i.test(clientVersion ?? "")) {
+  if (isDevSession(clientVersion)) {
     log.info("онбординг: пропущен (dev-сессия текст-драйвера)");
     return;
   }
+  // ДОКЛАД О СОБСТВЕННЫХ СБОЯХ здесь НЕ делается (адверс-ревью 2026-07-28): при коннекте владелец
+  // может спать (ночной авто-reconnect клиента из трея) — доклад ушёл бы в пустую комнату, а маркер
+  // прочитанного уехал бы навсегда. Триггер перенесён на ПЕРВУЮ РЕПЛИКУ владельца — см.
+  // `ctx.onOwnerPresent` в router-ws.makeSessionContext (голос + текстовая копия в чат).
   const cooldownMs = (() => {
     const n = Number.parseInt(process.env.JARVIS_GREETING_COOLDOWN_MS ?? "", 10);
     return Number.isFinite(n) && n >= 0 ? n : 6 * 3_600_000;
@@ -926,6 +993,9 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
         ctx.voice.speak(line);
         void setLastGreeted(session.userId); // кулдаун А6 — от факта ПРОИЗНЕСЁННОГО приветствия
         log.info("онбординг: приветствие произнесено");
+        // Волна D: сводка дня НЕ здесь (контроль: ночной реконнект после рестарта сервера произносил
+        // её в пустую комнату и тратил суточный гейт — утром владелец ничего не слышал). Триггер —
+        // ПЕРВАЯ РЕПЛИКА владельца, см. ctx.flushIncidentReport/брифинг в router-ws.
       })
       .catch((e) => log.warn("онбординг не удался", e instanceof Error ? e.message : String(e)));
   }, 800);

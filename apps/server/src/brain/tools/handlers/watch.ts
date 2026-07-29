@@ -76,7 +76,7 @@ function validatePredicate(raw: unknown): { ok: true; predicate: Record<string, 
   }
 }
 
-export function watchCreate(ctx: ToolContext, input: Record<string, unknown>): ToolResult {
+export async function watchCreate(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   if (!ctx.watch || !ctx.sessionId) return err("Наблюдение сейчас недоступно (нет канала озвучки).");
   const what = String(input.what ?? "").trim();
   const condition = String(input.condition ?? "").trim();
@@ -94,7 +94,27 @@ export function watchCreate(ctx: ToolContext, input: Record<string, unknown>): T
   const everySec = Number(input.every_seconds);
   const intervalMs = Number.isFinite(everySec) && everySec > 0 ? everySec * 1000 : predicate ? 10_000 : 300_000; // деф: предикат 10с, LLM 5 мин
   const continuous = input.continuous === true;
-  const res = ctx.watch.add({ sessionId: ctx.sessionId, userId: ctx.userId, what, condition, intervalMs, continuous, predicate });
+  // P0 «watch действует» (2026-07-28): отложенное поручение «когда X — СДЕЛАЙ Y». Кап длины — это
+  // одна реплика-реэнтри в петлю, не сочинение; невалидный тип — честный отказ (не «в тишину»).
+  let action: string | undefined;
+  if (input.action !== undefined) {
+    if (typeof input.action !== "string" || !input.action.trim()) {
+      return err("watch_create: action должен быть непустой строкой — что СДЕЛАТЬ при срабатывании.");
+    }
+    action = input.action.trim();
+    if (action.length > 500) return err("watch_create: action слишком длинный (кап 500 символов) — сформулируй короче.");
+    // §14 CONFIRM на ПОСТАНОВКЕ (адверс-ревью [10], «отмывание инъекции в авторитет владельца»):
+    // отложенное действие исполнится ПОЗЖЕ от имени владельца — значит владелец должен одобрить его
+    // СЕЙЧАС, при создании. Иначе prompt-инъекция с прочитанной страницы могла бы поставить наблюдение
+    // с вредным action, который позже исполнится с доверенным фреймингом. Нет канала → fail-closed.
+    if (!ctx.confirm) return err("watch_create: наблюдение с action требует подтверждения владельца (§14), а канал подтверждения недоступен.");
+    const { approved } = await ctx.confirm(
+      `Поставить наблюдение с отложенным действием: когда «${condition}» — выполнить «${action}»?`,
+      "irreversible",
+    );
+    if (!approved) return err("Владелец не подтвердил наблюдение с действием — не ставлю.");
+  }
+  const res = ctx.watch.add({ sessionId: ctx.sessionId, userId: ctx.userId, what, condition, intervalMs, continuous, predicate, action });
   if (!res.ok) {
     return res.reason === "limit"
       ? err("Слишком много активных наблюдений — сними одно (watch_cancel), прежде чем добавить новое.")
@@ -104,7 +124,8 @@ export function watchCreate(ctx: ToolContext, input: Record<string, unknown>): T
   const period = Math.round(w.intervalMs / 1000);
   return ok(
     `Поставил наблюдение: слежу за «${w.what}», уведомлю когда «${w.condition}». ` +
-      `Проверяю каждые ${period} с${predicate ? " локальным предикатом на клиенте ($0)" : ""}, ${w.continuous ? "слежу постоянно" : "уведомлю один раз"}. id=${w.id}`,
+      `Проверяю каждые ${period} с${predicate ? " локальным предикатом на клиенте ($0)" : ""}, ${w.continuous ? "слежу постоянно" : "уведомлю один раз"}.` +
+      `${w.action ? ` При срабатывании выполню: «${w.action}».` : ""} id=${w.id}`,
   );
 }
 

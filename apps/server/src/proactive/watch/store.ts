@@ -55,6 +55,11 @@ export class WatchStore {
     return this.items.filter((w) => w.userId === userId && w.pendingNotify !== undefined);
   }
 
+  /** Записи с НЕвыполненным отложенным действием (P0 «watch действует», 2026-07-28) — исполнить при подключении. */
+  withPendingAction(userId: string): Watch[] {
+    return this.items.filter((w) => w.userId === userId && w.pendingAction !== undefined);
+  }
+
   add(w: Watch): void {
     this.items.push(w);
     this.persist();
@@ -79,10 +84,17 @@ export class WatchStore {
     return w;
   }
 
-  /** Убрать давно завершённые/снятые из файла (гигиена). Активные не трогаем. */
-  prune(now: number, keepMs = 24 * 3600_000): void {
+  /** Убрать давно завершённые/снятые из файла (гигиена). Активные не трогаем.
+   *  Адверс-ревью [3]: запись с НЕдоставленным pendingNotify/pendingAction держим дольше (7 дней) —
+   *  раньше prune через 24ч молча стирал невыполненное поручение, обещанное при watch_create. */
+  prune(now: number, keepMs = 24 * 3600_000, keepPendingMs = 7 * 24 * 3600_000): void {
     const before = this.items.length;
-    this.items = this.items.filter((w) => w.status === "active" || now - (w.firedAt ?? w.createdAt) < keepMs);
+    this.items = this.items.filter((w) => {
+      if (w.status === "active") return true;
+      const age = now - (w.firedAt ?? w.createdAt);
+      if ((w.pendingNotify !== undefined || w.pendingAction !== undefined) && age < keepPendingMs) return true;
+      return age < keepMs;
+    });
     if (this.items.length !== before) this.persist();
   }
 

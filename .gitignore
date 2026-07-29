@@ -61,3 +61,7 @@ apps/server/models/
 /apps/server/test-token-issue.mjs
 /apps/server/tts-ab.mjs
 /apps/server/tts-models-ab.mjs
+
+# Рантайм-артефакты супервизора (PID-лок и его лог) — не в репозиторий.
+/infra/supervisor.lock
+/infra/supervisor.log
