@@ -352,18 +352,44 @@ describe("Волна C: чекпойнт прерванной задачи и ч
     const tasks = new TaskManager();
     const reply = await handleUserText(fakeSession(), "доделай", await makeDeps(llm, { checkpoints, tasks }));
     delete process.env.JARVIS_TOOL_FAMILY_CAP;
-    expect(reply.voice.toLowerCase()).toMatch(/застрял|не довёл/u); // честный провал
+    // Честный провал: без преамбулы срабатывает более ранний гард masked-failure («не вышло»), с
+    // преамбулой — собственная фраза floodStuck. Оба варианта НЕ заявляют успех.
+    expect(reply.voice.toLowerCase()).toMatch(/застрял|не довёл|не вышло/u);
     expect(checkpoints.peek("u1")).not.toBeNull(); // журнал цел — «доделай» ещё сработает
     expect(tasks.recentTerminal("u1")[0]?.state).toBe("failed"); // и это НЕ успех в реестре
   });
 
   // 🔴 Контроль-5 (HIGH): мой же фикс floodStuck озвучивал ПРЕАМБУЛУ модели дословно и стоял ВЫШЕ
   // анти-masked-failure — на «Готово.» владелец слышал УСПЕХ при `failed` в реестре.
-  it("флуд-обрыв с пустым «Готово.» от модели → честный провал, не ложный успех", async () => {
+  // Контроль-6: гард isHollowSuccess ловит только ≤3 слов — «Готово, сэр — отчёт по рынку собран.»
+  // проходил мимо, и владелец слышал УСПЕХ при failed. Терминал больше НЕ переиспользует текст модели.
+  it.each(["Готово.", "Готово, сэр — отчёт по рынку собран.", "Сообщение отправлено Кате, сэр."])(
+    "флуд-обрыв с заявкой успеха («%s») → честный провал, преамбула НЕ озвучивается",
+    async (preamble) => {
+      process.env.JARVIS_TOOL_FAMILY_CAP = "3";
+      const turns = Array.from({ length: 8 }, (_v, i) => ({
+        text: preamble,
+        toolUses: [{ id: `w${i}`, name: "web_search", input: { query: `тема ${i}` } }],
+      }));
+      const llm = new MockLlmProvider(turns);
+      const tasks = new TaskManager();
+      const reply = await handleUserText(
+        fakeSession(),
+        "собери отчёт по рынку",
+        await makeDeps(llm, { checkpoints: new CheckpointStore(dir), tasks }),
+      );
+      delete process.env.JARVIS_TOOL_FAMILY_CAP;
+      expect(reply.voice).not.toContain("собран");
+      expect(reply.voice).not.toContain("отправлено");
+      expect(reply.voice.toLowerCase()).toMatch(/застрял|не вышло|не довёл/u);
+      expect(tasks.recentTerminal("u1")[0]?.state).toBe("failed"); // голос и реестр согласованы
+    },
+  );
+
+  it("флуд-обрыв без преамбулы → честный провал, журнал цел", async () => {
     process.env.JARVIS_TOOL_FAMILY_CAP = "3";
     const checkpoints = new CheckpointStore(dir);
     const turns = Array.from({ length: 8 }, (_v, i) => ({
-      text: "Готово.", // полое подтверждение в преамбуле обрывающего раунда
       toolUses: [{ id: `w${i}`, name: "web_search", input: { query: `тема ${i}` } }],
     }));
     const llm = new MockLlmProvider(turns);
