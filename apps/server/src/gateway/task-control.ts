@@ -6,6 +6,7 @@
  */
 import type { TaskControl, TaskStatus } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { isOfferDeclined, resumeOfferWindowMs } from "../brain/agent/checkpoint.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
 import { statusReport } from "../brain/tasks/narrate.js";
 import type { Task } from "../brain/tasks/task.js";
@@ -76,7 +77,20 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   // (любая активная задача userId, вкл. скрытую разговорную). Иначе «отмени напоминание/подписку»/«забудь
   // что просил» БЕЗ §20-задачи должно уйти в АГЕНТ (cancel_reminder и пр.), а не съесться «Нет задачи».
   if (decision.kind === "cancel") {
-    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false; // нечего останавливать — в агент
+    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) {
+      // Волна C (финальный контроль): активных задач нет, но мы ТОЛЬКО ЧТО предложили продолжить
+      // прерванную — «не надо / забудь» в это окно есть ОТКАЗ от предложения. Гасим чекпойнт, иначе
+      // обещание живёт весь TTL: сказанное плееру «продолжи» воскрешало бы ЯВНО отклонённую работу.
+      // Реплику НЕ съедаем (return false) — она может быть «отмени напоминание» и нужна агенту.
+      // ⚠️ Только ГОЛЫЙ отказ (isOfferDeclined): «отмени напоминание про таблетки» — отмена ЧЕГО-ТО
+      // ДРУГОГО, и она МОЛЧА уничтожала журнал 12-раундовой работы (контроль-5).
+      const cp = isOfferDeclined(text) ? ctx.agentDeps.checkpoints?.peek(ctx.session.userId) : undefined;
+      if (cp?.offeredAt !== undefined && Date.now() - cp.offeredAt <= resumeOfferWindowMs()) {
+        ctx.agentDeps.checkpoints?.clearIf(ctx.session.userId, cp.taskId);
+        log.info("§волна C: владелец отказался продолжать — чекпойнт снят", { taskId: cp.taskId });
+      }
+      return false; // нечего останавливать — в агент
+    }
     handleTaskControl(ctx, "cancel", undefined, source);
     return true;
   }
@@ -150,8 +164,20 @@ export function handleTaskControl(
     case "resume": {
       const ok = tasks.resume(task.taskId);
       emitTaskStatus(ctx.session, task);
-      log.info("task.control: resume", { source, taskId: task.taskId, ok });
-      ackControl(ctx, ok ? "Продолжаю." : "Нечего возобновлять.", source);
+      log.info("task.control: resume", { source, taskId: task.taskId, ok, state: task.state });
+      // «Нечего возобновлять» на ИДУЩЕЙ задаче — ложный отказ (контрольное ревью-3 волны C): резюме не
+      // требуется, работа не стоит. Тем более теперь «доделай» — слово, которое Джарвис сам предлагает
+      // владельцу для продолжения ПРЕРВАННОЙ задачи; услышать на него «нечего» при активной работе
+      // сбивает с толку. Честный статус вместо отказа.
+      // Ложный отказ был не только на running (финальный контроль волны C): задача в admission-очереди
+      // (queued) или на §14-подтверждении (waiting_confirm) — тоже ИДЁТ, «нечего возобновлять» про неё
+      // неправда. Тем более «доделай» — слово, которое Джарвис сам предлагает владельцу.
+      const inFlight = task.state === "running" || task.state === "queued" || task.state === "waiting_confirm";
+      ackControl(
+        ctx,
+        ok ? "Продолжаю." : inFlight ? "Уже занимаюсь этим, сэр." : "Нечего возобновлять.",
+        source,
+      );
       break;
     }
     case "status": {

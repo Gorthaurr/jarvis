@@ -67,6 +67,7 @@ import type { McpManager } from "../brain/mcp/manager.js";
 import { noteClientContext } from "../proactive/salience.js";
 import { metrics } from "../obs/metrics.js";
 import { TaskManager } from "../brain/tasks/manager.js";
+import type { CheckpointStore } from "../brain/agent/checkpoint-store.js";
 import type { TradingService } from "../brain/trading/index.js";
 import type { KnowledgeBase } from "../brain/knowledge/index.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
@@ -113,6 +114,11 @@ export interface BrainProviders {
   tierThinking: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
   /** Реестр долгих задач (§20) — общий на gateway: голос/UI управляют активной задачей. */
   tasks: TaskManager;
+  /**
+   * Волна C (P0 #4): чекпойнты прерванных задач — «продолжи с того же места» перестаёт быть пустым
+   * обещанием. Durable, один на gateway (переживает рестарт сервера). Опционален: нет → фича молчит.
+   */
+  checkpoints?: CheckpointStore;
   /** Тёплость сессий для §15-кеширования — общая на gateway. */
   warmth: SessionWarmth;
   /** Реестр самописных инструментов (§8+ саморасширение) — общий на gateway. */
@@ -260,6 +266,10 @@ export function makeSessionContext(
       language: getProfile(session.userId).language,
     },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
+    // Волна C: чекпойнт прерванной задачи → честное «продолжи». DEV-ГЕЙТ обязателен (правило проекта
+    // для всего, что ПОТРЕБЛЯЕТ накопленное владельцем): слот один на пользователя, и утренний прогон
+    // текст-драйвера иначе перетёр бы недоделку владельца своей — а его «доделай» доводило бы смоук.
+    checkpoints: isDevSession(clientVersion) ? undefined : brain.checkpoints,
     warmth: brain.warmth, // общая тёплость сессий (§15)
     dynamicTools: brain.dynamicTools, // §8+ самописные инструменты в наборе модели
     // §15 ленивая загрузка: набор подгруженных холодных инструментов — per-session (скоуплен на Session,

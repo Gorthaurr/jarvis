@@ -176,6 +176,15 @@ export function claimsObservedResult(text: string): boolean {
 // этой памяти (formatRecentTasks), чтобы «не вижу» не превращалось в «этого не было», (в) persona v79
 // объявляет «проверил» действием и запрещает отрицать факт без проверки источника.
 
+/**
+ * Инструменты «исходящее сообщение/заказ ЧЕЛОВЕКУ»: их ok-результат — успех-мутация ТОЛЬКО при
+ * `ToolResult.sent:true` (честные отказы «не подтвердили»/«повтор не ушёл» — тоже isError:false, но
+ * дела не было). Живёт ЗДЕСЬ (а не в agent/index.ts), потому что этим знанием пользуются ДВА
+ * потребителя: анти-masked-failure в петле и журнал чекпойнта — разойдись они, журнал объявил бы
+ * неподтверждённую отправку совершённой (финальный контроль волны C, HIGH).
+ */
+export const OUTBOUND_SEND_TOOLS = new Set(["telegram_send", "telegram_send_voice", "message_send", "order_place"]);
+
 /** Грубая классификация по тексту ошибки (для будущих специализированных фраз/телеметрии). */
 export function classifyFailure(detail?: string): FailureClass {
   const d = (detail ?? "").toLowerCase();

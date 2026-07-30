@@ -120,10 +120,13 @@
 дренаж по факту воспроизведения, Talker/филлер, снизить promoteMs; затем openWakeWord+Silero
 (локальный wake = privacy+офлайн+деньги), включить speaker-gate, loopback-AEC.
 
-**Волна C «Действительно делает» (P0 #4,5 + P1 агента)**: onFire-реэнтри watch («когда X — сделай Y»),
-чекпойнт convo + resume длинных задач (сначала M-срез: persist последнего терминала для
-«продолжи»), subgoal-ledger, observation-masking вместо hard-fail, thinking ON на verify-раунде,
-cancel-токен реплея + needsLlm-эскалация, browser read-only в SDK.
+**Волна C «Действительно делает» (P0 #4,5 + P1 агента)**: onFire-реэнтри watch («когда X — сделай Y»)
+✅ 2026-07-28, thinking ON на verify-раунде ✅ 2026-07-28, **инкремент C-1 ✅ 2026-07-29**
+(observation-masking вместо hard-fail + чекпойнт-журнал прерванной задачи и честное «продолжи» —
+ветка `feat/wave-c-task-continuity`; порядок против плана: свёртка сделана ВМЕСТЕ с чекпойнтом, т.к.
+резюме задачи, умершей по контексту, без неё немедленно упиралось бы в тот же потолок).
+Осталось: subgoal-ledger, cancel-токен реплея + needsLlm-эскалация, browser read-only в SDK,
+полноценный resume convo (C-1 — M-срез: журнал, а не сырой контекст; обоснование в CLAUDE.md).
 
 **Волна D «Мажордом» (P1 проактива)** — ✅ СДЕЛАНА 2026-07-29 (D1–D5): повторяющиеся напоминания
 (daily/weekdays/weekly/interval, серии с seriesId, догон одним прыжком), обязательства из речи

@@ -27,6 +27,7 @@ import { metrics } from "../obs/metrics.js";
 import { type FileLogSink, initFileLog } from "../obs/file-log.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { flushTaskStores, loadTaskManager } from "../brain/tasks/task-store.js";
+import { loadCheckpointStore } from "../brain/agent/checkpoint-store.js";
 import { ActivityService } from "../brain/activities.js";
 import { flushResolutionStores, loadResolutionMemory } from "../memory/resolution-memory.js";
 import { flushWorkingStores } from "../memory/working-store.js";
@@ -245,6 +246,9 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     models: config.models,
     tierThinking: config.tierThinking,
     tasks: taskManager, // §20: реестр долгих задач, ПЕРЕЖИВАЕТ рестарт (диск-персист §5) — для «сделал?»
+    // Волна C (P0 #4): чекпойнт ПРЕРВАННОЙ задачи (журнал прошлого захода) — «продолжи» продолжает
+    // с того же места, а не запускает холодную петлю с нуля. Durable, переживает рестарт сервера.
+    checkpoints: loadCheckpointStore(),
     warmth: new SessionWarmth(), // §15: кешируем префикс только в тёплых сессиях
     dynamicTools, // §8+ самописные инструменты
     skills: createSkillProvider(embedder, skillDistiller), // §8 навыки; recall СЕМАНТИЧЕСКИЙ (e5); мульти-демо дистилляция (BrowserBC)

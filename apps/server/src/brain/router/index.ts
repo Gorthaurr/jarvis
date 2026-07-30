@@ -436,7 +436,13 @@ function extractQuery(tokens: string[], triggers: readonly string[]): string {
 const LEAD_STRIP_RE =
   /^[\s,!.:;-]*(?:джарвис[ауе]?|джарвиз|джарис|жарвис|сервис|эй|привет|пожалуйста|слушай(?:-ка)?|будь добр|давай|ну|короче|так|слышишь)[\s,!.:;-]*/iu;
 
-function stripWakeAndFiller(text: string): string {
+/**
+ * Срезать обращение и ведущую вежливость. ЭКСПОРТИРУЕТСЯ (волна C): любой слой, который решает
+ * «эта фраза принадлежит роутеру?», обязан нормализовать вход ТАК ЖЕ — вторая копия правил
+ * расходится (живой случай: «давай продолжи» роутер видел как медиа-команду, а гард продолжения
+ * задачи — нет, и гард не срабатывал).
+ */
+export function stripWakeAndFiller(text: string): string {
   let t = text.trim();
   for (let i = 0; i < 6; i += 1) {
     const next = t.replace(LEAD_STRIP_RE, "");
