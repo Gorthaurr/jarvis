@@ -9,7 +9,7 @@
  * Возвращает текст для tool_result и флаг ошибки. Декуплен от Session минимальным
  * интерфейсом ActuatorSink — тестируется с моком.
  */
-import type { ActionCommand, ActionResult, ActionKind } from "@jarvis/protocol";
+import type { ActionCommand, ActionResult, ActionKind, ConfirmOutcomeKind } from "@jarvis/protocol";
 import { DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "@jarvis/protocol";
 import type { ResolutionMemory } from "../../memory/resolution-memory.js";
 import type { ToolResultContent } from "../../integrations/llm.js";
@@ -32,7 +32,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, channelDownResult, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
 import { sleep } from "@jarvis/shared";
 import { type BrowserCondition, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 import {
@@ -75,6 +75,20 @@ export interface ActuatorSink {
   sendAction(cmd: ActionCommand, timeoutMs?: number): Promise<ActionResult>;
 }
 
+/**
+ * Исход §14-подтверждения (Ф0 пульта). `approved` — производное от `outcome === "approved"`;
+ * ветвиться по нему можно, но НОВЫЙ код обязан различать `denied` (владелец сказал «нет») и
+ * `undelivered` (владелец вопроса НЕ ВИДЕЛ) — иначе вернётся дефект «сказали „вы не подтвердили"
+ * про вопрос, ушедший в мёртвый сокет».
+ */
+export interface ConfirmOutcome {
+  outcome: ConfirmOutcomeKind;
+  approved: boolean;
+  revision?: string;
+  /** Ф1: идентификатор припаркованного запроса (outcome === "deferred"). */
+  approvalId?: string;
+}
+
 export interface ToolContext {
   session: ActuatorSink;
   web: IWebProvider;
@@ -82,11 +96,18 @@ export interface ToolContext {
   userId: string;
   /** §бесшумный-ввод: происхождение хода — "user" (реактивный, физ.ввод не гейтить) | "proactive" (само-инициатива). */
   origin?: "user" | "proactive";
-  /** Подтверждение необратимого (§14). kind задаёт вид модалки: send|order|irreversible. */
+  /**
+   * Подтверждение необратимого (§14). kind задаёт вид модалки: send|order|irreversible.
+   *
+   * Ф0 пульта: возвращает РАЗЛИЧИМЫЙ исход, а не голый boolean — «владелец отказал» и «я не смог его
+   * спросить» требуют РАЗНЫХ слов владельцу (см. ConfirmOutcomeKind). `approved` оставлено как
+   * производное поле, чтобы существующие ветки не сломались, но новые call-sites обязаны смотреть на
+   * `outcome`: молчаливая деградация всего в deny — ровно то, что чинит эта фаза.
+   */
   confirm?: (
     summary: string,
     kind?: "send" | "order" | "irreversible",
-  ) => Promise<{ approved: boolean; revision?: string }>;
+  ) => Promise<ConfirmOutcome>;
   /** Реестр самописных инструментов (§8+ саморасширение). */
   dynamicTools?: DynamicToolStore;
   /** §15 ленивая загрузка: набор подгруженных холодных инструментов (tool_load его мутирует). */
@@ -359,8 +380,8 @@ export async function dispatchTool(
           return "";
         }
       })();
-      const { approved } = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
-      if (!approved) return ok(`Отменено пользователем (${name}).`);
+      const gate = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
+      if (!gate.approved) return ok(confirmDeclineText(gate.outcome, name));
     }
     const r = await ctx.mcp.callTool(name, input);
     // §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (аудит контекста 2026-07-20 + ревью батча F7): вывод MCP-инструмента —
@@ -425,8 +446,8 @@ export async function dispatchTool(
         : name === "app_close"
           ? `Закрыть «${String(input.app ?? "")}» принудительно? Несохранённое будет потеряно.`
           : `Питание: ${String(input.op ?? "")}. Несохранённая работа будет потеряна. Выполнится с задержкой и предупреждением — можно отменить. Подтвердите?`;
-    const { approved } = await ctx.confirm(summary, "irreversible");
-    if (!approved) return ok(`Отменено пользователем (${name}).`);
+    const gate = await ctx.confirm(summary, "irreversible");
+    if (!gate.approved) return ok(confirmDeclineText(gate.outcome, name));
   }
 
   // C5 SSRF: web_* (невидимый ЗАЛОГИНЕННЫЙ браузер Джарвиса) тоже навигируют по URL — прогоняем через тот

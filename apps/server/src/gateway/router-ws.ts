@@ -44,7 +44,7 @@ import { autonomyFreeze } from "../autonomy/freeze.js";
 import { renderCapabilityPassport } from "../brain/capabilities.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, readEvictedFacts, removeFactsMatching, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { getProfile, readEvictedFacts, removeFactExact, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
 import { upcomingDue } from "../proactive/ambient/obligations.js";
@@ -250,14 +250,20 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
   const episodic = ctx.agentDeps.episodic;
   let episodes: MemoryItem[] = [];
   let episodesUnavailable: string | undefined;
+  let episodesTotal: number | undefined;
+  let episodesHasMore = false;
   if (!episodic?.listRecent) {
     // ЧЕСТНО: «не умею прочитать» ≠ «памяти нет» (закон честности — пустой список выглядел бы как
     // «Джарвис ничего не помнит», хотя записи на диске есть).
     episodesUnavailable = "эпизодическая память недоступна в этой сборке";
   } else {
     try {
-      const rows = await episodic.listRecent(userId, MEMORY_UI_LIMIT, needle);
-      episodes = rows.map((e) => ({ id: e.id, text: e.text, ts: e.ts, kind: e.kind }));
+      // +1 сверх капа — дешёвый признак «есть ещё» без вытягивания всей таблицы.
+      const rows = await episodic.listRecent(userId, MEMORY_UI_LIMIT + 1, needle);
+      const shown = rows.slice(0, MEMORY_UI_LIMIT);
+      episodesHasMore = rows.length > MEMORY_UI_LIMIT; // точного числа не знаем — но честно скажем «есть ещё»
+      if (!episodesHasMore) episodesTotal = rows.length;
+      episodes = shown.map((e) => ({ id: e.id, text: e.text, ts: e.ts, kind: e.kind }));
       // 🔴 Найдено ЖИВЫМ прогоном: без БД эпизодика — process-only, и ПУСТОЙ список читается как
       // «пока нечего запоминать», хотя правда — «долговременная память не работает, всё умрёт с
       // рестартом». Говорим прямо (декларация обязана совпадать с поведением).
@@ -271,14 +277,17 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
       log.warn("вкладка «Память»: чтение эпизодов упало", { error: e instanceof Error ? e.message : String(e) });
     }
   }
-  const evicted = (await readEvictedFacts(userId, MEMORY_UI_LIMIT))
-    .filter((r) => !needle || r.fact.toLowerCase().includes(needle.toLowerCase()))
-    .map((r) => ({ id: r.fact, text: r.fact, ...(r.ts !== undefined ? { ts: r.ts } : {}) }));
+  // Фильтр уходит ВНУТРЬ (не после обрезки) — иначе поиск по давно вытесненному врал бы «пусто».
+  const arch = await readEvictedFacts(userId, MEMORY_UI_LIMIT, needle);
+  const evicted = arch.items.map((r) => ({ id: r.fact, text: r.fact, ...(r.ts !== undefined ? { ts: r.ts } : {}) }));
   const state: MemoryState = {
     facts,
     episodes,
     evicted,
     ...(episodesUnavailable ? { episodesUnavailable } : {}),
+    // Честные тоталы: показанное ≠ всё накопленное (кап MEMORY_UI_LIMIT).
+    totals: { evicted: arch.total, ...(episodesTotal !== undefined ? { episodes: episodesTotal } : {}) },
+    ...(episodesHasMore ? { hasMore: { episodes: true } } : {}),
   };
   ctx.session.send("memory.state", state);
 }
@@ -288,9 +297,11 @@ async function forgetMemoryItem(ctx: SessionContext, req: MemoryForget): Promise
   const userId = ctx.session.userId;
   try {
     if (req?.layer === "fact" && typeof req.id === "string" && req.id) {
-      // Точное совпадение текста — владелец выбрал КОНКРЕТНУЮ строку, семантику здесь применять нельзя.
-      const removed = await removeFactsMatching(userId, [req.id]);
-      log.info("вкладка «Память»: владелец забыл факт профиля", { removed: removed.length });
+      // 🔴 removeFactExact, а НЕ removeFactsMatching (адверс-ревью, HIGH): у последнего семантика
+      // голосового забывания (needle ⊆ fact + кап 5) — клик «Забыть» на «жена Оля» сносил и
+      // «жена Оля работает врачом», и «жена Оля любит суши». Владелец выбрал КОНКРЕТНУЮ строку.
+      const removed = await removeFactExact(userId, req.id);
+      log.info("вкладка «Память»: владелец забыл факт профиля", { removed: removed !== null });
     } else if (req?.layer === "episode" && typeof req.id === "string" && req.id) {
       const ok = (await ctx.agentDeps.episodic?.markStaleById?.(userId, req.id)) ?? false;
       log.info("вкладка «Память»: владелец забыл эпизод", { id: req.id, ok });

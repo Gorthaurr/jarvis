@@ -31,6 +31,7 @@ function renderLayer(
   items: MemoryItem[],
   emptyText: string,
   onForget: ((item: MemoryItem) => void) | null,
+  hasMore = false,
 ): void {
   if (!list) return;
   list.innerHTML = "";
@@ -55,6 +56,14 @@ function renderLayer(
       }),
     );
   }
+  // ЧЕСТНОСТЬ (адверс-ревью): показанное ≠ всё накопленное. Без этой строки владелец читал список
+  // как исчерпывающий — и делал вывод «вот всё, что Джарвис обо мне знает».
+  if (hasMore) {
+    const li = document.createElement("li");
+    li.className = "skill-list__empty";
+    li.textContent = "…показаны только самые свежие — записей больше. Уточните поиском.";
+    list.appendChild(li);
+  }
 }
 
 export function initMemoryPanel(jarvis: JarvisBridge): void {
@@ -65,11 +74,24 @@ export function initMemoryPanel(jarvis: JarvisBridge): void {
   const counts = $<HTMLElement>("memCounts");
   const warn = $<HTMLElement>("memWarn");
 
+  let searching = false; // «нет совпадений по запросу» ≠ «память пуста» — тексты пустоты разные
   jarvis.onMemory((m: MemoryState) => {
-    renderLayer(factsList, m.facts, "Точных фактов пока нет.", (it) => jarvis.forgetMemory("fact", it.id));
-    renderLayer(episodesList, m.episodes, "Записей из разговоров пока нет.", (it) => jarvis.forgetMemory("episode", it.id));
-    renderLayer(evictedList, m.evicted, "Ничего не вытеснялось.", null);
-    if (counts) counts.textContent = `Фактов: ${m.facts.length} · из разговоров: ${m.episodes.length} · вытеснено: ${m.evicted.length}`;
+    const empty = (what: string) => (searching ? "По запросу ничего не найдено." : what);
+    renderLayer(factsList, m.facts, empty("Точных фактов пока нет."), (it) => jarvis.forgetMemory("fact", it.id));
+    renderLayer(
+      episodesList,
+      m.episodes,
+      empty("Записей из разговоров пока нет."),
+      (it) => jarvis.forgetMemory("episode", it.id),
+      m.hasMore?.episodes === true,
+    );
+    renderLayer(evictedList, m.evicted, empty("Ничего не вытеснялось."), null, m.hasMore?.evicted === true);
+    if (counts) {
+      // Числа честные: где показанное усечено — говорим «200+», а не выдаём кап за полный объём.
+      const ep = m.hasMore?.episodes ? `${m.episodes.length}+` : String(m.totals?.episodes ?? m.episodes.length);
+      const ev = m.totals?.evicted !== undefined && m.totals.evicted > m.evicted.length ? `${m.evicted.length} из ${m.totals.evicted}` : String(m.evicted.length);
+      counts.textContent = `Фактов: ${m.facts.length} · из разговоров: ${ep} · вытеснено: ${ev}`;
+    }
     if (warn) {
       // ЧЕСТНОСТЬ: «не смог прочитать» ≠ «памяти нет» — иначе владелец решит, что Джарвис его забыл.
       warn.textContent = m.episodesUnavailable ?? "";
@@ -81,6 +103,10 @@ export function initMemoryPanel(jarvis: JarvisBridge): void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   search?.addEventListener("input", () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => jarvis.requestMemory(search.value.trim() || undefined), 250);
+    timer = setTimeout(() => {
+      const q = search.value.trim();
+      searching = q.length > 0;
+      jarvis.requestMemory(q || undefined);
+    }, 250);
   });
 }

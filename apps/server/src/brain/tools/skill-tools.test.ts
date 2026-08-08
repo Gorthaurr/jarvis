@@ -75,7 +75,7 @@ describe("skill_list / skill_execute (§8 — выученные показом 
   });
 
   it("guard-навык: подтверждение получено → запускается", async () => {
-    const confirm = vi.fn(async () => ({ approved: true }));
+    const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
     const { ctx, sendAction } = makeCtx({ confirm });
     const r = await dispatchTool("skill_execute", { skillId: "send_vk" }, ctx);
     expect(confirm).toHaveBeenCalled();
@@ -84,7 +84,7 @@ describe("skill_list / skill_execute (§8 — выученные показом 
   });
 
   it("guard-навык: пользователь отклонил → не запускается, нейтральный ответ", async () => {
-    const confirm = vi.fn(async () => ({ approved: false }));
+    const confirm = vi.fn(async () => ({ approved: false, outcome: "denied" as const }));
     const { ctx, sendAction } = makeCtx({ confirm });
     const r = await dispatchTool("skill_execute", { skillId: "send_vk" }, ctx);
     expect(r.isError).toBe(false); // отказ — не ошибка инструмента

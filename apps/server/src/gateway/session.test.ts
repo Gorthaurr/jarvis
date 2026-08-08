@@ -52,3 +52,46 @@ describe("Session.sendAction — fail-fast на мёртвом сокете (Б4
     expect(s.channelUp()).toBe(false);
   });
 });
+
+// Ф0 пульта: подтверждение §14 — «владелец отказал» и «я не смог его спросить» это РАЗНЫЕ вещи.
+// До фикса вопрос уходил в мёртвый сокет молча, промис висел 60с (25% потолка задачи), и владельцу
+// говорили «вы не подтвердили» про вопрос, которого он не видел.
+describe("Session.requestConfirm — fail-fast и различимые исходы (Ф0)", () => {
+  const req = (id = "r1") => ({ requestId: id, summary: "Отправить Кате?", kind: "send" as const, expiresAt: Date.now() + 60_000 });
+
+  it("сокет закрыт → мгновенный undelivered, БЕЗ ожидания окна", async () => {
+    const s = new Session("s1", "u1", sock(WS_CLOSED));
+    const started = Date.now();
+    const r = await s.requestConfirm(req());
+    expect(r.approved).toBe(false);
+    expect(r.outcome).toBe("undelivered"); // НЕ denied: владелец вопроса не видел
+    expect(Date.now() - started).toBeLessThan(500); // окно 60с не сжигали
+  });
+
+  it("сокет открыт → вопрос уходит, решение владельца приходит как approved", async () => {
+    const socket = sock(WS_OPEN);
+    const s = new Session("s2", "u1", socket);
+    const p = s.requestConfirm(req("r2"));
+    expect(socket.sent.length).toBe(1); // вопрос реально отправлен
+    s.resolveConfirm({ requestId: "r2", approved: true });
+    const r = await p;
+    expect(r.approved).toBe(true);
+  });
+
+  it("teardown резолвит НАСТОЯЩИМ requestId и undelivered (корреляция не теряется)", async () => {
+    const s = new Session("s3", "u1", sock(WS_OPEN));
+    const p = s.requestConfirm(req("r3"));
+    s.teardown(); // сессия ушла, пока владелец думал
+    const r = await p;
+    expect(r.requestId).toBe("r3"); // раньше приходил пустой id — корреляция терялась
+    expect(r.outcome).toBe("undelivered"); // и это не решение владельца
+    expect(r.approved).toBe(false);
+  });
+
+  it("истечение окна = expired (владелец ВИДЕЛ вопрос, но не ответил) — мягче отказа", async () => {
+    const s = new Session("s4", "u1", sock(WS_OPEN));
+    const r = await s.requestConfirm({ requestId: "r4", summary: "?", kind: "send", expiresAt: Date.now() + 1 });
+    expect(r.outcome).toBe("expired");
+    expect(r.approved).toBe(false);
+  });
+});

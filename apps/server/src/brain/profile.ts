@@ -175,9 +175,17 @@ async function archiveEvictedFact(userId: string, fact: string): Promise<void> {
  * вытеснены капом), поэтому забывать оттуда нечего. Новые — первыми. Сбой ФС → пустой список
  * (архива может не быть вовсе — это норма, а не ошибка).
  */
-export async function readEvictedFacts(userId: string, limit = 50): Promise<Array<{ ts?: number; fact: string }>> {
+export async function readEvictedFacts(
+  userId: string,
+  limit = 50,
+  contains?: string,
+): Promise<{ items: Array<{ ts?: number; fact: string }>; total: number }> {
   try {
     const raw = await readFile(evictedArchiveFile(userId), "utf8");
+    // 🔴 Фильтр — ДО обрезки (адверс-ревью): раньше срезали 200 свежих и лишь потом искали подстроку,
+    // поэтому поиск по факту, вытесненному полгода назад, отвечал «Ничего не вытеснялось» при полном
+    // архиве — ложный отчёт о памяти ровно в той витрине, которая создана ради честности.
+    const needle = contains?.trim().toLowerCase();
     const out: Array<{ ts?: number; fact: string }> = [];
     for (const line of raw.split("\n")) {
       const s = line.trim();
@@ -185,15 +193,18 @@ export async function readEvictedFacts(userId: string, limit = 50): Promise<Arra
       try {
         const rec = JSON.parse(s) as { ts?: string; fact?: string };
         if (typeof rec.fact !== "string" || !rec.fact) continue;
+        if (needle && !rec.fact.toLowerCase().includes(needle)) continue;
         const ms = rec.ts ? Date.parse(rec.ts) : Number.NaN;
         out.push({ fact: rec.fact, ...(Number.isFinite(ms) ? { ts: ms } : {}) });
       } catch {
         /* битая строка архива — пропускаем, не роняем весь список */
       }
     }
-    return out.reverse().slice(0, limit);
+    // total — СКОЛЬКО ВСЕГО подошло: UI обязан показать «показаны последние N из M», иначе усечённое
+    // число подаётся владельцу как полное («вот всё, что вытеснено»).
+    return { items: out.reverse().slice(0, limit), total: out.length };
   } catch {
-    return []; // архива нет (ничего не вытеснялось) — штатный случай
+    return { items: [], total: 0 }; // архива нет (ничего не вытеснялось) — штатный случай
   }
 }
 
@@ -239,6 +250,33 @@ const MAX_FORGET_FACTS = 5;
  * точного равенства) — «забудь Москву» больше не стирает и «работаю в Москве», и «живу в Москве».
  * Кап MAX_FORGET_FACTS. Best-effort по словам; семантику несёт episodic.markStale в forgetUserMemory.
  */
+/**
+ * 🔴 ТОЧЕЧНОЕ забывание ОДНОГО факта — для вкладки «Память» (владелец кликнул «Забыть» на конкретной
+ * строке). Отдельный примитив, НЕ `removeFactsMatching`: у того семантика ГОЛОСОВОГО забывания
+ * (needle ⊆ fact + кап 5), и для UI-клика она давала collateral — адверс-ревью воспроизвело живьём:
+ * факты «жена Оля», «жена Оля работает врачом», «жена Оля любит суши» → клик «Забыть» на первом
+ * стирал ВСЕ ТРИ; а при 6 однотемных фактах кап съедал 5 СОСЕДЕЙ, оставляя выбранный на месте
+ * (владелец видел «нажал забыть — не сработало», и минус пять чужих фактов).
+ *
+ * Здесь — только ТОЧНОЕ совпадение (после fold: регистр/ё/пробелы), ровно одна запись, и она уходит
+ * в durable-архив вытесненных: забывание из UI обратимо и видно во вкладке «Вытеснено» — как и
+ * обещает панель. Возвращает удалённый текст или null (строки уже нет — честно сообщаем).
+ */
+export async function removeFactExact(userId: string, fact: string): Promise<string | null> {
+  const p = entry(userId);
+  if (!p.facts || p.facts.length === 0) return null;
+  const target = foldFact(fact);
+  if (!target) return null;
+  const idx = p.facts.findIndex((f) => foldFact(f) === target);
+  if (idx < 0) return null;
+  const [removed] = p.facts.splice(idx, 1);
+  if (removed === undefined) return null;
+  await archiveEvictedFact(userId, removed); // обратимость: попадёт во вкладку «Вытеснено»
+  await persist(userId);
+  log.info("профиль: факт забыт владельцем из UI (точечно)", { userId, remaining: p.facts.length });
+  return removed;
+}
+
 export async function removeFactsMatching(userId: string, needles: readonly string[]): Promise<string[]> {
   const p = entry(userId);
   if (!p.facts || p.facts.length === 0) return [];

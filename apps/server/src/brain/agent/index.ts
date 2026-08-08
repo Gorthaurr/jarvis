@@ -99,6 +99,16 @@ const sharedWarmth = new SessionWarmth();
  */
 const RECENT_TASKS_WINDOW_MS = 6 * 60 * 60_000;
 
+/**
+ * Окно §14-подтверждения (Ф0 пульта). Было зашито литералом 60_000 — это 25% потолка задачи
+ * (JARVIS_TASK_MAX_MS, деф 240с), и всё это время петля держала слот параллельности и аренду ввода.
+ * Кламп [10с, 5мин]: ниже владелец физически не успеет прочитать модалку, выше — задача умрёт по
+ * потолку раньше, чем истечёт окно (и вопрос окажется бессмысленным).
+ */
+function confirmWindowMs(): number {
+  return Math.min(300_000, Math.max(10_000, envInt("JARVIS_CONFIRM_WINDOW_MS", 60_000)));
+}
+
 /** Ответ агента по схеме §21. */
 export interface AgentReply {
   voice: string;
@@ -1402,8 +1412,15 @@ async function runAgentLoop(
     // чтобы удаление/выключение/код не показывались как обычная «отправка».
     confirm: (summary: string, kind: "send" | "order" | "irreversible" = "send") =>
       session
-        .requestConfirm({ requestId: newId(), summary, kind, expiresAt: Date.now() + 60_000 })
-        .then((r) => ({ approved: r.approved, revision: r.revision })),
+        .requestConfirm({ requestId: newId(), summary, kind, expiresAt: Date.now() + confirmWindowMs() })
+        .then((r) => ({
+          // Ф0 пульта: исход РАЗЛИЧИМ. Клиент шлёт только осознанное решение владельца → нет outcome =
+          // approved/denied по флагу; «не смог спросить»/«не дождался» проставляет Session (fail-fast,
+          // teardown, истечение окна). `approved` оставлено производным — старые ветки не ломаются.
+          outcome: r.outcome ?? (r.approved ? ("approved" as const) : ("denied" as const)),
+          approved: r.approved,
+          ...(r.revision !== undefined ? { revision: r.revision } : {}),
+        })),
     dynamicTools: deps.dynamicTools,
     skills: deps.skills,
     market: deps.market, // §трейдинг: рыночные данные + анализ (только чтение)

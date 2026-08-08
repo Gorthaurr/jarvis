@@ -11,7 +11,7 @@ const TMP = vi.hoisted(() => {
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { addFact, getProfile, loadProfile, readEvictedFacts, removeFactsMatching, setDisplayName, setLanguage } from "./profile.js";
+import { addFact, getProfile, loadProfile, readEvictedFacts, removeFactExact, removeFactsMatching, setDisplayName, setLanguage } from "./profile.js";
 
 const DEV_USER = "00000000-0000-0000-0000-000000000001";
 const A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -122,7 +122,7 @@ describe("readEvictedFacts — архив вытесненных для вкла
 
   it("архива нет (ничего не вытеснялось) → пустой список, не падение", async () => {
     await loadProfile(C);
-    expect(await readEvictedFacts(C)).toEqual([]);
+    expect((await readEvictedFacts(C)).items).toEqual([]);
   });
 
   it("вытесненные капом факты читаются, новые первыми, с временем", async () => {
@@ -131,7 +131,7 @@ describe("readEvictedFacts — архив вытесненных для вкла
     try {
       await loadProfile(C);
       for (let i = 1; i <= 13; i += 1) await addFact(C, `факт номер ${i}`);
-      const evicted = await readEvictedFacts(C);
+      const evicted = (await readEvictedFacts(C)).items;
       // 13 добавленных при капе 10 → три старейших уехали в архив.
       expect(evicted).toHaveLength(3);
       expect(evicted[0]?.fact).toBe("факт номер 3"); // новые первыми (последний вытесненный — сверху)
@@ -140,7 +140,101 @@ describe("readEvictedFacts — архив вытесненных для вкла
       // И они РЕАЛЬНО ушли из активного профиля (иначе витрина показывала бы дубли).
       expect(getProfile(C).facts).not.toContain("факт номер 1");
       // limit уважается.
-      expect(await readEvictedFacts(C, 2)).toHaveLength(2);
+      expect((await readEvictedFacts(C, 2)).items).toHaveLength(2);
+    } finally {
+      if (saved === undefined) delete process.env.JARVIS_PROFILE_FACTS_MAX;
+      else process.env.JARVIS_PROFILE_FACTS_MAX = saved;
+    }
+  });
+});
+
+// 🔴 Адверс-ревью вкладки «Память» (HIGH, воспроизведено живьём): клик «Забыть» на ОДНОЙ строке
+// уносил соседей — использовалась семантика голосового забывания (needle ⊆ fact + кап 5).
+describe("removeFactExact — точечное забывание из UI не трогает соседей", () => {
+  const U = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+
+  it("удаляет РОВНО выбранный факт, суперсеты остаются", async () => {
+    await loadProfile(U);
+    for (const f of ["жена Оля", "жена Оля работает врачом в третьей городской", "жена Оля любит суши"]) {
+      await addFact(U, f);
+    }
+    const removed = await removeFactExact(U, "жена Оля");
+    expect(removed).toBe("жена Оля");
+    // Раньше здесь оставался ПУСТОЙ профиль — сносило все три.
+    expect(getProfile(U).facts).toEqual([
+      "жена Оля работает врачом в третьей городской",
+      "жена Оля любит суши",
+    ]);
+  });
+
+  it("кейс кап-5: выбранный факт последним — удаляется ИМЕННО он, соседи целы", async () => {
+    const V = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
+    await loadProfile(V);
+    for (const f of [
+      "жена Оля работает врачом",
+      "жена Оля любит суши",
+      "жена Оля родом из Питера",
+      "жена Оля не ест мясо",
+      "жена Оля водит машину",
+      "жена Оля",
+    ]) {
+      await addFact(V, f);
+    }
+    const removed = await removeFactExact(V, "жена Оля");
+    expect(removed).toBe("жена Оля");
+    // Старое поведение: удалялись 5 СОСЕДЕЙ, а выбранный оставался («нажал забыть — не сработало»).
+    expect(getProfile(V).facts).toHaveLength(5);
+    expect(getProfile(V).facts).not.toContain("жена Оля");
+    expect(getProfile(V).facts).toContain("жена Оля любит суши");
+  });
+
+  it("забытое из UI попадает в архив вытесненных (обратимо, как обещает панель)", async () => {
+    const W = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+    await loadProfile(W);
+    await addFact(W, "работает в Сбербанке");
+    await removeFactExact(W, "работает в Сбербанке");
+    const arch = await readEvictedFacts(W);
+    expect(arch.items.some((r) => r.fact === "работает в Сбербанке")).toBe(true);
+  });
+
+  it("нет такой строки → null (честно), профиль не тронут", async () => {
+    const X = "11111111-2222-3333-4444-555555555555";
+    await loadProfile(X);
+    await addFact(X, "любит кофе");
+    expect(await removeFactExact(X, "любит чай")).toBeNull();
+    expect(getProfile(X).facts).toEqual(["любит кофе"]);
+  });
+
+  it("голосовой removeFactsMatching сохраняет прежнюю (семантическую) семантику", async () => {
+    const Y = "22222222-3333-4444-5555-666666666666";
+    await loadProfile(Y);
+    await addFact(Y, "работает в Сбербанке аналитиком");
+    const removed = await removeFactsMatching(Y, ["работает в Сбербанке"]);
+    expect(removed).toHaveLength(1); // subset-сверка — это ПРАВИЛЬНО для голоса, регресса нет
+  });
+});
+
+// Адверс-ревью (MED): фильтр архива применялся ПОСЛЕ обрезки до limit → поиск по давно вытесненному
+// факту врал «Ничего не вытеснялось» при полном архиве.
+describe("readEvictedFacts — поиск ищет по ВСЕМУ архиву, не только по свежему хвосту", () => {
+  const Z = "33333333-4444-5555-6666-777777777777";
+
+  it("старый факт находится, хотя свежих записей больше лимита показа", async () => {
+    const saved = process.env.JARVIS_PROFILE_FACTS_MAX;
+    process.env.JARVIS_PROFILE_FACTS_MAX = "10";
+    try {
+      await loadProfile(Z);
+      await addFact(Z, "работал в Сбербанке до две тысячи двадцатого");
+      for (let i = 0; i < 30; i += 1) await addFact(Z, `проходной факт номер ${i}`);
+      // limit=5 — «показываем только свежий хвост», но искать обязаны по всему архиву.
+      const found = await readEvictedFacts(Z, 5, "Сбербанке");
+      expect(found.items).toHaveLength(1);
+      expect(found.items[0]?.fact).toContain("Сбербанке");
+      expect(found.total).toBe(1);
+      // Без запроса — свежий хвост и ЧЕСТНЫЙ total (больше, чем показано).
+      const page = await readEvictedFacts(Z, 5);
+      expect(page.items).toHaveLength(5);
+      expect(page.total).toBeGreaterThan(5);
     } finally {
       if (saved === undefined) delete process.env.JARVIS_PROFILE_FACTS_MAX;
       else process.env.JARVIS_PROFILE_FACTS_MAX = saved;

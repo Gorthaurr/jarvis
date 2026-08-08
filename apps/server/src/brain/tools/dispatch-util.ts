@@ -4,7 +4,7 @@
  * Эти хелперы переиспользуют ВСЕ доменные модули хендлеров (handlers/*) + сам dispatch.
  */
 import { isFetchUrlAllowed } from "../../integrations/web.js";
-import type { ToolResult } from "./dispatch.js";
+import type { ConfirmOutcome, ToolResult } from "./dispatch.js";
 
 /**
  * §sec SSRF-гард для навигации браузера по URL: блокируем не-http(s) схемы (file:/chrome:/data:) и
@@ -143,4 +143,20 @@ export function numField(input: Record<string, unknown>, names: string[], fallba
     if (typeof v === "number" && Number.isFinite(v)) return v;
   }
   return fallback;
+}
+
+/**
+ * Ф0 пульта: «отменено пользователем» можно говорить ТОЛЬКО когда пользователь реально отменил.
+ * Мёртвый канал/истёкшее окно — не его решение; приписывать ему отказ так же нечестно, как
+ * рапортовать «Готово» без результата.
+ */
+export function confirmDeclineText(outcome: ConfirmOutcome["outcome"], what: string): string {
+  switch (outcome) {
+    case "undelivered":
+      return `Не стал делать (${what}) — не смог спросить вашего подтверждения: связь с вашим экраном была недоступна.`;
+    case "expired":
+      return `Не стал делать (${what}) — вы не ответили на подтверждение, оно истекло.`;
+    default:
+      return `Отменено пользователем (${what}).`;
+  }
 }

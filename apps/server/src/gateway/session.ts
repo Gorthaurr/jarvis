@@ -185,16 +185,30 @@ export class Session {
   /**
    * Отправить ConfirmRequest и дождаться решения пользователя (§14).
    * По истечении окна (expiresAt) — auto-deny (§5).
+   *
+   * 🔴 Ф0 пульта — FAIL-FAST (зеркало sendAction выше): раньше при ЗАКРЫТОМ сокете `send()` только
+   * писал warn, вопрос уходил в никуда, а промис ЖДАЛ полное окно (60с = 25% потолка задачи 240с) и
+   * резолвился «не подтверждено». Владельцу затем говорили «вы не подтвердили» про вопрос, которого
+   * он НЕ ВИДЕЛ, — ложное утверждение о его решении. Теперь мёртвый канал = мгновенный `undelivered`;
+   * вызывающий обязан сказать честно «не смог вас спросить» (и, с Ф1, припарковать намерение).
    */
   requestConfirm(request: ConfirmRequest): Promise<ConfirmResult> {
+    if (!this.alive || this.socket.readyState !== WS_OPEN) {
+      this.log.warn("confirm: канал недоступен — вопрос владельцу НЕ доставлен (fail-fast)", {
+        requestId: request.requestId,
+        kind: request.kind,
+      });
+      return Promise.resolve({ requestId: request.requestId, approved: false, outcome: "undelivered" });
+    }
     this.send("user.confirm.request", request, request.requestId);
     const windowMs = Math.max(0, request.expiresAt - Date.now());
 
     return new Promise<ConfirmResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pendingConfirms.delete(request.requestId);
-        this.log.info("confirm auto-deny по истечении окна", { requestId: request.requestId });
-        resolve({ requestId: request.requestId, approved: false });
+        this.log.info("confirm: окно истекло без ответа владельца", { requestId: request.requestId });
+        // expired ≠ denied: вопрос владелец ВИДЕЛ, но не ответил (отошёл) — формулировка мягче отказа.
+        resolve({ requestId: request.requestId, approved: false, outcome: "expired" });
       }, windowMs);
       if (typeof timer.unref === "function") timer.unref();
       this.pendingConfirms.set(request.requestId, { resolve, timer });
@@ -224,9 +238,11 @@ export class Session {
       pending.resolve(this.syntheticResult(commandId, "disconnected", "сессия закрыта", 0));
     }
     this.inFlight.clear();
-    for (const [, pending] of this.pendingConfirms) {
+    // Ф0 пульта: резолвим НАСТОЯЩИМ requestId и честным `undelivered` — раньше уходил `requestId: ""`
+    // (корреляция терялась) и исход был неотличим от отказа владельца, хотя сессия просто закрылась.
+    for (const [requestId, pending] of this.pendingConfirms) {
       clearTimeout(pending.timer);
-      pending.resolve({ requestId: "", approved: false });
+      pending.resolve({ requestId, approved: false, outcome: "undelivered" });
     }
     this.pendingConfirms.clear();
     // H8: финальная очистка (отмена фоновых §20-задач и т.п.) — ТОЛЬКО здесь, на реальном удалении

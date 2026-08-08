@@ -12,7 +12,7 @@ import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messaging/resend-guard.js";
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
-import type { ToolContext, ToolResult } from "../dispatch.js";
+import type { ConfirmOutcome, ToolContext, ToolResult } from "../dispatch.js";
 import { channelDownResult, err, ok } from "../dispatch-util.js";
 
 /**
@@ -25,14 +25,32 @@ async function confirmSendOnce(
   channel: string,
   recipient: string,
   summary: string,
-): Promise<{ approved: boolean; revision?: string }> {
+): Promise<ConfirmOutcome> {
   if (isSendApproved(ctx.userId, channel, recipient)) {
-    return { approved: true };
+    return { approved: true, outcome: "approved" };
   }
-  if (!ctx.confirm) return { approved: false };
+  // Ф0: канала подтверждения нет вовсе → это НЕ отказ владельца, а невозможность его спросить.
+  if (!ctx.confirm) return { approved: false, outcome: "undelivered" };
   const r = await ctx.confirm(summary, "send");
   if (r.approved) await approveSend(ctx.userId, channel, recipient);
   return r;
+}
+
+/**
+ * Ф0 пульта: РАЗНЫЕ слова на разные исходы. Раньше любой неуспех звучал как «вы не подтвердили» —
+ * то есть Джарвис утверждал, что владелец ПРИНЯЛ РЕШЕНИЕ, хотя тот мог вопроса вовсе не видеть
+ * (мёртвый сокет, закрытая сессия) или не успеть ответить. Приписывать владельцу чужое решение —
+ * та же ложь, что «Готово» без результата.
+ */
+function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string): string {
+  switch (outcome) {
+    case "undelivered":
+      return `Не отправил ${what} «${to}» — не смог спросить вашего подтверждения: связь с вашим экраном была недоступна.`;
+    case "expired":
+      return `Не отправил ${what} «${to}» — вы не ответили на подтверждение, и оно истекло. Скажите, если отправить.`;
+    default:
+      return `Не отправил ${what} — вы не подтвердили отправку «${to}».`;
+  }
 }
 
 /** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
@@ -170,7 +188,7 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
   }
   if (!confirmedByResendGate) {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
-    if (!gate.approved) return ok(`Не отправил — вы не подтвердили отправку «${to}».`);
+    if (!gate.approved) return ok(sendGateMessage(gate.outcome, "сообщение", to));
   }
   // ⚠️ Ревью р2 (peer-канал был МЁРТВ): клиентский fast-path (openHinted по peerId) входит ТОЛЬКО при
   // непустом preferredTitle. При явном peer подаём preferredTitle=to — иначе fast-path пропускался,
@@ -261,7 +279,7 @@ async function telegramSendVoiceLocked(ctx: ToolContext, input: Record<string, u
     await approveSend(ctx.userId, "telegram", to);
   } else {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить ГОЛОСОВОЕ «${to}» (голос филиппа)?\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»`);
-    if (!gate.approved) return ok(`Не отправил голосовое — вы не подтвердили «${to}».`);
+    if (!gate.approved) return ok(sendGateMessage(gate.outcome, "голосовое", to));
   }
   try {
     const audioB64 = await ctx.synthVoice(text); // mp3 base64 голосом филиппа
@@ -336,7 +354,9 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
     {
       // §14: подтверждаем адресата один раз, дальше помним навсегда (как telegram_send). Ресенд-гейт
       // уже показал владельцу адресата и ТОЧНЫЙ текст → второй вопрос подряд не задаём.
-      requestConfirm: confirmedByResendGate ? async () => ({ approved: true }) : (summary) => confirmSendOnce(ctx, channel, to, summary),
+      requestConfirm: confirmedByResendGate
+        ? async () => ({ approved: true, outcome: "approved" as const })
+        : (summary: string) => confirmSendOnce(ctx, channel, to, summary),
       regenerate: async (_rev, prev) => prev, // полная перегенерация — через новый ход агента
       cadence,
       // Явный ПОДТВЕРЖДЁННЫЙ повтор обязан уйти — точный дедуп-ключ его не блокирует.
