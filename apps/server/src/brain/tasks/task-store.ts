@@ -13,12 +13,13 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataDir } from "../../paths.js";
+import { lazyDataPath } from "../../paths.js";
 import { TaskManager } from "./manager.js";
 import type { PersistedTask } from "./task.js";
 
 const log: Logger = createLogger("task-store");
-const DEFAULT_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
+// ЛЕНИВО (волна E): дефолт вычисляется В МОМЕНТ ВЫЗОВА, не на импорте (см. paths.lazyDataPath).
+const defaultDir = lazyDataPath();
 const FILE_NAME = "tasks.json";
 /** Старше этого снимок не восстанавливаем — это история другого дня, не «недавние дела». */
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -111,13 +112,14 @@ export function flushTaskStores(): void {
  * @param now источник времени (инъектируется в тестах); по умолчанию системные часы.
  * @param dir каталог хранения (инъектируется в тестах); по умолчанию <cwd>/data.
  */
-export function loadTaskManager(now: () => number = () => Date.now(), dir: string = DEFAULT_DIR): TaskManager {
+export function loadTaskManager(now: () => number = () => Date.now(), dir?: string): TaskManager {
+  const root = dir ?? defaultDir(); // дефолт — В МОМЕНТ ВЫЗОВА (волна E)
   const tasks = new TaskManager(now);
-  const snap = readPersisted(dir, now());
+  const snap = readPersisted(root, now());
   if (snap) {
     tasks.restore({ tasks: snap.tasks }, now());
     log.info("реестр задач восстановлен с диска", { tasks: snap.tasks.length });
   }
-  tasks.setOnChange(() => scheduleSave(dir, tasks));
+  tasks.setOnChange(() => scheduleSave(root, tasks));
   return tasks;
 }

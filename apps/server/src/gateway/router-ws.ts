@@ -27,6 +27,10 @@ import {
   type DemoSave,
   type DevText,
   type Envelope,
+  type MemoryForget,
+  type MemoryItem,
+  type MemoryRequest,
+  type MemoryState,
   type MessageType,
   type SkillSaved,
   type Takeover,
@@ -40,7 +44,7 @@ import { autonomyFreeze } from "../autonomy/freeze.js";
 import { renderCapabilityPassport } from "../brain/capabilities.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { getProfile, readEvictedFacts, removeFactsMatching, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
 import { upcomingDue } from "../proactive/ambient/obligations.js";
@@ -224,6 +228,77 @@ function sendUsage(session: Session, spend: SpendGuard): void {
   const s = spend.snapshot();
   const plan = s.cap > DEFAULT_LIMITS.spendCap ? "Pro" : "Базовый";
   session.send("usage.info", { plan, ...s });
+}
+
+/** Сколько записей каждого слоя отдаём в UI (владельцу нужен обзор, не выгрузка всей БД). */
+const MEMORY_UI_LIMIT = 200;
+
+/**
+ * Волна E (вкладка «Память», идея Skales — единственное место, где их память была лучше нашей):
+ * снимок ВСЕГО, что Джарвис помнит о владельце, тремя честно разделёнными слоями:
+ *   • facts — курируемые факты профиля (в промпт идут ASSERTED, высокая уверенность);
+ *   • episodes — эпизодическая память (в промпт идёт ХЕДЖИРОВАННО «возможно, всплыло»);
+ *   • evicted — вытесненные капом (в промпт НЕ идут; витрина честности «ничего не пропало молча»).
+ * Провенанс слоёв в UI обязан совпадать с провенансом в промпте — иначе владелец правит не то.
+ */
+async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise<void> {
+  const userId = ctx.session.userId;
+  const needle = queryText?.trim();
+  const facts = (getProfile(userId).facts ?? [])
+    .filter((f) => !needle || f.toLowerCase().includes(needle.toLowerCase()))
+    .map((f) => ({ id: f, text: f })); // у факта профиля нет id — сам текст и есть ключ
+  const episodic = ctx.agentDeps.episodic;
+  let episodes: MemoryItem[] = [];
+  let episodesUnavailable: string | undefined;
+  if (!episodic?.listRecent) {
+    // ЧЕСТНО: «не умею прочитать» ≠ «памяти нет» (закон честности — пустой список выглядел бы как
+    // «Джарвис ничего не помнит», хотя записи на диске есть).
+    episodesUnavailable = "эпизодическая память недоступна в этой сборке";
+  } else {
+    try {
+      const rows = await episodic.listRecent(userId, MEMORY_UI_LIMIT, needle);
+      episodes = rows.map((e) => ({ id: e.id, text: e.text, ts: e.ts, kind: e.kind }));
+      // 🔴 Найдено ЖИВЫМ прогоном: без БД эпизодика — process-only, и ПУСТОЙ список читается как
+      // «пока нечего запоминать», хотя правда — «долговременная память не работает, всё умрёт с
+      // рестартом». Говорим прямо (декларация обязана совпадать с поведением).
+      if (episodic.durability === "process-only") {
+        episodesUnavailable =
+          "долговременная память сейчас без базы данных: записи живут только до перезапуска сервера" +
+          (episodes.length > 0 ? " (показанное ниже тоже)" : "");
+      }
+    } catch (e) {
+      episodesUnavailable = "не смог прочитать эпизодическую память (БД не отвечает)";
+      log.warn("вкладка «Память»: чтение эпизодов упало", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  const evicted = (await readEvictedFacts(userId, MEMORY_UI_LIMIT))
+    .filter((r) => !needle || r.fact.toLowerCase().includes(needle.toLowerCase()))
+    .map((r) => ({ id: r.fact, text: r.fact, ...(r.ts !== undefined ? { ts: r.ts } : {}) }));
+  const state: MemoryState = {
+    facts,
+    episodes,
+    evicted,
+    ...(episodesUnavailable ? { episodesUnavailable } : {}),
+  };
+  ctx.session.send("memory.state", state);
+}
+
+/** Точечно забыть по решению владельца и сразу вернуть обновлённый снимок (UI не гадает об исходе). */
+async function forgetMemoryItem(ctx: SessionContext, req: MemoryForget): Promise<void> {
+  const userId = ctx.session.userId;
+  try {
+    if (req?.layer === "fact" && typeof req.id === "string" && req.id) {
+      // Точное совпадение текста — владелец выбрал КОНКРЕТНУЮ строку, семантику здесь применять нельзя.
+      const removed = await removeFactsMatching(userId, [req.id]);
+      log.info("вкладка «Память»: владелец забыл факт профиля", { removed: removed.length });
+    } else if (req?.layer === "episode" && typeof req.id === "string" && req.id) {
+      const ok = (await ctx.agentDeps.episodic?.markStaleById?.(userId, req.id)) ?? false;
+      log.info("вкладка «Память»: владелец забыл эпизод", { id: req.id, ok });
+    }
+  } catch (e) {
+    log.warn("вкладка «Память»: забывание не удалось", { error: e instanceof Error ? e.message : String(e) });
+  }
+  await sendMemoryState(ctx); // свежий снимок: владелец ВИДИТ факт удаления, а не верит на слово
 }
 
 /** Создать контекст для свежей/возобновлённой сессии. */
@@ -773,6 +848,16 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "client.usage.request": {
       // §6B/B5: клиент (вкладка «Оплата») просит свежий снимок расхода/лимитов.
       sendUsage(ctx.session, ctx.agentDeps.spend);
+      break;
+    }
+    case "memory.request": {
+      // Волна E (вкладка «Память»): владелец хочет ВИДЕТЬ, что Джарвис о нём помнит.
+      void sendMemoryState(ctx, (env.payload as MemoryRequest | undefined)?.query);
+      break;
+    }
+    case "memory.forget": {
+      // Точечное забывание по решению владельца (мягкое: профиль-факт убирается, эпизод → stale).
+      void forgetMemoryItem(ctx, env.payload as MemoryForget);
       break;
     }
     case "client.keys": {

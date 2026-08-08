@@ -12,7 +12,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { SkillStep, Target, UiPattern } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataPath } from "../paths.js";
+import { lazyDataPath } from "../paths.js";
 import { isDbReady, query } from "../db/pool.js";
 import { extractSlots } from "./skill-slots.js";
 import type { IEmbeddingProvider } from "../integrations/openai-embeddings.js";
@@ -25,7 +25,8 @@ export { findDuplicateSemantic, findDuplicateSkill, matchLearnedSkill, recallSem
 const log: Logger = createLogger("skills");
 
 /** Папка осязаемых SKILL.md на диске (§универсальность: JARVIS_DATA_DIR → иначе cwd/data). */
-const SKILLS_DIR = dataPath("skills");
+// ЛЕНИВО (волна E): .env грузится ПОСЛЕ ESM-импортов — см. paths.lazyDataPath.
+const skillsDir = lazyDataPath("skills");
 
 /**
  * Префикс id выученных навыков-процедур (§8 HERMES). Развязывает их пространство имён с
@@ -79,9 +80,9 @@ export function slugify(name: string): string {
  */
 export async function writeSkillFile(id: string, contentMd: string): Promise<void> {
   try {
-    await mkdir(SKILLS_DIR, { recursive: true });
-    await writeFile(join(SKILLS_DIR, `${id}.md`), contentMd, "utf8");
-    log.info(`SKILL.md записан: ${join(SKILLS_DIR, `${id}.md`)}`);
+    await mkdir(skillsDir(), { recursive: true });
+    await writeFile(join(skillsDir(), `${id}.md`), contentMd, "utf8");
+    log.info(`SKILL.md записан: ${join(skillsDir(), `${id}.md`)}`);
   } catch (e) {
     log.warn(`не удалось записать SKILL.md на диск: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -92,7 +93,7 @@ export async function writeSkillFile(id: string, contentMd: string): Promise<voi
 //    «дистилляция процедуры». Демонстрации копятся per-(user,skill) рядом со SKILL.md; распознавание
 //    «той же capability» — существующий семантический дедуп в save(). Исполнение/verify-loop не меняем. ──
 
-const DEMOS_DIR = join(SKILLS_DIR, "_demos");
+const demosDir = () => join(skillsDir(), "_demos");
 
 /** Одна сырая демонстрация: как пользователь сделал задачу один раз. */
 export interface SkillDemonstration {
@@ -111,7 +112,7 @@ export type SkillDistiller = (input: {
 /** Прочитать накопленные демонстрации навыка (per-user). Нет файла/сбой → []. */
 async function readDemos(userId: string, id: string): Promise<SkillDemonstration[]> {
   try {
-    const arr = JSON.parse(await readFile(join(DEMOS_DIR, `${userId}__${id}.json`), "utf8"));
+    const arr = JSON.parse(await readFile(join(demosDir(), `${userId}__${id}.json`), "utf8"));
     return Array.isArray(arr) ? (arr as SkillDemonstration[]) : [];
   } catch {
     return [];
@@ -121,8 +122,8 @@ async function readDemos(userId: string, id: string): Promise<SkillDemonstration
 /** Сохранить демонстрации навыка (per-user). Не фатально. */
 async function writeDemos(userId: string, id: string, demos: readonly SkillDemonstration[]): Promise<void> {
   try {
-    await mkdir(DEMOS_DIR, { recursive: true });
-    await writeFile(join(DEMOS_DIR, `${userId}__${id}.json`), JSON.stringify(demos), "utf8");
+    await mkdir(demosDir(), { recursive: true });
+    await writeFile(join(demosDir(), `${userId}__${id}.json`), JSON.stringify(demos), "utf8");
   } catch (e) {
     log.warn(`не удалось сохранить демонстрации навыка: ${e instanceof Error ? e.message : String(e)}`);
   }

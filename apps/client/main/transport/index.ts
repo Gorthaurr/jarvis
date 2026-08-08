@@ -54,6 +54,9 @@ import type {
   VoiceEnrollProgress,
   VoiceEnrollDone,
   VoiceList,
+  MemoryForget,
+  MemoryRequest,
+  MemoryState,
   UsageInfo,
   ClientKeys,
 } from "@jarvis/protocol";
@@ -99,6 +102,7 @@ export interface TransportEvents {
   voiceList: [VoiceList];
   /** §6B/B5: расход/лимиты периода для вкладки «Оплата». */
   usage: [UsageInfo];
+  memory: [MemoryState];
   /** изменение «связности» для индикатора в UI. */
   link: [{ online: boolean }];
 }
@@ -244,6 +248,16 @@ export class Transport extends EventEmitter {
   /** §6B/B5: запросить у сервера свежий снимок расхода/лимитов (вкладка «Оплата»). */
   requestUsage(): void {
     this.send(makeEnvelope("client.usage.request", {}));
+  }
+
+  /** Волна E: запросить снимок памяти о владельце (вкладка «Память»); query — опц. фильтр. */
+  requestMemory(query?: string): void {
+    this.send(makeEnvelope<MemoryRequest>("memory.request", query ? { query } : {}));
+  }
+
+  /** Волна E: точечно забыть запись памяти (сервер ответит свежим memory.state — UI не гадает). */
+  forgetMemory(layer: MemoryForget["layer"], id: string): void {
+    this.send(makeEnvelope<MemoryForget>("memory.forget", { layer, id }));
   }
 
   /** §6B/B4: отправить API-ключи на сервер (шифрует в user_credentials). Значения не логируем. */
@@ -406,6 +420,9 @@ export class Transport extends EventEmitter {
         break;
       case "usage.info":
         this.emit("usage", env.payload as UsageInfo);
+        break;
+      case "memory.state":
+        this.emit("memory", env.payload as MemoryState);
         break;
       case "speak.chunk":
         this.emit("speak", env.payload as SpeakChunk);

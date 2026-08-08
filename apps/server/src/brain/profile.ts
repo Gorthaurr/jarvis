@@ -14,10 +14,11 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataDir } from "../paths.js";
+import { lazyDataPath } from "../paths.js";
 
 const log: Logger = createLogger("profile");
-const DATA_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
+// ЛЕНИВО (волна E): .env грузится ПОСЛЕ ESM-импортов — см. paths.lazyDataPath.
+const dataRoot = lazyDataPath();
 // Мирроринг seed-пользователя (infra/migrations/0002_seed_dev.sql / gateway/identity.ts DEV_USER):
 // его раздел остаётся в legacy-файле data/profile.json → апгрейд установки НЕ теряет имя/факты.
 const DEV_USER = "00000000-0000-0000-0000-000000000001";
@@ -47,9 +48,9 @@ const cache = new Map<string, UserProfile>();
 
 function fileFor(userId: string): string {
   // Континьюити: раздел dev-пользователя — в существующем data/profile.json (не трогаем).
-  if (userId === DEV_USER) return join(DATA_DIR, "profile.json");
+  if (userId === DEV_USER) return join(dataRoot(), "profile.json");
   const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
-  return join(DATA_DIR, "profile", `${safe}.json`);
+  return join(dataRoot(), "profile", `${safe}.json`);
 }
 
 /** Загрузить профиль пользователя с диска в кеш (на старте сессии). Безопасно при отсутствии файла. */
@@ -154,7 +155,7 @@ function maxProfileFacts(): number {
 /** Путь append-only архива вытесненных фактов (рядом с партициями профиля). */
 function evictedArchiveFile(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
-  return join(DATA_DIR, "profile", `evicted-${safe}.jsonl`);
+  return join(dataRoot(), "profile", `evicted-${safe}.jsonl`);
 }
 
 /** Вытесненный факт — в durable-архив (fail-safe: сбой ФС не роняет addFact). */
@@ -165,6 +166,34 @@ async function archiveEvictedFact(userId: string, fact: string): Promise<void> {
     await appendFile(file, `${JSON.stringify({ ts: new Date().toISOString(), fact })}\n`, "utf8");
   } catch (e) {
     log.warn("профиль: не удалось заархивировать вытесненный факт", { userId, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/**
+ * Вкладка «Память» (волна E): прочитать durable-архив вытесненных фактов — витрина честности
+ * «ничего не пропало молча». Только чтение; архив append-only и в промпт НЕ идёт (эти факты уже
+ * вытеснены капом), поэтому забывать оттуда нечего. Новые — первыми. Сбой ФС → пустой список
+ * (архива может не быть вовсе — это норма, а не ошибка).
+ */
+export async function readEvictedFacts(userId: string, limit = 50): Promise<Array<{ ts?: number; fact: string }>> {
+  try {
+    const raw = await readFile(evictedArchiveFile(userId), "utf8");
+    const out: Array<{ ts?: number; fact: string }> = [];
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const rec = JSON.parse(s) as { ts?: string; fact?: string };
+        if (typeof rec.fact !== "string" || !rec.fact) continue;
+        const ms = rec.ts ? Date.parse(rec.ts) : Number.NaN;
+        out.push({ fact: rec.fact, ...(Number.isFinite(ms) ? { ts: ms } : {}) });
+      } catch {
+        /* битая строка архива — пропускаем, не роняем весь список */
+      }
+    }
+    return out.reverse().slice(0, limit);
+  } catch {
+    return []; // архива нет (ничего не вытеснялось) — штатный случай
   }
 }
 

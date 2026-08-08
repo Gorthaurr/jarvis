@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { HashEmbeddingProvider } from "../integrations/openai-embeddings.js";
-import { InMemoryEpisodicMemory, cosine, memoryMinScore } from "./episodic.js";
+import { InMemoryEpisodicMemory, PgVectorEpisodicMemory, cosine, memoryMinScore } from "./episodic.js";
 
 // Аудит контекста 2026-07-20 + адверс-ревью F4: порог авто-ретривала embedder-aware.
 describe("memoryMinScore (порог авто-ретривала)", () => {
@@ -81,5 +81,74 @@ describe("InMemoryEpisodicMemory (§8)", () => {
     const tooHigh = await mem.markStale("a", "живёт в Москве", 1.01, 5);
     expect(tooHigh.staled).toBe(0);
     expect(mem.size).toBe(1); // факт 'a' цел
+  });
+});
+
+// Волна E (вкладка «Память»): владелец ВИДИТ накопленное и точечно забывает — листинг без семантики
+// (search требует запроса и порога; владельцу нужно увидеть ВСЁ) + удаление по конкретному id.
+describe("InMemoryEpisodicMemory — листинг и точечное забывание для UI (волна E)", () => {
+  it("listRecent отдаёт живые записи новыми вперёд и уважает limit", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await mem.write({ userId: "u", kind: "fact", text: "старое", ts: 1000 });
+    await mem.write({ userId: "u", kind: "fact", text: "среднее", ts: 2000 });
+    await mem.write({ userId: "u", kind: "event", text: "свежее", ts: 3000 });
+
+    const all = await mem.listRecent("u", 10);
+    expect(all.map((e) => e.text)).toEqual(["свежее", "среднее", "старое"]);
+    const capped = await mem.listRecent("u", 2);
+    expect(capped).toHaveLength(2);
+    expect(capped[0]?.text).toBe("свежее");
+  });
+
+  it("listRecent фильтрует подстрокой (регистронезависимо) и изолирует по userId", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await mem.write({ userId: "u", kind: "fact", text: "Работает в Сбербанке", ts: 1 });
+    await mem.write({ userId: "u", kind: "fact", text: "любит кофе", ts: 2 });
+    await mem.write({ userId: "other", kind: "fact", text: "чужой сбербанк", ts: 3 });
+
+    const hits = await mem.listRecent("u", 10, "сбер");
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.text).toBe("Работает в Сбербанке");
+    expect(await mem.listRecent("u", 10, "ничего-такого")).toHaveLength(0);
+  });
+
+  it("markStaleById убирает ИМЕННО выбранную запись; чужую и несуществующую не трогает", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await mem.write({ userId: "u", kind: "fact", text: "первый", ts: 1 });
+    await mem.write({ userId: "u", kind: "fact", text: "второй", ts: 2 });
+    await mem.write({ userId: "other", kind: "fact", text: "чужой", ts: 3 });
+    const list = await mem.listRecent("u", 10);
+    const target = list.find((e) => e.text === "первый");
+    expect(target).toBeDefined();
+
+    expect(await mem.markStaleById("u", target!.id)).toBe(true);
+    const after = await mem.listRecent("u", 10);
+    expect(after.map((e) => e.text)).toEqual(["второй"]); // забыт ровно один, соседний цел
+
+    // Чужая запись по чужому userId — не наша (изоляция §6B/B3), и несуществующий id — честный false.
+    const foreign = await mem.listRecent("other", 10);
+    expect(await mem.markStaleById("u", foreign[0]!.id)).toBe(false);
+    expect(await mem.markStaleById("u", "нет-такого-id")).toBe(false);
+    expect(await mem.listRecent("other", 10)).toHaveLength(1); // чужое цело
+  });
+
+  it("забытая запись исчезает и из семантического поиска (мягкое удаление = вне промпта)", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await mem.write({ userId: "u", kind: "fact", text: "работает в Сбербанке аналитиком", ts: 1 });
+    const [row] = await mem.listRecent("u", 10);
+    await mem.markStaleById("u", row!.id);
+    const hits = await mem.search("u", "где работает", 5);
+    expect(hits.every((h) => !h.episode.text.includes("Сбербанке"))).toBe(true);
+  });
+});
+
+// 🔴 ЧЕСТНОСТЬ «недоступно ≠ пусто» (найдено попыткой живого прогона без БД): PgVector.listRecent при
+// неотвечающей БД ОБЯЗАН бросить, иначе вкладка «Память» покажет «Джарвис ничего не помнит» вместо
+// «не смог прочитать» — ложный отчёт о состоянии памяти владельца.
+describe("PgVectorEpisodicMemory.listRecent — БД недоступна ≠ память пуста", () => {
+  it("без БД бросает (а НЕ возвращает пустой список)", async () => {
+    const mem = new PgVectorEpisodicMemory(new HashEmbeddingProvider());
+    // В тестовом окружении DATABASE_URL не задан → query() возвращает null (нет пула).
+    await expect(mem.listRecent("u", 10)).rejects.toThrow(/недоступна|не отвечает/i);
   });
 });

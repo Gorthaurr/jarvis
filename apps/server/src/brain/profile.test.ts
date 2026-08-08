@@ -11,7 +11,7 @@ const TMP = vi.hoisted(() => {
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { addFact, getProfile, loadProfile, removeFactsMatching, setDisplayName, setLanguage } from "./profile.js";
+import { addFact, getProfile, loadProfile, readEvictedFacts, removeFactsMatching, setDisplayName, setLanguage } from "./profile.js";
 
 const DEV_USER = "00000000-0000-0000-0000-000000000001";
 const A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
@@ -109,6 +109,38 @@ describe("profile — партиция по userId (§6B/B3: фикс утечк
       expect(existsSync(archive)).toBe(true); // …но НЕ бесследно — заархивирован
       const lines = readFileSync(archive, "utf8").trim().split("\n");
       expect(JSON.parse(lines[0]!).fact).toBe("факт номер 1");
+    } finally {
+      if (saved === undefined) delete process.env.JARVIS_PROFILE_FACTS_MAX;
+      else process.env.JARVIS_PROFILE_FACTS_MAX = saved;
+    }
+  });
+});
+
+// Волна E (вкладка «Память»): архив вытесненных — витрина честности «ничего не пропало молча».
+describe("readEvictedFacts — архив вытесненных для вкладки «Память»", () => {
+  const C = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+  it("архива нет (ничего не вытеснялось) → пустой список, не падение", async () => {
+    await loadProfile(C);
+    expect(await readEvictedFacts(C)).toEqual([]);
+  });
+
+  it("вытесненные капом факты читаются, новые первыми, с временем", async () => {
+    const saved = process.env.JARVIS_PROFILE_FACTS_MAX;
+    process.env.JARVIS_PROFILE_FACTS_MAX = "10"; // кламп-минимум
+    try {
+      await loadProfile(C);
+      for (let i = 1; i <= 13; i += 1) await addFact(C, `факт номер ${i}`);
+      const evicted = await readEvictedFacts(C);
+      // 13 добавленных при капе 10 → три старейших уехали в архив.
+      expect(evicted).toHaveLength(3);
+      expect(evicted[0]?.fact).toBe("факт номер 3"); // новые первыми (последний вытесненный — сверху)
+      expect(evicted.at(-1)?.fact).toBe("факт номер 1");
+      expect(typeof evicted[0]?.ts).toBe("number");
+      // И они РЕАЛЬНО ушли из активного профиля (иначе витрина показывала бы дубли).
+      expect(getProfile(C).facts).not.toContain("факт номер 1");
+      // limit уважается.
+      expect(await readEvictedFacts(C, 2)).toHaveLength(2);
     } finally {
       if (saved === undefined) delete process.env.JARVIS_PROFILE_FACTS_MAX;
       else process.env.JARVIS_PROFILE_FACTS_MAX = saved;

@@ -118,6 +118,7 @@
         <button class="settab" type="button" data-tab="skills">Навыки</button>
         <button class="settab" type="button" data-tab="voices">Голоса</button>
         <button class="settab" type="button" data-tab="keys">Ключи</button>
+        <button class="settab" type="button" data-tab="memory">Память</button>
         <button class="settab" type="button" data-tab="billing">Оплата</button>
       </div>
 
@@ -218,6 +219,33 @@
               <label class="field__label" for="keyDeepgram">Deepgram — распознавание речи</label>
               <input id="keyDeepgram" class="text-input" type="password" placeholder="резерв STT" />
             </div>
+          </section>
+        </div>
+
+        <!-- ── Память: что Джарвис о вас помнит (волна E) ── -->
+        <div class="settab-panel settab-panel--hidden" data-panel="memory">
+          <section class="setgroup">
+            <div class="field">
+              <label class="field__label" for="memSearch">Поиск по памяти</label>
+              <input id="memSearch" class="text-input" type="search" placeholder="напр. работа, Катя, кофе" />
+            </div>
+            <div id="memCounts" class="setgroup__hint">—</div>
+            <div id="memWarn" class="memwarn memwarn--hidden"></div>
+          </section>
+          <section class="setgroup">
+            <h3 class="setgroup__title">Точные факты</h3>
+            <div class="setgroup__hint">Джарвис считает это твёрдо установленным и опирается на это в ответах.</div>
+            <ul id="memFactsList" class="skill-list"></ul>
+          </section>
+          <section class="setgroup">
+            <h3 class="setgroup__title">Всплывает из разговоров</h3>
+            <div class="setgroup__hint">Подаётся как «возможно» — Джарвис сверяется, прежде чем опираться.</div>
+            <ul id="memEpisodesList" class="skill-list"></ul>
+          </section>
+          <section class="setgroup">
+            <h3 class="setgroup__title">Вытеснено</h3>
+            <div class="setgroup__hint">Ушло из активной памяти по лимиту, но не пропало бесследно. В ответах не участвует.</div>
+            <ul id="memEvictedList" class="skill-list"></ul>
           </section>
         </div>
 

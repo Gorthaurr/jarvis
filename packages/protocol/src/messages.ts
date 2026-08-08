@@ -33,6 +33,8 @@ export type MessageType =
   | "client.system" // ClientSystem — живой снимок: что открыто/на переднем плане/мониторы → хвост промпта
   | "client.settings" // ClientSettings — язык/контекст из настроек UI → профиль (персона)
   | "client.usage.request" // запрос текущего расхода/лимитов для вкладки «Оплата» (§6B/B5)
+  | "memory.request" // MemoryRequest — показать владельцу всё, что Джарвис о нём помнит (вкладка «Память»)
+  | "memory.forget" // MemoryForget — точечно забыть факт/эпизод по решению владельца
   | "client.keys" // ClientKeys — API-ключи из UI → сервер шифрует в user_credentials (§6B/B4)
   | "voice.enroll.start" // VoiceEnrollStart — начать запись голосового отпечатка (§3)
   | "voice.enroll.cancel" // отменить запись отпечатка
@@ -53,6 +55,7 @@ export type MessageType =
   | "ui.display" // DisplayCard — карточка с подробностями в renderer (§21)
   | "chat" // ChatMessage — реплика для текстового чата (роль+текст), §22
   | "usage.info" // UsageInfo — расход/потолок/лимиты периода для вкладки «Оплата» (§6B/B5)
+  | "memory.state" // MemoryState — снимок памяти о владельце для вкладки «Память»
   | "skill.saved" // SkillSaved — навык записан/сохранён, доступен для повтора (§8)
   | "voice.enroll.progress" // VoiceEnrollProgress — % готовности записи отпечатка (§3)
   | "voice.enroll.done" // VoiceEnrollDone — отпечаток записан (или нет)
@@ -379,6 +382,46 @@ export interface UsageInfo {
   remaining: number;
   /** Аварийный стоп активен (платные операции заблокированы, §14). */
   killSwitch: boolean;
+}
+
+/**
+ * Вкладка «Память» (волна E, идея Skales): владелец ВИДИТ всё, что ассистент о нём накопил, и правит.
+ * Раньше память была невидима — управлять ею можно было только голосом («забудь, что…»).
+ */
+export interface MemoryRequest {
+  /** Опц. поиск по подстроке (пусто — последние записи). */
+  query?: string;
+}
+
+/** Одна запись памяти для UI. */
+export interface MemoryItem {
+  /** Идентификатор для точечного забывания: у эпизода — UUID, у факта профиля — сам текст. */
+  id: string;
+  text: string;
+  /** unix ms; у фактов профиля времени нет (профиль хранит только текст) — тогда undefined. */
+  ts?: number;
+  /** Тип эпизода (preference|fact|event) — только для эпизодической памяти. */
+  kind?: string;
+}
+
+/** Снимок памяти о владельце: три слоя + счётчики. */
+export interface MemoryState {
+  /** Курируемые факты профиля — идут в промпт как ASSERTED (высокая уверенность). */
+  facts: MemoryItem[];
+  /** Эпизодическая память (pgvector) — в промпт идёт ХЕДЖИРОВАННО («возможно, всплыло»). */
+  episodes: MemoryItem[];
+  /** Вытесненные капом факты (durable-архив) — витрина честности: ничего не пропадает молча. */
+  evicted: MemoryItem[];
+  /** Эпизодическая память недоступна (нет БД/эмбеддера) — честно говорим, а не показываем пустоту. */
+  episodesUnavailable?: string;
+}
+
+/** Точечное забывание по решению владельца. */
+export interface MemoryForget {
+  /** Какой слой: факт профиля / эпизод. Вытесненный архив не трогаем (он и так вне промпта). */
+  layer: "fact" | "episode";
+  /** id из MemoryItem. */
+  id: string;
 }
 
 // ── удобные алиасы конвертов на типы payload ─────────────────

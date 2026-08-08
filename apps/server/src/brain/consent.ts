@@ -11,11 +11,13 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataDir } from "../paths.js";
+import { lazyDataPath } from "../paths.js";
 
 const log: Logger = createLogger("consent");
-const DATA_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
-const CONSENT_PATH = join(DATA_DIR, "consent.json");
+// ЛЕНИВО (волна E): путь берётся при первом обращении — .env грузится ПОСЛЕ ESM-импортов,
+// иначе JARVIS_DATA_DIR инсталлера был бы мёртв (см. paths.lazyDataPath).
+const dataRoot = lazyDataPath();
+const consentPath = lazyDataPath("consent.json");
 
 /** Одна запись согласия: когда одобрено (для возможной ревизии/аудита). */
 interface ConsentEntry {
@@ -32,7 +34,7 @@ export function consentKey(userId: string, channel: string, recipient: string): 
 /** Загрузить согласия с диска (один раз на старте). Безопасно при отсутствии файла. */
 export async function loadConsent(): Promise<void> {
   try {
-    cache = JSON.parse(await readFile(CONSENT_PATH, "utf8")) as Record<string, ConsentEntry>;
+    cache = JSON.parse(await readFile(consentPath(), "utf8")) as Record<string, ConsentEntry>;
     log.info("согласия на отправку загружены", { count: Object.keys(cache).length });
   } catch {
     cache = {};
@@ -78,12 +80,12 @@ function persist(): Promise<void> {
 
 async function doPersist(): Promise<void> {
   try {
-    await mkdir(DATA_DIR, { recursive: true });
+    await mkdir(dataRoot(), { recursive: true });
     // Атомарно (tmp→rename): краш посреди записи иначе обрезал бы consent.json → на старте битый
     // JSON ловится в loadConsent и согласия МОЛЧА обнулялись бы (потеря всех «можно слать X»).
-    const tmp = `${CONSENT_PATH}.tmp`;
+    const tmp = `${consentPath()}.tmp`;
     await writeFile(tmp, JSON.stringify(cache, null, 2), "utf8");
-    await rename(tmp, CONSENT_PATH);
+    await rename(tmp, consentPath());
   } catch (e) {
     log.warn("согласие: не удалось сохранить", e instanceof Error ? e.message : String(e));
   }

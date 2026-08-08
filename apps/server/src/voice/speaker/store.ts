@@ -7,11 +7,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataPath } from "../../paths.js";
+import { lazyDataPath } from "../../paths.js";
 import type { VoiceProfile } from "./verifier.js";
 
 const log: Logger = createLogger("speaker:store");
-const VOICES_PATH = dataPath("voices.json"); // §универсальность: JARVIS_DATA_DIR → иначе cwd/data
+// ЛЕНИВО (волна E): .env грузится ПОСЛЕ ESM-импортов — см. paths.lazyDataPath.
+const voicesPath = lazyDataPath("voices.json");
 
 // §мультитенант: seed-пользователь (зеркало gateway/identity.ts DEV_USER / brain/profile.ts) — legacy
 // профили без userId относим к нему (континьюити: записанный голос Антона не теряется при партиции).
@@ -43,7 +44,10 @@ export class VoiceProfileStore {
   private profiles: OwnedProfile[] = [];
 
   /** Путь к файлу хранилища (инъекция для тестов; по умолчанию data/voices.json). */
-  constructor(private readonly filePath: string = VOICES_PATH) {}
+  private readonly filePath: string;
+  constructor(filePath?: string) {
+    this.filePath = filePath ?? voicesPath();
+  }
 
   /** Загрузить с диска (один раз на старте). Безопасно при отсутствии файла. */
   async load(): Promise<void> {

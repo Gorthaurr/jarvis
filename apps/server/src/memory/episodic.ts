@@ -57,6 +57,25 @@ export interface EpisodicMemory {
    * search, но строка цела. Порог держать ВЫСОКИМ (не стереть лишнее). Возвращает счётчик + тексты.
    */
   markStale?(userId: string, queryText: string, minScore: number, max?: number): Promise<{ staled: number; texts: string[] }>;
+  /**
+   * Вкладка «Память» (волна E): показать владельцу ЖИВЫЕ записи — без эмбеддинга и без семантики
+   * (обычный листинг по времени, опц. подстрочный фильтр). Семантический `search` для UI не годится:
+   * он требует запроса и порога, а владельцу нужно увидеть ВСЁ, что о нём накоплено.
+   */
+  listRecent?(userId: string, limit: number, contains?: string): Promise<Episode[]>;
+  /**
+   * Точечно забыть ОДНУ запись по id (решение владельца в UI). Отдельно от `markStale` (тот ищет
+   * семантически по тексту): здесь владелец уже выбрал конкретную строку — гадать не нужно.
+   * Мягко (stale=true), как и `markStale` — обратимо, строка цела.
+   */
+  markStaleById?(userId: string, id: string): Promise<boolean>;
+  /**
+   * ЧЕСТНОСТЬ хранилища (найдено ЖИВЫМ прогоном вкладки «Память», волна E): без БД эпизодика живёт
+   * ТОЛЬКО в процессе и умирает с рестартом. Пустой список в UI при этом читается владельцем как
+   * «пока нечего запоминать», хотя правда — «долговременная память не работает вообще». Признак
+   * позволяет сказать это прямо (декларация обязана совпадать с поведением).
+   */
+  readonly durability?: "durable" | "process-only";
 }
 
 /**
@@ -115,6 +134,8 @@ function toVectorLiteral(vec: readonly number[]): string {
 
 /** Прод: Postgres + pgvector (схема §13). Без БД деградирует в []/no-op. */
 export class PgVectorEpisodicMemory implements EpisodicMemory {
+  /** Записи переживают рестарт (Postgres) — см. EpisodicMemory.durability. */
+  readonly durability = "durable" as const;
   /** Б2: userId, у которых ТОЧНО есть записи (монотонно: раз true — навсегда true в процессе). */
   private readonly known = new Set<string>();
 
@@ -232,10 +253,54 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
     if (upd) log.info("эпизодическая память: факты помечены stale (забыто по запросу)", { count: matches.length });
     return { staled: upd ? matches.length : 0, texts: upd ? texts : [] };
   }
+
+  /** Вкладка «Память»: живые записи по времени (без эмбеддинга). `contains` — подстрочный фильтр. */
+  async listRecent(userId: string, limit: number, contains?: string): Promise<Episode[]> {
+    const needle = contains?.trim();
+    const res = needle
+      ? await query(
+          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience
+             from episodic_memory
+            where user_id = $1 and stale = false and text ilike $2
+            order by created_at desc limit $3`,
+          [userId, `%${needle}%`, limit],
+        )
+      : await query(
+          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience
+             from episodic_memory
+            where user_id = $1 and stale = false
+            order by created_at desc limit $2`,
+          [userId, limit],
+        );
+    // 🔴 ЧЕСТНОСТЬ «недоступно ≠ пусто»: res===null — БД не ответила. Вернуть [] здесь нельзя —
+    // владелец увидел бы «Джарвис ничего не помнит» вместо «не смог прочитать» (ровно тот класс
+    // ложного отчёта, который проект выжигает). БРОСАЕМ: вызывающий (router-ws) ловит и пишет
+    // episodesUnavailable. У search/hasEntries семантика другая (деградация ретривала — там [] ок).
+    if (!res) throw new Error("эпизодическая память недоступна: БД не отвечает");
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      userId: String(r.user_id),
+      kind: String(r.kind) as EpisodeKind,
+      text: String(r.text),
+      ts: Number(r.ts),
+      salience: r.salience == null ? undefined : Number(r.salience),
+    }));
+  }
+
+  /** Точечное мягкое забывание по id (владелец нажал «забыть» в UI). user_id в WHERE — не чужое. */
+  async markStaleById(userId: string, id: string): Promise<boolean> {
+    const res = await query(`update episodic_memory set stale = true where id = $1 and user_id = $2`, [id, userId]);
+    if (!res) return false; // БД не ответила → false = «не забыл»; UI перечитает снимок и увидит запись на месте
+    const ok = (res.rowCount ?? 0) > 0;
+    if (ok) log.info("эпизодическая память: запись забыта владельцем из UI", { id });
+    return ok;
+  }
 }
 
 /** Dev/тесты: косинусный поиск в памяти процесса. */
 export class InMemoryEpisodicMemory implements EpisodicMemory {
+  /** Живёт только в процессе: рестарт стирает всё — UI обязан сказать это владельцу прямо. */
+  readonly durability = "process-only" as const;
   private readonly store: Array<{ episode: Episode; vec: number[] }> = [];
   private seq = 0;
 
@@ -280,6 +345,25 @@ export class InMemoryEpisodicMemory implements EpisodicMemory {
     this.store.length = 0;
     this.store.push(...kept);
     return { staled: ranked.length, texts: ranked.map((x) => x.text) };
+  }
+
+  /** Вкладка «Память»: живые записи по времени (новые первыми), опц. подстрочный фильтр. */
+  async listRecent(userId: string, limit: number, contains?: string): Promise<Episode[]> {
+    const needle = contains?.trim().toLowerCase();
+    return this.store
+      .filter((e) => e.episode.userId === userId)
+      .filter((e) => !needle || e.episode.text.toLowerCase().includes(needle))
+      .map((e) => e.episode)
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, limit);
+  }
+
+  /** Точечное забывание по id (в in-memory — физическое удаление, для search-путей эквивалентно). */
+  async markStaleById(userId: string, id: string): Promise<boolean> {
+    const idx = this.store.findIndex((e) => e.episode.id === id && e.episode.userId === userId);
+    if (idx < 0) return false;
+    this.store.splice(idx, 1);
+    return true;
   }
 
   /** Размер хранилища (диагностика тестов). */

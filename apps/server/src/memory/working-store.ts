@@ -8,11 +8,12 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataPath } from "../paths.js";
+import { lazyDataPath } from "../paths.js";
 import { type Entity, type Turn, WorkingMemory } from "./working.js";
 
 const log: Logger = createLogger("working-store");
-const DIR = dataPath("memory"); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
+// ЛЕНИВО (волна E): .env грузится ПОСЛЕ ESM-импортов — см. paths.lazyDataPath.
+const dir = lazyDataPath("memory");
 /** Старше этого восстанавливать не будем — это уже не «продолжение разговора», а другой день. */
 const TTL_MS = 12 * 60 * 60 * 1000;
 const SAVE_DEBOUNCE_MS = 120; // короткий: реплика сохраняется почти сразу → reconnect не теряет последнюю задачу
@@ -25,7 +26,7 @@ interface Persisted {
 
 function fileFor(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
-  return join(DIR, `${safe}.json`);
+  return join(dir(), `${safe}.json`);
 }
 
 const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -54,7 +55,7 @@ export function loadWorkingMemory(userId: string): WorkingMemory {
 /** H9: атомарная запись снимка памяти (tmp→rename) — kill посреди записи не оставит усечённый JSON,
  *  из-за которого на boot терялась вся дневная память (writeFileSync писал прямо в финальный путь). */
 function writeSnapshot(userId: string, mem: WorkingMemory): void {
-  if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true });
+  if (!existsSync(dir())) mkdirSync(dir(), { recursive: true });
   const data: Persisted = { savedAt: Date.now(), ...mem.toJSON() };
   const file = fileFor(userId);
   const tmp = `${file}.tmp`;
