@@ -21,6 +21,8 @@ import {
   isProtocolCompatible,
 } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { autonomyFreeze } from "../autonomy/freeze.js";
+import { autonomyThrottle } from "../autonomy/throttle.js";
 import type { ServerConfig } from "../config.js";
 import { SpendGuards } from "../billing/index.js";
 import { metrics } from "../obs/metrics.js";
@@ -503,6 +505,13 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       fileLog = initFileLog();
       metrics.enableJsonl();
       metrics.startProcessHealth(); // durable process_health-строки (rss/heap/cpu) — стоп в close() через disableJsonl
+      // Волна E: срабатывание часового предохранителя автономных LLM-вызовов — durable-деградация
+      // (не тихий дроп); killswitch-латч, переживший рестарт, виден в boot-логе честно.
+      autonomyThrottle().setOnBlocked((kind) => metrics.recordDegradation("autonomy_throttled", { kind }));
+      if (autonomyFreeze().isFrozen())
+        log.warn("автономия ОСТАНОВЛЕНА латчем killswitch (переживает рестарт) — снять: «включи автономию»", {
+          reason: autonomyFreeze().info()?.reason,
+        });
       // §6B/B3: профиль теперь партиционирован по userId и грузится per-session в handshake
       // (loadProfile(userId)), а не один глобальный на boot.
       await loadConsent(); // §14: помним согласия на отправку (Кате можно) между сессиями
@@ -925,6 +934,10 @@ async function doHandshake(
 function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logger, clientVersion?: string): void {
   if (!consolidationEnabled()) return;
   if (isDevSession(clientVersion)) return;
+  // Волна E: killswitch — ранним гейтом (дёшев); throttle НИЖЕ, после идемпотентных проверок
+  // (контроль-ревью: tryAcquire на КАЖДОМ коннекте жёг слот часового бюджета фантомно — трей-клиент
+  // авто-реконнектится, а консолидация реально бывает раз в день).
+  if (autonomyFreeze().isFrozen()) return;
   const userId = ctx.session.userId;
   const p = getProfile(userId);
   const last = p.lastConsolidatedAt ?? 0;
@@ -938,6 +951,9 @@ function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logge
   // пометки: следующий коннект (когда диалог накопится) попробует снова. Идемпотентность цела —
   // проверка+пометка синхронны до fire-and-forget, параллельные коннекты не запустят второй прогон.
   if (!turns.some((t) => t.role === "user")) return;
+  // Волна E: throttle — ПОСЛЕДНИМ гейтом перед реальной тратой (после проверок дня/реплик), но ДО
+  // claim (отказ предохранителя не сжигает дневной слот — попробуем на следующем коннекте).
+  if (!autonomyThrottle().tryAcquire("consolidation")) return;
   // Интеграционное ревью (#4): атомарная in-memory бронь на СЕГОДНЯ — не подвержена TOCTOU-гонке
   // loadProfile (конкурентный коннект того же userId мог затереть профиль-метку до её записи на диск).
   if (!claimConsolidationRun(userId, today)) return;

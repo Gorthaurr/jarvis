@@ -300,6 +300,8 @@ export interface AgentDeps {
   obligations?: ObligationStore;
   /** Фоновые активности (2026-07-25): чип живёт, пока идёт работа ПОСЛЕ хода (автолистание Shorts). */
   activities?: ActivityService;
+  /** Волна E: паспорт возможностей — готовый блок «что реально доступно сейчас» (renderCapabilityPassport). */
+  capabilities?: () => string;
   /** Опытная память резолва получателей (§ скорость): «помню, как зарезолвил». Общий с gateway. */
   resolutionMemory?: ResolutionMemory;
   /**
@@ -1338,6 +1340,9 @@ async function runAgentLoop(
       ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
       ...(skillCatalog ? { skillCatalog } : {}),
       ...(recentTasks ? { recentTasks } : {}),
+      // Волна E: паспорт возможностей — живой снимок «что доступно СЕЙЧАС» (расширение/MCP/ключи/
+      // killswitch). Честность ДО провала: модель не обещает мёртвый канал. Некешируемый хвост.
+      ...(deps.capabilities ? { capabilities: deps.capabilities() } : {}),
     },
     { lean },
   );
@@ -1503,6 +1508,58 @@ async function runAgentLoop(
     systemNotes.add(note);
     appendUserNote(convo, note);
   };
+  /**
+   * Волна C (P0 #4): сохранить ЧЕКПОЙНТ прерванной задачи, чтобы «продолжи» действительно продолжало.
+   *
+   * Возвращает true — только если продолжение РЕАЛЬНО возможно; терминал по этому флагу решает,
+   * предлагать ли «Продолжить с того же места?». Обещать продолжение без чекпойнта нельзя — ровно
+   * это и было ложью до Волны C.
+   *
+   * Сохраняем ЖУРНАЛ (buildResumeDigest), а не сырой convo — обоснование в checkpoint.ts.
+   * Не сохраняем: разговорный ход (продолжать нечего — это вопрос) и ход без единого раунда
+   * (журнал был бы пуст, «продолжение» выродилось бы в повтор исходной команды).
+   *
+   * Волна E: объявлен ДО петли — им пользуется и страховочный снимок на 70%-нудже (замыкания видят
+   * live-значения round/committedToolRounds/convo, место объявления семантику не меняет).
+   */
+  const saveCheckpoint = (reason: CheckpointReason, opts2?: { deliverable?: boolean }): boolean => {
+    // Машинный реэнтри (watch-action) чекпойнта НЕ оставляет (ревью): слот один на пользователя, и
+    // сгенерированное поручение наблюдения перетирало бы недоделку ВЛАДЕЛЬЦА — его «доделай» тогда
+    // доводило бы ЧУЖУЮ задачу. Продолжать машинное поручение владелец и не просил.
+    if (!deps.checkpoints || opts?.conversational || opts?.machine || committedToolRounds < 1) return false;
+    try {
+      const cp: TaskCheckpoint = {
+        userId: deps.userId,
+        taskId,
+        goal: text,
+        title: task.title,
+        reason,
+        // Обрыв канала/отмена посреди раунда выходят из петли ДО `round += 1`, а мутации уже совершены —
+        // сообщать «сделано шагов: 0» при реально сделанной отправке нельзя (контрольное ревью-3).
+        round: Math.max(round, committedToolRounds),
+        savedAt: Date.now(),
+        tier: currentTier,
+        // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
+        // иначе третий заход не видел отправок первого и мог повторить их людям).
+        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+        ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
+      };
+      const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);
+      // Окно «мы предложили» взводится ТОЛЬКО когда предложение реально ДОШЛО до владельца. При
+      // мёртвом канале (channelLost) фраза уходит в закрытый сокет и пропадает — взводить окно нельзя
+      // (контрольное ревью-2): владелец ничего не слышал, а сказанное плееру «продолжи» подняло бы
+      // задачу. `доделай` при этом работает весь TTL — обещание не теряется, только окно не открываем.
+      // Плюс: сессия должна быть ЖИВА — в закрытую фраза-предложение не уйдёт ни голосом, ни в чат
+      // (контрольное ревью-3). Недо-обещание безопасно: «доделай» работает весь TTL и без окна.
+      if (ok && opts2?.deliverable !== false && !deps.isClosed?.()) deps.checkpoints.markOffered(deps.userId, taskId);
+      log.info("§волна C: чекпойнт прерванной задачи сохранён", { taskId, reason, round, durable: ok, digest: cp.digest.length });
+      return ok;
+    } catch (e) {
+      // Чекпойнт — удобство, а не контракт задачи: его сбой не должен ломать терминал.
+      log.warn("не удалось сохранить чекпойнт задачи", { taskId, error: e instanceof Error ? e.message : String(e) });
+      return false;
+    }
+  };
   // Ревью волны Б 2-й проход (#3): ФАКТИЧЕСКОЕ число итераций петли — растёт на КАЖДОЙ итерации, вкл.
   // continue (channel-down/нудж), в отличие от round (только завершённые tool-раунды). capExhausted
   // должен ловить истинное исчерпание HARD_STEP_CAP, а не round (тот отстаёт → ложное «Готово»).
@@ -1510,6 +1567,9 @@ async function runAgentLoop(
   // Волна 1 (1.5, «видимый бюджет»): на 70% потолка времени — ОДИН впрыск «сворачивайся» (graceful
   // wrap-up c честным частичным итогом вместо невидимого обрыва «251с работы → „затянулось" без итога»).
   let budgetNudged = false;
+  // Волна E: на 70%-нудже лёг страховочный снимок чекпойнта (переживает ТОЛЬКО жёсткий kill —
+  // штатный выход из петли гасит его в finally, терминалы прерывания пишут поверх свою версию).
+  let preventiveCheckpoint = false;
   // Гард контекст-окна (см. CONTEXT_SOFT/HARD_TOKENS): одноразовый нудж на soft-пороге + подвид timedOut
   // (contextWrap) на hard-пороге — честный частичный итог вместо жёсткого 400 на середине задачи.
   let contextNudged = false;
@@ -1930,6 +1990,30 @@ async function runAgentLoop(
         );
         log.info("§20 бюджет-нудж: 70% потолка времени — прошу сворачиваться", { taskId, leftSec });
         nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
+        // Волна E (идея Skales «чекпойнт на 80% бюджета»): страховочный СНИМОК журнала — раньше
+        // чекпойнт писали ТОЛЬКО терминалы прерывания, и жёсткий kill процесса (краш/OOM/выключение
+        // ПК) не оставлял ничего: «доделай» после рестарта было пусто, хотя мутации уже совершены.
+        // Снимок МОЛЧАЛИВЫЙ (deliverable:false — предложение не звучало, окно у плеера не взводится).
+        // Продолжению новый слот не нужен — его слот уже существует, туда идёт свежий журнал
+        // (refreshJournal: offeredAt/savedAt не трогаются — инварианты волны C (12)/(19) целы).
+        if (opts?.resumeFrom) {
+          try {
+            deps.checkpoints?.refreshJournal(
+              deps.userId,
+              opts.resumeFrom.taskId,
+              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+              Math.max(round, committedToolRounds),
+            );
+          } catch (e) {
+            log.warn("страховочный журнал продолжения не обновился", { taskId, error: e instanceof Error ? e.message : String(e) });
+          }
+        } else if (deps.checkpoints) {
+          // Слот-гард: живую недоделку ДРУГОЙ задачи страховочный снимок НЕ перетирает — в отличие
+          // от терминала, наша задача здесь ещё может кончиться успехом, и чужое обещание «доделай»
+          // погибло бы зря (терминальный save с его WARN-политикой остаётся как был).
+          const slot = deps.checkpoints.peek(deps.userId);
+          if (!slot || slot.taskId === taskId) preventiveCheckpoint = saveCheckpoint("hardKill", { deliverable: false });
+        }
       }
       // Гард контекст-окна PROACTIVE (аудит 2026-07-20): проектируем РАЗМЕР СЛЕДУЮЩЕГО промпта =
       // lastPromptTokens (реальный из usage прошлого ответа) + pendingResultTokens (оценка результатов
@@ -2674,6 +2758,33 @@ async function runAgentLoop(
     // Волна C: результаты раунда УЖЕ в истории (мутации совершены) — даже если петля сейчас выйдет по
     // обрыву канала/отмене до `round += 1`, журнал чекпойнта обязан их включить.
     committedToolRounds += 1;
+    // Волна E (контроль-ревью): после 70%-нуджа страховочный снимок ОСВЕЖАЕТСЯ каждым закоммиченным
+    // раундом — фаза «заверши подшаг» (последние 30% бюджета) как раз и делает финальную отправку, и
+    // одноразовый снимок с 70% её бы НЕ содержал: «доделай» после жёсткого kill повторил бы отправку
+    // человеку. Дёшево: работает только после нуджа. savedAt/offeredAt refreshJournal не трогает;
+    // для свежей задачи слот уже наш (слот-гард пройден на нудже) — перезаписываем свежей версией.
+    if (budgetNudged && deps.checkpoints) {
+      try {
+        if (opts?.resumeFrom) {
+          deps.checkpoints.refreshJournal(
+            deps.userId,
+            opts.resumeFrom.taskId,
+            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+            Math.max(round + 1, committedToolRounds),
+          );
+        } else if (preventiveCheckpoint) {
+          // Контроль-2 волны E: слот-гард ПЕРЕПРОВЕРЯЕТСЯ на каждом re-save — параллельная задача
+          // могла УЖЕ положить свой чекпойнт и ВСЛУХ пообещать «доделай» (терминал прерывания);
+          // перетирание страховкой уничтожило бы озвученное обещание (store.save лишь WARN'ит).
+          // Чужой слот → уступаем и выключаем страховку (наш clearIf в finally чужого не тронет).
+          const slot2 = deps.checkpoints.peek(deps.userId);
+          if (!slot2 || slot2.taskId === taskId) preventiveCheckpoint = saveCheckpoint("hardKill", { deliverable: false });
+          else preventiveCheckpoint = false;
+        }
+      } catch (e) {
+        log.warn("не удалось освежить страховочный журнал", { taskId, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
     // PROACTIVE-гард (аудит 2026-07-20): оцениваем токены tool_result'ов ЭТОГО раунда — они попадут в
     // СЛЕДУЮЩИЙ промпт, но ещё не учтены в lastPromptTokens. Гард след. итерации сложит их с реальным
     // размером и свернётся ДО пробоя окна. Оценка КОНСЕРВАТИВНАЯ (over-estimate безопасен: ранний честный
@@ -2872,6 +2983,14 @@ async function runAgentLoop(
     // Освобождаем аренду ввода на ЛЮБОМ выходе (успех/отмена/лимит/исключение, §20),
     // иначе следующая задача навечно зависнет на acquire. Терминал ниже ввод не трогает.
     if (holdsInput && arbiter) arbiter.release();
+    // Волна E: страховочный снимок (70%-нудж) нужен лишь ПОКА петля может умереть без терминала.
+    // Дошли сюда — ответственность у терминалов ниже: прерывание перезапишет своей версией, а
+    // успех/провал/отмена чекпойнта не оставляют (инвариант волны C: «доделай» после честного
+    // терминала не должно воскрешать задачу). clearIf по taskId — чужой слот не трогаем.
+    // ⚠️ БЕЗУСЛОВНО, не по флагу (контроль-ревью волны E): при провале flush save() возвращает false
+    // (флаг не взводился), но снимок ОСТАВАЛСЯ в ОЗУ-сторе — успешный терминал его не гасил, и
+    // «доделай» 30 минут воскрешал СДЕЛАННУЮ задачу. clearIf по чужому/пустому слоту — no-op.
+    deps.checkpoints?.clearIf(deps.userId, taskId);
   }
 
   // Ревью волны Б (#4): петля исчерпала HARD_STEP_CAP БЕЗ финального текста (модель звала инструменты
@@ -3024,55 +3143,8 @@ async function runAgentLoop(
     return { voice };
   };
 
-  /**
-   * Волна C (P0 #4): сохранить ЧЕКПОЙНТ прерванной задачи, чтобы «продолжи» действительно продолжало.
-   *
-   * Возвращает true — только если продолжение РЕАЛЬНО возможно; терминал по этому флагу решает,
-   * предлагать ли «Продолжить с того же места?». Обещать продолжение без чекпойнта нельзя — ровно
-   * это и было ложью до Волны C.
-   *
-   * Сохраняем ЖУРНАЛ (buildResumeDigest), а не сырой convo — обоснование в checkpoint.ts.
-   * Не сохраняем: разговорный ход (продолжать нечего — это вопрос) и ход без единого раунда
-   * (журнал был бы пуст, «продолжение» выродилось бы в повтор исходной команды).
-   */
-  const saveCheckpoint = (reason: CheckpointReason, opts2?: { deliverable?: boolean }): boolean => {
-    // Машинный реэнтри (watch-action) чекпойнта НЕ оставляет (ревью): слот один на пользователя, и
-    // сгенерированное поручение наблюдения перетирало бы недоделку ВЛАДЕЛЬЦА — его «доделай» тогда
-    // доводило бы ЧУЖУЮ задачу. Продолжать машинное поручение владелец и не просил.
-    if (!deps.checkpoints || opts?.conversational || opts?.machine || committedToolRounds < 1) return false;
-    try {
-      const cp: TaskCheckpoint = {
-        userId: deps.userId,
-        taskId,
-        goal: text,
-        title: task.title,
-        reason,
-        // Обрыв канала/отмена посреди раунда выходят из петли ДО `round += 1`, а мутации уже совершены —
-        // сообщать «сделано шагов: 0» при реально сделанной отправке нельзя (контрольное ревью-3).
-        round: Math.max(round, committedToolRounds),
-        savedAt: Date.now(),
-        tier: currentTier,
-        // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
-        // иначе третий заход не видел отправок первого и мог повторить их людям).
-        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
-        ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
-      };
-      const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);
-      // Окно «мы предложили» взводится ТОЛЬКО когда предложение реально ДОШЛО до владельца. При
-      // мёртвом канале (channelLost) фраза уходит в закрытый сокет и пропадает — взводить окно нельзя
-      // (контрольное ревью-2): владелец ничего не слышал, а сказанное плееру «продолжи» подняло бы
-      // задачу. `доделай` при этом работает весь TTL — обещание не теряется, только окно не открываем.
-      // Плюс: сессия должна быть ЖИВА — в закрытую фраза-предложение не уйдёт ни голосом, ни в чат
-      // (контрольное ревью-3). Недо-обещание безопасно: «доделай» работает весь TTL и без окна.
-      if (ok && opts2?.deliverable !== false && !deps.isClosed?.()) deps.checkpoints.markOffered(deps.userId, taskId);
-      log.info("§волна C: чекпойнт прерванной задачи сохранён", { taskId, reason, round, durable: ok, digest: cp.digest.length });
-      return ok;
-    } catch (e) {
-      // Чекпойнт — удобство, а не контракт задачи: его сбой не должен ломать терминал.
-      log.warn("не удалось сохранить чекпойнт задачи", { taskId, error: e instanceof Error ? e.message : String(e) });
-      return false;
-    }
-  };
+  // Волна E: `saveCheckpoint` объявлен ВЫШЕ петли (нужен и страховочному снимку на 70%-нудже,
+  // не только терминалам) — см. определение рядом с pushSystemNote.
 
   // 🔴 Волна C (контрольное ревью, HIGH): если это ПРОДОЛЖЕНИЕ и заход успел поработать — журнал в
   // сторе обязан включать ЭТОТ заход, КАКИМ БЫ ни был терминал. Иначе комбинация двух фиксов давала

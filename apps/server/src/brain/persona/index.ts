@@ -80,6 +80,13 @@ export interface UserContextSlot {
    * Некешируемый хвост. Эмбеддинги не нужны (у Claude их нет) — семантику делает сама модель.
    */
   skillCatalog?: string;
+  /**
+   * Волна E: паспорт возможностей (brain/capabilities.ts) — живой снимок «что доступно СЕЙЧАС»
+   * (расширение подключено? MCP поднялись? ключи заданы? killswitch?). Честность ДО провала: модель
+   * не обещает мёртвый канал, а сразу называет, как его включить. НЕкешируемый хвост, капнут (~900).
+   * Это НАШ статус (не влияемые атакующим данные) — идёт доверенным текстом, без untrusted-обёртки.
+   */
+  capabilities?: string;
 }
 
 /**
@@ -228,7 +235,9 @@ function renderDynamic(slot: UserContextSlot): string {
   const catalogBlock = catalog
     ? `# Твои выученные навыки (точного совпадения нет — примени подходящий ПО СМЫСЛУ; не подходит — игнорируй)\n${catalog}`
     : "";
-  return [userBlock, recent, catalogBlock].filter(Boolean).join("\n\n");
+  // Волна E: паспорт возможностей — тем же некешируемым хвостом (готовая строка из brain/capabilities).
+  const passport = slot.capabilities?.trim();
+  return [userBlock, recent, catalogBlock, passport].filter(Boolean).join("\n\n");
 }
 
 const FALLBACK_PERSONA = [

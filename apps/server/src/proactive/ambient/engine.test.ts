@@ -316,3 +316,104 @@ describe("AmbientEngine — проактивная осведомлённост�
     expect(speak2).not.toHaveBeenCalled(); // durable дедуп сработал
   });
 });
+
+// Волна E (идея Skales): ТИХИЕ ЧАСЫ — календарное окно, где несрочный ambient не будит владельца.
+// Семантика ровно как «занят»: не отдаём, seen НЕ ставим, сигнал доходит после конца окна.
+describe("AmbientEngine — тихие часы (волна E)", () => {
+  const night = new Date(2026, 0, 1, 3, 0).getTime(); // 03:00 локального времени
+  const morning = new Date(2026, 0, 1, 10, 0).getTime(); // 10:00 — окно кончилось
+
+  it("несрочный сигнал ночью НЕ звучит и НЕ помечается; утром — звучит", async () => {
+    let clock = night;
+    const eng = new AmbientEngine([fakeSource("mail", () => [sig({ key: "m1", title: "Вам письмо" })])], tempStore(), {
+      minSalience: 0.5,
+      now: () => clock,
+      quietHours: "23-9",
+    });
+    const speak = vi.fn().mockReturnValue(true);
+    eng.registerSpeaker("s1", "u1", speak);
+    await eng.tickNow();
+    expect(speak).not.toHaveBeenCalled(); // ночь — молчим, seen не встал
+    clock = morning;
+    await eng.tickNow();
+    expect(speak).toHaveBeenCalledTimes(1); // утром сигнал пересмотрен и прозвучал
+  });
+
+  it("СРОЧНЫЙ сигнал проходит и ночью", async () => {
+    const eng = new AmbientEngine([fakeSource("obl", () => [sig({ key: "b1", title: "Счёт сегодня!", urgent: true })])], tempStore(), {
+      minSalience: 0.5,
+      now: () => night,
+      quietHours: "23-9",
+    });
+    const speak = vi.fn().mockReturnValue(true);
+    eng.registerSpeaker("s1", "u1", speak);
+    await eng.tickNow();
+    expect(speak).toHaveBeenCalledWith("Счёт сегодня!", true, expect.any(Function));
+  });
+
+  it("отложенное (владелец был офлайн) при коннекте ночью придерживается до утра", async () => {
+    let clock = night;
+    const eng = new AmbientEngine([fakeSource("mail", () => [sig({ key: "m2", title: "Письмо" })])], tempStore(), {
+      minSalience: 0.5,
+      now: () => clock,
+      quietHours: "23-9",
+    });
+    await eng.tickNow(); // офлайн → pending
+    const speak = vi.fn().mockReturnValue(true);
+    eng.registerSpeaker("s1", "u1", speak); // коннект в 03:00 — flushPending держит
+    expect(speak).not.toHaveBeenCalled();
+    clock = morning;
+    await eng.tickNow(); // утренний тик дренирует pending
+    expect(speak).toHaveBeenCalledTimes(1);
+  });
+
+  it("без JARVIS_QUIET_HOURS поведение прежнее (окна нет)", async () => {
+    const eng = new AmbientEngine([fakeSource("mail", () => [sig({ key: "m3", title: "Письмо" })])], tempStore(), {
+      minSalience: 0.5,
+      now: () => night,
+      quietHours: "",
+    });
+    const speak = vi.fn().mockReturnValue(true);
+    eng.registerSpeaker("s1", "u1", speak);
+    await eng.tickNow();
+    expect(speak).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Волна E: killswitch — «полный стоп» замораживает ambient целиком, снятие возобновляет без потерь.
+import { mkdtempSync } from "node:fs";
+import { AutonomyFreeze, setAutonomyFreezeForTests } from "../../autonomy/freeze.js";
+
+describe("AmbientEngine — killswitch (волна E)", () => {
+  it("при латче тик молчит; после «включи автономию» сигнал доходит (ничего не потеряно)", async () => {
+    const freeze = new AutonomyFreeze(mkdtempSync(join(tmpdir(), "jarvis-ks-eng-")));
+    setAutonomyFreezeForTests(freeze);
+    freeze.freeze("тест");
+    const eng = new AmbientEngine([fakeSource("mail", () => [sig({ key: "kf", title: "Письмо" })])], tempStore(), { minSalience: 0.5 });
+    const speak = vi.fn().mockReturnValue(true);
+    eng.registerSpeaker("s1", "u1", speak);
+    await eng.tickNow();
+    expect(speak).not.toHaveBeenCalled(); // заморожено — и не доставлено, и НЕ помечено seen
+    freeze.unfreeze();
+    await eng.tickNow();
+    expect(speak).toHaveBeenCalledTimes(1); // сигнал пересмотрен и прозвучал
+    setAutonomyFreezeForTests(undefined);
+  });
+});
+
+// Контроль-ревью волны E (MED): time-anchored сигнал («через 20 минут созвон», ttlMs) к концу тихого
+// окна ПРОТУХ бы и потерялся навсегда — «подождёт до утра» для него ложь. Тихие часы его пропускают.
+describe("AmbientEngine — тихие часы НЕ держат time-anchored сигнал", () => {
+  it("сигнал с ttlMs проходит ночью (встреча в 8:30 при окне 23-9 не теряется)", async () => {
+    const night = new Date(2026, 0, 1, 8, 10).getTime(); // 08:10 — ещё внутри окна 23-9
+    const eng = new AmbientEngine(
+      [fakeSource("cal", () => [sig({ key: "meet", title: "Сэр, через 20 минут — созвон.", ttlMs: 20 * 60_000, ts: night })])],
+      tempStore(),
+      { minSalience: 0.5, now: () => night, quietHours: "23-9" },
+    );
+    const speak = vi.fn().mockReturnValue(true);
+    eng.registerSpeaker("s1", "u1", speak);
+    await eng.tickNow();
+    expect(speak).toHaveBeenCalledTimes(1); // предупреждение прозвучало ДО встречи, не «утром»
+  });
+});

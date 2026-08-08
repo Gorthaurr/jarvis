@@ -518,3 +518,81 @@ describe("WatchService — durable повторяющееся наблюдени
     });
   });
 });
+
+// Контроль-ревью волны E (HIGH): отказ часового предохранителя у LLM-чекера обязан быть ТРАНЗИЕНТНЫМ —
+// без transient:true серия троттл-тиков хоронила наблюдение через dead-watch (suspended навсегда).
+import { AutonomyThrottle, setAutonomyThrottleForTests } from "../../autonomy/throttle.js";
+import { createWatchChecker } from "./checker.js";
+
+describe("watch-checker × часовой предохранитель (волна E)", () => {
+  it("отказ троттла = transient-ошибка: consecutiveFailures не растёт, watch жив", async () => {
+    const exhausted = new AutonomyThrottle(1, () => 5);
+    exhausted.tryAcquire("прогрев"); // единственный слот съеден
+    setAutonomyThrottleForTests(exhausted);
+    try {
+      const checker = createWatchChecker({
+        llm: { complete: async () => ({ text: "", toolUses: [], usage: {} }) } as never,
+        web: { search: async () => [], fetch: async () => null } as never,
+        tier: "sonnet",
+        model: "m",
+      });
+      const r = await checker({ id: "w1", userId: "u1", sessionId: "s1", what: "цена", condition: "упала" } as never);
+      expect(r.error).toContain("предохранитель");
+      expect(r.transient).toBe(true); // НЕ жжёт dead-watch: «не смог проверить» ≠ «проверка провалилась»
+      expect(r.met).toBe(false);
+    } finally {
+      setAutonomyThrottleForTests(undefined);
+    }
+  });
+});
+
+// Контроль-2 волны E (HIGH из раунда-1): замороженный тик обязан ПЕРЕВЗВОДИТЬ таймер (голый return
+// убивал one-shot цепочку навсегда), а после снятия стопа созревшая проверка должна пройти.
+import { AutonomyFreeze, setAutonomyFreezeForTests } from "../../autonomy/freeze.js";
+import { mkdtempSync } from "node:fs";
+
+describe("WatchService × killswitch (волна E)", () => {
+  it("frozen-тик перевзводит таймер: после unfreeze созревшая проверка проходит БЕЗ внешнего пинка", async () => {
+    vi.useFakeTimers();
+    const freeze = new AutonomyFreeze(mkdtempSync(join(tmpdir(), "jarvis-ks-watch-")));
+    setAutonomyFreezeForTests(freeze);
+    try {
+      const checker = vi.fn(async (): Promise<CheckResult> => ({ met: false, summary: "" }));
+      const svc = new WatchService(checker, new WatchStore(tempDir()), { minIntervalMs: 1000 });
+      svc.add({ userId: "u1", sessionId: "s1", what: "цена", condition: "упала", everySeconds: 1, kind: "recurring" } as never);
+      freeze.freeze("тест");
+      await svc.tickNow(); // заморожен: проверки нет, но таймер обязан перевзвестись (FREEZE_RECHECK_MS)
+      expect(checker).not.toHaveBeenCalled();
+      freeze.unfreeze();
+      await vi.advanceTimersByTimeAsync(31_000); // пере-проверочный таймер сработал уже БЕЗ латча
+      expect(checker).toHaveBeenCalled(); // цепочка жива — наблюдение возобновилось само
+      svc.stop?.();
+    } finally {
+      setAutonomyFreezeForTests(undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("тик дренирует и pendingAction (не только уведомления) — поручение, запаркованное стопом, исполняется после снятия", async () => {
+    const freeze = new AutonomyFreeze(mkdtempSync(join(tmpdir(), "jarvis-ks-watch2-")));
+    setAutonomyFreezeForTests(freeze);
+    try {
+      let met = true;
+      const svc = new WatchService(async () => ({ met, summary: "Доставлен!" }), new WatchStore(tempDir()), { minIntervalMs: 100 });
+      const run = vi.fn();
+      svc.registerSpeaker("s1", "u1", () => true);
+      svc.registerRunner("s1", "u1", run);
+      svc.add({ userId: "u1", sessionId: "s1", what: "посылка", condition: "доставлена", everySeconds: 1, kind: "one_shot", action: "напиши Кате, что доставили" } as never);
+      freeze.freeze("тест"); // стоп ставится ПОСЛЕ постановки наблюдения...
+      await svc.tickNow(); // ...заморожен: ничего не происходит
+      expect(run).not.toHaveBeenCalled();
+      freeze.unfreeze();
+      await svc.tickNow(); // проверка прошла → action; либо парковка → дренаж тем же тиком
+      await svc.tickNow(); // второй тик добирает pendingAction, если первый только запарковал
+      expect(run).toHaveBeenCalledTimes(1); // поручение НЕ потерялось и НЕ задвоилось
+      met = false;
+    } finally {
+      setAutonomyFreezeForTests(undefined);
+    }
+  });
+});

@@ -6,8 +6,10 @@
  */
 import type { TaskControl, TaskStatus } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
 import { isOfferDeclined, resumeOfferWindowMs } from "../brain/agent/checkpoint.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
+import { stripWakeAndFiller } from "../brain/router/index.js";
 import { statusReport } from "../brain/tasks/narrate.js";
 import type { Task } from "../brain/tasks/task.js";
 import { verbalize } from "../brain/verbalize/index.js";
@@ -51,6 +53,59 @@ function ackControl(ctx: SessionContext, text: string, source: ControlSource): v
  */
 export function handleControlUtterance(ctx: SessionContext, text: string, source: ControlSource = "voice"): boolean {
   if (!ctx.agentDeps.tasks) return false;
+  // ── KILLSWITCH автономии (волна E) — ПЕРЕД классификатором задач: «полный стоп» не должен
+  // падать в обычное «стоп» (stop_tts). Позитивный anchored-матч, нормализация как у роутера
+  // (та же грабля, что у resume-гарда: своя копия нормализации разошлась бы).
+  const killswitch = matchAutonomyCommand(stripWakeAndFiller(text));
+  if (killswitch === "freeze") {
+    const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId);
+    const durable = autonomyFreeze().freeze(`команда владельца («${text.trim().slice(0, 60)}»)`);
+    // Ack честный по составу: что остановлено, что НЕ остановлено (напоминания — заказаны на время),
+    // и КАК вернуть (обещаем ровно ту команду, которую матчер принимает, — обещание без срока годности).
+    // «Переживёт перезапуск» звучит ТОЛЬКО когда латч реально лёг на диск (контроль-ревью: freeze мог
+    // проглотить провал записи, а супервизор поднимает сервер за 1с — ложная гарантия durable-стопа).
+    const stopped = `Полный стоп, сэр: ${cancelled.length > 0 ? `остановил задач: ${cancelled.length}, ` : ""}автономные проверки и проактив заморожены`;
+    ackControl(
+      ctx,
+      durable
+        ? `${stopped} — переживёт и перезапуск. Напоминания продолжат срабатывать. Вернуть: «включи автономию».`
+        : `${stopped}, но на диск стоп не записался — перезапуск сервера его снимет, повторите команду после рестарта. Напоминания продолжат срабатывать. Вернуть: «включи автономию».`,
+      source,
+    );
+    log.warn("killswitch: владелец остановил автономию", { source, cancelled: cancelled.length, durable });
+    return true;
+  }
+  if (killswitch === "unfreeze") {
+    if (!autonomyFreeze().isFrozen()) {
+      // Контроль-2: даже при «и так работает» дочищаем остаточный файл-латч — прошлый unfreeze мог
+      // не снять его с диска (Windows-лок уже отпустил), и без ретрая рестарт вернул бы стоп,
+      // хотя владелец ДВАЖДЫ явно велел его снять.
+      const residualClean = autonomyFreeze().unfreeze();
+      ackControl(
+        ctx,
+        residualClean
+          ? "Автономия и так работает, сэр."
+          : "Автономия и так работает, сэр, но остаточный файл-стоп с диска снять не удалось — после перезапуска она замрёт, скажите тогда «включи автономию».",
+        source,
+      );
+      return true;
+    }
+    const clean = autonomyFreeze().unfreeze();
+    // Контроль-ревью (HIGH): «продолжится само» должно иметь МЕХАНИЗМ — пинаем watch-тик сразу
+    // (созревшие проверки/отложенные уведомления не ждут 30с-переопроса замороженного таймера;
+    // ambient на setInterval и оживает сам). Fire-and-forget: unfreeze уже случился.
+    void ctx.agentDeps.watch?.tickNow();
+    // Честность: латч мог не сняться С ДИСКА (Windows-лок) — тогда после рестарта стоп вернётся.
+    ackControl(
+      ctx,
+      clean
+        ? "Автономия включена, сэр: наблюдения, проактив и фоновые проверки снова работают."
+        : "Автономию включил, сэр, но файл-стоп не удалился с диска — после перезапуска она снова замрёт, скажите тогда ещё раз.",
+      source,
+    );
+    log.info("killswitch: владелец включил автономию", { source, diskClean: clean });
+    return true;
+  }
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;
 

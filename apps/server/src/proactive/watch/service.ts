@@ -10,6 +10,7 @@
  */
 import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { autonomyFreeze } from "../../autonomy/freeze.js";
 import { WatchStore } from "./store.js";
 import { type CheckResult, type Watch, type WatchChecker, dueAt } from "./watch.js";
 
@@ -21,6 +22,9 @@ const FLUSH_DRAIN_MS = 20_000;
 
 /** Потолок setTimeout (~24.8 дня): на больших интервалах спим максимум столько и пере-планируемся. */
 const MAX_DELAY = 2 ** 31 - 1;
+/** Волна E: пере-проверка «стоп ещё стоит?» замороженным тиком — пол задержки против busy-loop
+ *  (созревшие watch'и дают delay=0), при этом цепочка таймеров ЖИВА и снятие стопа подхватится само. */
+const FREEZE_RECHECK_MS = 30_000;
 
 export interface WatchServiceOpts {
   now?: () => number;
@@ -338,6 +342,13 @@ export class WatchService {
    * включался антидребезг по тексту, который его глушил и в следующие разы.
    */
   private notify(w: Watch, summary: string): void {
+    // Killswitch мог встать ПОСРЕДИ активного тика (контроль-ревью: гейт tickNow пройден ДО await
+    // проверки) — уведомление честно паркуем, как при отсутствии сессии: снятие стопа отдаст штатно.
+    if (autonomyFreeze().isFrozen()) {
+      w.pendingNotify = summary;
+      log.info("наблюдение сработало при «полном стопе» — уведомление отложено", { id: w.id });
+      return;
+    }
     const speak = this.speakerFor(w);
     // pendingNotify гасим ТОЛЬКО по факту ОЗВУЧКИ (контроль-9): «принято в очередь» ещё не
     // «прозвучало» (TTL/стоп/смерть сессии роняют принятое). Сначала помечаем «ждёт», снимает — колбэк.
@@ -409,11 +420,18 @@ export class WatchService {
     // ставим: он давил бы и ЛЕГИТИМНЫЙ повтор («сборка упала → починили → упала снова через час»).
     w.lastActionAt = this.now(); // durable-след последнего запуска (диагностика/будущие политики)
     const goal = this.actionGoal(w);
-    const run = this.runnerFor(w);
+    // Killswitch посреди тика (контроль-ревью): поручение ЛЮДЯМ после «полного стопа» исполняться
+    // не должно — паркуем как «нет сессии»: pendingAction + TTL (протухшее честно не исполнится).
+    const run = autonomyFreeze().isFrozen() ? undefined : this.runnerFor(w);
     if (!run) {
       w.pendingAction = goal;
       w.pendingActionAt = this.now(); // TTL: протухшее поручение не исполнится молча (адверс-ревью [3])
-      log.info("наблюдение сработало с действием, но нет живой сессии — действие отложено", { id: w.id });
+      log.info(
+        autonomyFreeze().isFrozen()
+          ? "наблюдение сработало при «полном стопе» — действие отложено (снятие стопа отдаст, TTL честен)"
+          : "наблюдение сработало с действием, но нет живой сессии — действие отложено",
+        { id: w.id },
+      );
       return;
     }
     w.pendingAction = undefined;
@@ -432,6 +450,10 @@ export class WatchService {
    * коннекте — владельцу честно сообщается, что оно устарело, решение за ним.
    */
   private flushPendingActions(userId: string): void {
+    // Killswitch (волна E): отложенное ПОРУЧЕНИЕ — самое опасное, что есть у автономии (действие от
+    // имени владельца). При стопе не исполняем и НЕ трогаем запись: снятие стопа отдаст её штатно
+    // (TTL проверится в момент исполнения — протухшее честно не исполнится).
+    if (autonomyFreeze().isFrozen()) return;
     const ttlMs = envInt("JARVIS_WATCH_PENDING_ACTION_TTL_MS", 30 * 60_000);
     for (const w of this.store.withPendingAction(userId)) {
       const run = this.runnerFor(w);
@@ -466,6 +488,9 @@ export class WatchService {
    *  срочное, а мы гасим `pendingNotify` сразу — залп после долгого офлайна терял бы почти всё.
    *  Остаток остаётся в сторе и уйдёт следующим тиком наблюдений (`tickNow` зовёт flushPending). */
   private flushPending(userId: string): void {
+    // Killswitch (волна E): проактивные уведомления при стопе не отдаём; pendingNotify цел в сторе —
+    // дренаж возобновится тиками после «включи автономию».
+    if (autonomyFreeze().isFrozen()) return;
     const queue = this.store.withPendingNotify(userId);
     let sent = 0;
     for (const w of queue) {
@@ -503,12 +528,30 @@ export class WatchService {
    *  триггера. Re-entrancy-гард: перекрывающийся вызов (долгий checker) — no-op. */
   async tickNow(): Promise<void> {
     if (this.ticking) return;
+    // Killswitch (волна E): «полный стоп» замораживает проверки/уведомления/действия наблюдений;
+    // записи store не трогаем (созревшее проверится после снятия стопа).
+    // 🔴 КОНТРОЛЬ-РЕВЬЮ (HIGH): голый return здесь УБИВАЛ цепочку таймеров НАВСЕГДА — таймер у
+    // WatchService one-shot и перевзводится ТОЛЬКО в finally этого метода (который ранний return
+    // минует) — «включи автономию» снимал латч, а наблюдения молчали до рестарта (ложный ack).
+    // Перевзводим явно и С ПОЛОМ задержки: обычный reschedule() на созревших watch'ах дал бы delay=0
+    // → busy-loop setTimeout(0) на всё время стопа. Второй рубеж — «включи автономию» пинает tickNow.
+    if (autonomyFreeze().isFrozen()) {
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = setTimeout(() => void this.tickNow(), FREEZE_RECHECK_MS);
+      if (typeof this.timer === "object" && "unref" in this.timer) this.timer.unref?.();
+      return;
+    }
     this.ticking = true;
     try {
       const now = this.now();
       // Хвост отложенных уведомлений (flushPending отдаёт их порцией — иначе очередь озвучки выбросит
       // помеченные доставленными) дренируем на каждом тике, а не только при подключении.
       for (const userId of new Set([...this.speakers.values()].map((s) => s.userId))) this.flushPending(userId);
+      // Контроль-2 волны E (HIGH): pendingAction, запаркованный киллсвитчем ПОСРЕДИ тика (или при
+      // реконнекте во время стопа), раньше ждал СЛЕДУЮЩЕГО registerRunner — «включи автономию»
+      // пинает tickNow, значит тик обязан дренировать и ПОРУЧЕНИЯ, не только уведомления. TTL внутри
+      // честен: протухшее не исполнится молча.
+      for (const userId of new Set([...this.runners.values()].map((r) => r.userId))) this.flushPendingActions(userId);
       const due = this.store.active().filter((w) => dueAt(w, now) <= now);
       // §Волна3 ревью (#14): проверки НЕЗАВИСИМЫ (каждая мутирует свою запись) → гоним ПАРАЛЛЕЛЬНО, а не
       // последовательно. Раньше один невыполненный предикат держал клиентский wait.for до 1.5с (мёртвый

@@ -538,3 +538,125 @@ describe("Волна C: чекпойнт прерванной задачи и ч
     expect(JSON.stringify(llm.requests[0]?.messages ?? [])).not.toContain("ПРОДОЛЖАЕМ ПРЕРВАННУЮ ЗАДАЧУ");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Волна E (идея Skales): СТРАХОВОЧНЫЙ снимок чекпойнта на 70%-нудже. Живёт он только внутри петли:
+// штатный выход гасит его в finally (успех/провал не оставляют «недоделку»), терминал прерывания
+// пишет поверх свою версию. Пережить он может ТОЛЬКО жёсткий kill процесса — ради этого и существует.
+describe("Волна E: превентивный чекпойнт на 70% бюджета времени", () => {
+  let dir = "";
+  let savedMaxMs: string | undefined;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "jarvis-cp-prev-"));
+    savedMaxMs = process.env.JARVIS_TASK_MAX_MS;
+    process.env.JARVIS_TASK_MAX_MS = "30000"; // кламп-минимум потолка задачи
+    vi.useFakeTimers({ toFake: ["Date"] }); // двигаем ТОЛЬКО Date — промисы/IO живые
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    if (savedMaxMs === undefined) delete process.env.JARVIS_TASK_MAX_MS;
+    else process.env.JARVIS_TASK_MAX_MS = savedMaxMs;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Веб-провайдер, крутящий часы МЕЛКИМИ шагами (+5.5с на вызов): после 4-го раунда elapsed 22с
+   *  переваливает 70% потолка (21с) → нудж со снимком, а средний раунд (5.5с) остаётся МЕНЬШЕ
+   *  остатка (8с) — early-wrap не срубает задачу, и она доходит до УСПЕШНОГО терминала. */
+  function clockWeb(): IWebProvider {
+    return {
+      search: async () => {
+        vi.setSystemTime(Date.now() + 5_500);
+        return [{ title: "T", url: "https://x.example", snippet: "коротко" }];
+      },
+      fetch: async () => null,
+    } as unknown as IWebProvider;
+  }
+
+  /** 4 tool-раунда с РАЗНЫМИ запросами (анти-runaway не карает) + финал + подтверждение goal-check. */
+  const fourRoundScript = () => [
+    { toolUses: [{ id: "t0", name: "web_search", input: { query: "цены ram ddr5" } }] },
+    { toolUses: [{ id: "t1", name: "web_search", input: { query: "цены ram ddr4" } }] },
+    { toolUses: [{ id: "t2", name: "web_search", input: { query: "динамика цен ram" } }] },
+    { toolUses: [{ id: "t3", name: "web_search", input: { query: "прогноз цен ram" } }] },
+    { text: "Готово: сводка по ценам собрана, четыре источника." },
+    { text: "Подтверждаю: сводка собрана." },
+  ];
+
+  it("снимок пишется МОЛЧА на нудже (deliverable:false) и гасится успешным терминалом", async () => {
+    const checkpoints = new CheckpointStore(dir);
+    const saveSpy = vi.spyOn(checkpoints, "save");
+    const offerSpy = vi.spyOn(checkpoints, "markOffered");
+    const llm = new MockLlmProvider(fourRoundScript());
+    await handleUserText(fakeSession(), "собери сводку по ценам", await makeDeps(llm, { checkpoints, web: clockWeb() }));
+    // Снимок был: save звался с причиной hardKill (страховка от жёсткого kill)...
+    expect(saveSpy.mock.calls.some(([cp]) => cp.reason === "hardKill")).toBe(true);
+    // ...но МОЛЧА: окно «мы предложили» не взводилось (предложение не звучало).
+    expect(offerSpy).not.toHaveBeenCalled();
+    // Успешный терминал снимок ГАСИТ: «доделай» не должно воскрешать сделанную задачу (закон честности).
+    expect(checkpoints.peek("u1")).toBeNull();
+  });
+
+  it("контроль-2: провал ДИСКА у снимка (save→false) не оставляет ОЗУ-чекпойнт после успеха — clearIf безусловен", async () => {
+    const checkpoints = new CheckpointStore(dir);
+    // Симулируем «в ОЗУ лёг, диск не принял»: save работает как настоящий, но рапортует false —
+    // прежняя уборка по флагу preventiveCheckpoint при этом НЕ срабатывала, и «доделай» 30 минут
+    // воскрешало УЖЕ СДЕЛАННУЮ задачу (мотивирующий кейс безусловного clearIf).
+    const orig = checkpoints.save.bind(checkpoints);
+    vi.spyOn(checkpoints, "save").mockImplementation((cp, chainFrom) => {
+      orig(cp, chainFrom);
+      return false;
+    });
+    const llm = new MockLlmProvider(fourRoundScript());
+    await handleUserText(fakeSession(), "собери сводку по ценам", await makeDeps(llm, { checkpoints, web: clockWeb() }));
+    expect(checkpoints.peek("u1")).toBeNull(); // успешный терминал погасил и «недоставшийся до диска» снимок
+  });
+
+  it("слот-гард: живая недоделка ДРУГОЙ задачи снимком не перетирается", async () => {
+    const checkpoints = new CheckpointStore(dir);
+    checkpoints.save(storedForeignCp());
+    const saveSpy = vi.spyOn(checkpoints, "save");
+    const llm = new MockLlmProvider(fourRoundScript());
+    await handleUserText(fakeSession(), "собери сводку по ценам", await makeDeps(llm, { checkpoints, web: clockWeb() }));
+    expect(saveSpy.mock.calls.some(([cp]) => cp.reason === "hardKill")).toBe(false); // снимок НЕ писался
+    expect(checkpoints.peek("u1")?.taskId).toBe("other-task"); // чужое обещание «доделай» цело
+  });
+
+  it("терминал прерывания главнее снимка: после earlyWrap в сторе его версия, не hardKill", async () => {
+    const checkpoints = new CheckpointStore(dir);
+    // Часы только вперёд: early-wrap («остаток < среднего раунда») срубает задачу сразу после нуджа.
+    let n = 0;
+    const web = {
+      search: async () => {
+        n += 1;
+        if (n === 1) vi.setSystemTime(Date.now() + 21_500);
+        return [{ title: "T", url: "https://x.example", snippet: "коротко" }];
+      },
+      fetch: async () => null,
+    } as unknown as IWebProvider;
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t0", name: "web_search", input: { query: "a" } }] },
+      { toolUses: [{ id: "t1", name: "web_search", input: { query: "b" } }] },
+      { text: "не должно понадобиться" },
+    ]);
+    await handleUserText(fakeSession(), "собери сводку по ценам", await makeDeps(llm, { checkpoints, web }));
+    const cp = checkpoints.peek("u1");
+    expect(cp).not.toBeNull();
+    expect(cp?.reason).not.toBe("hardKill"); // терминал записал СВОЮ причину поверх снимка
+  });
+});
+
+/** Живой чекпойнт ДРУГОЙ задачи (для слот-гарда волны E). */
+function storedForeignCp(): TaskCheckpoint {
+  return {
+    userId: "u1",
+    taskId: "other-task",
+    goal: "переименуй файлы проекта",
+    title: "Переименование файлов",
+    reason: "timeout",
+    round: 5,
+    savedAt: Date.now(),
+    offeredAt: Date.now(),
+    tier: "sonnet",
+    digest: "Вызвал fs_list — ok → 12 файлов",
+  };
+}

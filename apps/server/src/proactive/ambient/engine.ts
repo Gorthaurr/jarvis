@@ -5,6 +5,8 @@
  * НОВЫЙ салиентный сигнал — токен-эконом как качество (тики сами по себе бесплатны).
  */
 import { type Logger, createLogger } from "@jarvis/shared";
+import { autonomyFreeze } from "../../autonomy/freeze.js";
+import { type QuietWindow, inQuietWindow, parseQuietWindow } from "../quiet-hours.js";
 import { AmbientSeenStore } from "./store.js";
 import type { AmbientPhraser, AmbientSignal, AmbientSource } from "./signal.js";
 
@@ -25,6 +27,8 @@ export interface AmbientEngineOpts {
   minSalience?: number;
   /** LLM-фразировщик (опц.): сырой сигнал → дворецкая фраза. Зовётся лишь на НОВОЕ важное. null → title как есть. */
   phraser?: AmbientPhraser;
+  /** Тихие часы (волна E): спека окна для тестов; деф — env JARVIS_QUIET_HOURS ("23-9", пусто=выкл). */
+  quietHours?: string;
 }
 
 export class AmbientEngine {
@@ -43,6 +47,9 @@ export class AmbientEngine {
   private readonly intervalMs: number;
   private readonly minSalience: number;
   private readonly phraser?: AmbientPhraser;
+  /** Тихие часы: null = выкл; парсится ЛЕНИВО (грабля «.env грузится после ESM-хойст-импортов»). */
+  private quietWindow: QuietWindow | null | undefined;
+  private readonly quietSpec?: string;
 
   constructor(
     private readonly sources: AmbientSource[],
@@ -53,6 +60,17 @@ export class AmbientEngine {
     this.intervalMs = opts.intervalMs ?? envInt("JARVIS_AMBIENT_INTERVAL_MS", 90_000);
     this.minSalience = opts.minSalience ?? envFloat("JARVIS_AMBIENT_MIN_SALIENCE", 0.5);
     this.phraser = opts.phraser;
+    if (opts.quietHours !== undefined) this.quietSpec = opts.quietHours;
+  }
+
+  /** Волна E: сейчас тихие часы? Несрочный ambient не озвучиваем (семантика ровно как «занят»):
+   *  seen НЕ ставится, сигнал вернётся следующим тиком и прозвучит после конца окна. */
+  private inQuiet(): boolean {
+    if (this.quietWindow === undefined) {
+      this.quietWindow = parseQuietWindow(this.quietSpec ?? process.env.JARVIS_QUIET_HOURS);
+      if (this.quietWindow) log.info("ambient: тихие часы активны", { окно: this.quietSpec ?? process.env.JARVIS_QUIET_HOURS });
+    }
+    return this.quietWindow !== null && inQuietWindow(this.quietWindow, new Date(this.now()));
   }
 
   async start(): Promise<void> {
@@ -100,6 +118,9 @@ export class AmbientEngine {
   /** Один проход опроса всех источников. Публичен для тестов/ручного триггера. Re-entrancy-гард. */
   async tickNow(): Promise<void> {
     if (this.ticking) return;
+    // Killswitch (волна E): «полный стоп» замораживает ambient-опросы целиком (сигналы никуда не
+    // деваются — источники отдадут их после «включи автономию»; таймер жив).
+    if (autonomyFreeze().isFrozen()) return;
     this.ticking = true;
     try {
       // Сначала дренируем остаток прошлой порции отложенных (flushPending отдаёт их не разом, чтобы
@@ -168,6 +189,15 @@ export class AmbientEngine {
       log.info("ambient: уведомление отложено — владелец занят", { source: sig.sourceId, key: sig.key.slice(0, 40) });
       return;
     }
+    // Тихие часы (волна E): та же семантика, что «занят» — несрочное не отдаём, seen не ставим,
+    // сигнал вернётся тиком и прозвучит утром. Срочное (счёт с дедлайном) проходит всегда.
+    // ⚠️ time-anchored сигнал (ttlMs — «через 20 минут созвон») тихие часы НЕ держат (контроль-ревью,
+    // MED): к концу окна он ПРОТУХНЕТ и потеряется НАВСЕГДА («подождёт до утра» для него ложь) —
+    // привязка ко времени и есть срочность по смыслу, как у напоминаний, исключённых из окна.
+    if (ch && !sig.urgent && sig.ttlMs === undefined && this.inQuiet()) {
+      log.info("ambient: уведомление отложено — тихие часы", { source: sig.sourceId, key: sig.key.slice(0, 40) });
+      return;
+    }
     if (ch) {
       // durable-seen ТОЛЬКО если очередь озвучки РЕАЛЬНО приняла реплику (контроль-7): очередь общая на
       // все проактивные каналы, и «отдал» ≠ «прозвучит». Не приняли → сигнал остаётся непомеченным и
@@ -209,6 +239,7 @@ export class AmbientEngine {
   }
 
   private flushPending(userId: string): void {
+    if (autonomyFreeze().isFrozen()) return; // killswitch: pending цел, отдадим после снятия стопа
     if (this.pending.length === 0) return;
     const ch = this.channelFor(userId);
     if (!ch) return;
@@ -221,13 +252,22 @@ export class AmbientEngine {
     // ...И ТОЛЬКО КОГДА ВЛАДЕЛЕЦ СВОБОДЕН (контроль-6, HIGH — гард стоял лишь в consider()): занятому
     // владельцу пайплайн несрочное не отдаёт и через TTL выбрасывает, а seen здесь уже стоял бы →
     // потеря навсегда. Срочное (будильник/день оплаты) проходит всегда, как и в consider().
-    const busy = ch.isBusy?.() === true;
+    // «Занят» держит ВСЁ несрочное (волна D — отдать занятому = пайплайн выбросит по TTL, а seen уже
+    // осел бы). «Тихие часы» (волна E) держат несрочное БЕЗ временнОй привязки; запись с expiresAt
+    // («через 20 минут созвон») к концу окна протухнет и потеряется навсегда — её тихие часы
+    // ПРОПУСКАЮТ (контроль-ревью, MED: «подождёт до утра» для time-anchored — ложь).
+    const busyHold = ch.isBusy?.() === true;
+    const quietHold = this.inQuiet();
+    const heldByGates = (p: { urgent: boolean; expiresAt?: number }): boolean =>
+      !p.urgent && (busyHold || (quietHold && p.expiresAt === undefined));
+    const busy = busyHold; // для прежних логов «владелец занят»
     const mineAll = this.pending.filter((p) => p.userId === userId);
     const fresh = mineAll.filter((p) => !(p.expiresAt !== undefined && now > p.expiresAt));
     if (fresh.length !== mineAll.length) expired = true;
     const urgent = fresh.filter((p) => p.urgent);
-    const rest = busy ? [] : fresh.filter((p) => !p.urgent);
-    const held = busy ? fresh.filter((p) => !p.urgent) : rest.slice(FLUSH_BATCH);
+    const deliverableRest = fresh.filter((p) => !p.urgent && !heldByGates(p));
+    const rest = deliverableRest;
+    const held = [...fresh.filter((p) => !p.urgent && heldByGates(p)), ...rest.slice(FLUSH_BATCH)];
     const batch = [...urgent, ...rest.slice(0, FLUSH_BATCH)];
     const keep = new Set(held.map((p) => p.seenKey));
     if (busy && held.length > 0) log.info("ambient: очередь придержана — владелец занят", { ждут: held.length });

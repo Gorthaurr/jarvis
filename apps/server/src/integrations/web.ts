@@ -38,6 +38,10 @@ const SEARCH_UA =
 const WEB_TIMEOUT_MS = 8_000;
 /** Жёсткий лимит вычитываемого HTML (защита от гигантских страниц до slice). */
 const MAX_HTML_BYTES = 2_000_000;
+/** Кап hop'ов redirect-цепочки web.fetch (шортенеры укладываются в 2-3; больше — подозрительно). */
+const MAX_REDIRECT_HOPS = 5;
+/** HTTP-статусы редиректа (цепочку ходим вручную — каждый hop через SSRF-гард ДО запроса). */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /**
  * SSRF-защита (§14): URL для web.fetch приходит от LLM (tool-use). Не пускаем модель
@@ -507,21 +511,49 @@ export class WebProvider implements IWebProvider {
       return null;
     }
     try {
-      const resp = await fetch(url, {
-        headers: { "User-Agent": "JarvisBot/0.1 (+readability)" },
-        signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
-        redirect: "follow",
-      });
-      if (!resp.ok) return null;
-      // Redirect-SSRF: конечный URL после редиректов мог увести во внутреннюю сеть —
-      // ревалидируем (302 → 169.254.169.254/localhost не должен пройти).
-      if (resp.url && resp.url !== url && !isFetchUrlAllowed(resp.url)) {
-        log.warn("web.fetch: редирект в запрещённый адрес — отказ", { url, final: resp.url });
+      // Волна E (redirect-SSRF, урок Skales/шортенеры): раньше redirect:"follow" сам ходил по
+      // цепочке, и GET в запрещённый адрес УСПЕВАЛ УЙТИ до пост-проверки resp.url (сам запрос по
+      // внутреннему сервису — уже side-effect, тело читать не обязательно). Теперь цепочка ручная:
+      // КАЖДЫЙ hop (вкл. шортенеры) валидируется isFetchUrlAllowed ДО отправки запроса.
+      // Общий бюджет времени прежний (WEB_TIMEOUT_MS на всю цепочку, как было при follow).
+      const deadline = Date.now() + WEB_TIMEOUT_MS;
+      let current = url;
+      let resp: Response | null = null;
+      for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) return null; // бюджет цепочки исчерпан — честный null (как таймаут)
+        const r = await fetch(current, {
+          headers: { "User-Agent": "JarvisBot/0.1 (+readability)" },
+          signal: AbortSignal.timeout(remaining),
+          redirect: "manual",
+        });
+        if (REDIRECT_STATUSES.has(r.status)) {
+          try {
+            await r.body?.cancel(); // освобождаем сокет редирект-ответа (тело не нужно)
+          } catch {
+            /* уже потреблено/закрыто — не важно */
+          }
+          const loc = r.headers.get("location");
+          if (!loc) return null; // 3xx без Location — мусорный ответ
+          const next = new URL(loc, current).toString(); // относительный Location — от текущего hop
+          if (!isFetchUrlAllowed(next)) {
+            log.warn("web.fetch: редирект в запрещённый адрес — отказ ДО запроса", { url, next });
+            return null;
+          }
+          current = next;
+          continue;
+        }
+        resp = r;
+        break;
+      }
+      if (!resp) {
+        log.warn("web.fetch: слишком длинная redirect-цепочка", { url, cap: MAX_REDIRECT_HOPS });
         return null;
       }
+      if (!resp.ok) return null;
       // Потоковое чтение с жёстким лимитом байт (не доверяем content-length, не буферизуем всё).
       const html = await readCappedText(resp, MAX_HTML_BYTES);
-      const page = extractReadable(html, url);
+      const page = extractReadable(html, current); // база — ФИНАЛЬНЫЙ URL (относительные ссылки честны)
       // Ограничим объём текста (вход в LLM, §15).
       return { ...page, text: page.text.slice(0, 8000) };
     } catch (e) {

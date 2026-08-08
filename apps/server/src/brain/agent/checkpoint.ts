@@ -25,7 +25,7 @@ import { CANCEL_PHRASES, CANCEL_WORDS } from "../tasks/control.js";
 import { OUTBOUND_SEND_TOOLS, toolEffect } from "./error-voice.js";
 
 /** Почему задача прервалась (для честной формулировки при продолжении). */
-export type CheckpointReason = "timeout" | "contextWrap" | "earlyWrap" | "stepCap" | "channelLost";
+export type CheckpointReason = "timeout" | "contextWrap" | "earlyWrap" | "stepCap" | "channelLost" | "hardKill";
 
 /** Снимок прерванной задачи, из которого можно ЧЕСТНО продолжить. */
 export interface TaskCheckpoint {
@@ -65,6 +65,11 @@ export function reasonHuman(reason: CheckpointReason): string {
       return "исчерпан лимит шагов";
     case "channelLost":
       return "оборвалась связь с компьютером";
+    // Волна E: страховочный снимок на 70%-нудже пережил жёсткий kill процесса (краш/OOM/выключение) —
+    // штатный терминал его гасит или перезаписывает, так что звучит эта причина только после
+    // ВНЕЗАПНОЙ смерти сервера. Honesty: не выдаём за «не уложился в отведённое время».
+    case "hardKill":
+      return "работа оборвалась внезапно вместе с сервером";
     default:
       return "не уложился в отведённое время";
   }

@@ -36,6 +36,8 @@ import {
 import { AsyncMutex, type Logger, Semaphore, type ThinkingEffort, type Tier, createLogger, envInt } from "@jarvis/shared";
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
+import { autonomyFreeze } from "../autonomy/freeze.js";
+import { renderCapabilityPassport } from "../brain/capabilities.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { getProfile, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
@@ -293,6 +295,17 @@ export function makeSessionContext(
     openOrFocus: (url) => brain.extBridge.openOrFocus(url),
     // §: браузер пользователя через расширение для browser_open/read/act (его реальные вкладки/сессия).
     ext: brain.extBridge,
+    // Волна E: паспорт возможностей — живой снимок на КАЖДЫЙ ход ($0: читаем флаги, не сеть).
+    // «Ключ есть» ≠ «канал жив» — формулировки в renderCapabilityPassport это различают.
+    capabilities: () =>
+      renderCapabilityPassport({
+        extensionConnected: brain.extBridge.connected,
+        mcpServers: brain.mcp?.status() ?? [],
+        braveKey: Boolean(process.env.BRAVE_SEARCH_API_KEY),
+        tinkoffToken: Boolean(process.env.TINKOFF_INVEST_TOKEN),
+        obsConfigured: Boolean(process.env.OBS_WEBSOCKET_PASSWORD || process.env.OBS_WEBSOCKET_HOST),
+        autonomyFrozenReason: autonomyFreeze().info()?.reason ?? null,
+      }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
     obligations: brain.obligations, // §проактив-всё: счета/обязательства (инструменты obligation_*)
