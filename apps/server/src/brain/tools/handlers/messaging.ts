@@ -13,7 +13,7 @@ import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messag
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
 import type { ConfirmOutcome, ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, err, ok } from "../dispatch-util.js";
+import { channelDownResult, confirmDeclineText, declined, err, ok } from "../dispatch-util.js";
 
 /**
  * Подтверждение отправки адресату ОДИН РАЗ (§14, фидбэк пользователя). Если этого адресата уже одобряли
@@ -188,7 +188,7 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
   }
   if (!confirmedByResendGate) {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
-    if (!gate.approved) return ok(sendGateMessage(gate.outcome, "сообщение", to));
+    if (!gate.approved) return declined(sendGateMessage(gate.outcome, "сообщение", to));
   }
   // ⚠️ Ревью р2 (peer-канал был МЁРТВ): клиентский fast-path (openHinted по peerId) входит ТОЛЬКО при
   // непустом preferredTitle. При явном peer подаём preferredTitle=to — иначе fast-path пропускался,
@@ -279,7 +279,7 @@ async function telegramSendVoiceLocked(ctx: ToolContext, input: Record<string, u
     await approveSend(ctx.userId, "telegram", to);
   } else {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить ГОЛОСОВОЕ «${to}» (голос филиппа)?\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»`);
-    if (!gate.approved) return ok(sendGateMessage(gate.outcome, "голосовое", to));
+    if (!gate.approved) return declined(sendGateMessage(gate.outcome, "голосовое", to));
   }
   try {
     const audioB64 = await ctx.synthVoice(text); // mp3 base64 голосом филиппа
@@ -385,6 +385,12 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
     const cd = channelDownResult({ ok: false, error: { code: "channel_down" } }, "message_send не отправлен: канал с ПК недоступен (переподключение).");
     if (cd) return cd;
   }
+  // Ф0 пульта (адверс-ревью HIGH): §14-гейт не пропустил — это НЕ сбой инструмента. Говорим исходом
+  // владельца (не «пользователь отклонил» на всё подряд) и возвращаем declined, а не err: иначе
+  // недоставленный вопрос кормил бы anti-runaway и эскалацию тира «от транспорта».
+  if (res.status === "denied" && res.confirmOutcome !== undefined) {
+    return declined(sendGateMessage(res.confirmOutcome, "сообщение", to));
+  }
   return err(`Не отправлено (${res.status}): ${res.reason ?? ""}`);
 }
 
@@ -398,7 +404,7 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
   let channelDown = false; // Б4 (интеграционное ревью #4): channel_down теряется в обёртке — ловим сами
   try {
     const res = await placeOrder({ userId: ctx.userId, vendor, items, total }, DEFAULT_ORDER_POLICY, {
-      requestConfirm: async (summary) => ({ approved: (await ctx.confirm!(summary, "order")).approved }),
+      requestConfirm: (summary: string) => ctx.confirm!(summary, "order"), // Ф0: исход НЕ срезаем
       isAlreadyPlaced: (k) => placedOrderKeys.get(k) !== undefined,
       markPlaced: (k) => placedOrderKeys.set(k, true),
       place: async (req) => {
@@ -414,6 +420,9 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
     if (channelDown) {
       const cd = channelDownResult({ ok: false, error: { code: "channel_down" } }, "order_place не отправлен: канал с ПК недоступен (переподключение).");
       if (cd) return cd;
+    }
+    if (res.status === "denied" && res.confirmOutcome !== undefined) {
+      return declined(confirmDeclineText(res.confirmOutcome, "заказ"));
     }
     return err(`Заказ не оформлен (${res.status}): ${res.reason ?? ""}`);
   } catch (e) {

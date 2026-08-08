@@ -74,21 +74,29 @@ export function initMemoryPanel(jarvis: JarvisBridge): void {
   const counts = $<HTMLElement>("memCounts");
   const warn = $<HTMLElement>("memWarn");
 
-  let searching = false; // «нет совпадений по запросу» ≠ «память пуста» — тексты пустоты разные
   jarvis.onMemory((m: MemoryState) => {
-    const empty = (what: string) => (searching ? "По запросу ничего не найдено." : what);
-    renderLayer(factsList, m.facts, empty("Точных фактов пока нет."), (it) => jarvis.forgetMemory("fact", it.id));
+    // Текст пустоты выбираем по ЭХО СЕРВЕРА (какой фильтр он реально применил), а не по локальному
+    // флагу: тот расходился с реальностью после «Забыть» и при гонке быстрого ввода (адверс-ревью).
+    const applied = m.query ?? "";
+    const empty = (what: string) => (applied ? "По запросу ничего не найдено." : what);
+    renderLayer(factsList, m.facts, empty("Точных фактов пока нет."), (it) => jarvis.forgetMemory("fact", it.id, applied || undefined));
     renderLayer(
       episodesList,
       m.episodes,
       empty("Записей из разговоров пока нет."),
-      (it) => jarvis.forgetMemory("episode", it.id),
+      (it) => jarvis.forgetMemory("episode", it.id, applied || undefined),
       m.hasMore?.episodes === true,
     );
     renderLayer(evictedList, m.evicted, empty("Ничего не вытеснялось."), null, m.hasMore?.evicted === true);
     if (counts) {
       // Числа честные: где показанное усечено — говорим «200+», а не выдаём кап за полный объём.
-      const ep = m.hasMore?.episodes ? `${m.episodes.length}+` : String(m.totals?.episodes ?? m.episodes.length);
+      // «—», когда чтения НЕ БЫЛО (totals не пришёл и усечения нет): ноль здесь означал бы
+      // «Джарвис ничего не помнит», хотя записи есть, но прочитать их не удалось.
+      const ep = m.hasMore?.episodes === true
+        ? `${m.episodes.length}+`
+        : m.totals?.episodes !== undefined
+          ? String(m.totals.episodes)
+          : "—";
       const ev = m.totals?.evicted !== undefined && m.totals.evicted > m.evicted.length ? `${m.evicted.length} из ${m.totals.evicted}` : String(m.evicted.length);
       counts.textContent = `Фактов: ${m.facts.length} · из разговоров: ${ep} · вытеснено: ${ev}`;
     }
@@ -103,10 +111,6 @@ export function initMemoryPanel(jarvis: JarvisBridge): void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   search?.addEventListener("input", () => {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      const q = search.value.trim();
-      searching = q.length > 0;
-      jarvis.requestMemory(q || undefined);
-    }, 250);
+    timer = setTimeout(() => jarvis.requestMemory(search.value.trim() || undefined), 250);
   });
 }

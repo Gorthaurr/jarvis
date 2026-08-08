@@ -8,7 +8,7 @@ function deps(over: Partial<OrderDeps> = {}): { deps: OrderDeps; placed: string[
   const placedKeys = new Set<string>();
   const placed: string[] = [];
   const d: OrderDeps = {
-    requestConfirm: async () => ({ approved: true }),
+    requestConfirm: async () => ({ approved: true, outcome: "approved" as const }),
     isAlreadyPlaced: (k) => placedKeys.has(k),
     markPlaced: (k) => {
       placedKeys.add(k);
@@ -26,7 +26,7 @@ const usual = { userId: "u", vendor: "Додо", items: [{ name: "пицца" }]
 
 describe("placeOrder (§14, UC-5)", () => {
   it("обычное место в пороге → размещён без confirm", async () => {
-    const confirm = vi.fn(async () => ({ approved: true }));
+    const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
     const { deps: d, placed } = deps({ requestConfirm: confirm });
     const r = await placeOrder(usual, policy, d);
     expect(r.status).toBe("placed");
@@ -35,7 +35,7 @@ describe("placeOrder (§14, UC-5)", () => {
   });
 
   it("выше порога → confirm обязателен", async () => {
-    const confirm = vi.fn(async () => ({ approved: true }));
+    const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
     const { deps: d } = deps({ requestConfirm: confirm });
     await placeOrder({ ...usual, total: 3000 }, policy, d);
     expect(confirm).toHaveBeenCalledTimes(1);
@@ -49,7 +49,7 @@ describe("placeOrder (§14, UC-5)", () => {
   });
 
   it("отклонение пользователем → denied", async () => {
-    const { deps: d, placed } = deps({ requestConfirm: async () => ({ approved: false }) });
+    const { deps: d, placed } = deps({ requestConfirm: async () => ({ approved: false, outcome: "denied" as const }) });
     const r = await placeOrder({ ...usual, total: 3000 }, policy, d);
     expect(r.status).toBe("denied");
     expect(placed).toHaveLength(0);

@@ -2727,7 +2727,11 @@ async function runAgentLoop(
           // строго r.sent (ревью 2026-07-24): честные отказы хендлера («не подтвердили», «повтор не
           // ушёл») — тоже isError:false, но НЕ отправка; взводить по ним anyMutateSucceeded = отключать
           // masked-failure/анти-капитуляцию без реального дела (ложное «Готово, отправил» не поймалось бы).
-          if (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true) anyMutateSucceeded = true;
+          // Ф0 пульта (адверс-ревью, HIGH): `declined` — действие НЕ выполнено, потому что §14-гейт
+          // его не пропустил (отказ / не ответил / не смогли спросить). Раньше такой результат
+          // (isError:false) взводил флаг для fs_delete/system_power/code_run/skill_execute/MCP →
+          // masked-failure и анти-капитуляция глохли, и ход заканчивался «Готово» при нулевом деле.
+          if (r.declined !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) anyMutateSucceeded = true;
           // Волна C: журнал чекпойнта должен знать ТО ЖЕ САМОЕ — «нет ошибки» у отправки человеку ещё
           // не значит «ушло» (не подтвердили / повтор не ушёл). Иначе секция «СДЕЛАНО» соврёт.
           if (OUTBOUND_SEND_TOOLS.has(tu.name) && r.sent === true) confirmedSends.add(tu.id);

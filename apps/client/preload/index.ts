@@ -49,7 +49,7 @@ const api: JarvisBridge = {
   saveSettings: (patch) => ipcRenderer.invoke(IPC.settingsSave, patch),
   requestUsage: () => ipcRenderer.send(IPC.requestUsage),
   requestMemory: (query) => ipcRenderer.send(IPC.requestMemory, query),
-  forgetMemory: (layer, id) => ipcRenderer.send(IPC.forgetMemory, { layer, id }),
+  forgetMemory: (layer, id, query) => ipcRenderer.send(IPC.forgetMemory, { layer, id, query }),
 
   onState: (cb) => subscribe(IPC.state, cb),
   onTranscript: (cb) => subscribe(IPC.transcript, cb),

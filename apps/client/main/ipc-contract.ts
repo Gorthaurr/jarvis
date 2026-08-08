@@ -186,7 +186,7 @@ export interface JarvisBridge {
   /** Волна E: запросить снимок памяти о владельце (вкладка «Память»); `query` — опц. фильтр. */
   requestMemory(query?: string): void;
   /** Волна E: точечно забыть запись памяти (мягко: факт из профиля, эпизод → stale). */
-  forgetMemory(layer: "fact" | "episode", id: string): void;
+  forgetMemory(layer: "fact" | "episode", id: string, query?: string): void;
   // подписки на события main -> renderer
   onState(cb: (state: ClientState) => void): () => void;
   onTranscript(cb: (t: Transcript) => void): () => void;

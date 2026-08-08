@@ -370,3 +370,32 @@ describe("§14 отказ отправки — честная причина (Ф
     expect(r.content).not.toMatch(/вы не подтвердили отправку/i);
   });
 });
+
+// 🔴 Адверс-ревью Ф0 (HIGH): обёртки sendOutbound/placeOrder не были мигрированы — структурная
+// типизация промолчала (ConfirmOutcome присваивался в {approved,revision?}), и любой не-approved
+// печатался как «пользователь отклонил», даже когда владелец вопроса не видел.
+describe("message_send / order_place — исход §14 доходит до формулировки (Ф0)", () => {
+  it("message_send: undelivered → «не смог спросить», НЕ «отклонил», и результат declined", async () => {
+    const ctx = baseCtx({
+      userId: "u-msg-undelivered",
+      confirm: async () => ({ approved: false, outcome: "undelivered" as const }),
+      messageSend: async () => ({ ok: true }),
+    } as Partial<ToolContext>);
+    const r = await messageSend(ctx, { channel: "vk", to: "Оля", body: "задержусь" });
+    expect(r.content).toMatch(/не смог спросить|недоступн/i);
+    expect(r.content).not.toMatch(/отклонил/i);
+    // declined: иначе петля засчитает mutate сделанным и перестанет ловить ложное «Готово».
+    expect(r.declined).toBe(true);
+    expect(r.isError).toBe(false); // не сбой инструмента → не кормит anti-runaway/эскалацию тира
+  });
+
+  it("message_send: реальный отказ владельца → прежняя формулировка", async () => {
+    const ctx = baseCtx({
+      userId: "u-msg-denied",
+      confirm: async () => ({ approved: false, outcome: "denied" as const }),
+      messageSend: async () => ({ ok: true }),
+    } as Partial<ToolContext>);
+    const r = await messageSend(ctx, { channel: "vk", to: "Оля", body: "текст" });
+    expect(r.content).toMatch(/не подтвердили/i);
+  });
+});

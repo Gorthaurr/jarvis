@@ -7,7 +7,7 @@ function baseDeps(over: Partial<OutboundDeps> = {}): { deps: OutboundDeps; sende
   const sender = new MockSender("telegram");
   const sent = new Set<string>();
   const deps: OutboundDeps = {
-    requestConfirm: async () => ({ approved: true }),
+    requestConfirm: async () => ({ approved: true, outcome: "approved" as const }),
     regenerate: async (rev, prev) => `${prev} [${rev}]`,
     cadence: new CadenceGuard(undefined, () => 0),
     isAlreadySent: (k) => sent.has(k),
@@ -40,7 +40,7 @@ describe("sendOutbound (§14, UC-2)", () => {
     let calls = 0;
     const requestConfirm = vi.fn(async () => {
       calls += 1;
-      return calls === 1 ? { approved: false, revision: "короче" } : { approved: true };
+      return calls === 1 ? { approved: false, outcome: "denied" as const, revision: "короче" } : { approved: true, outcome: "approved" as const };
     });
     const { deps, sender } = baseDeps({ requestConfirm });
     const r = await sendOutbound(params, deps);
@@ -50,14 +50,14 @@ describe("sendOutbound (§14, UC-2)", () => {
   });
 
   it("deny: пользователь отклонил → не отправлено", async () => {
-    const { deps, sender } = baseDeps({ requestConfirm: async () => ({ approved: false }) });
+    const { deps, sender } = baseDeps({ requestConfirm: async () => ({ approved: false, outcome: "denied" as const }) });
     const r = await sendOutbound(params, deps);
     expect(r.status).toBe("denied");
     expect(sender.sent).toHaveLength(0);
   });
 
   it("cadence блокирует burst → blocked, без confirm", async () => {
-    const confirm = vi.fn(async () => ({ approved: true }));
+    const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
     const cadence = new CadenceGuard(undefined, () => 1000);
     cadence.record("u", "telegram", "@masha"); // только что писали → burst
     const { deps, sender } = baseDeps({ cadence, requestConfirm: confirm });

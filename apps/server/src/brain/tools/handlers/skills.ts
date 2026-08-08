@@ -7,7 +7,7 @@
 import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep, newId } from "@jarvis/protocol";
 import { fillSlots } from "../../../memory/skill-slots.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, confirmDeclineText, err, ok } from "../dispatch-util.js";
+import { channelDownResult, confirmDeclineText, declined, err, ok } from "../dispatch-util.js";
 
 /** Каталог выученных навыков для модели (id, имя, версия). */
 export async function skillList(ctx: ToolContext): Promise<ToolResult> {
@@ -34,7 +34,7 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   if (skill.needsReview) {
     if (!ctx.confirm) return err(`навык «${skillId}» содержит необратимые шаги — нужно подтверждение (§14), но канал недоступен`);
     const gate = await ctx.confirm(`Запустить навык «${skillId}»? Он содержит необратимые шаги.`, "irreversible");
-    if (!gate.approved) return ok(confirmDeclineText(gate.outcome, `навык ${skillId}`));
+    if (!gate.approved) return declined(confirmDeclineText(gate.outcome, `навык ${skillId}`));
   }
   const params = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : {};
   // §8 параметризация: подставить переменные {{slot}} в шаги ДО исполнения. Честность: если навык

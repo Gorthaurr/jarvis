@@ -256,8 +256,8 @@ export class Transport extends EventEmitter {
   }
 
   /** Волна E: точечно забыть запись памяти (сервер ответит свежим memory.state — UI не гадает). */
-  forgetMemory(layer: MemoryForget["layer"], id: string): void {
-    this.send(makeEnvelope<MemoryForget>("memory.forget", { layer, id }));
+  forgetMemory(layer: MemoryForget["layer"], id: string, query?: string): void {
+    this.send(makeEnvelope<MemoryForget>("memory.forget", { layer, id, ...(query ? { query } : {}) }));
   }
 
   /** §6B/B4: отправить API-ключи на сервер (шифрует в user_credentials). Значения не логируем. */

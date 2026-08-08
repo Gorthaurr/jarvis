@@ -92,6 +92,13 @@ function looksLikeBareHost(s: string): boolean {
 
 /** Успех инструмента. */
 export const ok = (content: string): ToolResult => ({ content, isError: false });
+
+/**
+ * Результат «§14-гейт не пропустил» (Ф0 пульта, адверс-ревью HIGH): не ошибка инструмента, но и НЕ
+ * выполненное действие — помечаем `declined`, иначе петля засчитает mutate как сделанный и перестанет
+ * ловить ложное «Готово» (см. ToolResult.declined).
+ */
+export const declined = (content: string): ToolResult => ({ content, isError: false, declined: true });
 /** Ошибка инструмента (честный провал, НЕ ложный успех — §честность). */
 export const err = (content: string): ToolResult => ({ content, isError: true });
 

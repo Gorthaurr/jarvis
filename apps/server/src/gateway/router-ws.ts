@@ -287,6 +287,7 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
     ...(episodesUnavailable ? { episodesUnavailable } : {}),
     // Честные тоталы: показанное ≠ всё накопленное (кап MEMORY_UI_LIMIT).
     totals: { evicted: arch.total, ...(episodesTotal !== undefined ? { episodes: episodesTotal } : {}) },
+    ...(needle ? { query: needle } : {}), // эхо: панель не должна догадываться, что было применено
     ...(episodesHasMore ? { hasMore: { episodes: true } } : {}),
   };
   ctx.session.send("memory.state", state);
@@ -309,7 +310,9 @@ async function forgetMemoryItem(ctx: SessionContext, req: MemoryForget): Promise
   } catch (e) {
     log.warn("вкладка «Память»: забывание не удалось", { error: e instanceof Error ? e.message : String(e) });
   }
-  await sendMemoryState(ctx); // свежий снимок: владелец ВИДИТ факт удаления, а не верит на слово
+  // Свежий снимок: владелец ВИДИТ факт удаления. Фильтр СОХРАНЯЕМ — иначе список под поиском
+  // молча превращался в полный, а подпись оставалась «по запросу» (адверс-ревью).
+  await sendMemoryState(ctx, req?.query);
 }
 
 /** Создать контекст для свежей/возобновлённой сессии. */

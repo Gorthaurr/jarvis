@@ -493,9 +493,9 @@ function registerIpc(): void {
   ipcMain.on(IPC.requestUsage, () => transport?.requestUsage());
   // Волна E вкладка «Память»: снимок накопленного о владельце + точечное забывание (ответ — memory.state).
   ipcMain.on(IPC.requestMemory, (_e, query?: string) => transport?.requestMemory(typeof query === "string" ? query : undefined));
-  ipcMain.on(IPC.forgetMemory, (_e, req: { layer: "fact" | "episode"; id: string }) => {
+  ipcMain.on(IPC.forgetMemory, (_e, req: { layer: "fact" | "episode"; id: string; query?: string }) => {
     if (req && (req.layer === "fact" || req.layer === "episode") && typeof req.id === "string") {
-      transport?.forgetMemory(req.layer, req.id);
+      transport?.forgetMemory(req.layer, req.id, typeof req.query === "string" ? req.query : undefined);
     }
   });
 

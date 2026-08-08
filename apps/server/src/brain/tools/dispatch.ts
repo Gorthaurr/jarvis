@@ -32,7 +32,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, confirmDeclineText, declined, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
 import { sleep } from "@jarvis/shared";
 import { type BrowserCondition, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 import {
@@ -199,6 +199,16 @@ export interface ToolResult {
    * пост-терминальный гейт врал бы «Уже отправил» после фактического НЕ-отправления).
    */
   sent?: boolean;
+  /**
+   * 🔴 Ф0 пульта (адверс-ревью, HIGH): действие НЕ выполнено, потому что §14-гейт его не пропустил —
+   * владелец отказал, не ответил, или его вообще не смогли спросить. Такой результат `isError:false`
+   * (это не сбой инструмента), и без метки петля взводила `anyMutateSucceeded` для mutate-инструментов
+   * (fs_delete/system_power/code_run/skill_execute/MCP) — то есть считала дело СДЕЛАННЫМ. Следствие:
+   * masked-failure и анти-капитуляция отключались, и ход заканчивался «Готово, сэр» при том, что
+   * ничего не удалено, а владельца даже не спросили (задача писалась в реестр как успешная).
+   * Зеркало `sent` для отправок людям: «нет ошибки» ≠ «сделано».
+   */
+  declined?: boolean;
   /**
    * fix 2026-07-15: ЧИСТОЕ время БЛОКИРУЮЩЕГО ОЖИДАНИЯ внутри вызова (wait_for browser поллит DOM до
    * met/таймаута). Петля вычитает его из бюджета задачи (как queueWaitMs): идл-ожидание не должно
@@ -381,7 +391,7 @@ export async function dispatchTool(
         }
       })();
       const gate = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
-      if (!gate.approved) return ok(confirmDeclineText(gate.outcome, name));
+      if (!gate.approved) return declined(confirmDeclineText(gate.outcome, name));
     }
     const r = await ctx.mcp.callTool(name, input);
     // §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (аудит контекста 2026-07-20 + ревью батча F7): вывод MCP-инструмента —
@@ -447,7 +457,7 @@ export async function dispatchTool(
           ? `Закрыть «${String(input.app ?? "")}» принудительно? Несохранённое будет потеряно.`
           : `Питание: ${String(input.op ?? "")}. Несохранённая работа будет потеряна. Выполнится с задержкой и предупреждением — можно отменить. Подтвердите?`;
     const gate = await ctx.confirm(summary, "irreversible");
-    if (!gate.approved) return ok(confirmDeclineText(gate.outcome, name));
+    if (!gate.approved) return declined(confirmDeclineText(gate.outcome, name));
   }
 
   // C5 SSRF: web_* (невидимый ЗАЛОГИНЕННЫЙ браузер Джарвиса) тоже навигируют по URL — прогоняем через тот
