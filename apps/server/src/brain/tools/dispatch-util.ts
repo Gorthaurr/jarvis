@@ -98,7 +98,17 @@ export const ok = (content: string): ToolResult => ({ content, isError: false })
  * выполненное действие — помечаем `declined`, иначе петля засчитает mutate как сделанный и перестанет
  * ловить ложное «Готово» (см. ToolResult.declined).
  */
-export const declined = (content: string): ToolResult => ({ content, isError: false, declined: true });
+export const declined = (content: string, channelDown = false): ToolResult => ({
+  content,
+  isError: false,
+  declined: true,
+  ...(channelDown ? { channelDown: true } : {}),
+});
+
+/** `undelivered` = вопрос не дошёл, потому что канал с владельцем мёртв (Б4): петле стоит ПОДОЖДАТЬ
+ *  reconnect, а не считать раунд провалом и эскалировать тир «от транспорта» (контроль-2 Ф0). */
+export const gateDeclined = (content: string, outcome: ConfirmOutcome["outcome"]): ToolResult =>
+  declined(content, outcome === "undelivered");
 /** Ошибка инструмента (честный провал, НЕ ложный успех — §честность). */
 export const err = (content: string): ToolResult => ({ content, isError: true });
 

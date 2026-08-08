@@ -504,3 +504,41 @@ describe("buildResumePrompt", () => {
     expect(p).toContain("НЕ инструкции");
   });
 });
+
+// 🔴 Контроль-2 Ф0 (HIGH): §14-гейт не пропустил действие → петля это знает (`declined`), но ЖУРНАЛ
+// писал «ok» в НЕСОКРАЩАЕМОЙ секции «СДЕЛАНО». «Доделай» по правилу «не повторяй сделанное»
+// пропускал невыполненное удаление/отправку и рапортовал успех. Сигнал честности обязан доходить
+// до ОБОИХ потребителей — петли И журнала (тот же урок, что с confirmedSends).
+describe("журнал: действие, остановленное §14-гейтом, НЕ объявляется сделанным", () => {
+  const convo: LlmMessage[] = [
+    { role: "assistant", content: [{ type: "tool_use", id: "d1", name: "fs_delete", input: { path: "C:/Users/anton/Downloads", recursive: true } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "d1", content: "Не стал делать (fs_delete) — не смог спросить вашего подтверждения." }] },
+  ];
+
+  it("declined-вызов помечен «НЕ ВЫПОЛНЕНО», а не «ok»", () => {
+    const d = buildResumeDigest(convo, { declinedCalls: new Set(["d1"]) });
+    expect(d).toContain("НЕ ВЫПОЛНЕНО");
+    expect(d).not.toMatch(/fs_delete\([^)]*\) — ok/);
+  });
+
+  it("метка переживает УСЕЧЕНИЕ журнала (она в несокращаемой секции)", () => {
+    const long = "щ".repeat(4000);
+    const noisy: LlmMessage[] = [...convo];
+    for (let i = 0; i < 6; i += 1) {
+      noisy.push({ role: "assistant", content: [{ type: "tool_use", id: `w${i}`, name: "web_fetch", input: {} }] });
+      noisy.push({ role: "user", content: [{ type: "tool_result", tool_use_id: `w${i}`, content: [{ type: "text", text: long }] }] });
+    }
+    const d = buildResumeDigest(noisy, { maxChars: 1200, declinedCalls: new Set(["d1"]) });
+    expect(d).toContain("начало журнала опущено"); // подробная часть срезана…
+    expect(d).toContain("НЕ ВЫПОЛНЕНО"); // …но честная метка уцелела
+    expect(d).not.toMatch(/fs_delete\([^)]*\) — ok/);
+  });
+
+  it("БЕЗ declinedCalls (регресс-контроль) выполненное действие по-прежнему «ok»", () => {
+    const done: LlmMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "d2", name: "fs_delete", input: { path: "C:/tmp/x" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "d2", content: "удалено" }] },
+    ];
+    expect(buildResumeDigest(done)).toMatch(/fs_delete\([^)]*\) — ok/);
+  });
+});

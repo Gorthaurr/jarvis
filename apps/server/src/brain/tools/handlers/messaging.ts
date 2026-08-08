@@ -13,7 +13,7 @@ import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messag
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
 import type { ConfirmOutcome, ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, confirmDeclineText, declined, err, ok } from "../dispatch-util.js";
+import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok } from "../dispatch-util.js";
 
 /**
  * Подтверждение отправки адресату ОДИН РАЗ (§14, фидбэк пользователя). Если этого адресата уже одобряли
@@ -42,14 +42,15 @@ async function confirmSendOnce(
  * (мёртвый сокет, закрытая сессия) или не успеть ответить. Приписывать владельцу чужое решение —
  * та же ложь, что «Готово» без результата.
  */
-function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string): string {
+function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string, repeat = false): string {
+  const act = repeat ? `повторную отправку ${what}` : `отправку ${what}`;
   switch (outcome) {
     case "undelivered":
       return `Не отправил ${what} «${to}» — не смог спросить вашего подтверждения: связь с вашим экраном была недоступна.`;
     case "expired":
       return `Не отправил ${what} «${to}» — вы не ответили на подтверждение, и оно истекло. Скажите, если отправить.`;
     default:
-      return `Не отправил ${what} — вы не подтвердили отправку «${to}».`;
+      return `Не отправил ${what} — вы не подтвердили ${act} «${to}».`;
   }
 }
 
@@ -181,14 +182,14 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
       ? `Повторная отправка «${to}» в Telegram (то же сообщение уже уходило ${agoOf(recent?.ageMs)}):\n${preview}`
       : `«${to}» только что (${agoOf(recent?.ageMs)}) получил: «${recent!.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
     const c = await ctx.confirm(summary, "send");
-    if (!c.approved) return ok(`Не отправил — вы не подтвердили повторную отправку «${to}».`);
+    if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
     confirmedByResendGate = true;
     // Чистое «да» с показом адресата и текста — это и есть согласие §14 на адресата: фиксируем.
     await approveSend(ctx.userId, "telegram", to);
   }
   if (!confirmedByResendGate) {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
-    if (!gate.approved) return declined(sendGateMessage(gate.outcome, "сообщение", to));
+    if (!gate.approved) return gateDeclined(sendGateMessage(gate.outcome, "сообщение", to), gate.outcome);
   }
   // ⚠️ Ревью р2 (peer-канал был МЁРТВ): клиентский fast-path (openHinted по peerId) входит ТОЛЬКО при
   // непустом preferredTitle. При явном peer подаём preferredTitle=to — иначе fast-path пропускался,
@@ -275,11 +276,11 @@ async function telegramSendVoiceLocked(ctx: ToolContext, input: Record<string, u
       `«${to}» только что (${agoOf(recent.ageMs)}) получал: «${recent.prev.bodyPreview}».\nОтправить ещё и ГОЛОСОВОЕ:\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»?`,
       "send",
     );
-    if (!c.approved) return ok(`Не отправил голосовое — вы не подтвердили повтор «${to}».`);
+    if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "голосовое", to, true), c.outcome);
     await approveSend(ctx.userId, "telegram", to);
   } else {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить ГОЛОСОВОЕ «${to}» (голос филиппа)?\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»`);
-    if (!gate.approved) return declined(sendGateMessage(gate.outcome, "голосовое", to));
+    if (!gate.approved) return gateDeclined(sendGateMessage(gate.outcome, "голосовое", to), gate.outcome);
   }
   try {
     const audioB64 = await ctx.synthVoice(text); // mp3 base64 голосом филиппа
@@ -329,7 +330,7 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
       ? `Повторная отправка «${to}» (${channel}) — то же сообщение уже уходило ${agoOf(recent.ageMs)}:\n${preview}`
       : `«${to}» только что (${agoOf(recent.ageMs)}) получил: «${recent.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
     const c = await ctx.confirm(summary, "send");
-    if (!c.approved) return ok(`Не отправил — вы не подтвердили повторную отправку «${to}».`);
+    if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
     confirmedByResendGate = true;
     await approveSend(ctx.userId, channel, to);
   }
@@ -342,7 +343,7 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
         `Повторная отправка «${to}» (${channel}) — то же сообщение уже уходило недавно:\n${body.slice(0, 160)}${body.length > 160 ? "…" : ""}`,
         "send",
       );
-      if (!c.approved) return ok(`Не отправил — вы не подтвердили повторную отправку «${to}».`);
+      if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
       confirmedByResendGate = true;
       await approveSend(ctx.userId, channel, to);
     }
@@ -389,7 +390,7 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
   // владельца (не «пользователь отклонил» на всё подряд) и возвращаем declined, а не err: иначе
   // недоставленный вопрос кормил бы anti-runaway и эскалацию тира «от транспорта».
   if (res.status === "denied" && res.confirmOutcome !== undefined) {
-    return declined(sendGateMessage(res.confirmOutcome, "сообщение", to));
+    return gateDeclined(sendGateMessage(res.confirmOutcome, "сообщение", to), res.confirmOutcome);
   }
   return err(`Не отправлено (${res.status}): ${res.reason ?? ""}`);
 }
@@ -422,7 +423,7 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
       if (cd) return cd;
     }
     if (res.status === "denied" && res.confirmOutcome !== undefined) {
-      return declined(confirmDeclineText(res.confirmOutcome, "заказ"));
+      return gateDeclined(confirmDeclineText(res.confirmOutcome, "заказ"), res.confirmOutcome);
     }
     return err(`Заказ не оформлен (${res.status}): ${res.reason ?? ""}`);
   } catch (e) {

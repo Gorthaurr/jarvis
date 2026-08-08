@@ -109,6 +109,14 @@ export interface DigestOptions {
    * сделанное» отправку пропускало и рапортовало успех (финальный контроль волны C, HIGH).
    */
   confirmedSends?: ReadonlySet<string>;
+  /**
+   * 🔴 Контроль-2 Ф0: tool_use_id вызовов, которые §14-гейт НЕ ПРОПУСТИЛ (отказ / нет ответа / не
+   * смогли спросить). Без этого журнал печатал им «ok» в НЕСОКРАЩАЕМОЙ секции «СДЕЛАНО», и
+   * продолжение по правилу «не повторяй сделанное» ПРОПУСКАЛО невыполненное действие, рапортуя успех.
+   * Тот же урок, что с `confirmedSends`: сигнал честности обязан доходить до ОБОИХ потребителей —
+   * петли И журнала, иначе они расходятся.
+   */
+  declinedCalls?: ReadonlySet<string>;
 }
 
 /** Дефолтный потолок журнала (символов) — общий для сборки и для склейки цепочки продолжений. */
@@ -249,9 +257,16 @@ type Entry =
  * секции «СДЕЛАНО» — продолжение по правилу «не повторяй сделанное» пропускало отправку и рапортовало
  * успех. Теперь без подтверждения пишем прямо: отправка НЕ подтверждена, сверь.
  */
-function outcomeMark(e: { id: string; tool: string; ok?: boolean }, confirmedSends?: ReadonlySet<string>): string {
+function outcomeMark(
+  e: { id: string; tool: string; ok?: boolean },
+  confirmedSends?: ReadonlySet<string>,
+  declinedCalls?: ReadonlySet<string>,
+): string {
   if (e.ok === undefined) return "без результата (оборвалось)";
   if (!e.ok) return "ОШИБКА";
+  // Гейт §14 не пропустил — действие НЕ совершено, хотя ошибки нет (контроль-2 Ф0). Проверяем ПЕРВЫМ:
+  // иначе mutate-вызов уехал бы в «СДЕЛАНО» как «ok» и продолжение пропустило бы его навсегда.
+  if (declinedCalls?.has(e.id)) return "НЕ ВЫПОЛНЕНО — подтверждение не получено, сверь и при необходимости сделай";
   if (OUTBOUND_SEND_TOOLS.has(e.tool) && !confirmedSends?.has(e.id)) return "ОТПРАВКА НЕ ПОДТВЕРЖДЕНА — сверь, при необходимости отправь";
   return "ok";
 }
@@ -387,7 +402,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     else {
       const cap = i >= detailFrom ? detailCap : briefCap;
       const res = e.result ? ` → ${squeeze(e.result, cap)}` : "";
-      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends)}${res}`);
+      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls)}${res}`);
     }
   }
 
@@ -410,7 +425,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     // в первой же строке журнала ЗАКРЫВАЛ нашу обёртку, и весь остаток (дампы страниц прошлого захода
     // + подставленная директива) читался моделью как ДОВЕРЕННЫЙ текст.
     const safeInput = neutralizeWrapperTags(squeeze(e.input, 90));
-    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends)}`;
+    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls)}`;
     if (!done.includes(line)) done.push(line);
   }
   const doneCapped = capDoneLines(done);

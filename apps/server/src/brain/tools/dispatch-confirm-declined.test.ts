@@ -60,3 +60,21 @@ describe("§14 отказ гейта помечает результат decline
     expect(r.declined).toBeUndefined(); // действие реально выполнено
   });
 });
+
+// Контроль-2 Ф0: «канал мёртв» — не провал раунда. Без channelDown петля считала раунд
+// провалившимся, эскалировала тир на Opus «от транспорта» и повторно спрашивала владельца.
+describe("undelivered помечается channelDown (Б4-ожидание вместо эскалации)", () => {
+  it("undelivered → channelDown, петля подождёт reconnect", async () => {
+    const r = await dispatchTool("fs_delete", { path: "C:/tmp/x" }, ctxWithConfirm("undelivered"));
+    expect(r.declined).toBe(true);
+    expect(r.channelDown).toBe(true);
+  });
+
+  it("отказ владельца и истечение окна — НЕ channelDown (канал жив, это его решение/молчание)", async () => {
+    for (const outcome of ["denied", "expired"] as const) {
+      const r = await dispatchTool("fs_delete", { path: "C:/tmp/x" }, ctxWithConfirm(outcome));
+      expect(r.declined).toBe(true);
+      expect(r.channelDown).toBeUndefined();
+    }
+  });
+});

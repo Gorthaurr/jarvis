@@ -32,7 +32,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, channelDownResult, confirmDeclineText, declined, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, confirmDeclineText, declined, gateDeclined, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
 import { sleep } from "@jarvis/shared";
 import { type BrowserCondition, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 import {
@@ -391,7 +391,7 @@ export async function dispatchTool(
         }
       })();
       const gate = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
-      if (!gate.approved) return declined(confirmDeclineText(gate.outcome, name));
+      if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, name), gate.outcome);
     }
     const r = await ctx.mcp.callTool(name, input);
     // §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (аудит контекста 2026-07-20 + ревью батча F7): вывод MCP-инструмента —
@@ -457,7 +457,7 @@ export async function dispatchTool(
           ? `Закрыть «${String(input.app ?? "")}» принудительно? Несохранённое будет потеряно.`
           : `Питание: ${String(input.op ?? "")}. Несохранённая работа будет потеряна. Выполнится с задержкой и предупреждением — можно отменить. Подтвердите?`;
     const gate = await ctx.confirm(summary, "irreversible");
-    if (!gate.approved) return declined(confirmDeclineText(gate.outcome, name));
+    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, name), gate.outcome);
   }
 
   // C5 SSRF: web_* (невидимый ЗАЛОГИНЕННЫЙ браузер Джарвиса) тоже навигируют по URL — прогоняем через тот

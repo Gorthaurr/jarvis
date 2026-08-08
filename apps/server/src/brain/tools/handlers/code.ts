@@ -6,7 +6,7 @@
 import { type CodeLang } from "@jarvis/protocol";
 import { lintCode } from "../../code-guard.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, confirmDeclineText, declined, err, ok } from "../dispatch-util.js";
+import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok } from "../dispatch-util.js";
 
 /** code.run под серверным lint-гардом (§6): запрет реестра/служб/сети/системных путей. */
 export async function runCodeGuarded(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
@@ -31,7 +31,7 @@ export async function executeGuardedCode(ctx: ToolContext, lang: CodeLang, code:
     // управление Windows (реестр/службы/сеть/COM) идёт без модалки — автономия по решению пользователя.
     if (!ctx.confirm) return err("необратимая операция требует подтверждения (§4), но канал недоступен.");
     const gate = await ctx.confirm(`Выполнить код?\n${code.slice(0, 160)}${code.length > 160 ? "…" : ""}`, "irreversible");
-    if (!gate.approved) return declined(confirmDeclineText(gate.outcome, "code.run"));
+    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, "code.run"), gate.outcome);
   }
   // Таймаут с запасом над макс. окном раннера (180с): раннер сам убьёт зависший процесс по своему wall-clock.
   const result = await ctx.session.sendAction({ kind: "code.run", lang, code }, 185_000);

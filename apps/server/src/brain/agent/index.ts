@@ -1500,6 +1500,12 @@ async function runAgentLoop(
   /** tool_use_id отправок ЧЕЛОВЕКУ, по которым отправка ПОДТВЕРЖДЕНА (`ToolResult.sent`) — для журнала. */
   const confirmedSends = new Set<string>();
   /**
+   * 🔴 Контроль-2 Ф0: вызовы, которые §14-гейт НЕ ПРОПУСТИЛ. Нужен ЖУРНАЛУ чекпойнта — иначе он
+   * пишет им «ok» в несокращаемой секции «СДЕЛАНО», и «доделай» пропускает невыполненное действие,
+   * рапортуя успех. Зеркало confirmedSends: сигнал честности обязан дойти до ОБОИХ потребителей.
+   */
+  const declinedCalls = new Set<string>();
+  /**
    * Волна C (контрольное ревью-2): тексты, которые ПЕТЛЯ впрыснула в user-роль (нуджи бюджета/
    * контекста/verify/goal-check, докрутка max_tokens, live-снимок ПК, итог авто-макроса). В журнал
    * продолжения они попадать НЕ должны — иначе Джарвис приписывает владельцу выдуманные приказы, а
@@ -1558,7 +1564,7 @@ async function runAgentLoop(
         tier: currentTier,
         // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
         // иначе третий заход не видел отправок первого и мог повторить их людям).
-        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
         ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
       };
       const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);
@@ -1584,6 +1590,8 @@ async function runAgentLoop(
   // Волна 1 (1.5, «видимый бюджет»): на 70% потолка времени — ОДИН впрыск «сворачивайся» (graceful
   // wrap-up c честным частичным итогом вместо невидимого обрыва «251с работы → „затянулось" без итога»).
   let budgetNudged = false;
+  /** Контроль-2 Ф0: в ЭТОМ раунде действие остановил §14-гейт (отказ/нет ответа/не смогли спросить). */
+  let gateStoppedRound = false;
   // Волна E: на 70%-нудже лёг страховочный снимок чекпойнта (переживает ТОЛЬКО жёсткий kill —
   // штатный выход из петли гасит его в finally, терминалы прерывания пишут поверх свою версию).
   let preventiveCheckpoint = false;
@@ -1983,6 +1991,7 @@ async function runAgentLoop(
       cancelled = true;
       break;
     }
+    gateStoppedRound = false; // признак живёт РОВНО один раунд
     // §Волна2 (2.5): очередь не дождалась аренды — ни одного LLM-раунда, честный терминал ниже.
     if (queueTimedOut) break;
     // Защитный потолок времени: задача не висит в «выполняю» бесконечно (§20).
@@ -2018,7 +2027,7 @@ async function runAgentLoop(
             deps.checkpoints?.refreshJournal(
               deps.userId,
               opts.resumeFrom.taskId,
-              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
               Math.max(round, committedToolRounds),
             );
           } catch (e) {
@@ -2445,6 +2454,7 @@ async function runAgentLoop(
         resp.stopReason === "end_turn" &&
         retryNudges < MAX_RETRY_NUDGES &&
         looksLikeGiveUp(resp.text) &&
+        !gateStoppedRound && // §14-гейт остановил действие — модель не «сдалась», давить бессмысленно
         !anyMutateSucceeded // P0.1: успешный НЕЙТРАЛЬНЫЙ инструмент (поиск/память) не считается «сделал» —
         // «погуглил → сдался словами» теперь форсит попытку. !anyMutateSucceeded включает и traj===0.
       ) {
@@ -2732,6 +2742,14 @@ async function runAgentLoop(
           // (isError:false) взводил флаг для fs_delete/system_power/code_run/skill_execute/MCP →
           // masked-failure и анти-капитуляция глохли, и ход заканчивался «Готово» при нулевом деле.
           if (r.declined !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) anyMutateSucceeded = true;
+          if (r.declined === true) {
+            declinedCalls.add(tu.id); // журнал не должен звать это «сделанным»
+            // Контроль-2 Ф0: остановка §14-ГЕЙТОМ — это НЕ капитуляция модели. Без этого флага мой же
+            // фикс (declined не взводит anyMutateSucceeded) включал анти-капитуляцию: нудж «не
+            // сдавайся» + эскалация на Opus + ПОВТОРНЫЙ вопрос владельцу о том, на что он только что
+            // ответил «нет» (или на что не смог ответить — канал мёртв, и Opus жгли «от транспорта»).
+            gateStoppedRound = true;
+          }
           // Волна C: журнал чекпойнта должен знать ТО ЖЕ САМОЕ — «нет ошибки» у отправки человеку ещё
           // не значит «ушло» (не подтвердили / повтор не ушёл). Иначе секция «СДЕЛАНО» соврёт.
           if (OUTBOUND_SEND_TOOLS.has(tu.name) && r.sent === true) confirmedSends.add(tu.id);
@@ -2790,7 +2808,7 @@ async function runAgentLoop(
           deps.checkpoints.refreshJournal(
             deps.userId,
             opts.resumeFrom.taskId,
-            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
             Math.max(round + 1, committedToolRounds),
           );
         } else if (preventiveCheckpoint) {
@@ -3184,7 +3202,7 @@ async function runAgentLoop(
       deps.checkpoints.refreshJournal(
         deps.userId,
         opts.resumeFrom.taskId,
-        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends })),
+        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
         Math.max(round, committedToolRounds),
       );
     } catch (e) {
