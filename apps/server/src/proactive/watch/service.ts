@@ -490,7 +490,13 @@ export class WatchService {
       if (!run || !w.pendingAction) continue;
       // F4: между парковкой и исполнением запись могла измениться — одобрение сверяется и здесь.
       if (!this.actionApprovalIntact(w)) continue;
-      const goal = w.pendingAction;
+      // 🔴 F4-контроль (HIGH): исполняем ПЕРЕСОБРАННЫЙ из СВЕРЕННЫХ полей goal, а не сохранённый
+      // `w.pendingAction`. Отпечаток покрывает what|condition|action — а исполнялся свободный текст
+      // pendingAction, в отпечаток не входящий: подмена ОДНОГО этого поля (что и есть заявленная
+      // тред-модель «между парковкой и коннектом запись могла измениться») проходила сверку и
+      // исполнялась дословно. actionGoal(w) даёт тот же текст, что клал dispatchAction, но из полей,
+      // чью неизменность мы только что доказали.
+      const goal = this.actionGoal(w);
       const ageMs = this.now() - (w.pendingActionAt ?? w.firedAt ?? w.createdAt);
       w.pendingAction = undefined;
       w.pendingActionAt = undefined;

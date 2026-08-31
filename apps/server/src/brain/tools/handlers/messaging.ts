@@ -6,7 +6,7 @@
  */
 import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol";
 import { AsyncMutex, TtlCache, nameSearchVariants } from "@jarvis/shared";
-import { approveSend, isSendApproved, listConsents, revokeSend } from "../../consent.js";
+import { approveSend, isSendApproved, listConsents, revokeSendMatching } from "../../consent.js";
 import { CadenceGuard } from "../../messaging/cadence.js";
 import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messaging/resend-guard.js";
@@ -448,12 +448,23 @@ export async function consentList(ctx: ToolContext): Promise<ToolResult> {
   return ok(`Действующие согласия на отправку без переспроса:\n${lines.join("\n")}`);
 }
 
-/** F4: отозвать согласие — следующая отправка адресату снова потребует подтверждения владельца. */
+/**
+ * F4: отозвать согласие — следующая отправка адресату снова потребует подтверждения владельца.
+ * 🔴 Контроль (HIGH): снимаем ВСЕ написания одного человека (склонения/полное имя — ключи копятся
+ * по сырому `to` модели), иначе фраза «снова спросит подтверждения» была бы ложью: назавтра модель
+ * назвала бы контакт другим падежом и попала в оставшийся ключ. Отчёт перечисляет снятое поимённо.
+ */
 export async function consentRevoke(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   const channel = String(input.channel ?? "").trim();
   const recipient = String(input.recipient ?? "").trim();
   if (!channel || !recipient) return err("consent_revoke: нужны channel и recipient (сверься с consent_list)");
-  const revoked = await revokeSend(ctx.userId, channel, recipient);
-  if (!revoked) return err(`согласия на «${recipient}» (${channel}) не было — нечего отзывать (сверься с consent_list)`);
-  return ok(`Согласие отозвано: следующая отправка «${recipient}» (${channel}) снова спросит вашего подтверждения.`);
+  const removed = await revokeSendMatching(ctx.userId, channel, recipient);
+  if (removed.length === 0) {
+    return err(`согласия на «${recipient}» (${channel}) не было — нечего отзывать (сверься с consent_list)`);
+  }
+  const list = removed.map((r) => `«${r}»`).join(", ");
+  return ok(
+    `Согласие отозвано (${channel}): ${list} — следующая отправка снова спросит вашего подтверждения. ` +
+      `Если этот человек записан у меня под другим именем, скажите — сниму и его.`,
+  );
 }

@@ -49,4 +49,14 @@ describe("consolidation-journal (F3)", () => {
   it("limit уважается", async () => {
     expect((await readConsolidationRuns(U, 1)).length).toBe(1);
   });
+
+  // 🔴 Контроль волны F: прогон, где ВСЁ отбил анти-инъекционный фильтр, — самое важное событие
+  // витрины, а ранний return оставлял её пустой («Сон-цикл ещё ничего не записывал»).
+  it("прогон с dropped>0 и нулём записанных фактов журналируется, числа арифметичны", async () => {
+    const U2 = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    await appendConsolidationRun(U2, { ts: 5000, extracted: 3, written: 0, dropped: 3, facts: [] });
+    const [run] = await readConsolidationRuns(U2);
+    expect(run?.dropped).toBe(3);
+    expect(run?.extracted).toBeGreaterThanOrEqual((run?.dropped ?? 0) + (run?.written ?? 0));
+  });
 });

@@ -113,6 +113,19 @@ const POLICY_BASENAMES = new Set([
  */
 const POLICY_DATA_BASENAMES = new Set(["profile.json", "tasks.json"]);
 
+/**
+ * Волна F (адверс-ревью): ПАРТИЦИОНИРОВАННЫЕ сторы того же класса — имя содержит userId, поэтому
+ * basename-множеством их не закрыть, но ПРЕФИКС предсказуем (у single-user установки — тем более).
+ *  • `fact-meta-<user>.jsonl` — провенанс фактов профиля: запись = подделка источника («вы сами»)
+ *    в витрине честности, т.е. отмывание инъекции в максимальное доверие владельца;
+ *  • `consolidation-<user>.jsonl` — журнал сон-цикла: запись = фальшивый отчёт о том, что Джарвис
+ *    записал в память ночью; удаление = сокрытие сработавшего анти-инъекционного фильтра;
+ *  • `evicted-<user>.jsonl` — durable-архив вытесненных фактов (витрина «ничего не пропало молча»).
+ * Плюс каталог карантина навыков `_quarantine` — это УЛИКИ заблокированной инъекции (F2): их
+ * удаление стирает след атаки. Все — только для записи/удаления; чтение не блокируем.
+ */
+const POLICY_DATA_PREFIXES = ["fact-meta-", "consolidation-", "evicted-"];
+
 // ── Проверки НАД УЖЕ НОРМАЛИЗОВАННЫМ путём (без сисколлов) — общее ядро для canon- и fast-веток. ──
 
 function isSecretPathNorm(normalized: string): boolean {
@@ -133,6 +146,11 @@ function isPolicyConfigPathNorm(normalized: string): boolean {
   if (POLICY_BASENAMES.has(b)) return true;
   // Generic-имена — только внутри каталога data (иначе ломали бы чужие проекты, контроль-2).
   if (POLICY_DATA_BASENAMES.has(b) && /[\\/]data[\\/][^\\/]+$/.test(normalized)) return true;
+  // Волна F: партиционированные сторы провенанса/журналов — по префиксу и только под каталогом data
+  // (тот же гард «не ломать чужие проекты»: путь обязан лежать внутри …/data/…).
+  if (/[\\/]data[\\/]/.test(normalized) && POLICY_DATA_PREFIXES.some((p) => b.startsWith(p) && b.endsWith(".jsonl"))) return true;
+  // Карантин навыков (улики заблокированной инъекции, F2) — каталог целиком.
+  if (/[\\/]data[\\/]skills[\\/]_quarantine(?:[\\/]|$)/.test(normalized)) return true;
   return false;
 }
 

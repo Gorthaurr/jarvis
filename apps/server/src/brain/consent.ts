@@ -67,6 +67,40 @@ export async function revokeSend(userId: string, channel: string, recipient: str
 }
 
 /**
+ * 🔴 F4-контроль (HIGH): отозвать согласия ВСЕХ написаний одного адресата, а не одну строку.
+ *
+ * Корень: ключ согласия — сырой `to` из вызова модели (trim+lowercase), а модель называет одного
+ * человека по-разному («Катя»/«Кате»/«Катя Любимая») — проект это уже знает и лечит стемами в
+ * `peerIdentityKeys` ресенд-гарда. Поэтому у одного человека со временем копится НЕСКОЛЬКО ключей,
+ * а точечный `revokeSend` снимал один — и владельцу при этом говорилось «следующая отправка снова
+ * спросит подтверждения». Назавтра модель называла тот же контакт другим падежом, попадала в
+ * оставшийся ключ и отправляла БЕЗ спроса: ложное заверение о §14-гейте.
+ *
+ * Матч: точное совпадение fold-имени ИЛИ общий стем (последняя гласная срезана, длина ≥4) — те же
+ * правила, что в peerIdentityKeys. Возвращает СНЯТЫЕ адресаты (вызывающий обязан их показать —
+ * владелец должен видеть, что именно перестало быть одобренным).
+ */
+export async function revokeSendMatching(userId: string, channel: string, recipient: string): Promise<string[]> {
+  const target = recipient.trim().toLowerCase();
+  if (!target) return [];
+  const stem = (s: string): string => (s.length >= 4 ? s.replace(/[аеиоуыэюя]$/u, "") : s);
+  const targetStem = stem(target);
+  const removed: string[] = [];
+  for (const c of listConsents(userId)) {
+    if (c.channel !== channel.trim()) continue;
+    const cand = c.recipient;
+    if (cand !== target && stem(cand) !== targetStem) continue;
+    delete cache[consentKey(userId, channel, cand)];
+    removed.push(cand);
+  }
+  if (removed.length > 0) {
+    await persist();
+    log.info("согласия на отправку отозваны (все написания адресата)", { channel, removed });
+  }
+  return removed;
+}
+
+/**
  * F4 (волна F, «инспекция согласий» — идея OpenClaw «inspect or revoke that permission later»):
  * список ДЕЙСТВУЮЩИХ согласий пользователя. До этого consent.json был невидим (ни инструмента, ни UI),
  * а revokeSend — мёртвым кодом: владелец физически не мог узнать, кому Джарвис шлёт без переспроса,

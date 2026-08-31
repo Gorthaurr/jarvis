@@ -845,6 +845,19 @@ export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: S
       const body = splitFrontmatter(rec.contentMd).body.trim();
       const newBody = attachReplaySection(body, lines);
       if (newBody === body) return false; // тот же реплей уже вписан — не бампаем версию
+      // 🔴 F2-контроль: attachReplay — ВТОРОЙ путь записи в тело навыка (мимо save), а тело целиком
+      // уходит в ДОВЕРЕННЫЙ блок промпта на recall. В машинные строки реплея попадает литеральный
+      // текст печати из трассы жестов — если в задаче печатался текст СО СТРАНИЦЫ, туда может уехать
+      // директива. Скан того же профиля: находки → макрос НЕ вписываем (навык остаётся с чистой
+      // процедурой, ничего не теряется — только детерминированный реплей не появится).
+      const replayFindings = scanSkillText(newBody);
+      if (replayFindings.length > 0) {
+        log.warn("F2: авто-реплей НЕ вписан — скан нашёл признаки инъекции в записанных шагах", {
+          id,
+          rules: replayFindings.map((f) => f.rule),
+        });
+        return false;
+      }
       const contentMd = serializeLearnedSkill({
         id,
         name: String(fm.name ?? id),

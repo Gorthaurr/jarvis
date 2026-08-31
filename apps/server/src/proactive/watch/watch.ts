@@ -122,11 +122,33 @@ export function dueAt(w: Watch, now: number): number {
 
 /**
  * F4 (волна F): отпечаток одобренной операции наблюдения-с-действием. РОВНО то, что владелец видел на
- * confirm («когда „condition" — выполнить „action"», в контексте what); predicate сознательно вне
- * отпечатка (см. Watch.actionFingerprint). Чистая функция — сверка при создании и перед исполнением
- * обязана давать одинаковый результат на неизменённой записи.
+ * confirm («когда „condition" — выполнить „action"», в контексте what) ПЛЮС предикат — для
+ * predicate-триггерных наблюдений именно он и есть фактическое условие запуска действия (контроль
+ * волны F: без него подмена `predicate.value/op` меняла УСЛОВИЕ запуска, не трогая отпечаток).
+ *
+ * Из предиката исключены АДРЕСНЫЕ поля `tabId`/`url`: их легитимно патчит self-heal вкладки
+ * (2026-07-25) после ремонта выгруженной/закрытой вкладки — включи мы их, здоровое наблюдение
+ * получило бы ложное «поручение изменилось» и было бы приостановлено.
+ * Чистая функция — сверка при создании и перед исполнением обязана давать одинаковый результат
+ * на неизменённой записи.
  */
-export function watchActionFingerprint(w: Pick<Watch, "what" | "condition" | "action">): string {
-  const basis = JSON.stringify([w.what, w.condition, w.action ?? ""]);
+export function watchActionFingerprint(w: Pick<Watch, "what" | "condition" | "action" | "predicate">): string {
+  const basis = JSON.stringify([w.what, w.condition, w.action ?? "", stablePredicate(w.predicate)]);
   return createHash("sha256").update(basis, "utf8").digest("hex").slice(0, 32);
+}
+
+/** Предикат для отпечатка: стабильный порядок ключей, без адресных tabId/url (их правит self-heal). */
+function stablePredicate(p: unknown): unknown {
+  if (p === undefined || p === null) return null;
+  if (Array.isArray(p)) return p.map(stablePredicate);
+  if (typeof p === "object") {
+    const src = p as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(src).sort()) {
+      if (k === "tabId" || k === "url") continue;
+      out[k] = stablePredicate(src[k]);
+    }
+    return out;
+  }
+  return p;
 }

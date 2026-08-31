@@ -23,10 +23,47 @@ describe("repeatSignature (F1)", () => {
     expect(a).toBe(c);
   });
 
-  it("волатильные поля вычищаются и во ВЛОЖЕННЫХ объектах", () => {
-    const a = repeatSignature([{ name: "mcp__x__do", input: { params: { traceId: "t1", q: "a" } } }]);
-    const b = repeatSignature([{ name: "mcp__x__do", input: { params: { traceId: "t2", q: "a" } } }]);
+  it("волатильные поля вычищаются и во ВЛОЖЕННЫХ объектах (у ВСТРОЕННЫХ инструментов)", () => {
+    const a = repeatSignature([{ name: "telegram_send", input: { params: { traceId: "t1", q: "a" } } }]);
+    const b = repeatSignature([{ name: "telegram_send", input: { params: { traceId: "t2", q: "a" } } }]);
     expect(a).toBe(b);
+  });
+
+  // 🔴 Контроль волны F: ложный «повтор» → ложный ЧЕСТНЫЙ ПРОВАЛ легитимной работы.
+  it("КОНТЕНТНЫЕ поля не нормализуются по пробелам: разные отступы/переносы = разные действия", () => {
+    const py1 = repeatSignature([{ name: "code_run", input: { lang: "python", code: "def f():\n    return 1" } }]);
+    const py2 = repeatSignature([{ name: "code_run", input: { lang: "python", code: "def f():\n  return 1" } }]);
+    expect(py1).not.toBe(py2); // отступ в Python — семантика
+
+    const w1 = repeatSignature([{ name: "fs_write", input: { path: "a.yaml", content: "a:\n  b: 1" } }]);
+    const w2 = repeatSignature([{ name: "fs_write", input: { path: "a.yaml", content: "a:\n    b: 1" } }]);
+    expect(w1).not.toBe(w2);
+
+    const t1 = repeatSignature([{ name: "input_type", input: { text: "строка один\nстрока два" } }]);
+    const t2 = repeatSignature([{ name: "input_type", input: { text: "строка один строка два" } }]);
+    expect(t1).not.toBe(t2);
+
+    const e1 = repeatSignature([{ name: "fs_edit", input: { old_string: "x  y", new_string: "z" } }]);
+    const e2 = repeatSignature([{ name: "fs_edit", input: { old_string: "x y", new_string: "z" } }]);
+    expect(e1).not.toBe(e2);
+  });
+
+  it("НЕ контентные строки по-прежнему нормализуются (косметика вызова)", () => {
+    const a = repeatSignature([{ name: "app_launch", input: { app: " dota  2 " } }]);
+    const b = repeatSignature([{ name: "app_launch", input: { app: "dota 2" } }]);
+    expect(a).toBe(b);
+  });
+
+  it("у mcp__* волатильные ИМЕНА не выбрасываются (могут быть селектором цели)", () => {
+    const a = repeatSignature([{ name: "mcp__sentry__get_trace", input: { trace_id: "aaa" } }]);
+    const b = repeatSignature([{ name: "mcp__sentry__get_trace", input: { trace_id: "bbb" } }]);
+    expect(a).not.toBe(b); // перебор РАЗНЫХ трейсов ≠ топтание на месте
+  });
+
+  it("если выброс волатильных опустошает input — поле было селектором, сигнатуры различаются", () => {
+    const a = repeatSignature([{ name: "some_tool", input: { request_id: "42" } }]);
+    const b = repeatSignature([{ name: "some_tool", input: { request_id: "43" } }]);
+    expect(a).not.toBe(b);
   });
 
   it("СЕМАНТИЧЕСКИ разный ввод остаётся разным (честность: не глушим легитимную серию)", () => {

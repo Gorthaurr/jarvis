@@ -196,7 +196,13 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     process.env.JARVIS_SKILL_DISTILL === "0"
       ? undefined
       : async ({ name, when, demonstrations }) => {
-          const demos = demonstrations.map((d, i) => `### Показ ${i + 1} (когда: ${d.when})\n${d.procedure}`).join("\n\n");
+          // F2-контроль: показы, накопленные ДО волны F, скан не проходили и могут нести
+          // `</untrusted_content>`, закрывающий нашу обёртку на своей строке (урок волны C #18) —
+          // нейтрализуем маркер ПЕРЕД вставкой, а не надеемся на чистоту истории.
+          const neutralize = (s: string): string => String(s ?? "").replace(/<\/?\s*untrusted_content/gi, "[тег]");
+          const demos = demonstrations
+            .map((d, i) => `### Показ ${i + 1} (когда: ${neutralize(d.when)})\n${neutralize(d.procedure)}`)
+            .join("\n\n");
           const system = [
             "Ты дистиллируешь навык-процедуру из НЕСКОЛЬКИХ показов одной и той же задачи (поведенческое клонирование).",
             "Выдай ОДНУ обобщённую устойчивую процедуру (markdown, шаги по пунктам), которая:",

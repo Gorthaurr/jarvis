@@ -18,11 +18,16 @@ export type EpisodeKind = "preference" | "fact" | "event";
 
 /**
  * Провенанс записи (волна F, F3 — идея Dream Diary/inspect-sources OpenClaw): КТО породил факт.
- * «owner» — прямое указание владельца (UI/явная команда), «model» — осознанный memory_write из петли,
- * «reflex» — бэкстоп memory-reflect, «consolidation» — сон-цикл. Показывается во вкладке «Память»
- * (владелец видит, ОТКУДА Джарвис это взял) и хранится в metadata JSONB (колонка есть с 0001_init).
+ * «model» — осознанный memory_write из петли, «reflex» — бэкстоп memory-reflect, «consolidation» —
+ * сон-цикл. Показывается во вкладке «Память» (владелец видит, ОТКУДА Джарвис это взял) и хранится
+ * в metadata JSONB (колонка есть с 0001_init).
+ *
+ * ⚠️ Источника «owner» здесь НЕТ СОЗНАТЕЛЬНО (адверс-ревью волны F): писать память напрямую владелец
+ * пока не может — во вкладке «Память» есть только забывание, а отличить «Джарвис, запомни: …» от
+ * решения модели внутри memory_write нечем. Объявленная, но недостижимая категория максимального
+ * доверия — ложь витрины честности; появится вместе с UI-вводом факта.
  */
-export type MemorySource = "owner" | "model" | "reflex" | "consolidation";
+export type MemorySource = "model" | "reflex" | "consolidation";
 
 export interface Episode {
   id: string;
@@ -299,9 +304,7 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
       ts: Number(r.ts),
       salience: r.salience == null ? undefined : Number(r.salience),
       // F3: провенанс из metadata; чужое/легаси-значение не коэрсим в union — честнее «неизвестно».
-      ...(r.source === "owner" || r.source === "model" || r.source === "reflex" || r.source === "consolidation"
-        ? { source: r.source as MemorySource }
-        : {}),
+      ...(r.source === "model" || r.source === "reflex" || r.source === "consolidation" ? { source: r.source as MemorySource } : {}),
     }));
   }
 

@@ -12,7 +12,15 @@ vi.mock("node:fs/promises", () => ({
   }),
 }));
 
-import { _resetConsentForTest, approveSend, consentKey, isSendApproved, listConsents, revokeSend } from "./consent.js";
+import {
+  _resetConsentForTest,
+  approveSend,
+  consentKey,
+  isSendApproved,
+  listConsents,
+  revokeSend,
+  revokeSendMatching,
+} from "./consent.js";
 
 beforeEach(() => _resetConsentForTest());
 
@@ -51,5 +59,26 @@ describe("consent (§14 персистентное согласие на отп�
     for (const c of mine) expect(c.ts).toBeTypeOf("number");
     await revokeSend("u1", "vk", "Маша");
     expect(listConsents("u1").map((c) => c.recipient)).toEqual(["катя"]); // отзыв виден в инспекции
+  });
+
+  // 🔴 Контроль волны F (HIGH): согласия на ОДНОГО человека копятся под разными написаниями (модель
+  // называет контакт в разных падежах) — точечный отзыв снимал одно, а владельцу обещали «снова
+  // спросит подтверждения»: назавтра отправка уходила БЕЗ спроса через оставшийся ключ.
+  it("revokeSendMatching снимает ВСЕ написания адресата (склонения) и возвращает снятое", async () => {
+    await approveSend("u1", "telegram", "Катя");
+    await approveSend("u1", "telegram", "Кате");
+    await approveSend("u1", "telegram", "Катю");
+    await approveSend("u1", "telegram", "Маша"); // другой человек — не трогаем
+    await approveSend("u1", "vk", "Катя"); // другой канал — не трогаем
+    const removed = await revokeSendMatching("u1", "telegram", "Кате");
+    expect(removed.sort()).toEqual(["катю", "катя", "кате"].sort());
+    expect(isSendApproved("u1", "telegram", "Катя")).toBe(false); // гейт реально взведён обратно
+    expect(isSendApproved("u1", "telegram", "Кате")).toBe(false);
+    expect(isSendApproved("u1", "telegram", "Маша")).toBe(true); // сосед не задет
+    expect(isSendApproved("u1", "vk", "Катя")).toBe(true); // другой канал не задет
+  });
+
+  it("revokeSendMatching: нечего отзывать → пустой список (вызывающий скажет честно)", async () => {
+    expect(await revokeSendMatching("u1", "telegram", "Никто")).toEqual([]);
   });
 });
