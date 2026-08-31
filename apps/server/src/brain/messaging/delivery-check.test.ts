@@ -63,3 +63,14 @@ describe("probeDelivery", () => {
     expect(await probeDelivery("привет", async () => ({ ok: true, messages: [{ dir: "out", text: "привет" }] }))).toBe("delivered");
   });
 });
+
+// 🔴 Урок слепой вкладки (watch): молчащий сенсор не должен маскироваться под честное «ещё нет».
+describe("пустой чат — это «не увидел», а не «сообщения нет»", () => {
+  it("ноль сообщений → unknown (иначе фолбэк отправит второе сообщение человеку)", () => {
+    expect(verdictFromReadback({ ok: true, messages: [] }, "привет")).toBe("unknown");
+  });
+
+  it("непустой чат без нашего сообщения по-прежнему absent (повтор законен)", () => {
+    expect(verdictFromReadback({ ok: true, messages: [{ dir: "in", text: "ок" }] }, "привет")).toBe("absent");
+  });
+});

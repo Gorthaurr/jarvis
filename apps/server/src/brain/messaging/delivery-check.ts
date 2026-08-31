@@ -66,6 +66,11 @@ export function verdictFromReadback(readback: ChatReadback | undefined, body: st
   if (!readback?.ok) return "unknown";
   const messages = readback.messages;
   if (!Array.isArray(messages)) return "unknown";
+  // 🔴 ПУСТОЙ список — не «сообщения нет», а «мы ничего не увидели»: у чата, куда мы только что
+  // писали, есть хотя бы история, поэтому ноль сообщений означает неотрисованную/выгруженную
+  // страницу. Тот же урок, что у слепой вкладки в наблюдениях: молчащий сенсор маскировался под
+  // честное «ещё нет» — и здесь это стоило бы человеку дубля.
+  if (messages.length === 0) return "unknown";
   return findOwnMessage(messages as ChatMessage[], body) ? "delivered" : "absent";
 }
 

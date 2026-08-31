@@ -38,16 +38,40 @@ export const PROTECTED_PATHS = [
   "apps/server/src/brain/messaging/delivery-check.ts",
   "apps/server/src/brain/messaging/cadence.ts",
   "apps/server/src/brain/tools/handlers/messaging.ts",
+  "apps/server/src/brain/messaging/outbound.ts",
+  "apps/server/src/brain/orders/order-guard.ts",
+  "apps/server/src/brain/tools/dispatch-util.ts",
   "apps/server/src/brain/agent/error-voice.ts",
   "apps/server/src/gateway/bind.ts",
   "apps/client/main/actuators/self-guard.ts",
   "infra/supervisor.mjs",
   "mcp.json",
+  // Конфигурация проверки — тоже ограничитель (см. PROTECTED_CONFIG ниже).
+  "apps/server/vitest.setup.ts",
+  "package.json",
+  "apps/server/package.json",
+  "apps/client/package.json",
+  "tsconfig.json",
+  "apps/server/tsconfig.json",
+  "apps/client/tsconfig.json",
+] as const;
+
+/**
+ * 🔴 Файлы, которых в репозитории СЕЙЧАС НЕТ, но появление которых само по себе меняет правила игры:
+ * конфиг vitest может исключить тесты из прогона, и «проверил, всё зелено» станет ложью — а на этот
+ * прогон опирается подтверждение владельца. Держим отдельно от PROTECTED_PATHS честности ради:
+ * первый список описывает существующий код (и сверяется тестом), этот — превентивный запрет.
+ */
+export const PROTECTED_CONFIG = [
+  "vitest.config.ts",
+  "vitest.config.mts",
+  "apps/server/vitest.config.ts",
+  "apps/client/vitest.config.ts",
 ] as const;
 
 /** Тронуты ли рельсы (сравнение по нормализованному пути, регистр Windows не должен создавать дыру). */
 export function protectedHits(changedFiles: readonly string[]): string[] {
-  const guard = new Set(PROTECTED_PATHS.map((p) => p.toLowerCase()));
+  const guard = new Set([...PROTECTED_PATHS, ...PROTECTED_CONFIG].map((p) => p.toLowerCase()));
   return changedFiles.map((f) => f.replace(/\\/g, "/")).filter((f) => guard.has(f.toLowerCase()) || /(^|\/)\.env($|\.)/i.test(f));
 }
 
@@ -187,6 +211,16 @@ export async function applySelfPatch(): Promise<PatchOutcome> {
   const state = await loadState();
   if (!state) return { ok: false, message: "Открытой правки нет." };
   if (state.stage !== "committed") return { ok: false, message: "Правка ещё не зафиксирована — применять нечего.", state };
+  // Незакоммиченные изменения `git checkout` перенёс бы на рабочую ветку ВМЕСТЕ с переключением —
+  // то есть в рабочий код уехало бы то, чего не было ни в проверке, ни в подтверждении владельца.
+  const before = await repoStatus();
+  if (before.dirty) {
+    return {
+      ok: false,
+      message: `В ветке ${state.branch} остались незафиксированные изменения (${before.changedFiles.slice(0, 5).join(", ")}). Проверь и зафиксируй их — непроверенное в рабочую ветку не переношу.`,
+      state,
+    };
+  }
   const back = await git(["checkout", state.baseBranch]);
   if (!back.ok) return { ok: false, message: `Не смог вернуться на ${state.baseBranch}: ${back.out.slice(0, 300)}`, state };
   const merged = await git(["merge", "--ff-only", state.branch]);

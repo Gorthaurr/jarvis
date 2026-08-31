@@ -33,6 +33,18 @@ describe("protectedHits — автономия не снимает собств�
     expect(protectedHits(["apps/server/src/brain/agent/index.ts", "packages/tools/src/index.ts"])).toEqual([]);
   });
 
+  // 🔴 Обход проверки без правки кода: подменить конфигурацию прогона и получить «зелено» на сломанном.
+  it.each([
+    "vitest.config.ts", // ещё не существует — запрет превентивный: его СОЗДАНИЕ и есть способ обхода
+    "apps/server/vitest.config.ts",
+    "apps/server/vitest.setup.ts",
+    "apps/server/package.json",
+    "apps/server/tsconfig.json",
+    "package.json",
+  ])("не даёт подменить конфигурацию проверки: %s", (p) => {
+    expect(protectedHits([p])).toHaveLength(1);
+  });
+
   it("список рельсов не пуст и покрывает четыре класса ограничителей", () => {
     expect(PROTECTED_PATHS.length).toBeGreaterThanOrEqual(10);
     expect(PROTECTED_PATHS.some((p) => p.includes("consent"))).toBe(true);
@@ -69,5 +81,19 @@ describe("affectedPackages — тесты гоняем там, где менял
 
   it("правка клиента проверяет клиент", () => {
     expect(affectedPackages(["apps\\client\\main\\actuators\\fs.ts"])).toEqual(["apps/client"]);
+  });
+});
+
+/**
+ * 🔴 Список рельсов — это ТОЧНЫЕ пути, и при переносе файла он молча перестал бы защищать: код
+ * уехал, запись осталась, «декларация разошлась с поведением». Тест держит список в соответствии с
+ * репозиторием: файл переименовали — тест падает и заставляет обновить рельсы осознанно.
+ */
+describe("рельсы указывают на существующие файлы", () => {
+  it.each(PROTECTED_PATHS.filter((p) => p.endsWith(".ts") || p.endsWith(".mjs")))("%s существует", async (rel) => {
+    const { existsSync } = await import("node:fs");
+    const { selfRepoRoot } = await import("./repo.js");
+    const { join } = await import("node:path");
+    expect(existsSync(join(selfRepoRoot(), rel))).toBe(true);
   });
 });
