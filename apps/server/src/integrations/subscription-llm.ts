@@ -93,8 +93,16 @@ export function classifySubscriptionError(text: string): SubscriptionFailure {
   return { kind: "other", human: `резервный канал не ответил: ${t.slice(0, 160)}`, at: Date.now() };
 }
 
+/**
+ * Сколько причина отказа считается АКТУАЛЬНОЙ. Разовая 429 или моргнувшая сеть не должны неделю
+ * висеть в паспорте как «канал не отвечает»: утверждение о СЕЙЧАС, основанное на давнем событии, —
+ * такая же неправда, как «Готово» без проверки. Протухшая причина просто исчезает (мы не знаем).
+ */
+const FAILURE_TTL_MS = 30 * 60_000;
+
 /** Последняя причина отказа резерва (для паспорта возможностей и честного доклада). */
 export function lastSubscriptionFailure(): SubscriptionFailure | undefined {
+  if (lastFailure && Date.now() - lastFailure.at > FAILURE_TTL_MS) lastFailure = undefined;
   return lastFailure;
 }
 
@@ -139,8 +147,14 @@ function applySandboxEnv(env: Record<string, string | undefined>): void {
   env.DISABLE_AUTOUPDATER ??= "1";
   try {
     mkdirSync(sdkSandboxDir(), { recursive: true });
-  } catch {
-    /* каталог не создался — CLI отработает в своём дефолтном cwd; канал важнее изоляции */
+  } catch (e) {
+    // Каталог не создался (нет прав на JARVIS_DATA_DIR, занято файлом) — CLI отработает в дефолтном
+    // cwd: канал важнее изоляции. Но МОЛЧАТЬ нельзя: изоляция тихо отключилась бы, а вместе с ней
+    // вернулся бы расход лимита на подхваченные настройки проекта.
+    log.warn("песочница резерва не создалась — изоляция подпроцесса не действует", {
+      dir: sdkSandboxDir(),
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 
@@ -377,7 +391,19 @@ export class SubscriptionLlmProvider implements ILlmProvider {
         applySandboxEnv(env);
         // Прогревать нужно ТЕМИ ЖЕ опциями, с какими пойдёт рабочий вызов: иначе прогреется не тот
         // подпроцесс (другой cwd/набор настроек), и первый настоящий ход всё равно заплатит стартом.
-        await start({ options: { env, settingSources: [], strictMcpConfig: true, cwd: sdkSandboxDir() } });
+        const warm = (await start({ options: { env, settingSources: [], strictMcpConfig: true, cwd: sdkSandboxDir() } })) as
+          | { close?: () => void }
+          | undefined;
+        // 🔴 Хендл прогрева ОДНОРАЗОВЫЙ и жёстко связан с опциями, которыми его создали, а у нас
+        // опции меняются каждый ход (свой системный промпт, свой набор инструментов, размышление по
+        // политике) — использовать его в рабочем вызове нельзя. Значит держать процесс незачем:
+        // не закрыв, мы бы оставляли висеть лишний CLI на каждый старт сервера (ревью волны I).
+        // Польза прогрева — в прогретом дисковом кеше и распакованных модулях, она сохраняется.
+        try {
+          warm?.close?.();
+        } catch {
+          /* закрывать нечего — не беда */
+        }
         log.info("резервный канал прогрет");
       }
     } catch (e) {
@@ -450,7 +476,12 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     const images = collectImages(req);
     const prompt = images.length > 0 ? userMessageStream(transcript, images) : transcript;
 
-    for await (const msg of sdk.query({ prompt, options })) {
+    // 🔴 ГЛАВНЫЙ путь отказа — БРОШЕННОЕ исключение (ревью волны I): когда CLI выходит с ошибкой
+    // (протухшая авторизация — самый частый случай), `sdk.query` бросает, а не отдаёт result-сообщение.
+    // Классификация ниже стояла ТОЛЬКО после цикла, поэтому в реальном сценарии не выполнялась вовсе,
+    // и владелец опять слышал «связь прервалась» вместо «нужно переавторизоваться».
+    try {
+      for await (const msg of sdk.query({ prompt, options })) {
       const type = String(msg.type ?? "");
       if (type === "stream_event" && onDelta) {
         const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } } | undefined;
@@ -502,6 +533,20 @@ export class SubscriptionLlmProvider implements ILlmProvider {
         if (failed) errorText = String(msg.result ?? msg.subtype);
         if (!text && typeof msg.result === "string" && msg.subtype === "success") text = msg.result;
       }
+      }
+    } catch (e) {
+      // Ничего не получили — это отказ канала, и владелец должен услышать ЕГО причину. Если же
+      // модель успела дать текст или запросить инструмент, работу не выбрасываем: обрыв на хвосте
+      // потока не повод превращать состоявшийся ход в стаб.
+      if (captured.length === 0 && !text && !streamed) {
+        const raw = e instanceof Error ? e.message : String(e);
+        lastFailure = classifySubscriptionError(raw);
+        log.warn("резерв недоступен (исключение SDK)", { kind: lastFailure.kind, human: lastFailure.human });
+        throw new Error(`подписка: ${lastFailure.human}`);
+      }
+      log.warn("резерв: поток оборвался после частичного ответа — отдаю, что получил", {
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
 
     // Ошибку поднимаем, только если ход ничего не дал: пришедший текст/вызов инструмента — уже

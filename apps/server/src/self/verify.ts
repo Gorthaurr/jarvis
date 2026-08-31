@@ -24,7 +24,25 @@ export interface CheckResult {
 const CHECK_TIMEOUT_MS = 10 * 60_000;
 const TAIL_CHARS = 2500;
 
-function runCommand(cmd: string, args: readonly string[], cwd: string, timeoutMs: number): Promise<{ code: number | null; out: string; spawnFailed: boolean }> {
+/**
+ * Признак «команду не удалось ЗАПУСТИТЬ» (а не «проверка нашла ошибки»). Под shell на Windows
+ * отсутствующий npx НЕ даёт ENOENT: шелл сам печатает «is not recognized» и выходит с кодом 9009 —
+ * поэтому прежняя проверка «есть код ошибки и пустой вывод» на этой платформе была недостижима, и
+ * ненайденный инструмент рапортовался как «тесты упали» (ревью волны I). А это разные вещи:
+ * «упало» требует чинить код, «не запустилось» — среду.
+ */
+function looksLikeSpawnFailure(error: NodeJS.ErrnoException | null, code: number | null, out: string): boolean {
+  if (error && (error.code === "ENOENT" || error.code === "EACCES" || error.code === "EPERM")) return true;
+  if (code === 127 || code === 9009) return true; // «команда не найдена»: POSIX / cmd.exe
+  return /is not recognized as an internal|command not found|не является внутренней или внешней/i.test(out);
+}
+
+function runCommand(
+  cmd: string,
+  args: readonly string[],
+  cwd: string,
+  timeoutMs: number,
+): Promise<{ code: number | null; out: string; spawnFailed: boolean; timedOut: boolean }> {
   return new Promise((resolvePromise) => {
     const child = execFile(
       cmd,
@@ -32,21 +50,37 @@ function runCommand(cmd: string, args: readonly string[], cwd: string, timeoutMs
       { cwd, timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024, windowsHide: true, shell: process.platform === "win32" },
       (error, stdout, stderr) => {
         const out = `${stdout ?? ""}${stderr ?? ""}`;
-        // ENOENT/EACCES — процесс не стартовал: это «не проверили», а не «тесты упали».
-        const spawnFailed = Boolean(error && typeof (error as NodeJS.ErrnoException).code === "string" && (error as NodeJS.ErrnoException).code !== "ETIMEDOUT");
-        resolvePromise({ code: child.exitCode, out, spawnFailed: spawnFailed && !out.trim() });
+        const err = error as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
+        // Убит по таймауту — прогон НЕ завершился: его результат неизвестен, а не «красный».
+        const timedOut = Boolean(err && (err.killed === true || err.signal));
+        resolvePromise({ code: child.exitCode, out, spawnFailed: looksLikeSpawnFailure(err, child.exitCode, out), timedOut });
       },
     );
   });
+}
+
+/**
+ * Доступен ли сам инструмент прогона. 🔴 Иначе различить «команды нет» и «проверка нашла ошибки»
+ * на Windows невозможно: cmd.exe под shell отдаёт ненайденную команду обычным кодом 1, а своё
+ * сообщение печатает в OEM-кодировке (в UTF-8 это нечитаемый мусор — проверено живьём). Поэтому
+ * спрашиваем прямо: `npx --version`. Не ответил → вся проверка НЕПРОВЕДЕНА, а не провалена.
+ */
+export async function toolchainAvailable(cmd = "npx", packageDir = "apps/server"): Promise<boolean> {
+  const cwd = join(selfRepoRoot(), packageDir);
+  const { code } = await runCommand(cmd, ["--version"], cwd, 60_000);
+  return code === 0;
 }
 
 /** Прогнать одну проверку в пакете монорепо. */
 export async function runCheck(name: string, cmd: string, args: readonly string[], packageDir: string): Promise<CheckResult> {
   const startedAt = Date.now();
   const cwd = join(selfRepoRoot(), packageDir);
-  const { code, out, spawnFailed } = await runCommand(cmd, args, cwd, CHECK_TIMEOUT_MS);
+  const { code, out, spawnFailed, timedOut } = await runCommand(cmd, args, cwd, CHECK_TIMEOUT_MS);
   const tail = out.length > TAIL_CHARS ? `…${out.slice(-TAIL_CHARS)}` : out;
-  return { name, ok: spawnFailed ? undefined : code === 0, tail: tail.trim(), durationMs: Date.now() - startedAt };
+  // «Не запустилось» и «не дождались» — оба означают НЕПРОВЕРЕНО (ok: undefined), а не провал кода.
+  const ok = spawnFailed || timedOut ? undefined : code === 0;
+  const note = spawnFailed ? "команду не удалось запустить" : timedOut ? "прогон не уложился в отведённое время" : "";
+  return { name, ok, tail: [note, tail.trim()].filter(Boolean).join(": "), durationMs: Date.now() - startedAt };
 }
 
 /** Какие пакеты затронуты списком изменённых файлов (тесты гоняем там, где меняли). */
@@ -76,6 +110,15 @@ export interface VerifyOutcome {
 export async function verifyChanges(changedFiles: readonly string[]): Promise<VerifyOutcome> {
   const packages = affectedPackages(changedFiles);
   const targets = packages.length > 0 ? packages : ["apps/server"];
+  // Среда сломана (нет npx после обновления Node, битый PATH) → честно «не проверено»: рапортовать
+  // «упало» значило бы отправить Джарвиса чинить исправный код.
+  if (!(await toolchainAvailable("npx", targets[0] ?? "apps/server"))) {
+    return {
+      ok: false,
+      checks: [{ name: "проба инструментов", ok: undefined, tail: "npx недоступен в этой среде", durationMs: 0 }],
+      summary: "Не смог запустить проверку: в среде нет npx — считаю НЕпроверенным (чинить надо среду, а не код).",
+    };
+  }
   const checks: CheckResult[] = [];
   for (const pkg of targets) {
     checks.push(await runCheck(`typecheck ${pkg}`, "npx", ["tsc", "--noEmit"], pkg));

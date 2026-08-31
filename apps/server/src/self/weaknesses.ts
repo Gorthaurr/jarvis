@@ -190,7 +190,14 @@ export async function collectWeaknesses(logsDir: string, opts: { days?: number; 
     return { windowDays: 0, tasks: { total: 0, failed: 0, llmUnavailable: 0 }, weaknesses: [], unavailable: `каталог логов недоступен (${logsDir})` };
   }
 
-  const metricEvents = parseJsonl(await tailLines(join(logsDir, "metrics.jsonl"), MAX_METRIC_LINES));
+  // 🔴 Окно обязано быть НАСТОЯЩИМ (ревью волны I): metrics.jsonl копится месяцами и ротируется по
+  // размеру, а не по дням. Раньше отчёт говорил «Окно: 7 дн. Задач: 502», хотя 502 — это ВСЯ история
+  // файла: заголовок утверждал то, чего не считал (закон честности — то же, что «не смог проверить»).
+  const since = Date.now() - days * 24 * 60 * 60 * 1000;
+  const metricEvents = parseJsonl(await tailLines(join(logsDir, "metrics.jsonl"), MAX_METRIC_LINES)).filter((e) => {
+    const ts = Date.parse(String(e.ts ?? ""));
+    return Number.isFinite(ts) ? ts >= since : true; // строка без времени (легаси) — не выбрасываем
+  });
   const dayFiles = names.filter((n) => /^server-\d{4}-\d{2}-\d{2}\.log$/.test(n)).sort().slice(-days);
   const logEntries: Record<string, unknown>[] = [];
   for (const f of dayFiles) {

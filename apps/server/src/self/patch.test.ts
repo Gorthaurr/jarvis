@@ -97,3 +97,31 @@ describe("рельсы указывают на существующие файл
     expect(existsSync(join(selfRepoRoot(), rel))).toBe(true);
   });
 });
+
+/**
+ * 🔴 Ревью волны I (HIGH): зелёная проверка относится к КОНКРЕТНОМУ содержимому. Между verify и
+ * commit модель могла дописать что угодно — включая снятие собственных ограничителей, — и `git add -A`
+ * утащил бы это в коммит под отчётом «проверено, зелено».
+ */
+describe("рельсы перепроверяются на КАЖДОМ шаге, а не только при verify", () => {
+  it("commit и apply вызывают проверку рельсов и сверку отпечатка", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { selfRepoRoot } = await import("./repo.js");
+    const { join } = await import("node:path");
+    const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
+    const commit = src.slice(src.indexOf("export async function commitSelfPatch"), src.indexOf("export async function applySelfPatch"));
+    const apply = src.slice(src.indexOf("export async function applySelfPatch"), src.indexOf("export async function abortSelfPatch"));
+    for (const [name, body] of [["commit", commit], ["apply", apply]] as const) {
+      expect(body, `${name} обязан перепроверять рельсы`).toContain("protectedHits");
+      expect(body, `${name} обязан сверять отпечаток проверенного дерева`).toContain("verifiedFingerprint");
+    }
+  });
+
+  it("apply не применяет правку без отметки о пройденной проверке", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { selfRepoRoot } = await import("./repo.js");
+    const { join } = await import("node:path");
+    const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
+    expect(src).toContain("нет отметки о пройденной проверке");
+  });
+});

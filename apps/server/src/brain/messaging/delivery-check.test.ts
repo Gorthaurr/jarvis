@@ -74,3 +74,32 @@ describe("пустой чат — это «не увидел», а не «соо
     expect(verdictFromReadback({ ok: true, messages: [{ dir: "in", text: "ок" }] }, "привет")).toBe("absent");
   });
 });
+
+/**
+ * 🔴 Ревью волны I: клиент отдаёт текст пузыря ОБРЕЗАННЫМ (500 символов) и срезает хвостовое время,
+ * поэтому строгое равенство объявляло реально отправленные сообщения неотправленными → дубль человеку.
+ */
+describe("сверка терпит обрезку пузыря, но не путает старые сообщения с новыми", () => {
+  it("«буду в 19:30» найдено, хотя время срезано чисткой клиента", () => {
+    expect(verdictFromReadback({ ok: true, messages: [{ dir: "out", text: "буду в" }] }, "буду в 19:30")).toBe("delivered");
+  });
+
+  it("длинное сообщение, обрезанное до 500 символов, засчитывается по началу", () => {
+    const long = `Отчёт по рынку за неделю: ${"деталь ".repeat(120)}`;
+    expect(verdictFromReadback({ ok: true, messages: [{ dir: "out", text: long.slice(0, 500) }] }, long)).toBe("delivered");
+  });
+
+  it("короткий текст обрезкой не оправдывается — только точное совпадение", () => {
+    expect(verdictFromReadback({ ok: true, messages: [{ dir: "out", text: "да" }] }, "да, буду")).toBe("absent");
+  });
+
+  it("совпадение ГЛУБОКО в истории не считается доставкой (иначе потеря сообщения под отчёт об успехе)", () => {
+    const old = { dir: "out", text: "еду домой" };
+    const recent = [{ dir: "in", text: "ок" }, { dir: "in", text: "жду" }, { dir: "out", text: "буду позже" }, { dir: "in", text: "ага" }];
+    expect(verdictFromReadback({ ok: true, messages: [old, ...recent] }, "еду домой")).toBe("absent");
+  });
+
+  it("только что отправленное (в хвосте ленты) — доставлено", () => {
+    expect(verdictFromReadback({ ok: true, messages: [{ dir: "in", text: "ты где?" }, { dir: "out", text: "еду домой" }] }, "еду домой")).toBe("delivered");
+  });
+});

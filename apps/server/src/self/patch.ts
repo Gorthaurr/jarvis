@@ -17,6 +17,7 @@
  *  4. Заморозка автономии (killswitch) выключает весь цикл — проверяется вызывающей стороной.
  */
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, writeFile, rm } from "node:fs/promises";
 import { lazyDataPath } from "../paths.js";
 import { selfRepoRoot } from "./repo.js";
@@ -38,6 +39,10 @@ export const PROTECTED_PATHS = [
   "apps/server/src/brain/messaging/delivery-check.ts",
   "apps/server/src/brain/messaging/cadence.ts",
   "apps/server/src/brain/tools/handlers/messaging.ts",
+  // Здесь живут killswitch-гейт самоправки и §14-подтверждение на apply: сними их — и следующий
+  // цикл применит себя сам, не спросив владельца (ревью волны I, HIGH).
+  "apps/server/src/brain/tools/handlers/self.ts",
+  "apps/server/src/gateway/session.ts",
   "apps/server/src/brain/messaging/outbound.ts",
   "apps/server/src/brain/orders/order-guard.ts",
   "apps/server/src/brain/tools/dispatch-util.ts",
@@ -82,6 +87,13 @@ export interface SelfPatchState {
   startedAt: string;
   stage: "open" | "verified" | "committed";
   lastVerify?: { ok: boolean; summary: string; at: string };
+  /**
+   * 🔴 Отпечаток ПРОВЕРЕННОГО дерева (ревью волны I, HIGH): зелёная проверка относится к конкретному
+   * содержимому файлов. Между verify и commit модель (в том числе под инъекцией с прочитанной
+   * страницы) может дописать что угодно — включая снятие собственных ограничителей, — а `git add -A`
+   * утащил бы это в коммит под отчёт «проверено, зелено». Поэтому фиксируем и сверяем.
+   */
+  verifiedFingerprint?: string;
 }
 
 function git(args: readonly string[]): Promise<{ ok: boolean; out: string }> {
@@ -161,6 +173,17 @@ export async function beginSelfPatch(title: string, today: string): Promise<Patc
   return { ok: true, message: `Открыл правку «${state.title}» в ветке ${branch} (от ${status.branch}).`, state };
 }
 
+/**
+ * Отпечаток текущего состояния правки: пути + хеши содержимого. `git status --porcelain` даёт только
+ * список файлов (правка внутри файла его не меняет), поэтому берём хеши объектов из индекса и дерева.
+ */
+async function treeFingerprint(state: SelfPatchState): Promise<string> {
+  await git(["add", "-A"]); // чтобы новые файлы попали в ls-files -s
+  const staged = (await git(["ls-files", "-s"])).out;
+  const head = (await git(["rev-parse", "HEAD"])).out.trim();
+  return `${head}|${createHash("sha256").update(staged).digest("hex")}`;
+}
+
 /** Что изменено в текущем цикле (рабочее дерево + уже сделанные коммиты ветки). */
 export async function patchChangedFiles(state: SelfPatchState): Promise<string[]> {
   const working = (await repoStatus()).changedFiles;
@@ -183,7 +206,12 @@ export async function verifySelfPatch(): Promise<PatchOutcome> {
     };
   }
   const verify = await verifyChanges(changed);
-  const next: SelfPatchState = { ...state, stage: verify.ok ? "verified" : "open", lastVerify: { ok: verify.ok, summary: verify.summary, at: new Date().toISOString() } };
+  const next: SelfPatchState = {
+    ...state,
+    stage: verify.ok ? "verified" : "open",
+    lastVerify: { ok: verify.ok, summary: verify.summary, at: new Date().toISOString() },
+    ...(verify.ok ? { verifiedFingerprint: await treeFingerprint(state) } : {}),
+  };
   await saveState(next);
   return { ok: verify.ok, message: verify.ok ? `Проверил: ${verify.summary} Изменено файлов: ${changed.length}.` : `Не готово. ${verify.summary}`, state: next, verify };
 }
@@ -195,7 +223,20 @@ export async function commitSelfPatch(message: string): Promise<PatchOutcome> {
   if (state.stage === "open" || state.lastVerify?.ok !== true) {
     return { ok: false, message: "Сначала проверка (компилятор + тесты) — непроверенное не фиксирую.", state };
   }
-  await git(["add", "-A"]);
+  // 🔴 Рельсы ПЕРЕПРОВЕРЯЕМ здесь, а не только в verify: между проверкой и фиксацией дерево могло
+  // измениться, и `git add -A` утащил бы в коммит правку ограничителей под отчёт «всё зелено».
+  const changedNow = await patchChangedFiles(state);
+  const hitsNow = protectedHits(changedNow);
+  if (hitsNow.length > 0) {
+    return { ok: false, message: `Не фиксирую: правка трогает мои ограничители (${hitsNow.join(", ")}). Это делает владелец руками.`, state };
+  }
+  // И сверяем ОТПЕЧАТОК: зелёная проверка относилась к конкретному содержимому файлов.
+  const fingerprintNow = await treeFingerprint(state);
+  if (state.verifiedFingerprint && fingerprintNow !== state.verifiedFingerprint) {
+    const reset: SelfPatchState = { ...state, stage: "open", verifiedFingerprint: undefined };
+    await saveState(reset);
+    return { ok: false, message: "После проверки код изменился — зелёный прогон к нему больше не относится. Нужен повторный verify.", state: reset };
+  }
   const commit = await git(["commit", "-m", String(message ?? state.title).slice(0, 500)]);
   if (!commit.ok && !/nothing to commit/i.test(commit.out)) return { ok: false, message: `Коммит не прошёл: ${commit.out.slice(0, 300)}`, state };
   const next: SelfPatchState = { ...state, stage: "committed" };
@@ -220,6 +261,20 @@ export async function applySelfPatch(): Promise<PatchOutcome> {
       message: `В ветке ${state.branch} остались незафиксированные изменения (${before.changedFiles.slice(0, 5).join(", ")}). Проверь и зафиксируй их — непроверенное в рабочую ветку не переношу.`,
       state,
     };
+  }
+  // 🔴 Состояние цикла лежит в файле, а файл — на диске владельца: доверять одному лишь `stage`
+  // нельзя (подделав его, можно было бы применить НЕпроверенное). Перед применением сверяем то, что
+  // реально уедет в рабочую ветку: список изменений против рельсов и отпечаток проверенного дерева.
+  const hitsNow = protectedHits(await patchChangedFiles(state));
+  if (hitsNow.length > 0) {
+    return { ok: false, message: `Не применяю: в ветке тронуты мои ограничители (${hitsNow.join(", ")}).`, state };
+  }
+  const fingerprintNow = await treeFingerprint(state);
+  if (state.verifiedFingerprint && fingerprintNow !== state.verifiedFingerprint) {
+    return { ok: false, message: "Содержимое ветки отличается от проверенного — применять не буду, нужен повторный verify.", state };
+  }
+  if (!state.verifiedFingerprint) {
+    return { ok: false, message: "У этой правки нет отметки о пройденной проверке — применять нечего (сделай verify заново).", state };
   }
   const back = await git(["checkout", state.baseBranch]);
   if (!back.ok) return { ok: false, message: `Не смог вернуться на ${state.baseBranch}: ${back.out.slice(0, 300)}`, state };
