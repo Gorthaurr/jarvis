@@ -96,12 +96,37 @@ export interface SelfPatchState {
   verifiedFingerprint?: string;
 }
 
-function git(args: readonly string[]): Promise<{ ok: boolean; out: string }> {
+/**
+ * Вызов git. `out` удобен для сообщений (обрезан), `raw` — для РАЗБОРА.
+ * 🔴 Разница принципиальна (поймано ЖИВЫМ прогоном цикла, тесты этого не видели): в
+ * `git status --porcelain` первые два символа — коды состояния, и у обычной незастейдженной правки
+ * первый из них ПРОБЕЛ (« M путь»). Общий `trim()` съедал его у ПЕРВОЙ строки, разбор сдвигался на
+ * символ, путь приезжал как «pps/server/…» — и гард ограничителей НЕ УЗНАВАЛ защищённый файл, если
+ * тот шёл в списке первым. То есть правку killswitch можно было пронести мимо рельсов.
+ */
+function git(args: readonly string[]): Promise<{ ok: boolean; out: string; raw: string }> {
   return new Promise((resolvePromise) => {
     execFile("git", [...args], { cwd: selfRepoRoot(), timeout: 120_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
-      resolvePromise({ ok: !error, out: `${stdout ?? ""}${stderr ?? ""}`.trim() });
+      const raw = `${stdout ?? ""}${stderr ?? ""}`;
+      resolvePromise({ ok: !error, out: raw.trim(), raw });
     });
   });
+}
+
+/**
+ * Разбор `git status --porcelain` (ЧИСТАЯ функция — тестируется без git). Формат: два символа кода,
+ * пробел, путь; переименование — «было -> стало». Кавычки вокруг пути (не-ASCII при core.quotepath)
+ * снимаем: иначе защищённый файл с кириллицей в пути прошёл бы мимо гарда.
+ */
+export function parsePorcelain(raw: string): string[] {
+  const out: string[] = [];
+  for (const line of String(raw ?? "").split(/\r?\n/)) {
+    if (line.length < 4) continue;
+    const path = line.slice(3).split(" -> ").pop() ?? "";
+    const cleaned = path.trim().replace(/^"(.*)"$/, "$1");
+    if (cleaned) out.push(cleaned);
+  }
+  return out;
 }
 
 export async function loadState(): Promise<SelfPatchState | undefined> {
@@ -138,12 +163,7 @@ export interface RepoStatus {
 
 export async function repoStatus(): Promise<RepoStatus> {
   const branch = (await git(["rev-parse", "--abbrev-ref", "HEAD"])).out.trim();
-  const porcelain = (await git(["status", "--porcelain"])).out;
-  const changedFiles = porcelain
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((l) => l.slice(3).trim().split(" -> ").pop() ?? "")
-    .filter(Boolean);
+  const changedFiles = parsePorcelain((await git(["status", "--porcelain"])).raw);
   return { branch, dirty: changedFiles.length > 0, changedFiles };
 }
 

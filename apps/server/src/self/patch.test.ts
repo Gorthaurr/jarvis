@@ -1,6 +1,6 @@
 // Рельсы самоправки (волна I, 2026-08-31). Проверяем ЧИСТУЮ логику ограничителей — git здесь не гоняем.
 import { describe, expect, it } from "vitest";
-import { PROTECTED_PATHS, branchNameFor, protectedHits } from "./patch.js";
+import { PROTECTED_PATHS, branchNameFor, parsePorcelain, protectedHits } from "./patch.js";
 import { affectedPackages } from "./verify.js";
 
 describe("protectedHits — автономия не снимает собственные ограничители", () => {
@@ -123,5 +123,35 @@ describe("рельсы перепроверяются на КАЖДОМ шаге
     const { join } = await import("node:path");
     const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
     expect(src).toContain("нет отметки о пройденной проверке");
+  });
+});
+
+/**
+ * 🔴 Найдено ЖИВЫМ прогоном цикла (тесты гард на готовых списках не ловили): вывод git обрезался
+ * общим trim(), из-за чего у ПЕРВОЙ строки porcelain пропадал ведущий пробел кода состояния, разбор
+ * съезжал на символ, и путь приезжал как «pps/server/...». Гард ограничителей такой путь не узнавал —
+ * то есть правку killswitch можно было пронести мимо рельсов, если она первая в списке.
+ */
+describe("parsePorcelain — разбор состояния репозитория", () => {
+  it("незастейдженная правка (ведущий пробел) читается ПОЛНОСТЬЮ", () => {
+    expect(parsePorcelain(" M apps/server/src/autonomy/freeze.ts\n")).toEqual(["apps/server/src/autonomy/freeze.ts"]);
+  });
+
+  it("и такой путь ловится рельсами (сквозная проверка того самого сценария)", () => {
+    expect(protectedHits(parsePorcelain(" M apps/server/src/autonomy/freeze.ts"))).toHaveLength(1);
+  });
+
+  it("разные состояния: добавлен, удалён, неотслеживаемый, переименован", () => {
+    const raw = ["A  apps/server/src/new.ts", " D apps/server/src/old.ts", "?? apps/server/src/untracked.ts", "R  a/old.ts -> a/new.ts"].join("\n");
+    expect(parsePorcelain(raw)).toEqual(["apps/server/src/new.ts", "apps/server/src/old.ts", "apps/server/src/untracked.ts", "a/new.ts"]);
+  });
+
+  it("путь в кавычках (кириллица при core.quotepath) разворачивается", () => {
+    expect(parsePorcelain(' M "apps/server/src/файл.ts"')).toEqual(["apps/server/src/файл.ts"]);
+  });
+
+  it("пустой вывод — пустой список (чистое дерево)", () => {
+    expect(parsePorcelain("")).toEqual([]);
+    expect(parsePorcelain("\n\n")).toEqual([]);
   });
 });
