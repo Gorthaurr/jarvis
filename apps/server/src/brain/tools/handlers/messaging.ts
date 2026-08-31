@@ -8,6 +8,7 @@ import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol
 import { AsyncMutex, TtlCache, nameSearchVariants } from "@jarvis/shared";
 import { approveSend, isSendApproved, listConsents, revokeSendMatching } from "../../consent.js";
 import { CadenceGuard } from "../../messaging/cadence.js";
+import { type DeliveryVerdict, probeDelivery } from "../../messaging/delivery-check.js";
 import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messaging/resend-guard.js";
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
@@ -95,6 +96,31 @@ function sendLock(userId: string): AsyncMutex {
   return m;
 }
 
+/**
+ * Сколько ждём ЧТЕНИЕ чата при сверке «ушло ли на самом деле» (delivery-check). Отдельный, короткий
+ * бюджет: сверка идёт уже ПОСЛЕ провала отправки, и затягивать ход ею нельзя — не сверились в срок
+ * значит «unknown», а не «не ушло».
+ */
+const DELIVERY_READ_TIMEOUT_MS = 45_000;
+
+/**
+ * Сверка факта доставки чтением чата (2026-08-31). Читаем ТЕМИ ЖЕ подсказками резолва, которыми
+ * отправляли, — иначе можно открыть чат другого человека и получить ложное «не ушло» (→ дубль).
+ */
+async function probeTelegramDelivery(
+  ctx: ToolContext,
+  args: { to: string; text: string; preferredTitle?: string; hintPeerId?: string },
+): Promise<DeliveryVerdict> {
+  return probeDelivery(args.text, async () => {
+    const r = await ctx.session.sendAction(
+      { kind: "telegram.read", to: args.to, count: 10, preferredTitle: args.preferredTitle, hintPeerId: args.hintPeerId },
+      DELIVERY_READ_TIMEOUT_MS,
+    );
+    const data = r.data as { messages?: unknown } | undefined;
+    return { ok: r.ok, messages: data?.messages };
+  });
+}
+
 /** Человекочитаемое «N с назад» для сводки confirm/ответа модели (нет возраста — честное «недавно»). */
 function agoOf(ageMs: number | undefined): string {
   return ageMs === undefined ? "недавно" : `${Math.max(1, Math.round(ageMs / 1000))} с назад`;
@@ -168,9 +194,18 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
   // §14: отправка — критичное действие. Обычный путь — confirm ОДИН раз на адресата (дальше помним
   // навсегда). Повтор/вдогонку в коротком окне — ЯВНЫЙ confirm на КАЖДЫЙ случай (консент адресата
   // его не заменяет: дубль человеку — необратим, цена ложного «да» выше одного вопроса).
+  // Прошлая попытка оборвалась, и сверка чтением чата не удалась: мы НЕ знаем, ушло ли. Говорить
+  // «уже отправлял» про такую запись — утверждать непроверенное; отправить молча — рисковать дублём.
+  const uncertainPrev = recent?.prev.uncertain === true && sentKeys.get(key) === undefined;
   let confirmedByResendGate = false;
   if (identicalHit || recent) {
     if (identicalHit && !resend) {
+      if (uncertainPrev) {
+        return ok(
+          `Не знаю, ушло ли это сообщение «${to}»: прошлая попытка ${agoOf(recent?.ageMs)} оборвалась, и проверить чат не удалось. ` +
+            `Вслепую не повторяю — сначала прочитай чат (telegram_read «${to}»). Нет там этого сообщения — повтори telegram_send с resend:true.`,
+        );
+      }
       return ok(
         `Уже отправлял «${to}» то же самое ${agoOf(recent?.ageMs)} — повтор НЕ ушёл. ` +
           `Если пользователь ЯВНО просит отправить ещё раз — повтори вызов с resend:true (уйдёт после подтверждения).`,
@@ -178,9 +213,11 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
     }
     if (!ctx.confirm) return err(`Повторная отправка «${to}» требует подтверждения (§14), а канал подтверждения недоступен.`);
     const preview = `${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`;
-    const summary = identicalHit
-      ? `Повторная отправка «${to}» в Telegram (то же сообщение уже уходило ${agoOf(recent?.ageMs)}):\n${preview}`
-      : `«${to}» только что (${agoOf(recent?.ageMs)}) получил: «${recent!.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
+    const summary = uncertainPrev
+      ? `Прошлая отправка «${to}» оборвалась ${agoOf(recent?.ageMs)}, и я не смог проверить, дошло ли. Отправить ещё раз (может прийти дублем)?\n${preview}`
+      : identicalHit
+        ? `Повторная отправка «${to}» в Telegram (то же сообщение уже уходило ${agoOf(recent?.ageMs)}):\n${preview}`
+        : `«${to}» только что (${agoOf(recent?.ageMs)}) получил: «${recent!.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
     const c = await ctx.confirm(summary, "send");
     if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
     confirmedByResendGate = true;
@@ -220,14 +257,44 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
   if (hint && isResolveIssue(rawReason)) ctx.resolutionMemory?.forget(ctx.userId, "telegram", to);
   // Проблема РЕЗОЛВА (не нашёл/неоднозначно/не залогинен) — НЕ транспортный сбой: отдаём модели без фолбэка.
   if (isResolveIssue(rawReason)) return err(reason);
-  // Иначе — транспортный сбой CDP-пути: пробуем расширение (те же транслит-варианты для recall).
+  // 🔴 НЕОПРЕДЕЛЁННЫЙ ИСХОД (эпизод «Катя получила дубль», 2026-08-31): команда дошла до ПК, но
+  // подтверждения доставки нет — сообщение могло УЙТИ (истёк таймаут действия, пузырь не успел
+  // отрисоваться за отведённую проверку). Слепой фолбэк на расширение в этом состоянии = ВТОРОЙ
+  // отправитель по тому же аккаунту = дубль живому человеку. Сначала СМОТРИМ чат.
+  // channel_down исключён осознанно: там команда физически не ушла с сервера (fail-fast закрытого
+  // сокета), сверять нечего — и читать тем же мёртвым каналом бессмысленно.
+  const markSent = (who: string, peerId?: string) => {
+    sentKeys.set(key, true);
+    cadence.record(ctx.userId, "telegram", to);
+    resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: peerId || hintPeerId, names: [to, who] }), text);
+  };
+  if (!wasChannelDown) {
+    const verdict = await probeTelegramDelivery(ctx, { to, text, preferredTitle, hintPeerId });
+    if (verdict === "delivered") {
+      markSent(to);
+      return {
+        ...ok(`Отправлено «${to}» в Telegram. Ответ инструмента потерялся (${reason}), но сообщение видно в чате — повторять НЕ нужно.`),
+        sent: true,
+      };
+    }
+    if (verdict === "unknown") {
+      // Не знаем — и не узнали. Второй отправки не делаем; окно гарда взводим «неопределённой»
+      // записью, чтобы повтор прошёл через владельца, а не молча.
+      resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to] }), text, { uncertain: true });
+      return err(
+        `Не знаю, ушло ли сообщение «${to}»: отправка оборвалась (${reason}), и прочитать чат для сверки не удалось. ` +
+          `Вслепую НЕ повторяю — это дало бы человеку дубль. Проверь чат (telegram_read «${to}»), и если сообщения там нет — повтори telegram_send с resend:true.`,
+      );
+    }
+    // verdict === "absent": чат открылся, нашего сообщения в нём нет → отправка действительно не
+    // состоялась, фолбэк законен.
+  }
+  // Транспортный сбой CDP-пути при доказанном «не ушло» — пробуем расширение (те же транслит-варианты для recall).
   if (ctx.telegramSend) {
     try {
       const out = await ctx.telegramSend(to, text, nameSearchVariants(to));
       const who = chatTitleOf(out) || to;
-      sentKeys.set(key, true);
-      cadence.record(ctx.userId, "telegram", to);
-      resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to, who] }), text);
+      markSent(who);
       return { ...ok(`Отправлено «${who}» в Telegram (через расширение).`), sent: true };
     } catch (e) {
       const em = stripResolveMarker(e instanceof Error ? e.message : String(e));
@@ -235,6 +302,19 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
       if (wasChannelDown) {
         const cd = channelDownResult(result, "telegram_send не отправлен: канал с ПК недоступен (переподключение).");
         if (cd) return cd;
+      }
+      // Расширение могло УСПЕТЬ отправить и упасть на своей проверке — тот же класс неопределённости.
+      const after = await probeTelegramDelivery(ctx, { to, text, preferredTitle, hintPeerId });
+      if (after === "delivered") {
+        markSent(to);
+        return { ...ok(`Отправлено «${to}» в Telegram (расширение отчиталось ошибкой «${em}», но сообщение видно в чате).`), sent: true };
+      }
+      if (after === "unknown") {
+        resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to] }), text, { uncertain: true });
+        return err(
+          `Не знаю, ушло ли сообщение «${to}»: оба пути оборвались (${reason}; расширение: ${em}), сверить чат не удалось. ` +
+            `Вслепую НЕ повторяю. Проверь telegram_read «${to}» и при отсутствии сообщения повтори с resend:true.`,
+        );
       }
       return err(`Не удалось отправить в Telegram: ${reason}; расширение: ${em}`);
     }

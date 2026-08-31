@@ -42,6 +42,7 @@ import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { autonomyFreeze } from "../autonomy/freeze.js";
 import { renderCapabilityPassport } from "../brain/capabilities.js";
+import { lastSubscriptionFailure } from "../integrations/subscription-llm.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
@@ -419,6 +420,9 @@ export function makeSessionContext(
         tinkoffToken: Boolean(process.env.TINKOFF_INVEST_TOKEN),
         obsConfigured: Boolean(process.env.OBS_WEBSOCKET_PASSWORD || process.env.OBS_WEBSOCKET_HOST),
         autonomyFrozenReason: autonomyFreeze().info()?.reason ?? null,
+        // Почему лёг резерв на подписке (протухшая авторизация/исчерпанный лимит) — знание на каждый
+        // ход: иначе владелец слышит «связь прервалась» и не догадывается, что нужно переавторизоваться.
+        subscriptionFailure: lastSubscriptionFailure(),
       }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка

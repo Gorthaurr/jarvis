@@ -70,6 +70,7 @@ import { watchCancel, watchCreate, watchList } from "./handlers/watch.js";
 import { obligationAdd, obligationList, obligationRemove } from "./handlers/obligations.js";
 import { calendarRead } from "./handlers/calendar.js";
 import { mailRead } from "./handlers/mail.js";
+import { selfCodeRead, selfCodeSearch, selfPatch, selfWeaknesses } from "./handlers/self.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
@@ -303,6 +304,15 @@ export async function dispatchTool(
       return consentList(ctx);
     case "consent_revoke":
       return consentRevoke(ctx, input);
+    // Волна I (самоулучшение): свой код, свои слабости, своя правка под рельсами.
+    case "self_weaknesses":
+      return selfWeaknesses(ctx, input);
+    case "self_code_search":
+      return selfCodeSearch(ctx, input);
+    case "self_code_read":
+      return selfCodeRead(ctx, input);
+    case "self_patch":
+      return selfPatch(ctx, input);
     // Саморасширение (§8+): Джарвис создаёт/смотрит/удаляет собственные инструменты.
     case "tool_create":
       return toolCreate(ctx, input);

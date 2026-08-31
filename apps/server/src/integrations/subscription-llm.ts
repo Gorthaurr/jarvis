@@ -23,12 +23,13 @@
  *    agent-loop: мы перехватываем первый tool_use из потока и возвращаем его наверх (аренда ввода,
  *    §14-гейты, verify-долг, метрики — всё остаётся на месте). SDK-хендлер до исполнения не доходит.
  */
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
+import { lazyDataPath } from "../paths.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse, ToolUse } from "./llm.js";
 
 const log: Logger = createLogger("llm:subscription");
@@ -60,6 +61,48 @@ function hasStoredLogin(): boolean {
   }
 }
 
+/**
+ * ПОЧЕМУ резерв не сработал — в терминах, понятных владельцу (2026-08-31, живой случай: OAuth-сессия
+ * протухла, и канал молча отдавал стаб «связь прервалась»; из этого текста нельзя было понять, что
+ * нужно всего лишь заново авторизоваться). Причина запоминается и попадает в паспорт возможностей,
+ * чтобы Джарвис говорил «подписка не авторизована», а не изображал общий сбой связи.
+ */
+export type SubscriptionFailureKind = "auth" | "credits" | "rate_limit" | "other";
+
+export interface SubscriptionFailure {
+  kind: SubscriptionFailureKind;
+  /** Что сказать владельцу. */
+  human: string;
+  at: number;
+}
+
+let lastFailure: SubscriptionFailure | undefined;
+
+/** Классификация текста ошибки SDK (чистая функция). */
+export function classifySubscriptionError(text: string): SubscriptionFailure {
+  const t = String(text ?? "");
+  if (/authenticate|oauth|session expired|not logged in|unauthorized/i.test(t)) {
+    return { kind: "auth", human: "подписка не авторизована (сессия истекла) — нужно выполнить `claude setup-token` и обновить CLAUDE_CODE_OAUTH_TOKEN", at: Date.now() };
+  }
+  if (/out of usage credits|usage limit|credit balance|quota/i.test(t)) {
+    return { kind: "credits", human: "лимит подписки исчерпан — до сброса окна резерв недоступен", at: Date.now() };
+  }
+  if (/rate.?limit|429|too many requests/i.test(t)) {
+    return { kind: "rate_limit", human: "подписка временно ограничивает частоту запросов", at: Date.now() };
+  }
+  return { kind: "other", human: `резервный канал не ответил: ${t.slice(0, 160)}`, at: Date.now() };
+}
+
+/** Последняя причина отказа резерва (для паспорта возможностей и честного доклада). */
+export function lastSubscriptionFailure(): SubscriptionFailure | undefined {
+  return lastFailure;
+}
+
+/** Только для тестов: забыть причину. */
+export function _resetSubscriptionFailureForTest(): void {
+  lastFailure = undefined;
+}
+
 /** Резерв включён? (env JARVIS_SUBSCRIPTION_FALLBACK=0 выключает даже при наличии токена.) */
 export function subscriptionFallbackEnabled(): boolean {
   return process.env.JARVIS_SUBSCRIPTION_FALLBACK !== "0";
@@ -77,6 +120,28 @@ export function subscriptionFallbackEnabled(): boolean {
 function subscriptionModel(): string {
   const raw = process.env.JARVIS_SUBSCRIPTION_MODEL?.trim();
   return raw || "opus";
+}
+
+/**
+ * Рабочий каталог CLI-подпроцесса: ПУСТОЙ и не-git. Держим его в data/, а не во временной папке ОС:
+ * так он переживает перезапуски (кеш CLI не сбрасывается каждым стартом) и попадает под те же
+ * правила, что остальные наши сторы. Путь ленивый — `.env` (JARVIS_DATA_DIR) читается после импортов.
+ */
+const sdkSandboxDir = lazyDataPath("sdk-cwd");
+
+/**
+ * Окружение дочернего CLI. Кроме уже вычищенного ANTHROPIC_API_KEY просим часовой TTL кеша (на
+ * подписке он даётся в рамках включённого объёма) и глушим автообновление — оно тратит время старта
+ * и способно подменить версию CLI посреди рабочего дня. Значения не перетираем, если владелец задал свои.
+ */
+function applySandboxEnv(env: Record<string, string | undefined>): void {
+  env.CLAUDE_CODE_PROMPT_CACHE_TTL ??= "1h";
+  env.DISABLE_AUTOUPDATER ??= "1";
+  try {
+    mkdirSync(sdkSandboxDir(), { recursive: true });
+  } catch {
+    /* каталог не создался — CLI отработает в своём дефолтном cwd; канал важнее изоляции */
+  }
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -119,8 +184,23 @@ function thinkingOption(effort: LlmRequest["thinking"], tier?: string): Record<s
 }
 
 /** Собрать системный промпт из наших блоков (кеш-брейкпоинты в резерве не применимы — см. шапку). */
-function buildSystem(req: LlmRequest): string {
-  return [req.systemStatic, req.systemSkill, req.systemTools, req.systemDynamic].filter((s) => s && s.trim()).join("\n\n");
+/**
+ * Системный промпт для SDK. Раньше склеивался в ОДНУ строку — и вместе с ней терялась граница §15
+ * между стабильной частью (персона/навык/каталог инструментов) и меняющейся каждый ход динамикой
+ * (время, окна ПК, факты). Установленный SDK 0.3.251 умеет эту границу принимать буквально: массив
+ * строк с маркером `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, где всё ДО маркера пригодно для кросс-сессионного
+ * кеша, а всё ПОСЛЕ — нет. Это ровно наша схема [персона][навык] / [динамика] из `persona/index.ts`.
+ *
+ * Маркер берём из SDK (не хардкодим строку): его значение — деталь реализации SDK, а не контракт.
+ * Нет маркера в этой версии → честно отдаём одну строку, как раньше (кеша не будет, но и поломки тоже).
+ */
+function buildSystem(req: LlmRequest, boundary?: string): string | string[] {
+  const stable = [req.systemStatic, req.systemSkill, req.systemTools].filter((s) => s && s.trim()).join("\n\n");
+  const dynamic = (req.systemDynamic ?? "").trim();
+  if (!boundary || !stable || !dynamic) {
+    return [stable, dynamic].filter(Boolean).join("\n\n");
+  }
+  return [stable, boundary, dynamic];
 }
 
 /**
@@ -231,6 +311,8 @@ export interface SubscriptionLlmDeps {
 export interface SdkModule {
   /** Прогрев CLI-подпроцесса (опционально — в старых версиях SDK может отсутствовать). */
   startup?: (opts?: unknown) => Promise<unknown>;
+  /** Маркер границы кеша системного промпта (появился не во всех версиях — используем, если есть). */
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY?: string;
   query: (opts: {
     prompt: string | AsyncIterable<Record<string, unknown>>;
     options: Record<string, unknown>;
@@ -292,7 +374,10 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       if (typeof start === "function") {
         const env: Record<string, string | undefined> = { ...process.env };
         delete env.ANTHROPIC_API_KEY;
-        await start({ env });
+        applySandboxEnv(env);
+        // Прогревать нужно ТЕМИ ЖЕ опциями, с какими пойдёт рабочий вызов: иначе прогреется не тот
+        // подпроцесс (другой cwd/набор настроек), и первый настоящий ход всё равно заплатит стартом.
+        await start({ options: { env, settingSources: [], strictMcpConfig: true, cwd: sdkSandboxDir() } });
         log.info("резервный канал прогрет");
       }
     } catch (e) {
@@ -321,10 +406,22 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
     else delete env.CLAUDE_CODE_OAUTH_TOKEN;
 
+    // ИЗОЛЯЦИЯ ПОДПРОЦЕССА (2026-08-31, по документации установленного SDK, sdk.d.ts:2052 —
+    // «When omitted, all sources are loaded… Must include 'project' to load CLAUDE.md files»).
+    // 🔴 Мы не передавали ни `cwd`, ни `settingSources` — значит дочерний CLI стартовал в
+    // `apps/server`, поднимался по дереву и подхватывал настройки проекта вместе с CLAUDE.md
+    // (у нас это 350 КБ карты репозитория) в КАЖДЫЙ ход. Модели в рантайме этот документ не нужен —
+    // у Джарвиса свой системный промпт, — а лимит подписки он расходует общий с Claude Code владельца.
+    // Поэтому: пустой список источников + отдельный ПУСТОЙ рабочий каталог (не-git, чтобы не
+    // подцепить и статус репозитория). Путь ленивый — `.env` читается ПОСЛЕ ESM-импортов (грабля волны E).
+    applySandboxEnv(env);
     const options: Record<string, unknown> = {
-      systemPrompt: buildSystem(req),
+      systemPrompt: buildSystem(req, sdk.SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
       model: subscriptionModel(),
       effort: subscriptionEffort(req.tier),
+      settingSources: [],
+      strictMcpConfig: true,
+      cwd: sdkSandboxDir(),
       // Свой цикл ведём МЫ: SDK должен вернуть первый ход (текст или запрос инструмента) и остановиться.
       maxTurns: 1,
       // Никаких встроенных инструментов Claude Code (Bash/Read/...): у Джарвиса свой арсенал и свои гейты.
@@ -382,7 +479,8 @@ export class SubscriptionLlmProvider implements ILlmProvider {
         // ПРОМПТА → 201K > HARD(185K) → задача обрывалась ложным «разрослась и не помещается» на
         // четвёртом шаге. Поэтому размер промпта в резерве ОЦЕНИВАЕМ САМИ по тому, что реально
         // отправили, а кеш-поля не выдаём за размер (в резерве нашего кеша нет вовсе — см. шапку).
-        const promptChars = String(options.systemPrompt ?? "").length + transcript.length;
+        const sp = options.systemPrompt;
+        const promptChars = (Array.isArray(sp) ? sp.join("\n\n") : String(sp ?? "")).length + transcript.length;
         usage = {
           inputTokens: Math.ceil(promptChars / 2.5), // 2.5 симв/ток — кириллическая калибровка проекта
           outputTokens: Number(u.output_tokens ?? 0),
@@ -408,7 +506,13 @@ export class SubscriptionLlmProvider implements ILlmProvider {
 
     // Ошибку поднимаем, только если ход ничего не дал: пришедший текст/вызов инструмента — уже
     // результат, и превращать его в стаб (потеря работы модели) было бы ложным провалом.
-    if (errorText && captured.length === 0 && !text && !streamed) throw new Error(`подписка: ${errorText}`);
+    if (errorText && captured.length === 0 && !text && !streamed) {
+      lastFailure = classifySubscriptionError(errorText);
+      log.warn("резерв недоступен", { kind: lastFailure.kind, human: lastFailure.human });
+      throw new Error(`подписка: ${lastFailure.human}`);
+    }
+    // Ход прошёл — прежняя причина отказа больше не актуальна (иначе паспорт врал бы о мёртвом канале).
+    lastFailure = undefined;
     // Стрим уже отдал текст наружу — не дублируем его в ответе иным содержимым (инвариант
     // «сумма дельт === resp.text» из контракта ILlmProvider).
     const finalText = onDelta && streamed ? streamed : text;

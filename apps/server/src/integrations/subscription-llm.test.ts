@@ -1,6 +1,6 @@
 // Волна G: резервный провайдер на подписке (Agent SDK) — маппинг нашего контракта на SDK.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SubscriptionLlmProvider, type SdkModule, serializeHistory } from "./subscription-llm.js";
+import { SubscriptionLlmProvider, _resetSubscriptionFailureForTest, classifySubscriptionError, lastSubscriptionFailure, type SdkModule, serializeHistory } from "./subscription-llm.js";
 import type { LlmRequest } from "./llm.js";
 
 const BASE: LlmRequest = {
@@ -112,10 +112,33 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(r.toolUses[0]?.input).toEqual({ app: "notepad" }); // распакован из args
   });
 
-  it("ошибка SDK (истёкший токен/лимит подписки) → исключение, а не пустой «успех»", async () => {
-    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "OAuth session expired" }]);
+  // 2026-08-31: текст ошибки переводится на язык владельца («что случилось и что делать»), потому что
+  // сырое «OAuth session expired» доходило до него как «связь прервалась» — и он не знал, что достаточно
+  // переавторизоваться. Класс ошибки при этом запоминается для паспорта возможностей.
+  it("ошибка SDK (истёкший токен) → исключение с ПОНЯТНОЙ причиной и запомненным классом", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "Failed to authenticate: OAuth session expired" }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
-    await expect(p.complete(BASE)).rejects.toThrow(/OAuth session expired/);
+    await expect(p.complete(BASE)).rejects.toThrow(/не авторизована/);
+    expect(lastSubscriptionFailure()?.kind).toBe("auth");
+    expect(lastSubscriptionFailure()?.human).toMatch(/setup-token/); // сказано, ЧТО делать
+  });
+
+  it("исчерпанный лимит подписки отличается от протухшей авторизации (разное лечение)", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "You're out of usage credits" }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/лимит подписки/);
+    expect(lastSubscriptionFailure()?.kind).toBe("credits");
+  });
+
+  it("успешный ход СБРАСЫВАЕТ прежнюю причину отказа (иначе паспорт врёт о мёртвом канале)", async () => {
+    _resetSubscriptionFailureForTest();
+    const bad = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "Failed to authenticate" }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => bad }).complete(BASE)).rejects.toThrow();
+    expect(lastSubscriptionFailure()).toBeDefined();
+    const good = fakeSdk([{ type: "result", subtype: "success", result: "готово", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => good }).complete(BASE);
+    expect(lastSubscriptionFailure()).toBeUndefined();
   });
 
   it("ANTHROPIC_API_KEY вычищается из env подпроцесса (иначе SDK уйдёт на платный API)", async () => {
@@ -257,7 +280,7 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
 
   it("настоящая ошибка БЕЗ результата — по-прежнему исключение (стаб, а не пустой успех)", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "OAuth session expired" }]);
-    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/OAuth/);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
   });
 
   it("слишком длинное имя инструмента не отдаётся в резерв (лимит 64 с префиксом)", async () => {
@@ -300,5 +323,69 @@ describe("serializeHistory (история → текстовый транскр
     });
     expect(s).toContain("[ОШИБКА]");
     expect(s).toContain("приложен отдельным блоком"); // картинка не теряется, а идёт блоком
+  });
+});
+
+describe("classifySubscriptionError — разные причины лечатся по-разному", () => {
+  it.each([
+    ["Failed to authenticate: OAuth session expired and could not be refreshed", "auth"],
+    ["Not logged in", "auth"],
+    ["You're out of usage credits. Switch to another model", "credits"],
+    ["429 Too Many Requests", "rate_limit"],
+    ["socket hang up", "other"],
+  ])("«%s» → %s", (text, kind) => {
+    expect(classifySubscriptionError(text).kind).toBe(kind);
+  });
+
+  it("неизвестная ошибка не выдаётся за понятную — текст сохраняется", () => {
+    expect(classifySubscriptionError("ECONNRESET на хосте api").human).toMatch(/ECONNRESET/);
+  });
+});
+
+describe("изоляция CLI-подпроцесса (экономия лимита подписки)", () => {
+  // 🔴 Найдено 2026-08-31 по документации установленного SDK (sdk.d.ts:2052): без settingSources
+  // загружаются ВСЕ источники настроек, а 'project' тянет CLAUDE.md. cwd наследовался от сервера,
+  // и выше по дереву лежит карта репозитория на 350 КБ — она уезжала в КАЖДЫЙ ход подписки.
+  it("не загружает настройки проекта и работает в отдельном каталоге", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(sdk.lastOptions?.settingSources).toEqual([]);
+    expect(sdk.lastOptions?.strictMcpConfig).toBe(true);
+    const cwd = String(sdk.lastOptions?.cwd ?? "");
+    expect(cwd).toBeTruthy();
+    expect(cwd.split("\\").join("/")).not.toMatch(/apps\/server$/); // не рабочий каталог сервера
+  });
+
+  it("просит часовой TTL кеша и не даёт CLI обновляться посреди работы", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    const env = sdk.lastOptions?.env as Record<string, string | undefined>;
+    expect(env.CLAUDE_CODE_PROMPT_CACHE_TTL).toBe("1h");
+    expect(env.DISABLE_AUTOUPDATER).toBe("1");
+  });
+
+  it("системный промпт разделён границей кеша: стабильное отдельно от динамики", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    sdk.SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "__BOUNDARY__";
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({
+      ...BASE,
+      systemStatic: "ПЕРСОНА",
+      systemSkill: "НАВЫК",
+      systemTools: "КАТАЛОГ",
+      systemDynamic: "СЕЙЧАС 22:00",
+    });
+    const sp = sdk.lastOptions?.systemPrompt as string[];
+    expect(Array.isArray(sp)).toBe(true);
+    expect(sp[1]).toBe("__BOUNDARY__");
+    expect(sp[0]).toContain("ПЕРСОНА"); // стабильная часть — до границы (кешируется)
+    expect(sp[0]).toContain("НАВЫК");
+    expect(sp[2]).toBe("СЕЙЧАС 22:00"); // меняющаяся — после
+  });
+
+  it("SDK без маркера границы → одна строка, как раньше (совместимость, а не поломка)", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, systemDynamic: "СЕЙЧАС" });
+    expect(typeof sdk.lastOptions?.systemPrompt).toBe("string");
+    expect(String(sdk.lastOptions?.systemPrompt)).toContain("ПЕРСОНА");
   });
 });

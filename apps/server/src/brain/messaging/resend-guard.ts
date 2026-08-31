@@ -23,6 +23,13 @@ export interface RecentSend {
   bodyPreview: string;
   /** unix ms успешной отправки. */
   at: number;
+  /**
+   * Исход той отправки НЕИЗВЕСТЕН (транспорт оборвался, а сверка чтением чата не удалась —
+   * см. delivery-check). Запись всё равно кладётся в окно: повтор обязан пройти через владельца,
+   * иначе «на всякий случай отправлю ещё раз» даёт человеку дубль. Но говорить «уже отправлял»
+   * про такую запись нельзя — это утверждение, которого мы не проверяли.
+   */
+  uncertain?: boolean;
 }
 
 /** Вердикт гарда по новой отправке в окне. */
@@ -126,13 +133,18 @@ export class ResendGuard {
     return undefined;
   }
 
-  /** Зафиксировать УСПЕШНУЮ отправку под всеми ключами идентичности адресата. */
-  record(userId: string, channel: string, peerKeys: readonly string[], body: string): void {
+  /**
+   * Зафиксировать отправку под всеми ключами идентичности адресата.
+   * `opts.uncertain` — исход неизвестен (см. RecentSend.uncertain): запись нужна, чтобы повтор
+   * прошёл через владельца, но выдавать её за состоявшуюся отправку нельзя.
+   */
+  record(userId: string, channel: string, peerKeys: readonly string[], body: string, opts?: { uncertain?: boolean }): void {
     if (this.windowMs <= 0) return;
     const entry: RecentSend = {
       bodyNorm: normalizeSendBody(body),
       bodyPreview: String(body ?? "").slice(0, 160),
       at: this.now(),
+      ...(opts?.uncertain ? { uncertain: true } : {}),
     };
     for (const pk of peerKeys) this.cache.set(this.key(userId, channel, pk), entry);
   }

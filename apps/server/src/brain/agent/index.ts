@@ -176,6 +176,9 @@ const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
   "monitor_list", "window_list", "screen_probe", "browser_tabs",
   "skill_list", "tool_list", "list_reminders", "watch_list", "obligation_list",
   "calendar_read", "mail_read",
+  // Волна I: чтение своего кода/телеметрии — чистые чтения с диска, параллелятся безопасно
+  // (self_patch сюда НЕ входит: он меняет ветку и гоняет тесты — строго последовательно).
+  "self_weaknesses", "self_code_search", "self_code_read",
 ]);
 
 /**

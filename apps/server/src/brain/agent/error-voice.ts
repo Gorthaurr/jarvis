@@ -112,6 +112,10 @@ const NEUTRAL_TOOLS = new Set([
   // перемен (НЕ verify: хеш не доказывает исход — план §4.2); wait_for — ожидание (его met:true за
   // сверку зачитывает agent-петля по data.met, не статический класс — см. dispatch/observed).
   "window_list", "screen_probe", "wait_for",
+  // Волна I (самоулучшение): чтение СВОЕГО кода и своей телеметрии — восприятие, не дело. Как mutate
+  // они взводили бы anyMutateSucceeded → «полистал свой код и сдался» проходило бы успехом задачи
+  // «почини себя». Сама правка (self_patch) остаётся mutate — она действительно меняет мир.
+  "self_weaknesses", "self_code_search", "self_code_read",
 ]);
 
 // H3: у MCP-инструментов (mcp__server__tool) эффект не известен заранее. Читающее ИМЯ (get/list/
