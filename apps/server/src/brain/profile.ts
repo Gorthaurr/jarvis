@@ -42,6 +42,8 @@ export interface UserProfile {
   lastConsolidatedAt?: number;
   /** Когда последний раз звучал брифинг дня (волна D) — гейт «раз в календарный день». */
   lastBriefedAt?: number;
+  /** Когда Джарвис в последний раз докладывал о СВОИХ повторяющихся слабостях (волна I) — раз в N дней. */
+  lastSelfReviewedAt?: number;
 }
 
 const cache = new Map<string, UserProfile>();
@@ -131,6 +133,12 @@ export async function setLastGreeted(userId: string): Promise<void> {
 /** Отметить произнесённый брифинг дня (волна D: не повторяем сводку на каждом коннекте). */
 export async function setLastBriefed(userId: string): Promise<void> {
   entry(userId).lastBriefedAt = Date.now();
+  await persist(userId);
+}
+
+/** Отметить состоявшийся доклад о собственных слабостях (волна I): двигаем ТОЛЬКО когда сказали вслух. */
+export async function setLastSelfReviewed(userId: string): Promise<void> {
+  entry(userId).lastSelfReviewedAt = Date.now();
   await persist(userId);
 }
 

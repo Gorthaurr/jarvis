@@ -45,10 +45,13 @@ import { renderCapabilityPassport } from "../brain/capabilities.js";
 import { lastSubscriptionFailure } from "../integrations/subscription-llm.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed, setLastSelfReviewed } from "../brain/profile.js";
 import { readConsolidationRuns } from "../proactive/consolidation-journal.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
+import { buildSelfReview, shouldSelfReview } from "../proactive/self-review.js";
+import { collectWeaknesses } from "../self/weaknesses.js";
+import { dataPath } from "../paths.js";
 import { upcomingDue } from "../proactive/ambient/obligations.js";
 import { parseCalendarChips } from "../proactive/ambient/calendar-parse.js";
 import type { CalendarReadResult } from "../proactive/ambient/calendar-source.js";
@@ -450,6 +453,9 @@ export function makeSessionContext(
   /** День (toDateString), в который брифинг УЖЕ пробовали в этом соединении, и латч in-flight. */
   let briefingTriedDay: string | undefined;
   let briefingInFlight = false;
+  // Волна I: самоосмотр — одна попытка на сессию (гейт по дням живёт в профиле и переживает рестарт).
+  let selfReviewTried = false;
+  let selfReviewInFlight = false;
   /** Занят ли владелец ПРЯМО СЕЙЧАС (полный экран/звонок/блокировка) — §9 «не мешать». */
   const ownerBusy = (): boolean => {
     const c = ctxForBusy?.lastContext;
@@ -545,11 +551,50 @@ export function makeSessionContext(
       briefingInFlight = false;
     }
   };
+  /**
+   * Волна I: РЕДКИЙ самоосмотр — «вот что у меня повторяется, могу починить». Данные уже лежат в
+   * durable-логах, но владелец не обязан догадываться спросить. Гейт — раз в несколько дней и только
+   * когда реально сказали (молчание не съедает гейт), как у брифинга; при аварийном стопе автономии
+   * молчим вовсе — предлагать себя чинить, когда владелец всё остановил, неуместно.
+   */
+  const flushSelfReview = async (): Promise<void> => {
+    if (devSession || selfReviewTried || selfReviewInFlight) return;
+    if (autonomyFreeze().isFrozen()) return;
+    const everyDays = Math.max(1, Number(process.env.JARVIS_SELF_REVIEW_DAYS ?? 3) || 3);
+    if (!shouldSelfReview({ lastReviewedAt: getProfile(session.userId).lastSelfReviewedAt, everyDays, enabled: true }, Date.now())) {
+      selfReviewTried = true;
+      return;
+    }
+    if (ownerBusy()) return; // занят — попробуем на следующей реплике (гейт не тратим)
+    selfReviewInFlight = true;
+    try {
+      const report = await collectWeaknesses(dataPath("logs"));
+      const line = report.unavailable ? null : buildSelfReview(report.weaknesses);
+      selfReviewTried = true;
+      if (!line) return; // не за что зацепиться — молчим, гейт НЕ двигаем
+      if (!session.channelUp()) {
+        selfReviewTried = false; // канал умер, пока читали логи — пусть попробует следующая сессия
+        return;
+      }
+      voice.speakQueued(verbalize(line));
+      session.send("chat", { role: "assistant", text: line });
+      void setLastSelfReviewed(session.userId).catch((e) =>
+        log.warn("самоосмотр: метка не сохранилась", e instanceof Error ? e.message : String(e)),
+      );
+      log.info("самоосмотр озвучен", { weaknesses: report.weaknesses.length });
+    } catch (e) {
+      log.warn("самоосмотр не собрался", e instanceof Error ? e.message : String(e));
+    } finally {
+      selfReviewInFlight = false;
+    }
+  };
   /** ЕДИНАЯ точка «владелец здесь»: всё, что нельзя говорить в пустую комнату. */
   const onOwnerPresent = (): void => {
     flushIncidentReport();
     // Брифинг ждёт чтения календаря (сеть/расширение) — не задерживаем реплику владельца.
     void flushDailyBriefing();
+    // Самоосмотр читает логи с диска — тоже фоном и тоже не в пустую комнату.
+    void flushSelfReview();
   };
   // §Волна2 (2.6): пост-STT нормализатор лексики. Источники: статика роутера (сервисы/алиасы),
   // приложения/игры из client.env (объект мутируется хендлером client.env ниже), имена/триггеры
