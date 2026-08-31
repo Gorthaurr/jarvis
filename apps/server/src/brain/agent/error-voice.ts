@@ -89,6 +89,10 @@ const NEUTRAL_TOOLS = new Set([
   "web_search", "web_fetch", "memory_write", "memory_search", "memory_forget", "skill_save", "skill_list",
   "skill_promote", "tool_load", "tool_create", "browser_tabs", "set_reminder", "cancel_reminder", "list_reminders",
   "watch_create", "watch_cancel", "watch_list", // §долгие-задачи: durable-конфиг наблюдения, не меняет экран
+  // F4 (волна F): операции над СОГЛАСИЯМИ (§14 confirm-once) — durable-конфиг разрешений, не мир/GUI.
+  // Как mutate consent_revoke взводил бы anyMutateSucceeded → «отозвал согласие и сдался» шло бы успехом
+  // содержательной задачи; самоотчёт обеих операций честный (ok/err от стора).
+  "consent_list", "consent_revoke",
   "obligation_add", "obligation_remove", "obligation_list", // §проактив-всё: durable-конфиг счетов, не меняет экран
   // D-4: calendar_read — ЧТЕНИЕ вкладки календаря (может открыть фоновую вкладку, но экран владельца
   // не трогает и дела не делает). Как mutate он взводил бы anyMutateSucceeded → «посмотрел календарь

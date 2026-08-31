@@ -116,7 +116,7 @@ export async function reflectFactFromUtterance(args: MemoryReflectArgs): Promise
     const text = String(input.content ?? input.text ?? "").trim();
     if (!text) return;
     const kind = input.kind === "preference" ? "preference" : "fact";
-    const outcome = await writeUserMemory(args.episodic, args.userId, kind, text);
+    const outcome = await writeUserMemory(args.episodic, args.userId, kind, text, { source: "reflex" });
     log.info("рефлекс памяти: устойчивый факт из реплики", { outcome, preview: text.slice(0, 60) });
   } catch (e) {
     log.debug("рефлекс памяти пропущен", e instanceof Error ? e.message : String(e));

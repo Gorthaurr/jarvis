@@ -12,7 +12,7 @@ vi.mock("node:fs/promises", () => ({
   }),
 }));
 
-import { _resetConsentForTest, approveSend, consentKey, isSendApproved, revokeSend } from "./consent.js";
+import { _resetConsentForTest, approveSend, consentKey, isSendApproved, listConsents, revokeSend } from "./consent.js";
 
 beforeEach(() => _resetConsentForTest());
 
@@ -38,5 +38,18 @@ describe("consent (§14 персистентное согласие на отп�
     expect(await revokeSend("u1", "telegram", "Катя")).toBe(true);
     expect(isSendApproved("u1", "telegram", "Катя")).toBe(false);
     expect(await revokeSend("u1", "telegram", "Катя")).toBe(false); // уже нечего отзывать
+  });
+
+  // F4 (волна F): инспекция согласий — consent.json перестаёт быть невидимым.
+  it("listConsents: только свои, канал/адресат разобраны, свежие первыми", async () => {
+    await approveSend("u1", "telegram", "Катя");
+    await approveSend("u1", "vk", "Маша");
+    await approveSend("u2", "telegram", "Чужой");
+    const mine = listConsents("u1");
+    expect(mine).toHaveLength(2); // чужого пользователя нет
+    expect(mine.map((c) => `${c.channel}:${c.recipient}`).sort()).toEqual(["telegram:катя", "vk:маша"]);
+    for (const c of mine) expect(c.ts).toBeTypeOf("number");
+    await revokeSend("u1", "vk", "Маша");
+    expect(listConsents("u1").map((c) => c.recipient)).toEqual(["катя"]); // отзыв виден в инспекции
   });
 });

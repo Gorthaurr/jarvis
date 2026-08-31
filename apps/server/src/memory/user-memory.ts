@@ -4,7 +4,7 @@
  * пишет осознанно) и рефлекс-бэкстопом (`agent/memory-reflect.ts`). Один код — одна дисциплина.
  */
 import { type Logger, createLogger } from "@jarvis/shared";
-import { type EpisodeKind, type EpisodicMemory } from "./episodic.js";
+import { type EpisodeKind, type EpisodicMemory, type MemorySource } from "./episodic.js";
 import { addFact, removeFactsMatching } from "../brain/profile.js";
 
 const log: Logger = createLogger("memory:write");
@@ -46,6 +46,8 @@ export async function writeUserMemory(
   userId: string,
   kind: EpisodeKind,
   text: string,
+  // F3 (волна F): провенанс — КТО породил запись; уходит и в эпизод (metadata), и в мост профиля.
+  opts?: { source?: MemorySource },
 ): Promise<WriteMemoryOutcome> {
   const t = text.trim();
   if (!t) return "empty";
@@ -61,10 +63,10 @@ export async function writeUserMemory(
   } catch {
     /* поиск упал — пишем как есть */
   }
-  await episodic.write({ userId, kind, text: t, ts: Date.now() });
+  await episodic.write({ userId, kind, text: t, ts: Date.now(), ...(opts?.source ? { source: opts.source } : {}) });
   // Мост в курируемый профиль: его читают промпт и контекстное приветствие; переживает pgvector-down.
-  if (kind === "fact" || kind === "preference") void addFact(userId, t);
-  log.info("память: факт записан", { kind, preview: t.slice(0, 60) });
+  if (kind === "fact" || kind === "preference") void addFact(userId, t, opts?.source);
+  log.info("память: факт записан", { kind, source: opts?.source, preview: t.slice(0, 60) });
   return "written";
 }
 

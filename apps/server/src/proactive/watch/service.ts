@@ -12,7 +12,7 @@ import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze } from "../../autonomy/freeze.js";
 import { WatchStore } from "./store.js";
-import { type CheckResult, type Watch, type WatchChecker, dueAt } from "./watch.js";
+import { type CheckResult, type Watch, type WatchChecker, dueAt, watchActionFingerprint } from "./watch.js";
 
 const log: Logger = createLogger("watch");
 
@@ -142,6 +142,9 @@ export class WatchService {
       ...(input.predicate ? { predicate: input.predicate } : {}),
       ...(input.action?.trim() ? { action: input.action.trim() } : {}),
     };
+    // F4 (волна F): одобрение владельца привязывается к СОДЕРЖИМОМУ операции (см. Watch.actionFingerprint) —
+    // перед каждым исполнением действие сверяется с тем, что реально одобрялось на confirm.
+    if (w.action) w.actionFingerprint = watchActionFingerprint(w);
     this.store.add(w);
     this.reschedule();
     log.info("наблюдение поставлено", { id: w.id, intervalMs: w.intervalMs, continuous: w.continuous, what: w.what.slice(0, 60) });
@@ -411,9 +414,36 @@ export class WatchService {
     );
   }
 
+  /**
+   * F4 (волна F): действие исполняется, только если запись СЕЙЧАС совпадает с тем, что владелец
+   * одобрил при постановке (отпечаток). Разошлось → НЕ исполняем, ОДНО честное уведомление, watch
+   * приостанавливается (одобренная единица «условие+действие» больше не существует — наблюдать её
+   * дальше значило бы тикать в холостую с мёртвым действием). Легаси-запись без отпечатка (одобрена
+   * до волны F) исполняется как раньше — ретро-блок сломал бы обещанные владельцу поручения.
+   */
+  private actionApprovalIntact(w: Watch): boolean {
+    if (!w.actionFingerprint) {
+      log.info("наблюдение: действие без отпечатка одобрения (легаси до волны F) — исполняю как раньше", { id: w.id });
+      return true;
+    }
+    if (w.actionFingerprint === watchActionFingerprint(w)) return true;
+    log.warn("наблюдение: операция ИЗМЕНИЛАСЬ после одобрения — действие не исполняю", { id: w.id });
+    w.status = "suspended";
+    w.pendingAction = undefined;
+    w.pendingActionAt = undefined;
+    this.notify(
+      w,
+      `Наблюдение «${w.what}» сработало, но его поручение изменилось после вашего одобрения — ` +
+        `не стал выполнять и приостановил наблюдение. Поставьте заново, если нужно.`,
+    );
+    this.store.update(w);
+    return false;
+  }
+
   /** Запустить действие срабатывания (или отложить до появления живой сессии). */
   private dispatchAction(w: Watch): void {
     if (!w.action) return;
+    if (!this.actionApprovalIntact(w)) return;
     // Анти-флап (контрольное ревью) решён В КОРНЕ: «нет данных» у LLM-чекера теперь возвращается как
     // ТРАНЗИЕНТНАЯ ошибка (report{unknown:true} → checker.ts), а не как достоверное «условие не
     // выполнено» — metStreak такой тик не сбрасывает, второго письма нет. Кулдаун по времени сюда НЕ
@@ -458,6 +488,8 @@ export class WatchService {
     for (const w of this.store.withPendingAction(userId)) {
       const run = this.runnerFor(w);
       if (!run || !w.pendingAction) continue;
+      // F4: между парковкой и исполнением запись могла измениться — одобрение сверяется и здесь.
+      if (!this.actionApprovalIntact(w)) continue;
       const goal = w.pendingAction;
       const ageMs = this.now() - (w.pendingActionAt ?? w.firedAt ?? w.createdAt);
       w.pendingAction = undefined;

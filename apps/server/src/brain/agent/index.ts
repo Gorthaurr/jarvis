@@ -25,6 +25,7 @@ import type { Session } from "../../gateway/session.js";
 import type { ILlmProvider, LlmContentBlock, LlmMessage, LlmResponse } from "../../integrations/llm.js";
 import { pruneStaleImages } from "./prune-images.js";
 import { maskOldObservations } from "./mask-observations.js";
+import { repeatSignature } from "./repeat-key.js";
 import {
   type CheckpointReason,
   type TaskCheckpoint,
@@ -2943,7 +2944,9 @@ async function runAgentLoop(
     // ложным успехом в обход verify-петли. Теперь: на 3-м одинаковом — ОДИН интервент-нудж (сверь
     // глазами / смени подход), при упорстве — честный обрыв С ПРОВАЛОМ (терминал runawayStuck).
     // Падающие повторы НЕ трогаем (ими занимается эскалация тира выше); разный input — сброс.
-    const toolSig = resp.toolUses.map((t) => `${t.name}:${JSON.stringify(t.input)}`).join("|");
+    // Сигнатура НОРМАЛИЗОВАННАЯ (волна F F1): перестановка ключей/пробелы/свежий nonce не делают
+    // повтор «новым действием» — см. repeat-key.ts.
+    const toolSig = repeatSignature(resp.toolUses);
     if (toolSig === lastToolSig && !allErrored) {
       identicalRepeats += 1;
       if (identicalRepeats >= 2) {

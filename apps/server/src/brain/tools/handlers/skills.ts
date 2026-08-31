@@ -6,6 +6,7 @@
  */
 import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep, newId } from "@jarvis/protocol";
 import { fillSlots } from "../../../memory/skill-slots.js";
+import { isQuarantined } from "../../../memory/skills.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok } from "../dispatch-util.js";
 
@@ -214,6 +215,16 @@ export async function skillSave(ctx: ToolContext, input: Record<string, unknown>
   if (!name || !procedure) return err("skill_save: нужны name и procedure");
   const saved = await ctx.skills.save(ctx.userId, { name, when, procedure });
   if (!saved) return err("не удалось сохранить навык");
+  if (isQuarantined(saved)) {
+    // F2 (волна F): скан нашёл в контенте признаки инъекции — навык НЕ записан, текст в карантине
+    // (data/skills/_quarantine) для ревью владельцем. Честная ошибка, НЕ ложный «сохранён»; повтор
+    // того же текста упрётся в тот же скан — не переформулируй директиву, а выбрось её из процедуры.
+    const rules = saved.findings.map((f) => f.rule).join(", ");
+    return err(
+      `навык НЕ сохранён: в тексте признаки инъекции (${rules}) — такие приказы не место в процедуре. ` +
+        `Текст отложен в карантин для владельца. Сохрани процедуру БЕЗ этих директив.`,
+    );
+  }
   const out = ok(`Навык «${saved.name}» сохранён (v${saved.version}). В следующий раз применю его сам.`);
   out.data = { id: saved.id }; // §8 МАКРОС: agent-петля дописывает в свежесохранённый навык авто-реплей жестов
   return out;
@@ -236,6 +247,8 @@ export async function skillPromote(ctx: ToolContext, input: Record<string, unkno
         ? "в общую библиотеку можно поднять только выученную процедуру (не записанный показом реплей)"
         : r.reason === "already_shared"
           ? "это уже общий навык"
-          : "не удалось поднять навык в общую библиотеку";
+          : r.reason === "blocked_scan"
+            ? "скан нашёл в навыке признаки инъекции — в общую библиотеку не поднимаю (F2); пересохрани навык без директив"
+            : "не удалось поднять навык в общую библиотеку";
   return err(reason);
 }

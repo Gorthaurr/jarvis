@@ -408,6 +408,23 @@ export interface MemoryItem {
   ts?: number;
   /** Тип эпизода (preference|fact|event) — только для эпизодической памяти. */
   kind?: string;
+  /**
+   * F3 (волна F): провенанс — КТО породил запись (owner|model|reflex|consolidation). Нет у
+   * легаси-записей (панель показывает без пометки, не выдумывает «неизвестно откуда» за факт).
+   */
+  source?: string;
+}
+
+/** F3: один прогон сон-цикла для журнала во вкладке «Память». */
+export interface MemoryConsolidationRun {
+  /** unix ms прогона. */
+  ts: number;
+  /** Извлечено LLM / реально записано / отброшено анти-инъекцией. */
+  extracted: number;
+  written: number;
+  dropped: number;
+  /** Тексты записанных фактов. */
+  facts: string[];
 }
 
 /** Снимок памяти о владельце: три слоя + счётчики. */
@@ -434,6 +451,8 @@ export interface MemoryState {
    * «По запросу ничего не найдено», а при гонке быстрого ввода — наоборот (адверс-ревью).
    */
   query?: string;
+  /** F3: последние прогоны сон-цикла (журнал «что фоновая консолидация записала»). Фильтром не режется. */
+  consolidation?: MemoryConsolidationRun[];
 }
 
 /**

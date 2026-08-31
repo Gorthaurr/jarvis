@@ -44,7 +44,8 @@ import { autonomyFreeze } from "../autonomy/freeze.js";
 import { renderCapabilityPassport } from "../brain/capabilities.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, readEvictedFacts, removeFactExact, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { readConsolidationRuns } from "../proactive/consolidation-journal.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
 import { upcomingDue } from "../proactive/ambient/obligations.js";
@@ -244,9 +245,19 @@ const MEMORY_UI_LIMIT = 200;
 async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise<void> {
   const userId = ctx.session.userId;
   const needle = queryText?.trim();
+  // F3 (волна F): провенанс фактов из sidecar-меты (fail-safe: нет меты → факт без пометки).
+  const factMeta = await readFactMeta(userId);
   const facts = (getProfile(userId).facts ?? [])
     .filter((f) => !needle || f.toLowerCase().includes(needle.toLowerCase()))
-    .map((f) => ({ id: f, text: f })); // у факта профиля нет id — сам текст и есть ключ
+    .map((f) => {
+      const meta = factMeta.get(f);
+      return {
+        id: f, // у факта профиля нет id — сам текст и есть ключ
+        text: f,
+        ...(meta?.source ? { source: meta.source } : {}),
+        ...(meta?.ts !== undefined ? { ts: meta.ts } : {}),
+      };
+    });
   const episodic = ctx.agentDeps.episodic;
   let episodes: MemoryItem[] = [];
   let episodesUnavailable: string | undefined;
@@ -263,7 +274,7 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
       const shown = rows.slice(0, MEMORY_UI_LIMIT);
       episodesHasMore = rows.length > MEMORY_UI_LIMIT; // точного числа не знаем — но честно скажем «есть ещё»
       if (!episodesHasMore) episodesTotal = rows.length;
-      episodes = shown.map((e) => ({ id: e.id, text: e.text, ts: e.ts, kind: e.kind }));
+      episodes = shown.map((e) => ({ id: e.id, text: e.text, ts: e.ts, kind: e.kind, ...(e.source ? { source: e.source } : {}) }));
       // 🔴 Найдено ЖИВЫМ прогоном: без БД эпизодика — process-only, и ПУСТОЙ список читается как
       // «пока нечего запоминать», хотя правда — «долговременная память не работает, всё умрёт с
       // рестартом». Говорим прямо (декларация обязана совпадать с поведением).
@@ -280,6 +291,9 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
   // Фильтр уходит ВНУТРЬ (не после обрезки) — иначе поиск по давно вытесненному врал бы «пусто».
   const arch = await readEvictedFacts(userId, MEMORY_UI_LIMIT, needle);
   const evicted = arch.items.map((r) => ({ id: r.fact, text: r.fact, ...(r.ts !== undefined ? { ts: r.ts } : {}) }));
+  // F3: журнал сон-цикла — «что фоновая консолидация записала». Фильтром не режется (это журнал
+  // прогонов, а не слой записей); fail-safe (сбой чтения → пустой журнал, не сломанный снимок).
+  const consolidationRuns = await readConsolidationRuns(userId, 10).catch(() => []);
   const state: MemoryState = {
     facts,
     episodes,
@@ -289,6 +303,7 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
     totals: { evicted: arch.total, ...(episodesTotal !== undefined ? { episodes: episodesTotal } : {}) },
     ...(needle ? { query: needle } : {}), // эхо: панель не должна догадываться, что было применено
     ...(episodesHasMore ? { hasMore: { episodes: true } } : {}),
+    ...(consolidationRuns.length > 0 ? { consolidation: consolidationRuns } : {}),
   };
   ctx.session.send("memory.state", state);
 }

@@ -24,6 +24,7 @@ import type { EpisodicMemory } from "../memory/episodic.js";
 import type { SpendGuard } from "../billing/index.js";
 import { costUsd } from "../obs/pricing.js";
 import { writeUserMemory } from "../memory/user-memory.js";
+import { appendConsolidationRun } from "./consolidation-journal.js";
 
 const log: Logger = createLogger("consolidation");
 
@@ -150,6 +151,7 @@ export async function consolidateMemory(
     return 0;
   }
   let facts: string[];
+  let droppedDirectives = 0; // F3: журнал прогона показывает и отброшенное анти-инъекцией
   try {
     const resp = await deps.llm.complete({
       tier: "sonnet",
@@ -176,6 +178,7 @@ export async function consolidateMemory(
       .filter((s) => {
         if (looksLikeDirective(s)) {
           log.warn("сон-цикл: извлечённый «факт» похож на директиву/контакт — отброшен (анти-инъекция)", { preview: s.slice(0, 80) });
+          droppedDirectives += 1;
           return false;
         }
         return true;
@@ -194,14 +197,27 @@ export async function consolidateMemory(
 
   // Запись через ЕДИНЫЙ писатель (user-memory): семантический дедуп ≥0.93 + мост fact→профиль (кап 20).
   let written = 0;
+  const writtenFacts: string[] = [];
   for (const f of facts) {
     try {
-      const outcome = await writeUserMemory(deps.episodic, userId, "fact", f);
-      if (outcome === "written") written += 1;
+      const outcome = await writeUserMemory(deps.episodic, userId, "fact", f, { source: "consolidation" });
+      if (outcome === "written") {
+        written += 1;
+        writtenFacts.push(f);
+      }
     } catch (e) {
       log.debug("сон-цикл: запись факта не удалась", { error: e instanceof Error ? e.message : String(e) });
     }
   }
   log.info("сон-цикл: консолидация завершена", { userId, extracted: facts.length, written });
+  // F3 (волна F): durable-журнал прогона — раньше итог терялся в `void ...` на server.ts, и владелец
+  // не мог узнать, что фоновый LLM записал ему в профиль. Вкладка «Память» читает этот журнал.
+  await appendConsolidationRun(userId, {
+    ts: Date.now(),
+    extracted: facts.length,
+    written,
+    dropped: droppedDirectives,
+    facts: writtenFacts,
+  });
   return written;
 }

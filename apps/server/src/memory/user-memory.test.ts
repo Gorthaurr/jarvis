@@ -11,7 +11,7 @@ const TMP = vi.hoisted(() => {
 import { rmSync } from "node:fs";
 import { HashEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { InMemoryEpisodicMemory } from "./episodic.js";
-import { getProfile } from "../brain/profile.js";
+import { getProfile, readFactMeta } from "../brain/profile.js";
 import { forgetMinScore, forgetUserMemory, writeUserMemory } from "./user-memory.js";
 
 const U = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
@@ -89,5 +89,28 @@ describe("user-memory: write + forget (аудит контекста 2026-07-20)
     const r = await forgetUserMemory(noStale, U, "живёт в Москве");
     expect(r.forgotten).toBe(1); // факт профиля удалён, эпизодов не тронуто (нет markStale)
     expect(getProfile(U).facts ?? []).not.toContain("живёт в Москве");
+  });
+});
+
+describe("F3 (волна F, адаптация OpenClaw): провенанс памяти", () => {
+  it("writeUserMemory прокидывает source в эпизод И в sidecar-мету профиля", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await writeUserMemory(mem, U, "fact", "любит зелёный чай без сахара", { source: "consolidation" });
+    const [ep] = await mem.listRecent(U, 10, "зелёный чай");
+    expect(ep?.source).toBe("consolidation"); // владелец увидит «сон-цикл» у эпизода
+    // Мост в профиль — fire-and-forget (void addFact): мета дописывается чуть позже возврата.
+    await vi.waitFor(async () => {
+      const meta = await readFactMeta(U);
+      expect(meta.get("любит зелёный чай без сахара")?.source).toBe("consolidation");
+      expect(meta.get("любит зелёный чай без сахара")?.ts).toBeTypeOf("number");
+    });
+  });
+
+  it("без source — запись как раньше (легаси-совместимость, провенанс не выдумывается)", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await writeUserMemory(mem, U, "fact", "ходит в зал по средам");
+    const [ep] = await mem.listRecent(U, 10, "в зал");
+    expect(ep?.source).toBeUndefined();
+    expect((await readFactMeta(U)).get("ходит в зал по средам")).toBeUndefined();
   });
 });

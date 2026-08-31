@@ -208,14 +208,59 @@ export async function readEvictedFacts(
   }
 }
 
+/**
+ * F3 (волна F): sidecar-провенанс фактов профиля. Сами facts остаются string[] (смена формата поехала бы
+ * по 4 потребителям: includes-дедуп, removeFactExact/Matching, id=текст в router-ws) — метаданные живут
+ * append-only рядом (паттерн evicted-архива). Пропавшая/битая мета = факт БЕЗ провенанса («неизвестно»),
+ * не ошибка. Последняя запись по факту выигрывает.
+ */
+function factMetaFile(userId: string): string {
+  const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
+  return join(dataRoot(), "profile", `fact-meta-${safe}.jsonl`);
+}
+
+async function appendFactMeta(userId: string, fact: string, source: string): Promise<void> {
+  try {
+    const file = factMetaFile(userId);
+    await mkdir(dirname(file), { recursive: true });
+    await appendFile(file, `${JSON.stringify({ ts: new Date().toISOString(), fact, source })}\n`, "utf8");
+  } catch (e) {
+    log.warn("профиль: не удалось записать провенанс факта", { userId, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** Прочитать провенанс фактов: Map<текст факта, {source, ts}>. Сбой/нет файла → пустая карта. */
+export async function readFactMeta(userId: string): Promise<Map<string, { source: string; ts?: number }>> {
+  const out = new Map<string, { source: string; ts?: number }>();
+  try {
+    const raw = await readFile(factMetaFile(userId), "utf8");
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const rec = JSON.parse(s) as { ts?: string; fact?: string; source?: string };
+        if (typeof rec.fact !== "string" || !rec.fact || typeof rec.source !== "string") continue;
+        const ms = rec.ts ? Date.parse(rec.ts) : Number.NaN;
+        out.set(rec.fact, { source: rec.source, ...(Number.isFinite(ms) ? { ts: ms } : {}) });
+      } catch {
+        /* битая строка — пропускаем */
+      }
+    }
+  } catch {
+    /* файла нет — штатно (легаси-факты без провенанса) */
+  }
+  return out;
+}
+
 /** Добавить факт о пользователе (без дублей; при переполнении старейший вытесняется В АРХИВ, не бесследно). */
-export async function addFact(userId: string, fact: string): Promise<void> {
+export async function addFact(userId: string, fact: string, source?: string): Promise<void> {
   const f = fact.trim();
   if (!f) return;
   const p = entry(userId);
   p.facts = p.facts ?? [];
   if (p.facts.includes(f)) return;
   p.facts.push(f);
+  if (source) await appendFactMeta(userId, f, source); // F3: провенанс — fail-safe sidecar
   const cap = maxProfileFacts();
   while (p.facts.length > cap) {
     const evicted = p.facts.shift(); // FIFO: старейшее уступает свежему
@@ -225,7 +270,7 @@ export async function addFact(userId: string, fact: string): Promise<void> {
     }
   }
   await persist(userId);
-  log.info("профиль: факт добавлен", { userId, count: p.facts.length, preview: f.slice(0, 60) });
+  log.info("профиль: факт добавлен", { userId, count: p.facts.length, source, preview: f.slice(0, 60) });
 }
 
 const foldFact = (s: string) => s.trim().toLowerCase().replace(/ё/g, "е");

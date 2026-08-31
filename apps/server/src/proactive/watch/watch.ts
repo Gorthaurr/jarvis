@@ -10,6 +10,7 @@
  * Концепт: НЕ хардкодим источники. Checker — общий (LLM водит web_search/web_fetch/market_quote и сам
  * добывает текущее значение). Сервис не знает, ЧТО именно отслеживается — только «проверь и скажи, met ли».
  */
+import { createHash } from "node:crypto";
 
 /** Состояние наблюдения. active — следим; fired — сработало (one-shot завершилось); cancelled — снято;
  *  suspended — приостановлено после серии провалов проверки (dead-watch, D3): не тикает, не воскресает
@@ -67,6 +68,17 @@ export interface Watch {
    * реплику runner'а не попадает — анти-инъекция). Пусто → только уведомление, как раньше.
    */
   action?: string;
+  /**
+   * F4 (волна F, «approve recurring work once» — идея OpenClaw): отпечаток ТОЧНОЙ операции, которую
+   * владелец одобрил на confirm при постановке (sha256 от what|condition|action). Перед КАЖДЫМ
+   * исполнением действия сверяется заново: разошёлся (запись изменена любым будущим путём/правкой
+   * стора) → действие НЕ исполняется, честное уведомление «поручение изменилось после одобрения —
+   * нужно новое подтверждение». Одобрение привязано к содержимому, а не к факту «когда-то одобряли».
+   * ⚠️ predicate в отпечаток НЕ входит СОЗНАТЕЛЬНО: его tabId/url легитимно патчится self-heal'ом
+   * вкладки (2026-07-25), а владельцу на confirm показывались именно condition+action.
+   * Нет у легаси-записей (одобрены до волны F) — они исполняются как раньше (grandfather).
+   */
+  actionFingerprint?: string;
   /** Сработало с action, но живой агентской сессии не было → выполнить при следующем подключении. */
   pendingAction?: string;
   /** Когда действие отложили (для TTL: протухшее side-effect-поручение не исполняется молча). */
@@ -106,4 +118,15 @@ export type WatchChecker = (w: Watch) => Promise<CheckResult>;
 /** Время следующей проверки наблюдения: ещё не проверяли → сейчас (сразу базовый замер), иначе +интервал. */
 export function dueAt(w: Watch, now: number): number {
   return w.lastCheckAt === undefined ? now : w.lastCheckAt + w.intervalMs;
+}
+
+/**
+ * F4 (волна F): отпечаток одобренной операции наблюдения-с-действием. РОВНО то, что владелец видел на
+ * confirm («когда „condition" — выполнить „action"», в контексте what); predicate сознательно вне
+ * отпечатка (см. Watch.actionFingerprint). Чистая функция — сверка при создании и перед исполнением
+ * обязана давать одинаковый результат на неизменённой записи.
+ */
+export function watchActionFingerprint(w: Pick<Watch, "what" | "condition" | "action">): string {
+  const basis = JSON.stringify([w.what, w.condition, w.action ?? ""]);
+  return createHash("sha256").update(basis, "utf8").digest("hex").slice(0, 32);
 }

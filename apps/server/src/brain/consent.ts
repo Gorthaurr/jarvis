@@ -66,6 +66,25 @@ export async function revokeSend(userId: string, channel: string, recipient: str
   return true;
 }
 
+/**
+ * F4 (волна F, «инспекция согласий» — идея OpenClaw «inspect or revoke that permission later»):
+ * список ДЕЙСТВУЮЩИХ согласий пользователя. До этого consent.json был невидим (ни инструмента, ни UI),
+ * а revokeSend — мёртвым кодом: владелец физически не мог узнать, кому Джарвис шлёт без переспроса,
+ * и не мог отозвать. Только свои записи (ключ начинается с userId).
+ */
+export function listConsents(userId: string): Array<{ channel: string; recipient: string; ts: number }> {
+  const prefix = `${userId}:`;
+  const out: Array<{ channel: string; recipient: string; ts: number }> = [];
+  for (const [key, entry] of Object.entries(cache)) {
+    if (!key.startsWith(prefix)) continue;
+    const rest = key.slice(prefix.length);
+    const sep = rest.indexOf(":");
+    if (sep <= 0) continue;
+    out.push({ channel: rest.slice(0, sep), recipient: rest.slice(sep + 1), ts: entry.ts });
+  }
+  return out.sort((a, b) => b.ts - a.ts);
+}
+
 /** Только для тестов: сбросить кеш в памяти. */
 export function _resetConsentForTest(): void {
   cache = {};

@@ -125,4 +125,14 @@ describe("skill_save (§8 HERMES — самообучение навыком)", 
     expect(r.isError).toBe(true);
     expect(r.content).toContain("недоступно");
   });
+
+  it("F2: провайдер вернул карантин → честная ошибка (не ложный «сохранён»), без data.id", async () => {
+    const save = vi.fn(async () => ({ quarantined: true as const, findings: [{ rule: "approval-bypass", excerpt: "…" }] }));
+    const { ctx } = makeCtx({ skills: { ...provider, save } });
+    const r = await dispatchTool("skill_save", { name: "X", when: "y", procedure: "z" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("карантин");
+    expect(r.content).toContain("approval-bypass"); // модель видит, ЧТО именно не так
+    expect(r.data).toBeUndefined(); // авто-реплей жестов к несохранённому навыку не привяжется
+  });
 });

@@ -18,6 +18,7 @@ import { extractSlots } from "./skill-slots.js";
 import type { IEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { findDuplicateSemantic, findDuplicateSkill, matchLearnedSkill, recallSemantic } from "./skill-recall.js";
 import { attachReplaySection } from "./skill-macro.js";
+import { type SkillScanFinding, scanSkillContent, scanSkillText } from "./skill-scan.js";
 
 // Recall/дедуп вынесены в skill-recall.ts (§ревью); ре-экспорт — обратная совместимость импортёров/тестов.
 export { findDuplicateSemantic, findDuplicateSkill, matchLearnedSkill, recallSemantic };
@@ -94,6 +95,29 @@ export async function writeSkillFile(id: string, contentMd: string): Promise<voi
 //    «той же capability» — существующий семантический дедуп в save(). Исполнение/verify-loop не меняем. ──
 
 const demosDir = () => join(skillsDir(), "_demos");
+const quarantineDir = () => join(skillsDir(), "_quarantine");
+
+/**
+ * F2: заблокированный сканером контент навыка НЕ выбрасывается молча — durable-файл для ревью
+ * владельцем (аналог карантина Skill Workshop у OpenClaw). Не фатально: сбой записи не меняет
+ * вердикт «не сохранять» (fail-closed по отношению к записи навыка).
+ */
+async function quarantineSkill(
+  userId: string,
+  payload: { name: string; when: string; procedure: string; findings: SkillScanFinding[] },
+): Promise<void> {
+  try {
+    await mkdir(quarantineDir(), { recursive: true });
+    const file = join(quarantineDir(), `${userId}__${Date.now()}.json`);
+    await writeFile(file, JSON.stringify({ ts: Date.now(), ...payload }, null, 2), "utf8");
+    log.warn("F2: навык в карантине (скан нашёл признаки инъекции)", {
+      file,
+      rules: payload.findings.map((f) => f.rule),
+    });
+  } catch (e) {
+    log.warn(`F2: не удалось записать карантин-файл: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 /** Одна сырая демонстрация: как пользователь сделал задачу один раз. */
 export interface SkillDemonstration {
@@ -548,6 +572,22 @@ export interface SavedLearnedSkill {
 }
 
 /**
+ * Волна F (F2): навык НЕ записан — контент похож на инъекцию, ушёл в карантин (durable-файл
+ * data/skills/_quarantine для ревью владельцем). Отдельный тип, а не null: вызывающий ОБЯЗАН
+ * отличать «не сохранилось» от «заблокировано сканером» — иначе честной формулировки не будет
+ * (урок пульта Ф0: смена ТИПА заставляет компилятор указать на всех потребителей).
+ */
+export interface QuarantinedSkill {
+  quarantined: true;
+  findings: SkillScanFinding[];
+}
+
+/** Сохранение прошло или контент в карантине? (type guard для потребителей save.) */
+export function isQuarantined(r: SavedLearnedSkill | QuarantinedSkill | null): r is QuarantinedSkill {
+  return r !== null && (r as QuarantinedSkill).quarantined === true;
+}
+
+/**
  * Выученный навык-процедура, поднятый recall'ом (§8 HERMES). В отличие от записанного
  * показом реплей-навыка (ResolvedSkill со steps) — это ТЕКСТ-руководство: его процедура
  * вшивается в системный промпт, и LLM ей СЛЕДУЕТ (гибко), а не реплеит детерминированно.
@@ -586,8 +626,8 @@ export interface PromoteResult {
   ok: boolean;
   /** Имя навыка при успехе. */
   name?: string;
-  /** Причина отказа: not_found | not_learned | already_shared | save_failed. */
-  reason?: "not_found" | "not_learned" | "already_shared" | "save_failed";
+  /** Причина отказа: not_found | not_learned | already_shared | save_failed | blocked_scan (F2). */
+  reason?: "not_found" | "not_learned" | "already_shared" | "save_failed" | "blocked_scan";
 }
 
 export interface SkillProvider {
@@ -595,8 +635,9 @@ export interface SkillProvider {
   list(userId: string): Promise<SkillInfo[]>;
   /** Резолв реплей-навыка по id для skill_execute (§8). Выученные-процедуры сюда не входят. */
   get(userId: string, id: string): Promise<ResolvedSkill | null>;
-  /** Сохранить выученный навык-процедуру (§8 HERMES, инструмент skill_save). */
-  save(userId: string, input: LearnedSkillInput): Promise<SavedLearnedSkill | null>;
+  /** Сохранить выученный навык-процедуру (§8 HERMES, инструмент skill_save).
+   *  F2: контент с признаками инъекции НЕ пишется — возвращается QuarantinedSkill (см. isQuarantined). */
+  save(userId: string, input: LearnedSkillInput): Promise<SavedLearnedSkill | QuarantinedSkill | null>;
   /** Подобрать подходящий выученный навык под текст задачи (recall, §8). null — нет. Свои + общие. */
   recall(userId: string, text: string): Promise<RecalledSkill | null>;
   /** Поднять СВОЙ выученный навык в ОБЩУЮ библиотеку (§мультитенант): копия под SHARED_USER_ID.
@@ -706,6 +747,13 @@ export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: S
         log.warn("skill save: пустое имя или процедура — пропуск");
         return null;
       }
+      // F2 (волна F): скан контента ДО любой записи (вкл. демо-стор — заражённый показ не должен
+      // кормить будущую дистилляцию). Findings → карантин, навык НЕ пишется.
+      const findings = scanSkillContent({ name, when: input.when, procedure: input.procedure });
+      if (findings.length > 0) {
+        await quarantineSkill(userId, { name, when: input.when, procedure: input.procedure, findings });
+        return { quarantined: true, findings };
+      }
       // Пространство id выученных навыков изолировано от записанных показом (см. LEARNED_ID_PREFIX).
       const slugId = LEARNED_ID_PREFIX + slugify(name);
       // ДЕДУП (§8): не плодить дубли на вариации ИМЕНИ (дота/доте/лишнее слово раньше → 3 строки).
@@ -724,8 +772,22 @@ export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: S
       // обобщённую устойчивую процедуру (вместо «как сделал последний раз»). Без дистиллятора/при 1 показе — свежая.
       const demos = await readDemos(userId, id);
       demos.push({ when: input.when, procedure: input.procedure.trim(), ts: Date.now() });
-      const procedure = await distillProcedure(name, input.when, demos, input.procedure, distiller);
-      if (procedure !== input.procedure.trim()) log.info("skill save: навык дистиллирован из демонстраций", { id, demos: demos.length });
+      let procedure = await distillProcedure(name, input.when, demos, input.procedure, distiller);
+      if (procedure !== input.procedure.trim()) {
+        // F2: дистиллят — вывод LLM по НАКОПЛЕННЫМ показам (старые могли не проходить скан или
+        // протащить директиву перефразом) → сканируем и ЕГО; findings → честный фолбэк на свежую
+        // процедуру, которая скан уже прошла (сохранение не теряем, заразу не пишем).
+        const dFindings = scanSkillText(procedure);
+        if (dFindings.length > 0) {
+          log.warn("F2: дистиллят не прошёл скан — фолбэк на свежую процедуру", {
+            id,
+            rules: dFindings.map((f) => f.rule),
+          });
+          procedure = input.procedure.trim();
+        } else {
+          log.info("skill save: навык дистиллирован из демонстраций", { id, demos: demos.length });
+        }
+      }
       await writeDemos(userId, id, demos);
       const contentMd = serializeLearnedSkill({ id, name, version, when: input.when, procedure });
       const rec = await saveSkill(userId, contentMd);
@@ -762,6 +824,13 @@ export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: S
       if (!rec) return { ok: false, reason: "not_found" };
       // В общую библиотеку поднимаем выученные ПРОЦЕДУРЫ (HERMES), не записанные показом реплеи.
       if (!isLearnedMd(rec.contentMd)) return { ok: false, reason: "not_learned" };
+      // F2: перескан ПЕРЕД копией в SHARED — навык, записанный до появления сканера (или иным
+      // путём), не должен пронести инъекцию в библиотеку, видную ВСЕМ пользователям.
+      const pFindings = scanSkillText(rec.contentMd);
+      if (pFindings.length > 0) {
+        log.warn("F2: promote заблокирован сканом", { id, rules: pFindings.map((f) => f.rule) });
+        return { ok: false, reason: "blocked_scan" };
+      }
       const shared = await saveSkill(SHARED_USER_ID, rec.contentMd);
       if (!shared) return { ok: false, reason: "save_failed" };
       await writeSkillFile(rec.id, rec.contentMd);

@@ -27,7 +27,7 @@ const URL_NAV_TOOLS: ReadonlySet<string> = new Set([
   "web_login", // C1: одноразовый видимый вход по URL — тоже навигация, тоже под SSRF-гардом
 ]);
 import { executeGuardedCode, runCodeGuarded } from "./handlers/code.js";
-import { messageSend, orderPlace, telegramSend, telegramSendVoiceHandler } from "./handlers/messaging.js";
+import { consentList, consentRevoke, messageSend, orderPlace, telegramSend, telegramSendVoiceHandler } from "./handlers/messaging.js";
 import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
@@ -295,6 +295,11 @@ export async function dispatchTool(
       return syncLogins(ctx, input);
     case "message_send":
       return messageSend(ctx, input);
+    // F4 (волна F): инспекция/отзыв согласий на отправку без переспроса (§14 confirm-once).
+    case "consent_list":
+      return consentList(ctx);
+    case "consent_revoke":
+      return consentRevoke(ctx, input);
     // Саморасширение (§8+): Джарвис создаёт/смотрит/удаляет собственные инструменты.
     case "tool_create":
       return toolCreate(ctx, input);
@@ -672,7 +677,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   if (!text) return err("memory_write: пустой content");
   // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
-  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text);
+  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, { source: "model" });
   return ok(outcome === "duplicate" ? "Уже помню это, сэр." : "Запомнил.");
 }
 

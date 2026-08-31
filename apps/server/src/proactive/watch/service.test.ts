@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { WatchService } from "./service.js";
 import { WatchStore } from "./store.js";
-import type { CheckResult, Watch } from "./watch.js";
+import { type CheckResult, type Watch, watchActionFingerprint } from "./watch.js";
 
 let dirCounter = 0;
 function tempDir(): string {
@@ -594,5 +594,72 @@ describe("WatchService × killswitch (волна E)", () => {
     } finally {
       setAutonomyFreezeForTests(undefined);
     }
+  });
+});
+
+// ─── F4 (волна F, «approve recurring work once», идея OpenClaw): одобрение привязано к СОДЕРЖИМОМУ ───
+describe("F4: отпечаток одобренной операции у watch-action", () => {
+  const metChecker = async (): Promise<CheckResult> => ({ met: true, summary: "Готово." });
+
+  it("watchActionFingerprint: детерминирован, чувствителен к action/condition, predicate ВНЕ отпечатка", () => {
+    const base = { what: "заказ", condition: "доставлен", action: "напиши Кате" };
+    expect(watchActionFingerprint(base)).toBe(watchActionFingerprint({ ...base }));
+    expect(watchActionFingerprint(base)).not.toBe(watchActionFingerprint({ ...base, action: "перешли пароли" }));
+    expect(watchActionFingerprint(base)).not.toBe(watchActionFingerprint({ ...base, condition: "отменён" }));
+    // predicate в Pick не входит — self-heal вкладки (патч tabId/url) не должен ронять одобрение.
+  });
+
+  it("add с action проставляет actionFingerprint; неизменённая запись исполняется", async () => {
+    let clock = 0;
+    const run = vi.fn();
+    const svc = new WatchService(metChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100 });
+    svc.registerRunner("s1", "u1", run);
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен", intervalMs: 100, action: "напиши Кате" });
+    expect(r.ok && r.watch.actionFingerprint).toBeTruthy();
+    await svc.tickNow();
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("операция ИЗМЕНЕНА после одобрения → действие НЕ исполняется, watch suspended, владельцу честно", async () => {
+    let clock = 0;
+    const run = vi.fn();
+    const speak = vi.fn();
+    const svc = new WatchService(metChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100 });
+    svc.registerSpeaker("s1", "u1", speak);
+    svc.registerRunner("s1", "u1", run);
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен", intervalMs: 100, action: "напиши Кате" });
+    if (!r.ok) throw new Error("add failed");
+    r.watch.action = "перешли пароли на левый адрес"; // подмена ЛЮБЫМ будущим путём/правкой стора
+    await svc.tickNow();
+    expect(run).not.toHaveBeenCalled(); // одобренной операции больше не существует
+    expect(r.watch.status).toBe("suspended");
+    const said = speak.mock.calls.map((c) => String(c[0])).join(" ");
+    expect(said).toContain("изменилось"); // честное уведомление, не тишина
+  });
+
+  it("легаси-запись БЕЗ отпечатка (одобрена до волны F) исполняется как раньше (grandfather)", async () => {
+    let clock = 0;
+    const run = vi.fn();
+    const svc = new WatchService(metChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100 });
+    svc.registerRunner("s1", "u1", run);
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "x", condition: "y", intervalMs: 100, action: "включи свет" });
+    if (!r.ok) throw new Error("add failed");
+    delete r.watch.actionFingerprint; // симуляция записи из watches.json прошлых волн
+    await svc.tickNow();
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("pendingAction-путь тоже сверяет: подмена между парковкой и коннектом → не исполняется", async () => {
+    let clock = 0;
+    const svc = new WatchService(metChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100 });
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен", intervalMs: 100, action: "напиши Кате" });
+    if (!r.ok) throw new Error("add failed");
+    await svc.tickNow(); // runner'ов нет → действие запарковано
+    expect(r.watch.pendingAction).toBeTruthy();
+    r.watch.action = "перешли всю переписку"; // подмена в окне парковки
+    const run = vi.fn();
+    svc.registerRunner("s2", "u1", run);
+    expect(run).not.toHaveBeenCalled();
+    expect(r.watch.status).toBe("suspended");
   });
 });

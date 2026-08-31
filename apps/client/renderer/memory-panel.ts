@@ -13,7 +13,7 @@
 import { $ } from "./dom.js";
 import { buildListItem } from "./list-item.js";
 import type { JarvisBridge } from "../main/ipc-contract.js";
-import type { MemoryItem, MemoryState } from "@jarvis/protocol";
+import type { MemoryConsolidationRun, MemoryItem, MemoryState } from "@jarvis/protocol";
 
 /** Человеческая дата записи («12 мар, 14:03»); без времени — пусто (у фактов профиля его нет). */
 function whenLabel(ts?: number): string | undefined {
@@ -23,6 +23,20 @@ function whenLabel(ts?: number): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * F3 (волна F): человеческая метка провенанса — ОТКУДА запись взялась. Неизвестный/легаси source
+ * не показываем вовсе (не выдумываем «неизвестно откуда» за данные).
+ */
+const SOURCE_RU: Record<string, string> = {
+  owner: "вы сами",
+  model: "записал в разговоре",
+  reflex: "рефлекс из реплики",
+  consolidation: "сон-цикл",
+};
+function sourceLabel(source?: string): string | undefined {
+  return source ? SOURCE_RU[source] : undefined;
 }
 
 /** Отрисовать один слой в <ul>; onForget=null → слой только для чтения (архив вытесненных). */
@@ -43,7 +57,7 @@ function renderLayer(
     return;
   }
   for (const item of items) {
-    const sub = [item.kind, whenLabel(item.ts)].filter(Boolean).join(" · ");
+    const sub = [item.kind, whenLabel(item.ts), sourceLabel(item.source)].filter(Boolean).join(" · ");
     list.appendChild(
       buildListItem({
         name: item.text,
@@ -62,6 +76,31 @@ function renderLayer(
     const li = document.createElement("li");
     li.className = "skill-list__empty";
     li.textContent = "…показаны только самые свежие — записей больше. Уточните поиском.";
+    list.appendChild(li);
+  }
+}
+
+/**
+ * F3 (волна F): журнал сон-цикла — «что фоновая консолидация реально записала» (аналог Dream Diary).
+ * Только чтение: прогон — событие, забывать нечего (сами факты забываются в слоях выше).
+ */
+function renderConsolidation(list: HTMLUListElement | null, runs: MemoryConsolidationRun[]): void {
+  if (!list) return;
+  list.innerHTML = "";
+  if (runs.length === 0) {
+    const li = document.createElement("li");
+    li.className = "skill-list__empty";
+    li.textContent = "Сон-цикл ещё ничего не записывал.";
+    list.appendChild(li);
+    return;
+  }
+  for (const run of runs) {
+    const li = document.createElement("li");
+    li.className = "skill-list__empty";
+    const when = whenLabel(run.ts) ?? "";
+    const dropped = run.dropped > 0 ? `, отброшено фильтром: ${run.dropped}` : "";
+    const facts = run.facts.length > 0 ? ` — ${run.facts.join("; ")}` : "";
+    li.textContent = `${when}: записано ${run.written} из ${run.extracted}${dropped}${facts}`;
     list.appendChild(li);
   }
 }
@@ -88,6 +127,7 @@ export function initMemoryPanel(jarvis: JarvisBridge): void {
       m.hasMore?.episodes === true,
     );
     renderLayer(evictedList, m.evicted, empty("Ничего не вытеснялось."), null, m.hasMore?.evicted === true);
+    renderConsolidation($<HTMLUListElement>("memConsolidationList"), m.consolidation ?? []);
     if (counts) {
       // Числа честные: где показанное усечено — говорим «200+», а не выдаём кап за полный объём.
       // «—», когда чтения НЕ БЫЛО (totals не пришёл и усечения нет): ноль здесь означал бы

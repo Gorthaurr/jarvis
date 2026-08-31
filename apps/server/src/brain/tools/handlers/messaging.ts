@@ -6,7 +6,7 @@
  */
 import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol";
 import { AsyncMutex, TtlCache, nameSearchVariants } from "@jarvis/shared";
-import { approveSend, isSendApproved } from "../../consent.js";
+import { approveSend, isSendApproved, listConsents, revokeSend } from "../../consent.js";
 import { CadenceGuard } from "../../messaging/cadence.js";
 import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messaging/resend-guard.js";
@@ -430,4 +430,30 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
     if (e instanceof CardDataError) return err(e.message); // §0: красная линия карты
     throw e;
   }
+}
+
+/**
+ * F4 (волна F, «инспекция согласий» — идея OpenClaw): показать владельцу действующие confirm-once
+ * согласия. До этого consent.json был невидим («разрешил один раз» = навсегда и втихую), а
+ * revokeSend — мёртвым кодом без единого продакшн-вызова.
+ */
+export async function consentList(ctx: ToolContext): Promise<ToolResult> {
+  const items = listConsents(ctx.userId);
+  if (items.length === 0) {
+    return ok("Действующих согласий на отправку нет — каждая отправка новому адресату спросит подтверждение.");
+  }
+  const lines = items.map(
+    (c) => `- ${c.channel}: «${c.recipient}» (одобрено ${new Date(c.ts).toLocaleDateString("ru-RU")})`,
+  );
+  return ok(`Действующие согласия на отправку без переспроса:\n${lines.join("\n")}`);
+}
+
+/** F4: отозвать согласие — следующая отправка адресату снова потребует подтверждения владельца. */
+export async function consentRevoke(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  const channel = String(input.channel ?? "").trim();
+  const recipient = String(input.recipient ?? "").trim();
+  if (!channel || !recipient) return err("consent_revoke: нужны channel и recipient (сверься с consent_list)");
+  const revoked = await revokeSend(ctx.userId, channel, recipient);
+  if (!revoked) return err(`согласия на «${recipient}» (${channel}) не было — нечего отзывать (сверься с consent_list)`);
+  return ok(`Согласие отозвано: следующая отправка «${recipient}» (${channel}) снова спросит вашего подтверждения.`);
 }

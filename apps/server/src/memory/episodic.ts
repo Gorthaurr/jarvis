@@ -16,6 +16,14 @@ const log: Logger = createLogger("episodic");
 /** Тип эпизода (§13: kind). */
 export type EpisodeKind = "preference" | "fact" | "event";
 
+/**
+ * Провенанс записи (волна F, F3 — идея Dream Diary/inspect-sources OpenClaw): КТО породил факт.
+ * «owner» — прямое указание владельца (UI/явная команда), «model» — осознанный memory_write из петли,
+ * «reflex» — бэкстоп memory-reflect, «consolidation» — сон-цикл. Показывается во вкладке «Память»
+ * (владелец видит, ОТКУДА Джарвис это взял) и хранится в metadata JSONB (колонка есть с 0001_init).
+ */
+export type MemorySource = "owner" | "model" | "reflex" | "consolidation";
+
 export interface Episode {
   id: string;
   userId: string;
@@ -24,6 +32,8 @@ export interface Episode {
   /** unix ms. */
   ts: number;
   salience?: number;
+  /** F3: происхождение записи (нет у легаси-строк — отображается как «неизвестно»). */
+  source?: MemorySource;
 }
 
 /** Результат поиска: эпизод + косинусная близость [0,1]. */
@@ -196,14 +206,16 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
       });
     }
     const res = await query(
-      `insert into episodic_memory (user_id, kind, text, salience, embedding)
-       values ($1, $2, $3, $4, $5::vector)`,
+      `insert into episodic_memory (user_id, kind, text, salience, embedding, metadata)
+       values ($1, $2, $3, $4, $5::vector, $6::jsonb)`,
       [
         episode.userId,
         episode.kind,
         episode.text,
         episode.salience ?? 0.5,
         vec ? toVectorLiteral(vec) : null,
+        // F3: провенанс в metadata (колонка существовала с 0001_init, но никогда не писалась).
+        JSON.stringify(episode.source ? { source: episode.source } : {}),
       ],
     );
     if (!res) log.debug("episodic.write no-op (нет БД)");
@@ -259,14 +271,16 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
     const needle = contains?.trim();
     const res = needle
       ? await query(
-          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience
+          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience,
+                  metadata->>'source' as source
              from episodic_memory
             where user_id = $1 and stale = false and text ilike $2
             order by created_at desc limit $3`,
           [userId, `%${needle}%`, limit],
         )
       : await query(
-          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience
+          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience,
+                  metadata->>'source' as source
              from episodic_memory
             where user_id = $1 and stale = false
             order by created_at desc limit $2`,
@@ -284,6 +298,10 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
       text: String(r.text),
       ts: Number(r.ts),
       salience: r.salience == null ? undefined : Number(r.salience),
+      // F3: провенанс из metadata; чужое/легаси-значение не коэрсим в union — честнее «неизвестно».
+      ...(r.source === "owner" || r.source === "model" || r.source === "reflex" || r.source === "consolidation"
+        ? { source: r.source as MemorySource }
+        : {}),
     }));
   }
 
