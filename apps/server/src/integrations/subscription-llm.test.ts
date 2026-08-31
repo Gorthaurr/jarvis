@@ -12,8 +12,10 @@ const BASE: LlmRequest = {
 };
 
 /** Мок SDK: отдаёт заранее заданные сообщения потока. */
-function fakeSdk(messages: Array<Record<string, unknown>>): SdkModule & { lastOptions?: Record<string, unknown>; lastPrompt?: string } {
-  const sdk: SdkModule & { lastOptions?: Record<string, unknown>; lastPrompt?: string } = {
+function fakeSdk(
+  messages: Array<Record<string, unknown>>,
+): SdkModule & { lastOptions?: Record<string, unknown>; lastPrompt?: string | AsyncIterable<Record<string, unknown>> } {
+  const sdk: SdkModule & { lastOptions?: Record<string, unknown>; lastPrompt?: string | AsyncIterable<Record<string, unknown>> } = {
     query({ prompt, options }) {
       sdk.lastPrompt = prompt;
       sdk.lastOptions = options;
@@ -35,16 +37,26 @@ afterEach(() => {
 });
 
 describe("SubscriptionLlmProvider.live (честность доступности)", () => {
-  it("без токена подписки — НЕ live, причина названа", () => {
-    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    expect(new SubscriptionLlmProvider().live).toBe(false);
-    expect(SubscriptionLlmProvider.unavailableReason()).toContain("setup-token");
-  });
-
-  it("с токеном — live", () => {
+  it("с токеном — live и режим авторизации «token»", () => {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test";
     expect(new SubscriptionLlmProvider().live).toBe(true);
+    expect(SubscriptionLlmProvider.authMode()).toBe("token");
     expect(SubscriptionLlmProvider.unavailableReason()).toBeUndefined();
+  });
+
+  it("без токена — авторизация по сохранённому логину, если он есть; иначе честная причина с ОБЕИМИ командами", () => {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const mode = SubscriptionLlmProvider.authMode();
+    if (mode === "stored-login") {
+      // На машине владельца файл логина есть — резерв ПРОБУЕТ его (при отказе честно деградирует).
+      expect(new SubscriptionLlmProvider().live).toBe(true);
+      expect(SubscriptionLlmProvider.unavailableReason()).toBeUndefined();
+    } else {
+      expect(new SubscriptionLlmProvider().live).toBe(false);
+      const why = SubscriptionLlmProvider.unavailableReason() ?? "";
+      expect(why).toContain("setup-token");
+      expect(why).toContain("/login");
+    }
   });
 
   it("выключатель JARVIS_SUBSCRIPTION_FALLBACK=0 гасит резерв даже с токеном", () => {
@@ -52,6 +64,14 @@ describe("SubscriptionLlmProvider.live (честность доступност�
     process.env.JARVIS_SUBSCRIPTION_FALLBACK = "0";
     expect(new SubscriptionLlmProvider().live).toBe(false);
     expect(SubscriptionLlmProvider.unavailableReason()).toContain("выключен");
+  });
+
+  it("токен НЕ подсовывается пустым в env подпроцесса (иначе перебил бы сохранённый логин)", async () => {
+    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    const env = sdk.lastOptions?.env as Record<string, string | undefined>;
+    expect("CLAUDE_CODE_OAUTH_TOKEN" in env).toBe(false);
   });
 });
 
@@ -111,6 +131,32 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(sdk.lastOptions?.maxTurns).toBe(1); // цикл ведём МЫ
   });
 
+  // 🔴 Зрение в резерве: без передачи картинок Джарвис на подписке слеп, а «сверь глазами» —
+  // основа его честности на GUI-задачах.
+  it("картинки истории доносятся до модели блоками (streaming input), а не теряются", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    const png = { type: "base64" as const, media_type: "image/png", data: "AAAA" };
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({
+      ...BASE,
+      messages: [
+        { role: "user", content: "посмотри на экран" },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "image", source: png }] }] },
+      ],
+    });
+    expect(typeof sdk.lastPrompt).not.toBe("string"); // ушли в режим блоков
+    const msgs: Array<Record<string, unknown>> = [];
+    for await (const m of sdk.lastPrompt as AsyncIterable<Record<string, unknown>>) msgs.push(m);
+    const content = (msgs[0]?.message as { content?: Array<Record<string, unknown>> })?.content ?? [];
+    expect(content.some((b) => b.type === "image")).toBe(true);
+    expect(content.some((b) => b.type === "text")).toBe(true);
+  });
+
+  it("без картинок промпт остаётся простой строкой (не усложняем обычный путь)", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(typeof sdk.lastPrompt).toBe("string");
+  });
+
   it("стрим отдаёт дельты и сохраняет инвариант «сумма дельт === text»", async () => {
     const sdk = fakeSdk([
       { type: "stream_event", event: { delta: { type: "text_delta", text: "При" } } },
@@ -121,6 +167,25 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).completeStream(BASE, (d) => deltas.push(d.text));
     expect(deltas.join("")).toBe("Привет.");
     expect(r.text).toBe("Привет.");
+  });
+
+  // §7/§2.7: резерв обязан уважать нашу пер-раундовую политику размышления, а не дефолт SDK.
+  it("эффорт пробрасывается: off → disabled, adaptive → adaptive, число → adaptive", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+    await p.complete({ ...BASE, thinking: "off" });
+    expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
+    await p.complete({ ...BASE, thinking: "adaptive" });
+    expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
+    await p.complete({ ...BASE, thinking: 4096 }); // числовой бюджет 400-ит на свежих семействах
+    expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("потолок вывода уходит в env подпроцесса (per-call параметра у SDK нет)", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, maxTokens: 1500 });
+    const env = sdk.lastOptions?.env as Record<string, string | undefined>;
+    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("1500");
   });
 
   it("тир fable → opus, прочее → sonnet", async () => {
@@ -157,6 +222,6 @@ describe("serializeHistory (история → текстовый транскр
       ],
     });
     expect(s).toContain("[ОШИБКА]");
-    expect(s).toContain("в резервном режиме не передаётся");
+    expect(s).toContain("приложен отдельным блоком"); // картинка не теряется, а идёт блоком
   });
 });

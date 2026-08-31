@@ -23,6 +23,8 @@
  *    agent-loop: мы перехватываем первый tool_use из потока и возвращаем его наверх (аренда ввода,
  *    §14-гейты, verify-долг, метрики — всё остаётся на месте). SDK-хендлер до исполнения не доходит.
  */
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
@@ -35,10 +37,27 @@ const log: Logger = createLogger("llm:subscription");
 const MCP_PREFIX = "mcp__jarvis__";
 const SERVER_NAME = "jarvis";
 
-/** Токен headless-доступа к подписке (claude setup-token). Пусто → резерв недоступен. */
+/** Токен headless-доступа к подписке (claude setup-token). Пусто → пробуем сохранённый логин. */
 function oauthToken(): string | undefined {
   const t = process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
   return t ? t : undefined;
+}
+
+/**
+ * Сохранённый интерактивный логин Claude Code (`claude` → `/login`) — ВТОРОЙ путь авторизации резерва,
+ * чтобы владельцу не приходилось вручную переносить секрет в `.env`.
+ * ⚠️ Он МЕНЕЕ надёжен: сессия протухает и в фоновом сервисе не всегда рефрешится (живой зонд:
+ * «OAuth session expired and could not be refreshed»). Поэтому наличие файла — лишь ОСНОВАНИЕ
+ * попробовать: при отказе фолбэк честно деградирует в стаб и пишет причину в лог, а не молчит.
+ */
+function hasStoredLogin(): boolean {
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (!home) return false;
+  try {
+    return existsSync(join(home, ".claude", ".credentials.json"));
+  } catch {
+    return false;
+  }
 }
 
 /** Резерв включён? (env JARVIS_SUBSCRIPTION_FALLBACK=0 выключает даже при наличии токена.) */
@@ -55,12 +74,33 @@ function modelAlias(req: LlmRequest): string {
   return req.model.includes("opus") ? "opus" : "sonnet";
 }
 
+/**
+ * Наш эффорт (§7: "off" | "adaptive" | число-бюджет) → thinking-опция SDK.
+ * Резерв ОБЯЗАН уважать пер-раундовую политику размышления (`agent/thinking-policy.ts`): иначе
+ * механические раунды думали бы зря (лишние секунды и токены лимита подписки), а verify-раунд —
+ * наоборот, шёл бы без размышления, где оно честностно важно («получилось или нет» решает
+ * интерпретация наблюдения). До этого в SDK не передавалось НИЧЕГО и действовал его дефолт.
+ */
+function thinkingOption(effort: LlmRequest["thinking"]): Record<string, unknown> | undefined {
+  if (!effort || effort === "off") return { type: "disabled" };
+  if (effort === "adaptive") return { type: "adaptive" };
+  // Числовой бюджет: у подписки семейства моделей свежие (Opus/Sonnet 5+), где enabled+budget даёт
+  // 400 — как и в основном канале, честно уходим в adaptive, а не гадаем бюджетом вслепую.
+  return { type: "adaptive" };
+}
+
 /** Собрать системный промпт из наших блоков (кеш-брейкпоинты в резерве не применимы — см. шапку). */
 function buildSystem(req: LlmRequest): string {
   return [req.systemStatic, req.systemSkill, req.systemTools, req.systemDynamic].filter((s) => s && s.trim()).join("\n\n");
 }
 
-/** Текст из блока результата инструмента (картинки в резерве обозначаем меткой — их SDK не примет). */
+/**
+ * Сколько ПОСЛЕДНИХ картинок доносим до модели. Больше одной-двух не нужно: петля и так прунит
+ * устаревшие скриншоты (`JARVIS_KEEP_SCREENSHOTS`), а каждая — ~2000 токенов лимита подписки.
+ */
+const MAX_IMAGES = 2;
+
+/** Текст из блока результата инструмента (картинки идут отдельными блоками — см. collectImages). */
 function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return String(content ?? "");
@@ -68,11 +108,32 @@ function toolResultText(content: unknown): string {
     .map((b) => {
       const blk = b as { type?: string; text?: string };
       if (blk.type === "text") return blk.text ?? "";
-      if (blk.type === "image") return "[картинка — в резервном режиме не передаётся]";
+      if (blk.type === "image") return "[скриншот — приложен отдельным блоком ниже]";
       return "";
     })
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * 🔴 ЗРЕНИЕ В РЕЗЕРВЕ: собрать ПОСЛЕДНИЕ картинки истории, чтобы приложить их к промпту.
+ * Без этого резерв делал Джарвиса СЛЕПЫМ (screen_capture возвращал только метку), а зрение — его
+ * суть на GUI-задачах: «клик ≠ результат, сверь глазами» без картинки невыполнимо, и петля получала
+ * бы ложное основание считать действие непроверяемым. SDK принимает Messages-API-блоки в
+ * streaming-input режиме, поэтому картинки доносим как есть.
+ */
+function collectImages(req: LlmRequest): Array<Record<string, unknown>> {
+  const found: Array<Record<string, unknown>> = [];
+  for (const m of req.messages) {
+    if (typeof m.content === "string") continue;
+    for (const b of m.content) {
+      if (b.type === "image") found.push({ type: "image", source: b.source });
+      else if (b.type === "tool_result" && Array.isArray(b.content)) {
+        for (const inner of b.content) if (inner.type === "image") found.push({ type: "image", source: inner.source });
+      }
+    }
+  }
+  return found.slice(-MAX_IMAGES); // свежие важнее: экран мог измениться
 }
 
 /**
@@ -97,7 +158,7 @@ export function serializeHistory(req: LlmRequest): string {
         const err = b.is_error ? " [ОШИБКА]" : "";
         parts.push(`### РЕЗУЛЬТАТ ИНСТРУМЕНТА${err}\n${toolResultText(b.content).slice(0, 4000)}`);
       } else if (b.type === "image") {
-        parts.push("### СКРИНШОТ\n[картинка — в резервном режиме не передаётся]");
+        parts.push("### СКРИНШОТ\n[приложен отдельным блоком ниже]");
       }
       // thinking/redacted_thinking в транскрипт не идут: они бессмысленны вне своего API-хода.
     }
@@ -139,7 +200,10 @@ export interface SubscriptionLlmDeps {
 
 /** Минимальный контракт используемой части SDK (позволяет тестировать без сети). */
 export interface SdkModule {
-  query: (opts: { prompt: string; options: Record<string, unknown> }) => AsyncIterable<Record<string, unknown>>;
+  query: (opts: {
+    prompt: string | AsyncIterable<Record<string, unknown>>;
+    options: Record<string, unknown>;
+  }) => AsyncIterable<Record<string, unknown>>;
   tool: (name: string, description: string, schema: unknown, handler: (args: unknown) => Promise<unknown>) => unknown;
   createSdkMcpServer: (opts: { name: string; tools: unknown[] }) => unknown;
 }
@@ -158,19 +222,26 @@ export class SubscriptionLlmProvider implements ILlmProvider {
   }
 
   /**
-   * Резерв доступен? Требуется ЯВНЫЙ headless-токен подписки: сохранённый интерактивный логин
-   * (~/.claude/.credentials.json) в фоновом сервисе протухает и не рефрешится — молча обещать по нему
-   * работу нельзя (проверено живым зондом: «OAuth session expired and could not be refreshed»).
+   * Резерв доступен? Два основания: явный headless-токен (надёжный путь) ИЛИ сохранённый логин
+   * Claude Code (удобный путь — без переноса секрета руками, но сессия может протухнуть).
+   * Обещание тут МЯГКОЕ по конструкции: при отказе авторизации фолбэк отдаёт честный стаб и пишет
+   * причину, поэтому «попробовать логин» не создаёт ложных обещаний владельцу.
    */
   get live(): boolean {
-    return subscriptionFallbackEnabled() && oauthToken() !== undefined;
+    return subscriptionFallbackEnabled() && (oauthToken() !== undefined || hasStoredLogin());
+  }
+
+  /** Каким основанием авторизуемся — для boot-лога (владелец должен понимать, что именно работает). */
+  static authMode(): "token" | "stored-login" | "none" {
+    if (oauthToken()) return "token";
+    return hasStoredLogin() ? "stored-login" : "none";
   }
 
   /** Понятная причина недоступности — для честного ответа владельцу и boot-лога. */
   static unavailableReason(): string | undefined {
     if (!subscriptionFallbackEnabled()) return "резерв по подписке выключен (JARVIS_SUBSCRIPTION_FALLBACK=0)";
-    if (!oauthToken()) {
-      return "нет токена подписки: выполните `claude setup-token` и положите CLAUDE_CODE_OAUTH_TOKEN в .env";
+    if (SubscriptionLlmProvider.authMode() === "none") {
+      return "нет авторизации подписки: `claude setup-token` → CLAUDE_CODE_OAUTH_TOKEN в .env (надёжно) ИЛИ `claude` → /login (проще)";
     }
     return undefined;
   }
@@ -189,8 +260,12 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     const tools = buildTools(sdk, req.tools ?? [], captured);
     // ANTHROPIC_API_KEY ПОБЕЖДАЕТ подписку в порядке кредов SDK — в резерве он именно тот канал,
     // который уже не работает, поэтому вычищаем его из окружения дочернего процесса.
-    const env: Record<string, string | undefined> = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: oauthToken() };
+    const env: Record<string, string | undefined> = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
+    const token = oauthToken();
+    // Токена нет → НЕ подсовываем пустое значение: SDK должен взять сохранённый логин Claude Code.
+    if (token) env.CLAUDE_CODE_OAUTH_TOKEN = token;
+    else delete env.CLAUDE_CODE_OAUTH_TOKEN;
 
     const options: Record<string, unknown> = {
       systemPrompt: buildSystem(req),
@@ -205,16 +280,25 @@ export class SubscriptionLlmProvider implements ILlmProvider {
             allowedTools: [`${MCP_PREFIX}*`],
           }
         : {}),
+      // §7/§2.7: размышление — по нашей пер-раундовой политике, а не по дефолту SDK.
+      thinking: thinkingOption(req.thinking),
       env,
       ...(onDelta ? { includePartialMessages: true } : {}),
     };
+    // Потолок вывода хода: у SDK нет per-call параметра — он читается из env дочернего процесса.
+    if (req.maxTokens) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(req.maxTokens);
 
     let text = "";
     let streamed = "";
     let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     let errorText: string | undefined;
 
-    for await (const msg of sdk.query({ prompt: serializeHistory(req), options })) {
+    // Зрение: есть картинки → streaming-input (блоки Messages API), иначе — обычный текстовый промпт.
+    const transcript = serializeHistory(req);
+    const images = collectImages(req);
+    const prompt = images.length > 0 ? userMessageStream(transcript, images) : transcript;
+
+    for await (const msg of sdk.query({ prompt, options })) {
       const type = String(msg.type ?? "");
       if (type === "stream_event" && onDelta) {
         const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } } | undefined;
@@ -261,6 +345,20 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       stubbed: false,
     };
   }
+}
+
+/**
+ * Один user-ход с блоками (текст + картинки) в формате streaming-input SDK. Генератор завершается
+ * сразу: наш цикл ведёт агент-петля, продолжения диалога внутри SDK-сессии нам не нужны.
+ */
+function userMessageStream(text: string, images: Array<Record<string, unknown>>): AsyncIterable<Record<string, unknown>> {
+  return (async function* () {
+    yield {
+      type: "user",
+      parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "text", text }, ...images] },
+    };
+  })();
 }
 
 /** Уникальные вызовы по id (перехват может добавить их и из потока, и из хендлера). */

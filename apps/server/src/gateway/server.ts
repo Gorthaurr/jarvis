@@ -187,8 +187,11 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // Резерв активируется САМ и только при реальном отказе основного; выключатель JARVIS_SUBSCRIPTION_FALLBACK=0.
   const subscriptionLlm = new SubscriptionLlmProvider();
   const anthropicLlm = new FallbackLlmProvider(apiLlm, subscriptionLlm);
-  if (subscriptionLlm.live) log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)");
-  else log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
+  if (subscriptionLlm.live) {
+    log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)", { auth: SubscriptionLlmProvider.authMode() });
+  } else {
+    log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
+  }
   // Реестр самописных инструментов (§8+): имена встроенных — зарезервированы.
   // Рехидратация с диска — в listen() ДО приёма соединений (чтобы ранние сессии видели
   // выученные инструменты), не fire-and-forget.
