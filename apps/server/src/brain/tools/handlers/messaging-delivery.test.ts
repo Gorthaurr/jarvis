@@ -104,3 +104,24 @@ describe("telegram_send: неопределённый исход сверяет�
     expect(r.channelDown).toBe(true);
   });
 });
+
+describe("неопределённость доходит до ПАМЯТИ о сделанном (журнал прерванной задачи)", () => {
+  it("помечает результат как uncertain — иначе журнал скажет «ОШИБКА» и продолжение повторит отправку", async () => {
+    _resetResendGuardForTest();
+    const { ctx } = ctxWith(async () => TIMED_OUT);
+    const r = await telegramSend(ctx, { to: "Катя", text: "буду через час" });
+    expect(r.isError).toBe(true);
+    expect(r.uncertain).toBe(true);
+  });
+
+  it("журнал пишет «сверь перед повтором», а не «не сделано»", async () => {
+    const { buildResumeDigest } = await import("../../agent/checkpoint.js");
+    const convo = [
+      { role: "assistant" as const, content: [{ type: "tool_use", id: "u1", name: "telegram_send", input: { to: "Катя", text: "буду" } }] },
+      { role: "user" as const, content: [{ type: "tool_result", tool_use_id: "u1", is_error: true, content: "Не знаю, ушло ли" }] },
+    ];
+    const digest = buildResumeDigest(convo as never, { uncertainCalls: new Set(["u1"]) });
+    expect(digest).toMatch(/ИСХОД НЕИЗВЕСТЕН/);
+    expect(digest).toMatch(/СВЕРЬ/);
+  });
+});

@@ -73,3 +73,40 @@ describe("searchOwnCode — поиск по себе", () => {
     expect(r.capped).toBe(true);
   });
 });
+
+// ─── Обходы границ (найдено адверс-ревью волны I, 2026-08-31) ───
+describe("обходы границ чтения", () => {
+  const root = selfRepoRoot();
+
+  // 🔴 На Windows «Data» и «data» — ОДИН каталог: регистрозависимый денилист обходился одним символом,
+  // открывая личные данные владельца (профиль, память, чекпойнты) через self_code_read.
+  it.each(["apps/server/Data/profile.json", "apps/server/DATA/memory/x.json", "Node_Modules/pkg/i.js", ".GIT/config"])(
+    "смена регистра не открывает закрытую зону: %s",
+    (p) => {
+      expect(resolveOwnPath(p)).toBeUndefined();
+    },
+  );
+
+  it("junction внутри репозитория, ведущий НАРУЖУ, не читается", async () => {
+    const { mkdirSync, rmSync, symlinkSync } = await import("node:fs");
+    const linkDir = join(root, "apps/server/src/_test_link_dir");
+    const link = join(linkDir, "outside");
+    rmSync(linkDir, { recursive: true, force: true });
+    mkdirSync(linkDir, { recursive: true });
+    try {
+      // junction не требует прав администратора (в отличие от symlink) — тот же приём, что в self-guard.
+      symlinkSync(join(root, ".."), link, "junction");
+    } catch {
+      return; // ФС не дала создать ссылку — проверять нечего
+    }
+    try {
+      // Путь ВНУТРИ репозитория по написанию, но канонически — за его пределами.
+      expect(resolveOwnPath("apps/server/src/_test_link_dir/outside/CLAUDE.md")).toBeUndefined();
+      // И обход по ссылке не ходит: поиск не должен вывалиться наружу репозитория.
+      const r = await searchOwnCode("CLAUDE", { dir: "apps/server/src/_test_link_dir", maxHits: 5 });
+      expect(r.hits.every((h) => !h.path.includes("outside"))).toBe(true);
+    } finally {
+      rmSync(linkDir, { recursive: true, force: true });
+    }
+  });
+});

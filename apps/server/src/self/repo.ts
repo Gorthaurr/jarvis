@@ -14,7 +14,7 @@
  * Читающий модуль: ничего не пишет. Правку своего кода делает patch.ts под рельсами и подтверждением.
  */
 import { readFile, readdir, stat } from "node:fs/promises";
-import { existsSync, type Dirent } from "node:fs";
+import { existsSync, realpathSync, type Dirent } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -60,20 +60,49 @@ export function _resetSelfRepoRootForTest(): void {
   cachedRoot = undefined;
 }
 
-/** Путь внутри репозитория и не в исключённой зоне? (чистая проверка, без обращения к диску) */
+/**
+ * Путь внутри репозитория и не в исключённой зоне? БЕЗ обращения к диску — используется в горячем
+ * обходе каталогов, где записи `readdir` уже канонические (урок контроль-4 волны E: `realpath` на
+ * каждую запись обхода морозит процесс на сотнях тысяч сисколлов).
+ *
+ * 🔴 Сравнение имён — БЕЗ учёта регистра: на Windows `Data/profile.json` и `data/profile.json` —
+ * ОДИН файл, поэтому регистрозависимая проверка была бы обходом денилиста в один символ.
+ */
 export function isOwnCodePath(absPath: string, root = selfRepoRoot()): boolean {
   const rel = relative(root, absPath);
   if (!rel || rel.startsWith("..") || resolve(root, rel) !== resolve(absPath)) return false;
   const parts = rel.split(/[\\/]/);
-  if (parts.some((p) => EXCLUDED_DIRS.has(p))) return false;
+  if (parts.some((p) => EXCLUDED_DIRS.has(p.toLowerCase()))) return false;
   if (SECRET_FILE.test(absPath)) return false;
   return true;
 }
 
-/** Разрешить относительный путь в абсолютный внутри репозитория (или undefined, если он вне границ). */
+/**
+ * Канонизация пути: разворачивает symlink/junction, короткие имена Windows (8.3) и регистр.
+ * Нужна ТОЛЬКО на верхнем уровне (путь, пришедший от модели) — там, где злоумышленник может
+ * подсунуть ссылку, ведущую наружу репозитория или в личные данные владельца. Путь не существует
+ * (создание нового файла) → возвращаем как есть: у несуществующей цели нет и цели ссылки.
+ */
+function canonical(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * Разрешить относительный путь в абсолютный внутри репозитория (или undefined, если он вне границ).
+ * Проверяем ДВАЖДЫ: по написанному пути и по каноническому — иначе junction внутри репозитория,
+ * указывающий на `~/.ssh` или на `data/`, прошёл бы как «свой код» (класс, который проект уже
+ * закрывал в self-guard клиента; здесь он был бы дырой в новом канале чтения).
+ */
 export function resolveOwnPath(relPath: string, root = selfRepoRoot()): string | undefined {
   const abs = resolve(root, String(relPath ?? "").trim());
-  return isOwnCodePath(abs, root) ? abs : undefined;
+  if (!isOwnCodePath(abs, root)) return undefined;
+  const canon = canonical(abs);
+  if (canon !== abs && !isOwnCodePath(canon, canonical(root))) return undefined;
+  return abs;
 }
 
 export interface OwnFile {
@@ -141,10 +170,17 @@ export async function searchOwnCode(
       }
       const abs = join(dir, e.name);
       if (e.isDirectory()) {
-        if (EXCLUDED_DIRS.has(e.name)) continue;
+        // Регистр — как в isOwnCodePath: «Data» и «data» на Windows один каталог.
+        if (EXCLUDED_DIRS.has(e.name.toLowerCase())) continue;
+        // Ссылка (symlink/junction) может увести обход ВНЕ репозитория или в личные данные, и она же
+        // способна замкнуть обход в цикл. Настоящий каталог наружу увести не может, поэтому дорогой
+        // канонизации здесь не нужно — достаточно НЕ ходить по ссылкам (перф-урок контроль-4 волны E).
+        if (e.isSymbolicLink()) continue;
         await walk(abs);
         continue;
       }
+      // Файл-ссылка тоже может указывать наружу (на .env, на ключ) — её содержимое не наше.
+      if (e.isSymbolicLink()) continue;
       if (!ext.test(e.name) || SECRET_FILE.test(abs)) continue;
       scannedFiles += 1;
       let text = "";

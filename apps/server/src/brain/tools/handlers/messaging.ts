@@ -281,10 +281,13 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
       // Не знаем — и не узнали. Второй отправки не делаем; окно гарда взводим «неопределённой»
       // записью, чтобы повтор прошёл через владельца, а не молча.
       resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to] }), text, { uncertain: true });
-      return err(
-        `Не знаю, ушло ли сообщение «${to}»: отправка оборвалась (${reason}), и прочитать чат для сверки не удалось. ` +
-          `Вслепую НЕ повторяю — это дало бы человеку дубль. Проверь чат (telegram_read «${to}»), и если сообщения там нет — повтори telegram_send с resend:true.`,
-      );
+      return {
+        ...err(
+          `Не знаю, ушло ли сообщение «${to}»: отправка оборвалась (${reason}), и прочитать чат для сверки не удалось. ` +
+            `Вслепую НЕ повторяю — это дало бы человеку дубль. Проверь чат (telegram_read «${to}»), и если сообщения там нет — повтори telegram_send с resend:true.`,
+        ),
+        uncertain: true,
+      };
     }
     // verdict === "absent": чат открылся, нашего сообщения в нём нет → отправка действительно не
     // состоялась, фолбэк законен.
@@ -311,10 +314,13 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
       }
       if (after === "unknown") {
         resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to] }), text, { uncertain: true });
-        return err(
-          `Не знаю, ушло ли сообщение «${to}»: оба пути оборвались (${reason}; расширение: ${em}), сверить чат не удалось. ` +
-            `Вслепую НЕ повторяю. Проверь telegram_read «${to}» и при отсутствии сообщения повтори с resend:true.`,
-        );
+        return {
+          ...err(
+            `Не знаю, ушло ли сообщение «${to}»: оба пути оборвались (${reason}; расширение: ${em}), сверить чат не удалось. ` +
+              `Вслепую НЕ повторяю. Проверь telegram_read «${to}» и при отсутствии сообщения повтори с resend:true.`,
+          ),
+          uncertain: true,
+        };
       }
       return err(`Не удалось отправить в Telegram: ${reason}; расширение: ${em}`);
     }

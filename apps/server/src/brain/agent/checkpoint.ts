@@ -117,6 +117,12 @@ export interface DigestOptions {
    * петли И журнала, иначе они расходятся.
    */
   declinedCalls?: ReadonlySet<string>;
+  /**
+   * Вызовы, чей исход НЕИЗВЕСТЕН (`ToolResult.uncertain`): действие могло совершиться, подтвердить
+   * не удалось. В журнале это отдельная метка — иначе продолжение прочитает «ОШИБКА» и повторит
+   * необратимое (та же логика, что у confirmedSends/declinedCalls: сигнал честности обязан дойти).
+   */
+  uncertainCalls?: ReadonlySet<string>;
 }
 
 /** Дефолтный потолок журнала (символов) — общий для сборки и для склейки цепочки продолжений. */
@@ -261,8 +267,13 @@ function outcomeMark(
   e: { id: string; tool: string; ok?: boolean },
   confirmedSends?: ReadonlySet<string>,
   declinedCalls?: ReadonlySet<string>,
+  uncertainCalls?: ReadonlySet<string>,
 ): string {
   if (e.ok === undefined) return "без результата (оборвалось)";
+  // 🔴 ИСХОД НЕИЗВЕСТЕН (2026-08-31): формально ошибка, но по смыслу — «могло и получиться». Для
+  // журнала это КРИТИЧНО: «ОШИБКА» читается продолжением как «не сделано», и оно повторит отправку,
+  // которая, возможно, уже ушла человеку. Проверяем ДО ветки ошибки.
+  if (uncertainCalls?.has(e.id)) return "ИСХОД НЕИЗВЕСТЕН — могло и выполниться; СВЕРЬ фактическое состояние ПЕРЕД повтором";
   if (!e.ok) return "ОШИБКА";
   // Гейт §14 не пропустил — действие НЕ совершено, хотя ошибки нет (контроль-2 Ф0). Проверяем ПЕРВЫМ:
   // иначе mutate-вызов уехал бы в «СДЕЛАНО» как «ok» и продолжение пропустило бы его навсегда.
@@ -402,7 +413,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     else {
       const cap = i >= detailFrom ? detailCap : briefCap;
       const res = e.result ? ` → ${squeeze(e.result, cap)}` : "";
-      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls)}${res}`);
+      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls)}${res}`);
     }
   }
 
@@ -425,7 +436,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     // в первой же строке журнала ЗАКРЫВАЛ нашу обёртку, и весь остаток (дампы страниц прошлого захода
     // + подставленная директива) читался моделью как ДОВЕРЕННЫЙ текст.
     const safeInput = neutralizeWrapperTags(squeeze(e.input, 90));
-    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls)}`;
+    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls)}`;
     if (!done.includes(line)) done.push(line);
   }
   const doneCapped = capDoneLines(done);

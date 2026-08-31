@@ -1521,6 +1521,12 @@ async function runAgentLoop(
    */
   const declinedCalls = new Set<string>();
   /**
+   * 2026-08-31: вызовы с НЕИЗВЕСТНЫМ исходом (`ToolResult.uncertain`) — действие могло совершиться,
+   * подтвердить не удалось. Журналу это нужно отдельно от «ОШИБКА»: иначе продолжение прочитает
+   * «не сделано» и повторит необратимое (дубль живому человеку).
+   */
+  const uncertainCalls = new Set<string>();
+  /**
    * Волна C (контрольное ревью-2): тексты, которые ПЕТЛЯ впрыснула в user-роль (нуджи бюджета/
    * контекста/verify/goal-check, докрутка max_tokens, live-снимок ПК, итог авто-макроса). В журнал
    * продолжения они попадать НЕ должны — иначе Джарвис приписывает владельцу выдуманные приказы, а
@@ -1579,7 +1585,7 @@ async function runAgentLoop(
         tier: currentTier,
         // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
         // иначе третий заход не видел отправок первого и мог повторить их людям).
-        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
+        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
         ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
       };
       const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);
@@ -2048,7 +2054,7 @@ async function runAgentLoop(
             deps.checkpoints?.refreshJournal(
               deps.userId,
               opts.resumeFrom.taskId,
-              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
+              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
               Math.max(round, committedToolRounds),
             );
           } catch (e) {
@@ -2768,6 +2774,7 @@ async function runAgentLoop(
           // (isError:false) взводил флаг для fs_delete/system_power/code_run/skill_execute/MCP →
           // masked-failure и анти-капитуляция глохли, и ход заканчивался «Готово» при нулевом деле.
           if (r.declined !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) anyMutateSucceeded = true;
+          if (r.uncertain === true) uncertainCalls.add(tu.id); // «могло и выполниться» — журнал скажет сверить
           if (r.declined === true) {
             declinedCalls.add(tu.id); // журнал не должен звать это «сделанным»
             // Контроль-2 Ф0: остановка §14-ГЕЙТОМ — это НЕ капитуляция модели. Без этого флага мой же
@@ -2840,7 +2847,7 @@ async function runAgentLoop(
           deps.checkpoints.refreshJournal(
             deps.userId,
             opts.resumeFrom.taskId,
-            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
+            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
             Math.max(round + 1, committedToolRounds),
           );
         } else if (preventiveCheckpoint) {
@@ -3236,7 +3243,7 @@ async function runAgentLoop(
       deps.checkpoints.refreshJournal(
         deps.userId,
         opts.resumeFrom.taskId,
-        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls })),
+        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
         Math.max(round, committedToolRounds),
       );
     } catch (e) {
