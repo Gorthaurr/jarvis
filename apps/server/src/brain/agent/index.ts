@@ -26,6 +26,7 @@ import type { ILlmProvider, LlmContentBlock, LlmMessage, LlmResponse } from "../
 import { pruneStaleImages } from "./prune-images.js";
 import { maskOldObservations } from "./mask-observations.js";
 import { repeatSignature } from "./repeat-key.js";
+import { describeIrreversible } from "../tasks/misfire.js";
 import {
   type CheckpointReason,
   type TaskCheckpoint,
@@ -2774,7 +2775,13 @@ async function runAgentLoop(
           }
           // Волна C: журнал чекпойнта должен знать ТО ЖЕ САМОЕ — «нет ошибки» у отправки человеку ещё
           // не значит «ушло» (не подтвердили / повтор не ушёл). Иначе секция «СДЕЛАНО» соврёт.
-          if (OUTBOUND_SEND_TOOLS.has(tu.name) && r.sent === true) confirmedSends.add(tu.id);
+          if (OUTBOUND_SEND_TOOLS.has(tu.name) && r.sent === true) {
+            confirmedSends.add(tu.id);
+            // Волна H (ложный запуск): задача обязана ПОМНИТЬ совершённое необратимое. Если владелец
+            // скажет «это была не команда», отмена остановит работу — но отправленное уже не вернуть,
+            // и об этом нужно сказать прямо, а не рапортовать «остановил», будто ничего не случилось.
+            deps.tasks?.noteIrreversible(taskId, describeIrreversible(tu.name, tu.input));
+          }
           if (sendCommit) {
             blindMutatePending = true;
             sendCommitDebt = true; // исход отправки сверяется ТОЛЬКО реальным взглядом

@@ -9,6 +9,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
 import { isOfferDeclined, resumeOfferWindowMs } from "../brain/agent/checkpoint.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
+import { irreversibleDone, looksLikeMisfire, misfireAck } from "../brain/tasks/misfire.js";
 import { stripWakeAndFiller } from "../brain/router/index.js";
 import { statusReport } from "../brain/tasks/narrate.js";
 import type { Task } from "../brain/tasks/task.js";
@@ -106,6 +107,34 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     log.info("killswitch: владелец включил автономию", { source, diskClean: clean });
     return true;
   }
+  // 🔴 ЛОЖНЫЙ ЗАПУСК (волна H, живой эпизод): владелец сообщает, что мы приняли его слова за команду
+  // («это не призыв к действию был»). Раньше такая реплика НЕ распознавалась: задача продолжала идти,
+  // а сама фраза уходила в модель как НОВАЯ цель — то есть ошибка интерпретации порождала вторую
+  // ошибку. Теперь отменяем ВСЁ запущенное (владелец не обязан разбираться, какую задачу гасить) и
+  // честно называем уже совершённое необратимое: остановка задачи не отменяет отправленного.
+  if (looksLikeMisfire(text)) {
+    const tasks = ctx.agentDeps.tasks;
+    if (!tasks.hasAnyActive(ctx.session.userId)) {
+      // Нечего останавливать — но признать ошибку понимания всё равно нужно (иначе владелец
+      // не поймёт, услышали ли его вообще).
+      ackControl(ctx, misfireAck(0), source);
+      log.info("ложный запуск: активных задач нет — только признание ошибки понимания", { source });
+      return true;
+    }
+    // Необратимое собираем ДО отмены — у отменённых задач состояние уже терминальное, а знать, что
+    // ушло владельцу, нужно именно сейчас.
+    const cancelledTasks = tasks.cancelUser(ctx.session.userId);
+    const irreversible = cancelledTasks.flatMap((t) => irreversibleDone(t));
+    const cancelled = cancelledTasks.length;
+    ackControl(ctx, misfireAck(cancelled, irreversible), source);
+    log.warn("ложный запуск: реплика владельца была принята за команду — всё остановлено", {
+      source,
+      cancelled,
+      irreversible: irreversible.length,
+    });
+    return true;
+  }
+
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;
 
