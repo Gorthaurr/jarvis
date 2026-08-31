@@ -37,6 +37,33 @@ function looksLikeSpawnFailure(error: NodeJS.ErrnoException | null, code: number
   return /is not recognized as an internal|command not found|не является внутренней или внешней/i.test(out);
 }
 
+/**
+ * 🔴 ЧИСТОЕ окружение прогона (найдено ЖИВЫМ прогоном цикла): дочерний процесс наследовал
+ * `process.env` СЕРВЕРА, куда загружен `.env` владельца с боевыми настройками (тарифы площадок,
+ * ключи, пути). Тесты рассчитаны на дефолты, поэтому прогон падал ВСЕГДА, независимо от правки:
+ * verify не мог стать зелёным в принципе, а самоправка — состояться. И это ложный красный: код
+ * исправен, ломает его конфигурация среды.
+ *
+ * Отдаём только системные переменные (тот же приём, что env-allowlist у MCP-детей): всё, что нужно
+ * для запуска Node и инструментов, и ничего из личной конфигурации Джарвиса.
+ */
+const SYSTEM_ENV_KEYS = [
+  "PATH", "Path", "PATHEXT", "SystemRoot", "windir", "ComSpec", "TEMP", "TMP", "TMPDIR",
+  "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME", "APPDATA", "LOCALAPPDATA",
+  "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "NUMBER_OF_PROCESSORS", "OS", "LANG", "LC_ALL",
+];
+
+export function cleanEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const k of SYSTEM_ENV_KEYS) {
+    const v = process.env[k];
+    if (typeof v === "string") env[k] = v;
+  }
+  env.NODE_ENV = "test";
+  env.CI = "1"; // vitest не пытается открыть интерактивный watch/UI
+  return env;
+}
+
 function runCommand(
   cmd: string,
   args: readonly string[],
@@ -47,7 +74,7 @@ function runCommand(
     const child = execFile(
       cmd,
       [...args],
-      { cwd, timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024, windowsHide: true, shell: process.platform === "win32" },
+      { cwd, timeout: timeoutMs, maxBuffer: 20 * 1024 * 1024, windowsHide: true, shell: process.platform === "win32", env: cleanEnv() },
       (error, stdout, stderr) => {
         const out = `${stdout ?? ""}${stderr ?? ""}`;
         const err = error as (NodeJS.ErrnoException & { killed?: boolean; signal?: string }) | null;
