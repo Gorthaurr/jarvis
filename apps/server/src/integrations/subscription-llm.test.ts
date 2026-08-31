@@ -203,11 +203,11 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
 
   // Решение владельца: резерв — на СИЛЬНОЙ модели и МАКСИМАЛЬНОМ эффорте (последний шанс сделать
   // ход правильно; лимиты подписки уже оплачены). Живым зондом подтверждено: fable/opus доступны.
-  it("модель всегда сильная (fable), а эффорт — ПО ТИРУ: обычный ход low, эскалация max", async () => {
+  it("модель всегда сильная (opus-5), а эффорт — ПО ТИРУ: обычный ход low, эскалация max", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
     await p.complete({ ...BASE, tier: "haiku" });
-    expect(sdk.lastOptions?.model).toBe("fable");
+    expect(sdk.lastOptions?.model).toBe("opus");
     expect(sdk.lastOptions?.effort).toBe("low"); // голосу важна скорость первого токена
     await p.complete({ ...BASE, tier: "sonnet" });
     expect(sdk.lastOptions?.effort).toBe("low");

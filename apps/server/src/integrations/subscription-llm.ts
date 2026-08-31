@@ -69,14 +69,14 @@ export function subscriptionFallbackEnabled(): boolean {
  * Модель резерва. Проверено живым зондом на подписке владельца: доступны `fable` (→ claude-fable-5),
  * `opus` (→ claude-opus-5), а также полные id `claude-fable-5` / `claude-opus-5`.
  *
- * Решение владельца (2026-08-31): резерв работает на СИЛЬНОЙ модели — либо Fable 5, либо Opus 5 —
- * и на МАКСИМАЛЬНОМ эффорте. Причина: резерв включается, когда API уже недоступен, то есть это
- * последний шанс сделать ход правильно; экономить там нечего, а лимиты подписки уже оплачены.
- * Дефолт — `fable` (сильнейшая); переопределяется `JARVIS_SUBSCRIPTION_MODEL`.
+ * Решение владельца (2026-08-31): резерв работает на СИЛЬНОЙ модели — либо Fable 5, либо Opus 5.
+ * Дефолт — **`opus`** (claude-opus-5): по замерам скорость у них одинаковая (латентность держит
+ * оверхед SDK, а не модель), но Opus 5 экономнее расходует общий лимит подписки, который делится
+ * с Claude Code владельца. Fable 5 остаётся доступен через `JARVIS_SUBSCRIPTION_MODEL=fable`.
  */
 function subscriptionModel(): string {
   const raw = process.env.JARVIS_SUBSCRIPTION_MODEL?.trim();
-  return raw || "fable";
+  return raw || "opus";
 }
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];

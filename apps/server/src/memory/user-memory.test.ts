@@ -114,3 +114,39 @@ describe("F3 (волна F, адаптация OpenClaw): провенанс п�
     expect((await readFactMeta(U)).get("ходит в зал по средам")).toBeUndefined();
   });
 });
+
+describe("F3/H: supersede — устаревший факт не всплывает, но и не пропадает молча", () => {
+  it("помеченный заменённым исчезает из search/listRecent, но виден в listSuperseded", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    const U2 = "aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa";
+    await writeUserMemory(mem, U2, "fact", "работает в Сбере");
+    const [old] = await mem.listRecent(U2, 10, "Сбере");
+    expect(old).toBeDefined();
+
+    expect(await mem.supersede(U2, old!.id)).toBe(true);
+    // Живые пути чтения его больше не отдают — в промпт устаревшее не попадёт.
+    expect((await mem.listRecent(U2, 10, "Сбере")).length).toBe(0);
+    expect((await mem.search(U2, "работает в Сбере", 5, 0)).length).toBe(0);
+    expect(await mem.hasEntries(U2)).toBe(false);
+    // Но владелец может увидеть, ЧТО именно заменено (иначе — молчаливое исчезновение).
+    const gone = await mem.listSuperseded(U2, 10);
+    expect(gone.map((g) => g.text)).toContain("работает в Сбере");
+    expect(gone[0]?.invalidAt).toBeTypeOf("number");
+  });
+
+  it("повторный supersede той же записи → false (идемпотентно, без двойного учёта)", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    const U3 = "bbbbbbbb-0000-0000-0000-bbbbbbbbbbbb";
+    await writeUserMemory(mem, U3, "fact", "живёт в Москве");
+    const [rec] = await mem.listRecent(U3, 10, "Москве");
+    expect(await mem.supersede(U3, rec!.id)).toBe(true);
+    expect(await mem.supersede(U3, rec!.id)).toBe(false);
+  });
+
+  it("чужую запись не помечаем", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await writeUserMemory(mem, "cccccccc-0000-0000-0000-cccccccccccc", "fact", "мой факт");
+    const [rec] = await mem.listRecent("cccccccc-0000-0000-0000-cccccccccccc", 10);
+    expect(await mem.supersede("dddddddd-0000-0000-0000-dddddddddddd", rec!.id)).toBe(false);
+  });
+});
