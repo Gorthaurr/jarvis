@@ -108,6 +108,44 @@ describe("FallbackLlmProvider (волна G)", () => {
     }
   });
 
+  // СКОРОСТЬ: при исчерпанном кредите каждый ход тратил секунды на обречённый запрос к API.
+  it("предохранитель: после 2 отказов подряд основной канал не дёргаем, идём сразу в резерв", async () => {
+    const primary = fake({ live: true, result: STUB });
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    await p.complete(REQ);
+    await p.complete(REQ);
+    expect(primary.calls).toBe(2);
+    await p.complete(REQ); // третий ход — основной уже на паузе
+    await p.complete(REQ);
+    expect(primary.calls).toBe(2); // лишних попыток нет — время не тратится
+    expect(p.lastChannel).toBe("subscription");
+  });
+
+  it("предохранитель ПОЛУОТКРЫТЫЙ: после паузы основной пробуется снова (баланс пополнили)", async () => {
+    let clock = 0;
+    const primary = fake({ live: true, result: STUB });
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ); // сработал предохранитель
+    clock += 400_000; // пауза (деф 5 мин) истекла
+    await p.complete(REQ);
+    expect(primary.calls).toBe(3); // снова попробовали — восстановление без перезапуска
+  });
+
+  it("успех основного снимает предохранитель (не залипаем в резерве)", async () => {
+    const primary = fake({ live: true, result: STUB });
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    await p.complete(REQ);
+    // Основной «ожил»: следующий вызов вернёт нормальный ответ.
+    (primary as unknown as { complete: () => Promise<LlmResponse> }).complete = async () => resp({ text: "по API" });
+    const r = await p.complete(REQ);
+    expect(r.text).toBe("по API");
+    expect(p.lastChannel).toBe("primary");
+  });
+
   it("live = true, если жив ХОТЬ ОДИН канал", () => {
     expect(new FallbackLlmProvider(fake({ live: false }), fake({ live: true })).live).toBe(true);
     expect(new FallbackLlmProvider(fake({ live: true }), fake({ live: false })).live).toBe(true);

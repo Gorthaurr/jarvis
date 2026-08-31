@@ -170,26 +170,21 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   });
 
   // §7/§2.7: резерв обязан уважать нашу пер-раундовую политику размышления, а не дефолт SDK.
-  it("на МАКС эффорте размышление не глушим даже при политике «off» (max без thinking — противоречие)", async () => {
+  it("на тире fable (max) размышление не глушим даже при политике «off» (max без thinking — противоречие)", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
-    await p.complete({ ...BASE, thinking: "off" }); // дефолтный эффорт = max
+    await p.complete({ ...BASE, tier: "fable", thinking: "off" });
     expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
-    await p.complete({ ...BASE, thinking: "adaptive" });
-    expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
-    await p.complete({ ...BASE, thinking: 4096 }); // числовой бюджет 400-ит на свежих семействах
+    await p.complete({ ...BASE, tier: "fable", thinking: 4096 }); // числовой бюджет 400-ит на свежих семействах
     expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
   });
 
-  it("на невысоком эффорте пер-раундовая политика §2.7 уважается: off → disabled", async () => {
-    process.env.JARVIS_SUBSCRIPTION_EFFORT = "high";
-    try {
-      const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
-      await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, thinking: "off" });
-      expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
-    } finally {
-      delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
-    }
+  // СКОРОСТЬ (замер 2026-08-31): обычные ходы идут на low, и пер-раундовая политика §2.7 работает —
+  // механические раунды не платят за размышление, голосу важен первый токен.
+  it("на обычном тире политика §2.7 уважается: off → disabled", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, tier: "sonnet", thinking: "off" });
+    expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
   });
 
   it("потолок вывода уходит в env подпроцесса (per-call параметра у SDK нет)", async () => {
@@ -201,12 +196,16 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
 
   // Решение владельца: резерв — на СИЛЬНОЙ модели и МАКСИМАЛЬНОМ эффорте (последний шанс сделать
   // ход правильно; лимиты подписки уже оплачены). Живым зондом подтверждено: fable/opus доступны.
-  it("по умолчанию модель fable и эффорт max — независимо от тира хода", async () => {
+  it("модель всегда сильная (fable), а эффорт — ПО ТИРУ: обычный ход low, эскалация max", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
     await p.complete({ ...BASE, tier: "haiku" });
     expect(sdk.lastOptions?.model).toBe("fable");
-    expect(sdk.lastOptions?.effort).toBe("max");
+    expect(sdk.lastOptions?.effort).toBe("low"); // голосу важна скорость первого токена
+    await p.complete({ ...BASE, tier: "sonnet" });
+    expect(sdk.lastOptions?.effort).toBe("low");
+    await p.complete({ ...BASE, tier: "fable" });
+    expect(sdk.lastOptions?.effort).toBe("max"); // сюда ход попадает, когда качество решает
   });
 
   it("модель и эффорт переопределяются env", async () => {
@@ -223,11 +222,14 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     }
   });
 
-  it("мусорный эффорт из env → безопасный max, а не передача мусора в SDK", async () => {
+  it("мусорный эффорт из env игнорируется — работает политика по тиру, а не мусор в SDK", async () => {
     process.env.JARVIS_SUBSCRIPTION_EFFORT = "ультра";
     try {
       const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
-      await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+      const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+      await p.complete({ ...BASE, tier: "sonnet" });
+      expect(sdk.lastOptions?.effort).toBe("low");
+      await p.complete({ ...BASE, tier: "fable" });
       expect(sdk.lastOptions?.effort).toBe("max");
     } finally {
       delete process.env.JARVIS_SUBSCRIPTION_EFFORT;

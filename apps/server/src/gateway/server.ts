@@ -189,6 +189,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const anthropicLlm = new FallbackLlmProvider(apiLlm, subscriptionLlm);
   if (subscriptionLlm.live) {
     log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)", { auth: SubscriptionLlmProvider.authMode() });
+    void subscriptionLlm.warmup(); // fire-and-forget: первый ход владельца не платит за холодный старт
   } else {
     log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
   }

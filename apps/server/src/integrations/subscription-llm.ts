@@ -79,10 +79,23 @@ function subscriptionModel(): string {
   return raw || "fable";
 }
 
-/** Эффорт резерва (low|medium|high|xhigh|max). Дефолт — max по решению владельца. */
-function subscriptionEffort(): string {
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Эффорт резерва — ПО ТИРУ ХОДА (скорость vs качество, замерено живьём 2026-08-31).
+ *
+ * Замер показал: латентность резерва почти НЕ зависит от эффорта и модели (5.2-5.9с полного ответа,
+ * первый токен 3.2-4.7с) — она упирается в оверхед SDK (CLI-подпроцесс), а не в генерацию. Значит
+ * держать `max` на КАЖДОМ ходе смысла нет: разговорные реплики от этого не ускорятся, но и качество
+ * им не нужно. Поэтому: обычные ходы (haiku/sonnet) — `low` (голосу важен первый токен), а тир
+ * `fable` (эскалация §7, трейдинг, сложное рассуждение) — `max`: туда ход попадает, когда качество
+ * реально решает. Переопределяется `JARVIS_SUBSCRIPTION_EFFORT` (один на всё) — если владелец
+ * захочет фиксированный уровень.
+ */
+function subscriptionEffort(tier?: string): string {
   const raw = process.env.JARVIS_SUBSCRIPTION_EFFORT?.trim().toLowerCase();
-  return raw && ["low", "medium", "high", "xhigh", "max"].includes(raw) ? raw : "max";
+  if (raw && EFFORTS.includes(raw)) return raw;
+  return tier === "fable" ? "max" : "low";
 }
 
 /**
@@ -92,11 +105,12 @@ function subscriptionEffort(): string {
  * наоборот, шёл бы без размышления, где оно честностно важно («получилось или нет» решает
  * интерпретация наблюдения). До этого в SDK не передавалось НИЧЕГО и действовал его дефолт.
  */
-function thinkingOption(effort: LlmRequest["thinking"]): Record<string, unknown> {
+function thinkingOption(effort: LlmRequest["thinking"], tier?: string): Record<string, unknown> {
   // На высоком эффорте размышление НЕ глушим, даже если пер-раундовая политика просила «off»:
-  // «max без размышления» — противоречие (эффорт и есть бюджет обдумывания), а резерв включается
-  // там, где ход уже последний шанс. На низких эффортах политика §2.7 уважается как есть.
-  const strong = subscriptionEffort() === "max" || subscriptionEffort() === "xhigh";
+  // «max без размышления» — противоречие (эффорт и есть бюджет обдумывания). На низких эффортах
+  // политика §2.7 уважается как есть — это и есть быстрый путь для разговорных ходов.
+  const eff = subscriptionEffort(tier);
+  const strong = eff === "max" || eff === "xhigh";
   if (!effort || effort === "off") return strong ? { type: "adaptive" } : { type: "disabled" };
   if (effort === "adaptive") return { type: "adaptive" };
   // Числовой бюджет: у подписки семейства моделей свежие (Opus/Fable 5), где enabled+budget даёт
@@ -215,6 +229,8 @@ export interface SubscriptionLlmDeps {
 
 /** Минимальный контракт используемой части SDK (позволяет тестировать без сети). */
 export interface SdkModule {
+  /** Прогрев CLI-подпроцесса (опционально — в старых версиях SDK может отсутствовать). */
+  startup?: (opts?: unknown) => Promise<unknown>;
   query: (opts: {
     prompt: string | AsyncIterable<Record<string, unknown>>;
     options: Record<string, unknown>;
@@ -261,6 +277,29 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     return undefined;
   }
 
+  /**
+   * Прогрев резервного канала на boot (fire-and-forget). SDK поднимает CLI-подпроцесс, и часть этой
+   * работы (~0.6с по замеру) можно оплатить заранее, а не на первой реплике владельца. Полностью
+   * оверхед не снимает (замер: ~3.2-3.8с до первого токена и с прогревом, и без) — но первый ход
+   * после старта перестаёт быть заметно медленнее остальных. Ошибки глушим: прогрев не обязан
+   * удаваться (нет сети/токен протух — узнаем на реальном ходе честной деградацией).
+   */
+  async warmup(): Promise<void> {
+    if (!this.live) return;
+    try {
+      const sdk = this.sdk ?? (this.sdk = await this.loadSdk());
+      const start = (sdk as unknown as { startup?: (o?: unknown) => Promise<unknown> }).startup;
+      if (typeof start === "function") {
+        const env: Record<string, string | undefined> = { ...process.env };
+        delete env.ANTHROPIC_API_KEY;
+        await start({ env });
+        log.info("резервный канал прогрет");
+      }
+    } catch (e) {
+      log.debug("прогрев резерва не удался (не критично)", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   async complete(req: LlmRequest): Promise<LlmResponse> {
     return this.run(req, undefined);
   }
@@ -285,7 +324,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     const options: Record<string, unknown> = {
       systemPrompt: buildSystem(req),
       model: subscriptionModel(),
-      effort: subscriptionEffort(),
+      effort: subscriptionEffort(req.tier),
       // Свой цикл ведём МЫ: SDK должен вернуть первый ход (текст или запрос инструмента) и остановиться.
       maxTurns: 1,
       // Никаких встроенных инструментов Claude Code (Bash/Read/...): у Джарвиса свой арсенал и свои гейты.
@@ -297,7 +336,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
           }
         : {}),
       // §7/§2.7: размышление — по нашей пер-раундовой политике, а не по дефолту SDK.
-      thinking: thinkingOption(req.thinking),
+      thinking: thinkingOption(req.thinking, req.tier),
       env,
       ...(onDelta ? { includePartialMessages: true } : {}),
     };

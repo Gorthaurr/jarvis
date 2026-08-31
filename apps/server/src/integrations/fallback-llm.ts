@@ -40,28 +40,80 @@ function forceSubscription(): boolean {
   return process.env.JARVIS_FORCE_SUBSCRIPTION === "1";
 }
 
+/**
+ * Сколько подряд отказов основного канала считаем «он мёртв надолго» и на сколько перестаём его
+ * дёргать. Мотив — СКОРОСТЬ: при исчерпанном кредите каждый ход тратил секунды на обречённый
+ * HTTP-запрос с ретраем ПЕРЕД тем, как уйти в резерв (замер: это ощутимая доля времени ответа).
+ * Предохранитель полуоткрытый: по истечении паузы основной пробуется снова — пополнение баланса
+ * подхватывается само, без перезапуска.
+ */
+const TRIP_AFTER_FAILURES = 2;
+function breakerCooldownMs(): number {
+  const raw = Number(process.env.JARVIS_PRIMARY_COOLDOWN_MS ?? 300_000);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 300_000;
+}
+
 export class FallbackLlmProvider implements ILlmProvider {
   /** Живой, если жив хотя бы один канал (иначе стаб-режим, как и раньше). */
   readonly live: boolean;
   /** Канал последнего успешного хода — читают метрики/диагностика. */
   lastChannel: LlmChannel = "primary";
+  private consecutiveFailures = 0;
+  private skipPrimaryUntil = 0;
 
   constructor(
     private readonly primary: ILlmProvider,
     private readonly secondary: ILlmProvider,
     private readonly deps: FallbackLlmDeps = {},
+    private readonly now: () => number = () => Date.now(),
   ) {
     this.live = primary.live || secondary.live;
   }
 
+  /** Стоит ли вообще пробовать основной канал сейчас (предохранитель + наличие ключа). */
+  private primaryWorthTrying(): boolean {
+    if (!this.primary.live) return false;
+    if (this.skipPrimaryUntil === 0) return true;
+    if (this.now() < this.skipPrimaryUntil) return false;
+    // Пауза истекла — пробуем снова (полуоткрытое состояние): вдруг баланс пополнили.
+    this.skipPrimaryUntil = 0;
+    this.consecutiveFailures = 0;
+    log.info("основной канал: пауза истекла — пробую снова");
+    return true;
+  }
+
+  /** Учесть исход основного канала: серия отказов → пауза, успех → сброс. */
+  private notePrimary(ok: boolean): void {
+    if (ok) {
+      if (this.consecutiveFailures > 0 || this.skipPrimaryUntil > 0) log.info("основной канал снова отвечает — предохранитель снят");
+      this.consecutiveFailures = 0;
+      this.skipPrimaryUntil = 0;
+      return;
+    }
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= TRIP_AFTER_FAILURES && this.secondary.live && breakerCooldownMs() > 0) {
+      this.skipPrimaryUntil = this.now() + breakerCooldownMs();
+      log.warn("основной канал отказал подряд — временно иду сразу в резерв (экономлю секунды на ход)", {
+        failures: this.consecutiveFailures,
+        cooldownMs: breakerCooldownMs(),
+      });
+    }
+  }
+
   async complete(req: LlmRequest): Promise<LlmResponse> {
     if (forceSubscription()) return this.viaSubscription(req, "принудительная проверка резерва", () => this.primary.complete(req));
-    const first = this.primary.live ? await this.primary.complete(req) : undefined;
+    const tryPrimary = this.primaryWorthTrying();
+    const first = tryPrimary ? await this.primary.complete(req) : undefined;
+    if (first) this.notePrimary(!first.stubbed);
     if (first && !first.stubbed) {
       this.lastChannel = "primary";
       return first;
     }
-    const reason = first ? "основной канал вернул стаб (кредит/лимит/сеть)" : "основной канал недоступен (нет ключа)";
+    const reason = first
+      ? "основной канал вернул стаб (кредит/лимит/сеть)"
+      : this.primary.live
+        ? "основной канал на паузе после отказов"
+        : "основной канал недоступен (нет ключа)";
     return this.viaSubscription(req, reason, () => first ?? stubOf(req, this.primary));
   }
 
@@ -73,13 +125,19 @@ export class FallbackLlmProvider implements ILlmProvider {
       return this.viaSubscription(req, "принудительная проверка резерва", () => this.primary.complete(req), onDelta);
     }
     let acc = "";
-    const first = this.primary.live ? await this.primary.completeStream(req, (d) => (acc += d.text)) : undefined;
+    const tryPrimary = this.primaryWorthTrying();
+    const first = tryPrimary ? await this.primary.completeStream(req, (d) => (acc += d.text)) : undefined;
+    if (first) this.notePrimary(!first.stubbed);
     if (first && !first.stubbed) {
       this.lastChannel = "primary";
       if (acc) onDelta({ text: acc });
       return first;
     }
-    const reason = first ? "основной канал вернул стаб (кредит/лимит/сеть)" : "основной канал недоступен (нет ключа)";
+    const reason = first
+      ? "основной канал вернул стаб (кредит/лимит/сеть)"
+      : this.primary.live
+        ? "основной канал на паузе после отказов"
+        : "основной канал недоступен (нет ключа)";
     return this.viaSubscription(req, reason, () => first ?? stubOf(req, this.primary), onDelta);
   }
 
