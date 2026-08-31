@@ -292,13 +292,23 @@ async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise
   const arch = await readEvictedFacts(userId, MEMORY_UI_LIMIT, needle);
   const evicted = arch.items.map((r) => ({ id: r.fact, text: r.fact, ...(r.ts !== undefined ? { ts: r.ts } : {}) }));
   // F3: журнал сон-цикла — «что фоновая консолидация записала». Фильтром не режется (это журнал
-  // прогонов, а не слой записей); fail-safe (сбой чтения → пустой журнал, не сломанный снимок).
-  const consolidationRuns = await readConsolidationRuns(userId, 10).catch(() => []);
+  // прогонов, а не слой записей). Сбой ЧТЕНИЯ существующего журнала не выдаём за «ничего не было»
+  // (контроль-2, класс «недоступно ≠ пусто»): честно говорим об этом в предупреждении панели.
+  let consolidationRuns: Awaited<ReturnType<typeof readConsolidationRuns>> = [];
+  let journalUnavailable: string | undefined;
+  try {
+    consolidationRuns = await readConsolidationRuns(userId, 10);
+  } catch (e) {
+    journalUnavailable = "журнал сна прочитать не удалось";
+    log.warn("вкладка «Память»: чтение журнала сон-цикла упало", { error: e instanceof Error ? e.message : String(e) });
+  }
   const state: MemoryState = {
     facts,
     episodes,
     evicted,
-    ...(episodesUnavailable ? { episodesUnavailable } : {}),
+    ...(episodesUnavailable || journalUnavailable
+      ? { episodesUnavailable: [episodesUnavailable, journalUnavailable].filter(Boolean).join("; ") }
+      : {}),
     // Честные тоталы: показанное ≠ всё накопленное (кап MEMORY_UI_LIMIT).
     totals: { evicted: arch.total, ...(episodesTotal !== undefined ? { episodes: episodesTotal } : {}) },
     ...(needle ? { query: needle } : {}), // эхо: панель не должна догадываться, что было применено

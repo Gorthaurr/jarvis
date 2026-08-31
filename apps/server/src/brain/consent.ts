@@ -10,7 +10,7 @@
  */
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { type Logger, createLogger } from "@jarvis/shared";
+import { type Logger, createLogger, foldName } from "@jarvis/shared";
 import { lazyDataPath } from "../paths.js";
 
 const log: Logger = createLogger("consent");
@@ -81,23 +81,48 @@ export async function revokeSend(userId: string, channel: string, recipient: str
  * владелец должен видеть, что именно перестало быть одобренным).
  */
 export async function revokeSendMatching(userId: string, channel: string, recipient: string): Promise<string[]> {
-  const target = recipient.trim().toLowerCase();
-  if (!target) return [];
-  const stem = (s: string): string => (s.length >= 4 ? s.replace(/[аеиоуыэюя]$/u, "") : s);
-  const targetStem = stem(target);
+  const keys = nameKeys(recipient);
+  if (keys.size === 0) return [];
   const removed: string[] = [];
   for (const c of listConsents(userId)) {
     if (c.channel !== channel.trim()) continue;
-    const cand = c.recipient;
-    if (cand !== target && stem(cand) !== targetStem) continue;
-    delete cache[consentKey(userId, channel, cand)];
-    removed.push(cand);
+    const candKeys = nameKeys(c.recipient);
+    let hit = false;
+    for (const k of candKeys) if (keys.has(k)) hit = true;
+    if (!hit) continue;
+    delete cache[consentKey(userId, channel, c.recipient)];
+    removed.push(c.recipient);
   }
   if (removed.length > 0) {
     await persist();
     log.info("согласия на отправку отозваны (все написания адресата)", { channel, removed });
   }
   return removed;
+}
+
+/**
+ * Ключи идентичности имени для сверки «тот же человек» — ПОТОКЕННО (контроль-2, HIGH ×2).
+ * Прежняя версия стемила строку ЦЕЛИКОМ и не применяла foldName, поэтому «катя любимая» (полное имя
+ * из namesake-выбора) и «алёна» (ё вместо е) НЕ снимались, хотя владельцу говорилось «следующая
+ * отправка снова спросит подтверждения» — то самое ложное заверение о §14-гейте, ради которого
+ * фикс и делался. Теперь: foldName (регистр/ё/украшения) → токены → каждый токен + его стем.
+ * Совпадение ЛЮБОГО токена-ключа = тот же адресат.
+ *
+ * ⚠️ Слияние однокоренных («Александра» ↔ «Александр», «Оля Петрова» ↔ «Оля Сидорова») ОСОЗНАННО:
+ * направление безопасное — лишний §14-вопрос, а не молчаливая отправка; снятое перечисляется
+ * владельцу поимённо (см. consentRevoke), так что сюрприза нет.
+ */
+function nameKeys(name: string): Set<string> {
+  const folded = foldName(String(name ?? "")) || String(name ?? "").trim().toLowerCase();
+  const out = new Set<string>();
+  for (const tok of folded.split(/[^\p{L}\p{N}]+/u)) {
+    if (tok.length < 2) continue;
+    out.add(tok);
+    if (tok.length >= 4) out.add(tok.replace(/[аеиоуыэюяaeiouy]$/u, ""));
+    // ⚠️ Предел: транслитерация («katya» vs «kate») стемом не сводится — латинские написания одного
+    // человека могут остаться разными ключами. Русские имена (основной случай) покрыты.
+  }
+  return out;
 }
 
 /**

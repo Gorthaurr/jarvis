@@ -100,8 +100,12 @@ function renderConsolidation(list: HTMLUListElement | null, runs: MemoryConsolid
     li.className = "skill-list__empty";
     const when = whenLabel(run.ts) ?? "";
     const dropped = run.dropped > 0 ? `, отброшено фильтром: ${run.dropped}` : "";
+    // Контроль-2: «извлечено» считается ДО фильтра и дневного лимита, поэтому остаток между
+    // extracted и written+dropped надо объяснить, а не оставлять владельца гадать.
+    const rest = run.extracted - run.written - run.dropped;
+    const restNote = rest > 0 ? `, ещё ${rest} — дубли известного или сверх дневного лимита` : "";
     const facts = run.facts.length > 0 ? ` — ${run.facts.join("; ")}` : "";
-    li.textContent = `${when}: записано ${run.written} из ${run.extracted}${dropped}${facts}`;
+    li.textContent = `${when}: записано ${run.written} из ${run.extracted}${dropped}${restNote}${facts}`;
     list.appendChild(li);
   }
 }

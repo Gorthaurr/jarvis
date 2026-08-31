@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { WatchService } from "./service.js";
 import { WatchStore } from "./store.js";
-import { type CheckResult, type Watch, watchActionFingerprint } from "./watch.js";
+import { type CheckResult, type Watch, watchActionFingerprint, watchActionFingerprintLegacy } from "./watch.js";
 
 let dirCounter = 0;
 function tempDir(): string {
@@ -616,6 +616,38 @@ describe("F4: отпечаток одобренной операции у watch-
     const p3 = { ...base, predicate: { kind: "browser", prop: "currentTime", op: ">=", value: 1, tabId: 7, url: "https://a" } };
     expect(watchActionFingerprint(p1)).toBe(watchActionFingerprint(p2)); // self-heal вкладки не ломает одобрение
     expect(watchActionFingerprint(p1)).not.toBe(watchActionFingerprint(p3)); // подмена условия — ломает
+  });
+
+  it("отпечаток ПРЕДЫДУЩЕЙ схемы (без предиката) не суспендит здоровое наблюдение", async () => {
+    let clock = 0;
+    const svc = new WatchService(metChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100 });
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "видео", condition: "дошло до 26-й", intervalMs: 100, action: "перемотай на 25-ю" });
+    if (!r.ok) throw new Error("add failed");
+    await svc.tickNow(); // runner'ов нет → действие запарковано
+    // Имитация записи, созданной МЕЖДУ волной F и её контролем: есть предикат, а отпечаток посчитан
+    // по ПРЕДЫДУЩЕЙ схеме (без предиката). Сверять её текущей схемой = ложное «поручение изменилось».
+    r.watch.predicate = { kind: "browser", prop: "currentTime", op: ">=", value: 1560 };
+    r.watch.actionFingerprint = watchActionFingerprintLegacy(r.watch);
+    const run = vi.fn();
+    svc.registerRunner("s2", "u1", run);
+    expect(run).toHaveBeenCalledTimes(1); // штатное исполнение, а не суспенд
+    expect(r.watch.status).not.toBe("suspended");
+  });
+
+  it("pendingAction без текста поручения (легаси) → НЕ исполняем пустую цель, говорим честно", async () => {
+    let clock = 0;
+    const speak = vi.fn();
+    const svc = new WatchService(metChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 100 });
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен", intervalMs: 100, action: "напиши Кате" });
+    if (!r.ok) throw new Error("add failed");
+    await svc.tickNow(); // запарковано
+    r.watch.action = undefined; // поле поручения потеряно, отпечатка нет (легаси-путь)
+    r.watch.actionFingerprint = undefined;
+    const run = vi.fn();
+    svc.registerSpeaker("s2", "u1", speak);
+    svc.registerRunner("s2", "u1", run);
+    expect(run).not.toHaveBeenCalled(); // «выполни поручение: <пусто>» в петлю не уходит
+    expect(speak.mock.calls.map((c) => String(c[0])).join(" ")).toContain("поручения");
   });
 
   it("подмена ТОЛЬКО pendingAction (не входит в отпечаток) не подсовывает свой текст в петлю", async () => {

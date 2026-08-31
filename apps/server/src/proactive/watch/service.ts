@@ -12,7 +12,14 @@ import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze } from "../../autonomy/freeze.js";
 import { WatchStore } from "./store.js";
-import { type CheckResult, type Watch, type WatchChecker, dueAt, watchActionFingerprint } from "./watch.js";
+import {
+  type CheckResult,
+  type Watch,
+  type WatchChecker,
+  dueAt,
+  watchActionFingerprint,
+  watchActionFingerprintLegacy,
+} from "./watch.js";
 
 const log: Logger = createLogger("watch");
 
@@ -426,7 +433,9 @@ export class WatchService {
       log.info("наблюдение: действие без отпечатка одобрения (легаси до волны F) — исполняю как раньше", { id: w.id });
       return true;
     }
-    if (w.actionFingerprint === watchActionFingerprint(w)) return true;
+    // Текущая схема ИЛИ предыдущая (без предиката) — см. watchActionFingerprintLegacy: смена схемы
+    // отпечатка не должна выглядеть как подмена операции владельцем.
+    if (w.actionFingerprint === watchActionFingerprint(w) || w.actionFingerprint === watchActionFingerprintLegacy(w)) return true;
     log.warn("наблюдение: операция ИЗМЕНИЛАСЬ после одобрения — действие не исполняю", { id: w.id });
     w.status = "suspended";
     w.pendingAction = undefined;
@@ -496,6 +505,18 @@ export class WatchService {
       // тред-модель «между парковкой и коннектом запись могла измениться») проходила сверку и
       // исполнялась дословно. actionGoal(w) даёт тот же текст, что клал dispatchAction, но из полей,
       // чью неизменность мы только что доказали.
+      // Пересобранный goal осмыслен только при живом `action`. Если поле пусто (легаси-запись из
+      // прошлых волн / стёртое поле при отсутствующем отпечатке-grandfather) — исполнять «выполни
+      // поручение: <пусто>» нельзя: это отправило бы в петлю бессмысленную цель от имени владельца.
+      if (!w.action?.trim()) {
+        w.pendingAction = undefined;
+        w.pendingActionAt = undefined;
+        this.store.update(w);
+        log.warn("наблюдение: отложенное действие без текста поручения — не исполняю", { id: w.id });
+        this.notify(w, `Сработало наблюдение «${w.what}», но текста поручения у меня не осталось — не стал ничего делать. Скажите, что нужно.`);
+        this.store.update(w);
+        continue;
+      }
       const goal = this.actionGoal(w);
       const ageMs = this.now() - (w.pendingActionAt ?? w.firedAt ?? w.createdAt);
       w.pendingAction = undefined;

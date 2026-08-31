@@ -137,6 +137,18 @@ export function watchActionFingerprint(w: Pick<Watch, "what" | "condition" | "ac
   return createHash("sha256").update(basis, "utf8").digest("hex").slice(0, 32);
 }
 
+/**
+ * ПРЕДЫДУЩАЯ схема отпечатка (what|condition|action, БЕЗ предиката) — записи, созданные между
+ * первым коммитом волны F и его контролем, несут именно её. Сверять их текущей схемой значило бы
+ * массово суспендить ЗДОРОВЫЕ наблюдения с ложным «поручение изменилось после одобрения» (мой же
+ * фикс как источник дефекта — типовая ловушка проекта). Совпадение по легаси-схеме доказывает
+ * неизменность ровно того, что тогда и одобрялось, — этого достаточно.
+ */
+export function watchActionFingerprintLegacy(w: Pick<Watch, "what" | "condition" | "action">): string {
+  const basis = JSON.stringify([w.what, w.condition, w.action ?? ""]);
+  return createHash("sha256").update(basis, "utf8").digest("hex").slice(0, 32);
+}
+
 /** Предикат для отпечатка: стабильный порядок ключей, без адресных tabId/url (их правит self-heal). */
 function stablePredicate(p: unknown): unknown {
   if (p === undefined || p === null) return null;

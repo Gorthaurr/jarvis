@@ -105,7 +105,7 @@ const quarantineDir = () => join(skillsDir(), "_quarantine");
 async function quarantineSkill(
   userId: string,
   payload: { name: string; when: string; procedure: string; findings: SkillScanFinding[] },
-): Promise<void> {
+): Promise<boolean> {
   try {
     await mkdir(quarantineDir(), { recursive: true });
     const file = join(quarantineDir(), `${userId}__${Date.now()}.json`);
@@ -114,8 +114,12 @@ async function quarantineSkill(
       file,
       rules: payload.findings.map((f) => f.rule),
     });
+    return true;
   } catch (e) {
+    // Контроль-2 (честность): запись карантина fail-safe, но вердикт «не сохранять» от неё не зависит.
+    // Возвращаем ФАКТ записи — вызывающий не должен обещать владельцу улику, которой нет на диске.
     log.warn(`F2: не удалось записать карантин-файл: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
 }
 
@@ -580,6 +584,8 @@ export interface SavedLearnedSkill {
 export interface QuarantinedSkill {
   quarantined: true;
   findings: SkillScanFinding[];
+  /** Улика реально легла на диск? (запись карантина fail-safe — обещать несуществующий файл нельзя.) */
+  stored?: boolean;
 }
 
 /** Сохранение прошло или контент в карантине? (type guard для потребителей save.) */
@@ -751,8 +757,8 @@ export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: S
       // кормить будущую дистилляцию). Findings → карантин, навык НЕ пишется.
       const findings = scanSkillContent({ name, when: input.when, procedure: input.procedure });
       if (findings.length > 0) {
-        await quarantineSkill(userId, { name, when: input.when, procedure: input.procedure, findings });
-        return { quarantined: true, findings };
+        const stored = await quarantineSkill(userId, { name, when: input.when, procedure: input.procedure, findings });
+        return { quarantined: true, findings, stored };
       }
       // Пространство id выученных навыков изолировано от записанных показом (см. LEARNED_ID_PREFIX).
       const slugId = LEARNED_ID_PREFIX + slugify(name);
@@ -850,7 +856,10 @@ export function createSkillProvider(embedder?: IEmbeddingProvider, distiller?: S
       // текст печати из трассы жестов — если в задаче печатался текст СО СТРАНИЦЫ, туда может уехать
       // директива. Скан того же профиля: находки → макрос НЕ вписываем (навык остаётся с чистой
       // процедурой, ничего не теряется — только детерминированный реплей не появится).
-      const replayFindings = scanSkillText(newBody);
+      // Сканируем ТОЛЬКО ДОБАВЛЯЕМЫЕ строки (контроль-2): старая процедура скан уже проходила при
+      // save, а её повторная проверка навсегда лишала бы навык авто-макроса и приписывала находку
+      // записанным жестам (ложное обвинение в логе).
+      const replayFindings = scanSkillText(lines.join("\n"));
       if (replayFindings.length > 0) {
         log.warn("F2: авто-реплей НЕ вписан — скан нашёл признаки инъекции в записанных шагах", {
           id,

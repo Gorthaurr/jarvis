@@ -81,4 +81,34 @@ describe("consent (§14 персистентное согласие на отп�
   it("revokeSendMatching: нечего отзывать → пустой список (вызывающий скажет честно)", async () => {
     expect(await revokeSendMatching("u1", "telegram", "Никто")).toEqual([]);
   });
+
+  // 🔴 Контроль-2 (HIGH ×2): стем считался от ВСЕЙ строки и без foldName — полное имя из
+  // namesake-выбора («Катя Любимая») и ё/е-написание не снимались, а владельцу обещали взведённый гейт.
+  it("снимает ПОЛНОЕ имя (namesake), ё/е и украшения — потокенно и через foldName", async () => {
+    await approveSend("u1", "telegram", "Катя");
+    await approveSend("u1", "telegram", "Катя Любимая");
+    expect((await revokeSendMatching("u1", "telegram", "Катя")).length).toBe(2);
+    expect(isSendApproved("u1", "telegram", "Катя Любимая")).toBe(false);
+
+    await approveSend("u1", "telegram", "Алёна");
+    await approveSend("u1", "telegram", "Алене");
+    expect((await revokeSendMatching("u1", "telegram", "Алены")).length).toBe(2); // ё/е сведены
+    expect(isSendApproved("u1", "telegram", "Алёна")).toBe(false);
+
+    await approveSend("u1", "telegram", "Катя 💜");
+    await approveSend("u1", "telegram", "Кате");
+    expect((await revokeSendMatching("u1", "telegram", "Катя")).length).toBe(2); // украшения не мешают
+    expect(isSendApproved("u1", "telegram", "Катя 💜")).toBe(false);
+  });
+
+  it("разные люди не сливаются: соседи и короткие имена целы", async () => {
+    await approveSend("u1", "telegram", "Оля");
+    await approveSend("u1", "telegram", "Олег");
+    await approveSend("u1", "telegram", "Ян");
+    await approveSend("u1", "telegram", "Яна");
+    expect(await revokeSendMatching("u1", "telegram", "Оля")).toEqual(["оля"]);
+    expect(isSendApproved("u1", "telegram", "Олег")).toBe(true);
+    expect(await revokeSendMatching("u1", "telegram", "Ян")).toEqual(["ян"]);
+    expect(isSendApproved("u1", "telegram", "Яна")).toBe(true);
+  });
 });

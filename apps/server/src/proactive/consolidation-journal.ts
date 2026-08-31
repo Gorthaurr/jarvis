@@ -50,7 +50,11 @@ export async function appendConsolidationRun(userId: string, rec: ConsolidationR
   }
 }
 
-/** Прочитать последние прогоны (новые первыми). Нет файла/сбой → []. */
+/**
+ * Прочитать последние прогоны (новые первыми).
+ * ⚠️ Бросает при СБОЕ ЧТЕНИЯ существующего журнала (контроль-2: «недоступно ≠ пусто» — класс, который
+ * проект уже выжигал в этой же панели на эпизодах). Отсутствие файла — штатная пустота, не ошибка.
+ */
 export async function readConsolidationRuns(userId: string, limit = 20): Promise<ConsolidationRunRecord[]> {
   try {
     const raw = await readFile(journalFile(userId), "utf8");
@@ -73,7 +77,9 @@ export async function readConsolidationRuns(userId: string, limit = 20): Promise
       }
     }
     return out.reverse().slice(0, limit);
-  } catch {
-    return [];
+  } catch (e) {
+    // ENOENT — журнала ещё нет (сон-цикл не отрабатывал): честная пустота.
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw e; // прочие сбои (права/битый диск) — «не смог прочитать», а не «ничего не было»
   }
 }
