@@ -1,6 +1,7 @@
 // Волна G: резерв мозга на подписке — переключение каналов и ЧЕСТНОСТЬ исходов.
 import { describe, expect, it, vi } from "vitest";
 import { FallbackLlmProvider } from "./fallback-llm.js";
+import { _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
 
 const REQ: LlmRequest = { tier: "sonnet", model: "claude-sonnet-4-6", systemStatic: "персона", messages: [{ role: "user", content: "привет" }] };
@@ -167,5 +168,43 @@ describe("FallbackLlmProvider (волна G)", () => {
     const r = await new FallbackLlmProvider(primary, fake({ live: true })).completeStream(REQ, (d) => deltas.push(d.text));
     expect(deltas.join("")).toBe("по API");
     expect(r.text).toBe("по API");
+  });
+});
+
+/**
+ * 🔴 Живая проверка 2026-09-01: кредиты API исчерпаны И OAuth-сессия подписки протухла — оба канала
+ * мертвы. Владелец слышал «связь прервалась» и повторял фразу, не зная, что нужно переавторизоваться:
+ * система знала причину и молчала.
+ */
+describe("оба канала легли — владельцу называют ПРИЧИНУ, а не «связь прервалась»", () => {
+  const req = { tier: "sonnet", model: "m", systemStatic: "s", systemDynamic: "d", messages: [{ role: "user" as const, content: "привет" }] };
+
+  it("протухшая авторизация подписки → сказано, что делать", async () => {
+    _resetSubscriptionFailureForTest();
+    const primary = { live: true, complete: async () => ({ text: "Связь с сервером прервалась, сэр. Повторите, пожалуйста.", toolUses: [], stopReason: "stub" as const, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, stubbed: true }), completeStream: async () => { throw new Error("не нужен"); } };
+    const secondary = { live: true, complete: async () => { throw new Error("подписка: подписка не авторизована (сессия истекла)"); }, completeStream: async () => { throw new Error("подписка: подписка не авторизована (сессия истекла)"); } };
+    _setSubscriptionFailureForTest("Failed to authenticate: OAuth session expired"); // как это делает провайдер
+    const p = new FallbackLlmProvider(primary as never, secondary as never);
+    const r = await p.complete(req as never);
+    expect(r.stubbed).toBe(true); // ход всё равно провален — петля обязана это видеть
+    expect(r.text).toMatch(/setup-token/); // владельцу сказано, ЧТО сделать
+    expect(r.text).not.toMatch(/Связь с сервером прервалась/); // бесполезная общая фраза ушла
+  });
+
+  it("исчерпанные кредиты и лимит — своя формулировка (лечение другое)", async () => {
+    _resetSubscriptionFailureForTest();
+    _setSubscriptionFailureForTest("You're out of usage credits");
+    const primary = { live: true, complete: async () => ({ text: "Связь с сервером прервалась, сэр.", toolUses: [], stopReason: "stub" as const, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, stubbed: true }), completeStream: async () => { throw new Error("не нужен"); } };
+    const secondary = { live: true, complete: async () => { throw new Error("подписка: лимит исчерпан"); }, completeStream: async () => { throw new Error("подписка: лимит исчерпан"); } };
+    const r = await new FallbackLlmProvider(primary as never, secondary as never).complete(req as never);
+    expect(r.text).toMatch(/исчерпан/);
+  });
+
+  it("причина неизвестна → прежняя общая фраза (не выдумываем диагноз)", async () => {
+    _resetSubscriptionFailureForTest();
+    const primary = { live: true, complete: async () => ({ text: "Связь с сервером прервалась, сэр.", toolUses: [], stopReason: "stub" as const, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 }, stubbed: true }), completeStream: async () => { throw new Error("не нужен"); } };
+    const secondary = { live: true, complete: async () => { throw new Error("что-то пошло не так"); }, completeStream: async () => { throw new Error("что-то пошло не так"); } };
+    const r = await new FallbackLlmProvider(primary as never, secondary as never).complete(req as never);
+    expect(r.text).toMatch(/Связь с сервером прервалась/);
   });
 });

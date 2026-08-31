@@ -111,6 +111,11 @@ export function _resetSubscriptionFailureForTest(): void {
   lastFailure = undefined;
 }
 
+/** Только для тестов: подставить причину отказа (в бою её ставит сам провайдер по ответу SDK). */
+export function _setSubscriptionFailureForTest(text: string): void {
+  lastFailure = classifySubscriptionError(text);
+}
+
 /** Резерв включён? (env JARVIS_SUBSCRIPTION_FALLBACK=0 выключает даже при наличии токена.) */
 export function subscriptionFallbackEnabled(): boolean {
   return process.env.JARVIS_SUBSCRIPTION_FALLBACK !== "0";

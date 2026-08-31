@@ -20,6 +20,7 @@
  */
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
+import { lastSubscriptionFailure } from "./subscription-llm.js";
 
 const log: Logger = createLogger("llm:fallback");
 
@@ -166,9 +167,30 @@ export class FallbackLlmProvider implements ILlmProvider {
       // Резерв тоже не смог (протухший токен, лимит подписки, сбой CLI) — отдаём стаб основного:
       // петля обязана увидеть провал хода, а не «пустой успех».
       log.error("резервный канал (подписка) не сработал — стаб", { error: e instanceof Error ? e.message : String(e) });
-      return fallbackStub();
+      return withKnownReason(await fallbackStub());
     }
   }
+}
+
+/**
+ * 🔴 Если ОБА канала легли, а причина известна — владелец должен услышать ЕЁ (2026-09-01, живая
+ * проверка: кредиты API исчерпаны + OAuth-сессия подписки протухла). Прежде он слышал «связь
+ * прервалась» и повторял фразу снова и снова, не догадываясь, что нужно переавторизоваться:
+ * система ЗНАЛА причину и молчала — та же нечестность, что «Готово» без результата.
+ * Стаб остаётся стабом (`stubbed:true`, ход провален) — меняется только текст.
+ */
+function withKnownReason(stub: LlmResponse): LlmResponse {
+  const failure = lastSubscriptionFailure();
+  if (!failure || !stub.stubbed) return stub;
+  const what =
+    failure.kind === "auth"
+      ? "Сэр, я не могу связаться с моделью: доступ по подписке разлогинился. Нужно выполнить claude setup-token и обновить токен в настройках."
+      : failure.kind === "credits"
+        ? "Сэр, я не могу связаться с моделью: и оплаченный ключ, и лимит подписки исчерпаны. Пока их не пополнить, отвечать я не смогу."
+        : failure.kind === "rate_limit"
+          ? "Сэр, модель ограничивает частоту запросов — основной канал тоже недоступен. Попробуем через несколько минут."
+          : `Сэр, связи с моделью нет: ${failure.human}`;
+  return { ...stub, text: what };
 }
 
 /** Стаб основного провайдера (когда его даже не звали — нет ключа). */
