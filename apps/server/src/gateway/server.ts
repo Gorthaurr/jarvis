@@ -38,6 +38,8 @@ import { McpManager } from "../brain/mcp/manager.js";
 import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
 import { AnthropicLlmProvider } from "../integrations/anthropic.js";
+import { FallbackLlmProvider } from "../integrations/fallback-llm.js";
+import { SubscriptionLlmProvider } from "../integrations/subscription-llm.js";
 import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "../brain/profile.js";
 import { verbalize } from "../brain/verbalize/index.js";
 import { claimConsolidationRun, consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
@@ -174,11 +176,19 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // §7: мозг — ТОЛЬКО облачный Opus (Anthropic). Концепция: ничего локального (тонкий
   // клиент, должен идти и на телефоне). Никаких резервных/локальных моделей. Сбой Opus →
   // честный стаб «Связь прервалась, сэр».
-  const anthropicLlm = new AnthropicLlmProvider({
+  const apiLlm = new AnthropicLlmProvider({
     apiKey: config.anthropicApiKey,
     cacheTtl: config.anthropicCacheTtl,
     baseUrl: config.anthropicBaseUrl,
   });
+  // ВОЛНА G: РЕЗЕРВ НА ПОДПИСКЕ. Кончился кредит API / лимит / сеть → ход уходит в Claude Max через
+  // Agent SDK вместо стаба «связь прервалась» (см. integrations/subscription-llm.ts — там же честно
+  // расписано, чем резерв ХУЖЕ основного канала: нет наших кеш-брейкпоинтов, история идёт текстом).
+  // Резерв активируется САМ и только при реальном отказе основного; выключатель JARVIS_SUBSCRIPTION_FALLBACK=0.
+  const subscriptionLlm = new SubscriptionLlmProvider();
+  const anthropicLlm = new FallbackLlmProvider(apiLlm, subscriptionLlm);
+  if (subscriptionLlm.live) log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)");
+  else log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
   // Реестр самописных инструментов (§8+): имена встроенных — зарезервированы.
   // Рехидратация с диска — в listen() ДО приёма соединений (чтобы ранние сессии видели
   // выученные инструменты), не fire-and-forget.
