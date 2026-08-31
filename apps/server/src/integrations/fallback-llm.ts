@@ -155,7 +155,10 @@ export class FallbackLlmProvider implements ILlmProvider {
     log.warn("переключаюсь на РЕЗЕРВНЫЙ канал — подписка", { reason });
     this.deps.onFallback?.({ reason });
     try {
-      const resp = onDelta ? await this.secondary.completeStream(req, onDelta) : await this.secondary.complete(req);
+      const raw = onDelta ? await this.secondary.completeStream(req, onDelta) : await this.secondary.complete(req);
+      // Канал проставляем ЗДЕСЬ, а не полагаемся на провайдера: по нему петля решает, начислять ли
+      // долларовую стоимость (подписка оплачена помесячно — см. LlmResponse.channel).
+      const resp: LlmResponse = { ...raw, channel: "subscription" };
       this.lastChannel = "subscription";
       log.info("ход выполнен по подписке", { tier: req.tier, toolUses: resp.toolUses.length, outputTokens: resp.usage.outputTokens });
       return resp;

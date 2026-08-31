@@ -376,12 +376,26 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       }
       if (type === "result") {
         const u = (msg.usage ?? {}) as Record<string, number>;
+        // 🔴 ЖИВОЙ БАГ (боевой прогон 2026-08-31): у SDK ИНАЯ семантика usage — `input_tokens` почти
+        // нулевой (видели 2), а `cache_*` кумулятивны по его внутренней сессии (68K+132K на 4-м
+        // раунде). Наш гард контекст-окна складывает input+cache_read+cache_creation как РАЗМЕР
+        // ПРОМПТА → 201K > HARD(185K) → задача обрывалась ложным «разрослась и не помещается» на
+        // четвёртом шаге. Поэтому размер промпта в резерве ОЦЕНИВАЕМ САМИ по тому, что реально
+        // отправили, а кеш-поля не выдаём за размер (в резерве нашего кеша нет вовсе — см. шапку).
+        const promptChars = String(options.systemPrompt ?? "").length + transcript.length;
         usage = {
-          inputTokens: Number(u.input_tokens ?? 0),
+          inputTokens: Math.ceil(promptChars / 2.5), // 2.5 симв/ток — кириллическая калибровка проекта
           outputTokens: Number(u.output_tokens ?? 0),
-          cacheReadTokens: Number(u.cache_read_input_tokens ?? 0),
-          cacheCreationTokens: Number(u.cache_creation_input_tokens ?? 0),
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
         };
+        if (u.cache_read_input_tokens || u.cache_creation_input_tokens) {
+          log.debug("резерв: кеш-числа SDK не используются как размер промпта", {
+            sdkCacheRead: u.cache_read_input_tokens,
+            sdkCacheCreation: u.cache_creation_input_tokens,
+            ourEstimate: usage.inputTokens,
+          });
+        }
         // 🔴 `error_max_turns` — НЕ ошибка в нашей схеме: мы СПЕЦИАЛЬНО ставим maxTurns:1, чтобы
         // цикл вёл наш agent-loop, и SDK помечает так штатный случай «модель запросила инструмент
         // и остановилась» (поймано живым зондом). Ошибкой считаем только то, где мы ничего не
@@ -405,6 +419,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       stopReason: toolUses.length > 0 ? "tool_use" : "end_turn",
       usage,
       stubbed: false,
+      channel: "subscription", // расход считается лимитами подписки, а не долларами API
     };
   }
 }

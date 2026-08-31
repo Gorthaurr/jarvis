@@ -18,6 +18,7 @@ import type { EpisodicMemory } from "../../memory/episodic.js";
 import { forgetUserMemory, writeUserMemory } from "../../memory/user-memory.js";
 import { knowledgeConsult, memorySearch, webFetch, webSearch } from "./handlers/info.js";
 import type { IWebProvider } from "../../integrations/web.js";
+import type { ContradictionDeps } from "../../memory/contradiction-hook.js";
 /** Инструменты, навигирующие браузер по URL → SSRF-гард обязателен (C5: web_* раньше его обходили). */
 const URL_NAV_TOOLS: ReadonlySet<string> = new Set([
   "web_open",
@@ -108,6 +109,8 @@ export interface ToolContext {
     summary: string,
     kind?: "send" | "order" | "irreversible",
   ) => Promise<ConfirmOutcome>;
+  /** Волна H: деп хука противоречий памяти (нет → memory_write пишет как раньше, без пометок). */
+  contradiction?: ContradictionDeps;
   /** Реестр самописных инструментов (§8+ саморасширение). */
   dynamicTools?: DynamicToolStore;
   /** §15 ленивая загрузка: набор подгруженных холодных инструментов (tool_load его мутирует). */
@@ -677,7 +680,11 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   if (!text) return err("memory_write: пустой content");
   // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
-  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, { source: "model" });
+  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, {
+    source: "model",
+    // Волна H: новый факт мог отменить старый — хук пометит устаревшее (fire-and-forget, ход не ждёт).
+    ...(ctx.contradiction ? { contradiction: ctx.contradiction } : {}),
+  });
   return ok(outcome === "duplicate" ? "Уже помню это, сэр." : "Запомнил.");
 }
 

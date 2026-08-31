@@ -37,6 +37,9 @@ describe("персистентность: схема §13 ↔ запросы к�
     // Реальные миграции — те же файлы, что лягут в нативный Postgres.
     await db.exec(await readMigration("0001_init.sql"));
     await db.exec(await readMigration("0002_seed_dev.sql"));
+    // Волна H: колонки supersede (invalid_at/superseded_by) — их фильтрует КАЖДЫЙ путь чтения памяти,
+    // поэтому без этой миграции интеграционный тест проверял бы схему, которой в бою уже нет.
+    await db.exec(await readMigration("0006_memory_supersede.sql"));
     // Внедряем PGlite как клиент для глобального query() (db/pool.ts).
     __setQueryClientForTests({
       query: (text, params) => db.query(text, params ? [...params] : undefined),

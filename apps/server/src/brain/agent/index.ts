@@ -49,7 +49,8 @@ import { polarityConflict } from "../../memory/intent-polarity.js";
 import type { WorkingMemory } from "../../memory/working.js";
 import type { SpendGuard } from "../../billing/index.js";
 import { type UserContextSlot, buildSystemPrompt } from "../persona/index.js";
-import { getProfile, setDisplayName, setEmotion, setMode } from "../profile.js";
+import { getProfile, readFactMeta, setDisplayName, setEmotion, setMode } from "../profile.js";
+import { withFactAges } from "../../memory/fact-age.js";
 import { getMode, matchModeCommand } from "../persona/modes.js";
 import { emotionName, emotionOverlay, matchEmotionCommand } from "../persona/emotion.js";
 import {
@@ -1338,6 +1339,12 @@ async function runAgentLoop(
   //    курируемых (не двоим то, что уже asserted). Профиль читаем ЖИВЬЁМ из кеша (факты этой сессии).
   const curatedFacts = getProfile(deps.userId).facts ?? [];
   const curatedSet = new Set(curatedFacts.map((f) => f.trim().toLowerCase()));
+  // Волна H (шаг 1): к КАЖДОМУ курируемому факту печатаем его возраст. Без этого два противоречащих
+  // факта («работает в Сбере» / «…в Яндексе» — косинус ниже дедуп-порога, поэтому оба в сторе)
+  // выглядели для модели равноправными, и она уверенно называла устаревшее в ДОВЕРЕННОМ блоке.
+  // Свежесть считает КОД (у модели это слабое место); карта провенанса — sidecar волны F.
+  const factMeta = await readFactMeta(deps.userId).catch(() => new Map<string, { source: string; ts?: number }>());
+  const datedFacts = withFactAges(curatedFacts, factMeta, Date.now());
   const recalledMemories = facts.filter((t) => !curatedSet.has(t.trim().toLowerCase()));
   // §econ (лог-анализ 2026-07-21): тривиальный smalltalk («привет») не требует полной 33К-персоны — на холодном
   // кеше (тир-свитч) это ~$0.2/ход, 11% трат. LEAN-ядро (~500 ток) за флагом; дефолт — полная персона (0 регресс).
@@ -1345,7 +1352,7 @@ async function runAgentLoop(
   const sys = buildSystemPrompt(
     {
       ...deps.userContext,
-      facts: curatedFacts,
+      facts: datedFacts,
       ...(recalledMemories.length ? { recalledMemories } : {}),
       personaTone,
       ...(recalled ? { learnedSkill: formatRecalledSkill(recalled) } : {}),
@@ -1409,6 +1416,9 @@ async function runAgentLoop(
     web: deps.web,
     episodic: deps.episodic,
     userId: deps.userId,
+    // ВОЛНА H (шаг 3): деп хука противоречий для `memory_write` — самого частого пути записи.
+    // Дешёвый тир и учёт трат: фоновая проверка не обходит месячный потолок.
+    contradiction: { llm: deps.llm, model: deps.models.sonnet, spend: deps.spend },
     // Подтверждение необратимого (§14): kind задаёт вид модалки (send|order|irreversible),
     // чтобы удаление/выключение/код не показывались как обычная «отправка».
     confirm: (summary: string, kind: "send" | "order" | "irreversible" = "send") =>
@@ -2364,7 +2374,12 @@ async function runAgentLoop(
     }
     warmth.touch(session.sessionId);
     deps.spend.recordStep(taskId);
-    deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(model, resp.usage));
+    // 🔴 Волна G/H (живой прогон): ход по ПОДПИСКЕ не тарифицируется по токенам — она оплачена
+    // помесячно. Считать его в долларовый расход API нельзя: фиктивные $0.8/ход съедали месячный
+    // потолок SpendGuard и заблокировали бы работу. Токены учитываем (это реальный расход лимита
+    // подписки и полезная телеметрия), деньги — нет.
+    const turnCostUsd = resp.channel === "subscription" ? 0 : costUsd(model, resp.usage);
+    deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, turnCostUsd);
     cacheReadTokens += resp.usage.cacheReadTokens;
     cacheCreationTokens += resp.usage.cacheCreationTokens;
     // Телеметрия: вход/выход за ход (cache_* копятся отдельно выше) + число вызовов инструментов.

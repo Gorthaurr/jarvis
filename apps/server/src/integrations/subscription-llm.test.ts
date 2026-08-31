@@ -86,7 +86,14 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(r.text).toBe("Блокнот открыт.");
     expect(r.stopReason).toBe("end_turn");
     expect(r.stubbed).toBe(false); // это НАСТОЯЩИЙ ход, а не заглушка
-    expect(r.usage).toEqual({ inputTokens: 100, outputTokens: 7, cacheReadTokens: 3, cacheCreationTokens: 0 });
+    // 🔴 Живой баг волны G: usage у SDK иной семантики (input≈2, cache_* кумулятивны по его сессии) —
+    // сложенные, они давали «размер промпта» 201K и рвали задачу ложным contextWrap на 4-м шаге.
+    // Поэтому размер промпта ОЦЕНИВАЕМ САМИ по отправленному, а кеш-числа SDK не выдаём за него.
+    expect(r.usage.outputTokens).toBe(7);
+    expect(r.usage.cacheReadTokens).toBe(0);
+    expect(r.usage.cacheCreationTokens).toBe(0);
+    expect(r.usage.inputTokens).toBeGreaterThan(0); // наша оценка по системному промпту + транскрипту
+    expect(r.channel).toBe("subscription"); // канал → петля не начислит долларовую стоимость
   });
 
   it("tool_use перехватывается и отдаётся НАМ (исполняет agent-loop, не SDK)", async () => {
