@@ -3200,6 +3200,9 @@ async function runAgentLoop(
     toolCalls: toolCallsTotal,
     usage: taskUsage,
     ok: taskOk,
+    // Канал модели не ответил → это НЕ провал работы Джарвиса, и в статистике слабостей он не должен
+    // выглядеть как «не справился» (разбор телеметрии 2026-08-31: 31 такой ход из 86 «провалов»).
+    ...(taskOk ? {} : { failKind: llmStubbed ? ("llm_unavailable" as const) : ("task" as const) }),
   });
   log.info("task-метрики", {
     tier: currentTier,

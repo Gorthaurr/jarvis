@@ -20,10 +20,10 @@ describe("weaknessesFromMetrics", () => {
   it("считает задачи и находит высокую долю провалов", () => {
     const events = [
       ...Array.from({ length: 6 }, () => ({ ok: true, rounds: 2 })),
-      ...Array.from({ length: 4 }, () => ({ ok: false, rounds: 3 })),
+      ...Array.from({ length: 4 }, () => ({ ok: false, rounds: 3, failKind: "task" })),
     ];
     const { tasks, weaknesses } = weaknessesFromMetrics(events);
-    expect(tasks).toEqual({ total: 10, failed: 4 });
+    expect(tasks).toEqual({ total: 10, failed: 4, llmUnavailable: 0 });
     expect(weaknesses.some((w) => w.kind === "task_failures")).toBe(true);
   });
 
@@ -93,5 +93,38 @@ describe("collectWeaknesses — «не знаю» ≠ «всё хорошо»", 
     expect(r.windowDays).toBe(1);
     expect(r.weaknesses[0]?.kind).toBe("degradation:context_masked"); // самая частая — первой
     expect(r.weaknesses.some((w) => w.kind.startsWith("error:"))).toBe(true);
+  });
+});
+
+// 🔴 Разбор боевой телеметрии 2026-08-31: 31 «провал» из 86 — ходы, не дошедшие до модели (кончился
+// ключ, протухла подписка). Считать их своей слабостью — наговор на собственную логику ровно того же
+// класса, что «не смог проверить» = «не получилось».
+describe("отказ канала модели ≠ провал работы", () => {
+  it("новые записи различаются по failKind", () => {
+    const events = [
+      ...Array.from({ length: 8 }, () => ({ ok: true, rounds: 1 })),
+      ...Array.from({ length: 3 }, () => ({ ok: false, rounds: 0, failKind: "llm_unavailable", usage: { outputTokens: 0 } })),
+      { ok: false, rounds: 4, failKind: "task" },
+    ];
+    const { tasks, weaknesses } = weaknessesFromMetrics(events);
+    expect(tasks.llmUnavailable).toBe(3);
+    expect(tasks.failed).toBe(1); // настоящая слабость только одна
+    const line = weaknesses.find((w) => w.kind === "llm_unavailable");
+    expect(line?.title).toMatch(/чинить надо доступ/); // владельцу сказано, что чинить
+  });
+
+  it("старые записи (без поля) опознаются по отпечатку: 0 раундов и 0 выходных токенов", () => {
+    const events = [
+      ...Array.from({ length: 8 }, () => ({ ok: true, rounds: 1 })),
+      ...Array.from({ length: 3 }, () => ({ ok: false, rounds: 0, usage: { outputTokens: 0 } })),
+    ];
+    expect(weaknessesFromMetrics(events).tasks.llmUnavailable).toBe(3);
+  });
+
+  it("провал ПОСЛЕ работы модели остаётся провалом работы (не списывается на канал)", () => {
+    const events = [{ ok: false, rounds: 0, usage: { outputTokens: 120 } }];
+    const { tasks } = weaknessesFromMetrics(events);
+    expect(tasks.failed).toBe(1);
+    expect(tasks.llmUnavailable).toBe(0);
   });
 });

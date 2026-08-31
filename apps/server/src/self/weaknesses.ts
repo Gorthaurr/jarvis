@@ -27,8 +27,12 @@ export interface Weakness {
 export interface WeaknessReport {
   /** Окно наблюдения в днях (сколько дневных логов удалось прочитать). */
   windowDays: number;
-  /** Всего задач в окне и сколько из них провалилось. */
-  tasks: { total: number; failed: number };
+  /**
+   * Всего задач в окне; `failed` — провалы РАБОТЫ, `llmUnavailable` — ходы, не дошедшие до модели
+   * (кончился ключ, протухла подписка). Смешивать их нельзя: во втором случае чинить надо доступ к
+   * модели, а не себя, и «каждая шестая задача провалена» было бы наговором на собственную логику.
+   */
+  tasks: { total: number; failed: number; llmUnavailable: number };
   weaknesses: Weakness[];
   /** Телеметрию прочитать не удалось (нет каталога/пустые файлы) — «не знаю», не «всё хорошо». */
   unavailable?: string;
@@ -64,10 +68,14 @@ function parseJsonl(lines: readonly string[]): Record<string, unknown>[] {
  * Свернуть метрики в слабости (ЧИСТАЯ функция — тестируется без диска).
  * `minCount` отсекает единичные случаи: слабость — то, что ПОВТОРЯЕТСЯ.
  */
-export function weaknessesFromMetrics(events: readonly Record<string, unknown>[], minCount = 2): { weaknesses: Weakness[]; tasks: { total: number; failed: number } } {
+export function weaknessesFromMetrics(
+  events: readonly Record<string, unknown>[],
+  minCount = 2,
+): { weaknesses: Weakness[]; tasks: { total: number; failed: number; llmUnavailable: number } } {
   const degradations = new Map<string, { count: number; samples: string[] }>();
   let total = 0;
   let failed = 0;
+  let llmUnavailable = 0;
   for (const e of events) {
     const type = String(e.type ?? "");
     if (type === "degradation") {
@@ -82,7 +90,14 @@ export function weaknessesFromMetrics(events: readonly Record<string, unknown>[]
     // Событие задачи пишется без поля type (historical): опознаём по обязательным полям.
     if (!type && typeof e.ok === "boolean" && typeof e.rounds === "number") {
       total += 1;
-      if (e.ok === false) failed += 1;
+      if (e.ok === false) {
+        // Ход не дошёл до модели — это отказ КАНАЛА, а не моя работа. Старые записи (до 2026-08-31)
+        // поля не имеют: там опознаём по отпечатку «0 раундов и 0 выходных токенов».
+        const usage = (e.usage ?? {}) as { outputTokens?: unknown };
+        const looksUnavailable = e.rounds === 0 && Number(usage.outputTokens ?? 0) === 0;
+        if (e.failKind === "llm_unavailable" || (e.failKind === undefined && looksUnavailable)) llmUnavailable += 1;
+        else failed += 1;
+      }
     }
   }
 
@@ -100,8 +115,17 @@ export function weaknessesFromMetrics(events: readonly Record<string, unknown>[]
       samples: [],
     });
   }
+  // Отдельная строка: не моя логика, но владельцу знать НУЖНО — без канала я не работаю вовсе.
+  if (total >= 5 && llmUnavailable / total >= 0.1) {
+    weaknesses.push({
+      kind: "llm_unavailable",
+      title: `Ходы, не дошедшие до модели (кончился ключ или подписка): ${llmUnavailable} из ${total} — чинить надо доступ, а не меня`,
+      count: llmUnavailable,
+      samples: [],
+    });
+  }
   weaknesses.sort((a, b) => b.count - a.count);
-  return { weaknesses, tasks: { total, failed } };
+  return { weaknesses, tasks: { total, failed, llmUnavailable } };
 }
 
 /** Понятная формулировка известных видов деградации (незнакомый вид — отдаём как есть, не выдумываем). */
@@ -163,7 +187,7 @@ export async function collectWeaknesses(logsDir: string, opts: { days?: number; 
   try {
     names = await readdir(logsDir);
   } catch {
-    return { windowDays: 0, tasks: { total: 0, failed: 0 }, weaknesses: [], unavailable: `каталог логов недоступен (${logsDir})` };
+    return { windowDays: 0, tasks: { total: 0, failed: 0, llmUnavailable: 0 }, weaknesses: [], unavailable: `каталог логов недоступен (${logsDir})` };
   }
 
   const metricEvents = parseJsonl(await tailLines(join(logsDir, "metrics.jsonl"), MAX_METRIC_LINES));
@@ -175,7 +199,7 @@ export async function collectWeaknesses(logsDir: string, opts: { days?: number; 
   }
 
   if (metricEvents.length === 0 && logEntries.length === 0) {
-    return { windowDays: dayFiles.length, tasks: { total: 0, failed: 0 }, weaknesses: [], unavailable: "телеметрия пуста — судить о слабостях не по чему" };
+    return { windowDays: dayFiles.length, tasks: { total: 0, failed: 0, llmUnavailable: 0 }, weaknesses: [], unavailable: "телеметрия пуста — судить о слабостях не по чему" };
   }
 
   const fromMetrics = weaknessesFromMetrics(metricEvents);

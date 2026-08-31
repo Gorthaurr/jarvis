@@ -132,6 +132,39 @@ export interface CodeHit {
   text: string;
 }
 
+/** Длиннее — не паттерн, а полотно: такие выражения и медленны, и бессмысленны для поиска по коду. */
+const MAX_PATTERN_CHARS = 200;
+/** Строку длиннее этого не матчим целиком: минифицированные и base64-строки — топливо для бэктрекинга. */
+const MAX_LINE_CHARS = 2000;
+/** Общий бюджет поиска: обход синхронно держит event loop, а на нём живёт голос владельца. */
+const SEARCH_BUDGET_MS = 5000;
+
+/**
+ * Признак КАТАСТРОФИЧЕСКОГО бэктрекинга: квантификатор, навешенный на группу, внутри которой тоже
+ * есть квантификатор («(a+)+», «(\s*\w*)*»). Эвристика намеренно грубая — она не обязана распознать
+ * все опасные выражения, её задача — не пустить самые дешёвые способы подвесить процесс.
+ */
+export function looksCatastrophic(pattern: string): boolean {
+  return /\([^)]*[+*}][^)]*\)\s*[+*]/.test(pattern) || /(\[[^\]]*\][+*]){2,}/.test(pattern);
+}
+
+/**
+ * Компиляция поискового выражения. 🔴 Паттерн приходит ОТ МОДЕЛИ (а через прочитанную страницу — и от
+ * атакующего), поэтому произвольная регулярка здесь — способ повесить весь сервер: обход синхронный,
+ * event loop один, на нём же голос и все сессии (ровно тот класс, что закрывали в web.ts).
+ * Опасное или слишком длинное выражение ищем КАК ТЕКСТ — поиск остаётся рабочим, но безопасным.
+ */
+export function compileSearch(pattern: string): RegExp {
+  const literal = (p: string): RegExp => new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  const raw = String(pattern ?? "");
+  if (raw.length > MAX_PATTERN_CHARS || looksCatastrophic(raw)) return literal(raw.slice(0, MAX_PATTERN_CHARS));
+  try {
+    return new RegExp(raw, "i");
+  } catch {
+    return literal(raw); // невалидная регулярка → ищем как текст
+  }
+}
+
 /**
  * Поиск по собственному коду (регулярка или подстрока). Своя реализация вместо внешнего grep:
  * инструмент должен работать одинаково на машине владельца и в тестах, без предположений о PATH.
@@ -143,20 +176,16 @@ export async function searchOwnCode(
   const root = selfRepoRoot();
   const start = opts.dir ? resolveOwnPath(opts.dir) : root;
   if (!start) throw new Error(`Каталог вне моего кода: ${opts.dir}`);
-  let re: RegExp;
-  try {
-    re = new RegExp(pattern, "i");
-  } catch {
-    re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"); // невалидная регулярка → ищем как текст
-  }
+  const re = compileSearch(pattern);
   const maxHits = Math.max(1, Math.min(Number(opts.maxHits) || 60, 300));
   const ext = opts.ext ?? CODE_EXT;
   const hits: CodeHit[] = [];
   let scannedFiles = 0;
   let capped = false;
+  const deadline = Date.now() + SEARCH_BUDGET_MS;
 
   const walk = async (dir: string): Promise<void> => {
-    if (hits.length >= maxHits || scannedFiles >= MAX_SCANNED_FILES) return;
+    if (hits.length >= maxHits || scannedFiles >= MAX_SCANNED_FILES || Date.now() > deadline) return;
     let entries: Dirent[] = [];
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -164,7 +193,7 @@ export async function searchOwnCode(
       return; // недоступный каталог не должен рушить весь поиск
     }
     for (const e of entries) {
-      if (hits.length >= maxHits || scannedFiles >= MAX_SCANNED_FILES) {
+      if (hits.length >= maxHits || scannedFiles >= MAX_SCANNED_FILES || Date.now() > deadline) {
         capped = true;
         return;
       }
@@ -194,7 +223,9 @@ export async function searchOwnCode(
       const rel = relative(root, abs).split(sep).join("/");
       const lines = text.split(/\r?\n/);
       for (let i = 0; i < lines.length; i += 1) {
-        const lineText = lines[i] ?? "";
+        // Длинную строку (минифицированный бандл, base64) матчим только по началу: полный прогон по
+        // ней — самый дешёвый способ уронить процесс в бэктрекинг.
+        const lineText = (lines[i] ?? "").slice(0, MAX_LINE_CHARS);
         if (!re.test(lineText)) continue;
         hits.push({ path: rel, line: i + 1, text: lineText.trim().slice(0, 300) });
         if (hits.length >= maxHits) {

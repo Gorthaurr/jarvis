@@ -20,7 +20,9 @@ import { err, gateDeclined, ok } from "../dispatch-util.js";
 export async function selfWeaknesses(_ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   const report = await collectWeaknesses(dataPath("logs"), { days: Number(input.days) || undefined, limit: Number(input.limit) || undefined });
   if (report.unavailable) return ok(`Судить о своих слабостях не по чему: ${report.unavailable}. Это «не знаю», а не «всё в порядке».`);
-  const head = `Окно: ${report.windowDays} дн. Задач: ${report.tasks.total}, из них провалено: ${report.tasks.failed}.`;
+  const head =
+    `Окно: ${report.windowDays} дн. Задач: ${report.tasks.total}, провалов в работе: ${report.tasks.failed}` +
+    (report.tasks.llmUnavailable > 0 ? `, плюс ${report.tasks.llmUnavailable} ходов вообще не дошли до модели (канал был недоступен).` : ".");
   if (report.weaknesses.length === 0) return ok(`${head} Повторяющихся отказов в телеметрии не нашёл (единичные случаи не считаю слабостью).`);
   const lines = report.weaknesses.map((w, i) => `${i + 1}. [${w.kind}] ${w.title}${w.samples.length ? ` — напр.: ${w.samples.join(" | ")}` : ""}`);
   return ok(`${head}\nПовторяющиеся слабости:\n${lines.join("\n")}`);

@@ -1,7 +1,7 @@
 // Самопознание: границы «своего кода» (волна I, 2026-08-31).
 import { describe, expect, it } from "vitest";
 import { join } from "node:path";
-import { isOwnCodePath, readOwnFile, resolveOwnPath, searchOwnCode, selfRepoRoot } from "./repo.js";
+import { compileSearch, isOwnCodePath, looksCatastrophic, readOwnFile, resolveOwnPath, searchOwnCode, selfRepoRoot } from "./repo.js";
 
 describe("selfRepoRoot — Джарвис знает, где он сам", () => {
   it("находит корень монорепозитория (там лежит pnpm-workspace.yaml)", async () => {
@@ -108,5 +108,32 @@ describe("обходы границ чтения", () => {
     } finally {
       rmSync(linkDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ─── ReDoS: паттерн приходит ОТ МОДЕЛИ (адверс-ревью волны I) ───
+describe("поиск по коду не вешает сервер вредной регуляркой", () => {
+  it("распознаёт вложенные квантификаторы", () => {
+    expect(looksCatastrophic("(a+)+$")).toBe(true);
+    expect(looksCatastrophic("(\s*\w*)*")).toBe(true);
+    expect(looksCatastrophic("probeTelegramDelivery")).toBe(false);
+    expect(looksCatastrophic("function\s+\w+")).toBe(false); // обычный рабочий паттерн живёт
+  });
+
+  it("опасное выражение ищется как ТЕКСТ (поиск работает, процесс жив)", () => {
+    const re = compileSearch("(a+)+$");
+    expect(re.test("(a+)+$")).toBe(true); // литеральное совпадение
+    expect(re.test("aaaaaaaaaaaaaaaaaaaaaaaaaaX")).toBe(false); // как регулярка НЕ применяется
+  });
+
+  it("катастрофический паттерн по реальному коду отрабатывает быстро", async () => {
+    const started = Date.now();
+    // Без фикса это экспоненциальный бэктрекинг на первой же длинной строке — сервер (и голос) встают.
+    await searchOwnCode("(x+x+)+y", { dir: "apps/server/src", maxHits: 5 });
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it("обычная регулярка по-прежнему работает как регулярка", () => {
+    expect(compileSearch(String.raw`export\s+function`).test("export function foo()")).toBe(true);
   });
 });
