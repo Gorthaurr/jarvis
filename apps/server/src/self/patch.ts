@@ -155,6 +155,16 @@ export function branchNameFor(title: string, today: string): string {
   return `self/${today}-${slug || "patch"}`;
 }
 
+/** Свободное имя ветки: к занятому добавляем номер (-2, -3…), пока не найдём незанятое. */
+async function freeBranchName(base: string): Promise<string> {
+  for (let i = 1; i <= 20; i += 1) {
+    const name = i === 1 ? base : `${base}-${i}`;
+    const exists = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]);
+    if (!exists.ok || !exists.out.trim()) return name;
+  }
+  return `${base}-${Math.floor(Date.now() / 1000)}`;
+}
+
 export interface RepoStatus {
   branch: string;
   dirty: boolean;
@@ -185,7 +195,9 @@ export async function beginSelfPatch(title: string, today: string): Promise<Patc
       message: `В рабочем дереве есть незакоммиченные изменения (${status.changedFiles.slice(0, 5).join(", ")}). Свою правку в них не подмешиваю — сохраните или откатите их.`,
     };
   }
-  const branch = branchNameFor(title, today);
+  // Ветка от прошлой правки на ту же тему могла остаться (abort её СОХРАНЯЕТ — работу не теряем),
+  // и повторный заход упирался бы в сырое «branch already exists». Подбираем свободное имя.
+  const branch = await freeBranchName(branchNameFor(title, today));
   const created = await git(["checkout", "-b", branch]);
   if (!created.ok) return { ok: false, message: `Не смог создать ветку ${branch}: ${created.out.slice(0, 300)}` };
   const state: SelfPatchState = { branch, baseBranch: status.branch, title: String(title ?? "").slice(0, 200), startedAt: new Date().toISOString(), stage: "open" };
