@@ -66,12 +66,23 @@ export function subscriptionFallbackEnabled(): boolean {
 }
 
 /**
- * Модель для SDK: наш model id («claude-sonnet-4-6») SDK принимает, но у подписки свой набор —
- * безопаснее передавать алиас по тиру (sonnet/opus), как это делает Claude Code.
+ * Модель резерва. Проверено живым зондом на подписке владельца: доступны `fable` (→ claude-fable-5),
+ * `opus` (→ claude-opus-5), а также полные id `claude-fable-5` / `claude-opus-5`.
+ *
+ * Решение владельца (2026-08-31): резерв работает на СИЛЬНОЙ модели — либо Fable 5, либо Opus 5 —
+ * и на МАКСИМАЛЬНОМ эффорте. Причина: резерв включается, когда API уже недоступен, то есть это
+ * последний шанс сделать ход правильно; экономить там нечего, а лимиты подписки уже оплачены.
+ * Дефолт — `fable` (сильнейшая); переопределяется `JARVIS_SUBSCRIPTION_MODEL`.
  */
-function modelAlias(req: LlmRequest): string {
-  if (req.tier === "fable") return "opus";
-  return req.model.includes("opus") ? "opus" : "sonnet";
+function subscriptionModel(): string {
+  const raw = process.env.JARVIS_SUBSCRIPTION_MODEL?.trim();
+  return raw || "fable";
+}
+
+/** Эффорт резерва (low|medium|high|xhigh|max). Дефолт — max по решению владельца. */
+function subscriptionEffort(): string {
+  const raw = process.env.JARVIS_SUBSCRIPTION_EFFORT?.trim().toLowerCase();
+  return raw && ["low", "medium", "high", "xhigh", "max"].includes(raw) ? raw : "max";
 }
 
 /**
@@ -81,10 +92,14 @@ function modelAlias(req: LlmRequest): string {
  * наоборот, шёл бы без размышления, где оно честностно важно («получилось или нет» решает
  * интерпретация наблюдения). До этого в SDK не передавалось НИЧЕГО и действовал его дефолт.
  */
-function thinkingOption(effort: LlmRequest["thinking"]): Record<string, unknown> | undefined {
-  if (!effort || effort === "off") return { type: "disabled" };
+function thinkingOption(effort: LlmRequest["thinking"]): Record<string, unknown> {
+  // На высоком эффорте размышление НЕ глушим, даже если пер-раундовая политика просила «off»:
+  // «max без размышления» — противоречие (эффорт и есть бюджет обдумывания), а резерв включается
+  // там, где ход уже последний шанс. На низких эффортах политика §2.7 уважается как есть.
+  const strong = subscriptionEffort() === "max" || subscriptionEffort() === "xhigh";
+  if (!effort || effort === "off") return strong ? { type: "adaptive" } : { type: "disabled" };
   if (effort === "adaptive") return { type: "adaptive" };
-  // Числовой бюджет: у подписки семейства моделей свежие (Opus/Sonnet 5+), где enabled+budget даёт
+  // Числовой бюджет: у подписки семейства моделей свежие (Opus/Fable 5), где enabled+budget даёт
   // 400 — как и в основном канале, честно уходим в adaptive, а не гадаем бюджетом вслепую.
   return { type: "adaptive" };
 }
@@ -269,7 +284,8 @@ export class SubscriptionLlmProvider implements ILlmProvider {
 
     const options: Record<string, unknown> = {
       systemPrompt: buildSystem(req),
-      model: modelAlias(req),
+      model: subscriptionModel(),
+      effort: subscriptionEffort(),
       // Свой цикл ведём МЫ: SDK должен вернуть первый ход (текст или запрос инструмента) и остановиться.
       maxTurns: 1,
       // Никаких встроенных инструментов Claude Code (Bash/Read/...): у Джарвиса свой арсенал и свои гейты.
@@ -327,12 +343,19 @@ export class SubscriptionLlmProvider implements ILlmProvider {
           cacheReadTokens: Number(u.cache_read_input_tokens ?? 0),
           cacheCreationTokens: Number(u.cache_creation_input_tokens ?? 0),
         };
-        if (msg.subtype && msg.subtype !== "success") errorText = String(msg.result ?? msg.subtype);
+        // 🔴 `error_max_turns` — НЕ ошибка в нашей схеме: мы СПЕЦИАЛЬНО ставим maxTurns:1, чтобы
+        // цикл вёл наш agent-loop, и SDK помечает так штатный случай «модель запросила инструмент
+        // и остановилась» (поймано живым зондом). Ошибкой считаем только то, где мы ничего не
+        // получили — иначе честный ход с инструментом превращался бы в стаб.
+        const failed = msg.subtype && msg.subtype !== "success" && msg.subtype !== "error_max_turns";
+        if (failed) errorText = String(msg.result ?? msg.subtype);
         if (!text && typeof msg.result === "string" && msg.subtype === "success") text = msg.result;
       }
     }
 
-    if (errorText) throw new Error(`подписка: ${errorText}`);
+    // Ошибку поднимаем, только если ход ничего не дал: пришедший текст/вызов инструмента — уже
+    // результат, и превращать его в стаб (потеря работы модели) было бы ложным провалом.
+    if (errorText && captured.length === 0 && !text && !streamed) throw new Error(`подписка: ${errorText}`);
     // Стрим уже отдал текст наружу — не дублируем его в ответе иным содержимым (инвариант
     // «сумма дельт === resp.text» из контракта ILlmProvider).
     const finalText = onDelta && streamed ? streamed : text;
@@ -375,7 +398,17 @@ function dedupeById(uses: ToolUse[]): ToolUse[] {
  * модели, что исполнение идёт на стороне Джарвиса.
  */
 function buildTools(sdk: SdkModule, schemas: readonly ToolSchema[], captured: ToolUse[]): unknown[] {
-  return schemas.map((s) =>
+  // Лимит Anthropic на имя инструмента — 64 символа, а в резерве к имени добавляется наш префикс
+  // `mcp__jarvis__` (13). Наши имена короткие, но инструменты ВНЕШНИХ MCP-серверов приходят уже с
+  // собственным префиксом (`mcp__github__…` — проверено живым зондом: срез префикса восстанавливает
+  // исходное имя корректно). Экзотически длинное имя молча ломало бы вызов — лучше честно не
+  // предлагать его в резерве и сказать об этом в логе.
+  const fits = schemas.filter((s) => {
+    if (MCP_PREFIX.length + s.name.length <= 64) return true;
+    log.warn("резерв: имя инструмента не влезает в лимит 64 с префиксом — в резерве недоступен", { tool: s.name });
+    return false;
+  });
+  return fits.map((s) =>
     sdk.tool(
       s.name,
       `${s.description}\n\nПАРАМЕТРЫ (JSON Schema) — передавай их объектом в поле args:\n${JSON.stringify(s.input_schema)}`,

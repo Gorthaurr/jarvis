@@ -170,15 +170,26 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   });
 
   // §7/§2.7: резерв обязан уважать нашу пер-раундовую политику размышления, а не дефолт SDK.
-  it("эффорт пробрасывается: off → disabled, adaptive → adaptive, число → adaptive", async () => {
+  it("на МАКС эффорте размышление не глушим даже при политике «off» (max без thinking — противоречие)", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
-    await p.complete({ ...BASE, thinking: "off" });
-    expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
+    await p.complete({ ...BASE, thinking: "off" }); // дефолтный эффорт = max
+    expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
     await p.complete({ ...BASE, thinking: "adaptive" });
     expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
     await p.complete({ ...BASE, thinking: 4096 }); // числовой бюджет 400-ит на свежих семействах
     expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
+  });
+
+  it("на невысоком эффорте пер-раундовая политика §2.7 уважается: off → disabled", async () => {
+    process.env.JARVIS_SUBSCRIPTION_EFFORT = "high";
+    try {
+      const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+      await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, thinking: "off" });
+      expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
+    } finally {
+      delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
+    }
   });
 
   it("потолок вывода уходит в env подпроцесса (per-call параметра у SDK нет)", async () => {
@@ -188,13 +199,70 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("1500");
   });
 
-  it("тир fable → opus, прочее → sonnet", async () => {
+  // Решение владельца: резерв — на СИЛЬНОЙ модели и МАКСИМАЛЬНОМ эффорте (последний шанс сделать
+  // ход правильно; лимиты подписки уже оплачены). Живым зондом подтверждено: fable/opus доступны.
+  it("по умолчанию модель fable и эффорт max — независимо от тира хода", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
-    await p.complete({ ...BASE, tier: "fable", model: "claude-opus-4-8" });
-    expect(sdk.lastOptions?.model).toBe("opus");
-    await p.complete(BASE);
-    expect(sdk.lastOptions?.model).toBe("sonnet");
+    await p.complete({ ...BASE, tier: "haiku" });
+    expect(sdk.lastOptions?.model).toBe("fable");
+    expect(sdk.lastOptions?.effort).toBe("max");
+  });
+
+  it("модель и эффорт переопределяются env", async () => {
+    process.env.JARVIS_SUBSCRIPTION_MODEL = "claude-opus-5";
+    process.env.JARVIS_SUBSCRIPTION_EFFORT = "high";
+    try {
+      const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+      await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+      expect(sdk.lastOptions?.model).toBe("claude-opus-5");
+      expect(sdk.lastOptions?.effort).toBe("high");
+    } finally {
+      delete process.env.JARVIS_SUBSCRIPTION_MODEL;
+      delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
+    }
+  });
+
+  it("мусорный эффорт из env → безопасный max, а не передача мусора в SDK", async () => {
+    process.env.JARVIS_SUBSCRIPTION_EFFORT = "ультра";
+    try {
+      const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+      await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+      expect(sdk.lastOptions?.effort).toBe("max");
+    } finally {
+      delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
+    }
+  });
+
+  // 🔴 Живой зонд: при maxTurns:1 SDK помечает штатное «модель запросила инструмент» как
+  // error_max_turns — считать это ошибкой значило бы превращать честный ход в стаб.
+  it("error_max_turns с пойманным вызовом инструмента — НЕ ошибка", async () => {
+    const sdk = fakeSdk([
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "mcp__jarvis__app_launch", input: { args: { app: "x" } } }] } },
+      { type: "result", subtype: "error_max_turns", result: "Reached maximum number of turns (1)" },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.toolUses[0]?.name).toBe("app_launch");
+  });
+
+  it("настоящая ошибка БЕЗ результата — по-прежнему исключение (стаб, а не пустой успех)", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "OAuth session expired" }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/OAuth/);
+  });
+
+  it("слишком длинное имя инструмента не отдаётся в резерв (лимит 64 с префиксом)", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    const longName = `mcp__server__${"x".repeat(60)}`;
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({
+      ...BASE,
+      tools: [
+        { name: "app_launch", description: "d", input_schema: { type: "object", properties: {} } },
+        { name: longName, description: "d", input_schema: { type: "object", properties: {} } },
+      ],
+    });
+    const server = (sdk.lastOptions?.mcpServers as { jarvis?: { tools?: unknown[] } })?.jarvis;
+    expect(server?.tools).toHaveLength(1); // длинный отфильтрован, короткий остался
   });
 });
 
