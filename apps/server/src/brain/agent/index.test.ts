@@ -1156,11 +1156,17 @@ describe("agent-loop (§7, §8)", () => {
   });
 
   it("§6/§20: waitWhilePaused выходит сразу при отмене на паузе", async () => {
+    // Прежнее утверждение было вырожденным (`expect(true).toBe(true)`): тест проходил и в случае,
+    // когда ожидание паузы не работало вовсе. Проверяем ДВА факта: до отмены висим, после — выходим.
     const task = { state: "paused", cancel: { cancelled: false } } as Task;
-    const p = waitWhilePaused(task);
+    let done = false;
+    const p = waitWhilePaused(task).then(() => { done = true; });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(done).toBe(false); // на паузе действительно ждём, а не проскакиваем
     task.cancel.cancelled = true; // отмена во время паузы
-    await p; // не должно зависнуть
-    expect(true).toBe(true);
+    await p;
+    expect(done).toBe(true); // и выходим по отмене, а не висим до resume
+    expect(task.state).toBe("paused"); // выход именно по отмене — состояние не трогали
   });
 
   it("Б4 (г): waitForChannel возвращает true, когда канал восстановился", async () => {
