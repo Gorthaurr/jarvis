@@ -126,12 +126,18 @@ describe("поиск по коду не вешает сервер вредной
     expect(re.test("aaaaaaaaaaaaaaaaaaaaaaaaaaX")).toBe(false); // как регулярка НЕ применяется
   });
 
+  /**
+   * 🔴 Аудит тестов 2026-09-01: порог ассерта (5000 мс) СОВПАДАЛ с таймаутом vitest, поэтому тест
+   * не мог осмысленно провалиться — под нагрузкой он вываливался по таймауту, а не показывал
+   * замедление. Разводим: бюджет поиска в коде 5 с, ассерт с запасом, таймаут теста заведомо больше.
+   */
   it("катастрофический паттерн по реальному коду отрабатывает быстро", async () => {
     const started = Date.now();
     // Без фикса это экспоненциальный бэктрекинг на первой же длинной строке — сервер (и голос) встают.
     await searchOwnCode("(x+x+)+y", { dir: "apps/server/src", maxHits: 5 });
-    expect(Date.now() - started).toBeLessThan(5000);
-  });
+    const spent = Date.now() - started;
+    expect(spent).toBeLessThan(8000); // сам поиск ограничен бюджетом SEARCH_BUDGET_MS = 5 с
+  }, 30_000);
 
   it("обычная регулярка по-прежнему работает как регулярка", () => {
     expect(compileSearch(String.raw`export\s+function`).test("export function foo()")).toBe(true);
