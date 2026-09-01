@@ -1377,19 +1377,36 @@ async function runAgentLoop(
   const activation = deps.toolActivation; // Set<string> | undefined (имена подгруженных холодных)
   const isHot = (t: ToolSchema): boolean => !EXCLUDED_TOOLS.has(t.name) && (!COLD_TOOL_NAMES.has(t.name) || Boolean(activation?.has(t.name)));
   const mcpTools = deps.mcp?.asToolSchemas() ?? []; // § MCP-инструменты (все холодные)
-  const tools = [
-    ...TOOL_SCHEMAS.filter(isHot),
-    ...(deps.dynamicTools?.asToolSchemas(deps.userId) ?? []),
-    ...mcpTools.filter((t) => activation?.has(t.name)), // активированные через tool_load MCP → в набор
-  ];
-  // Каталог холодных (не подгруженных) — компактные однострочники, кешируемый блок (см. buildSystemBlocks).
-  const coldCatalog = [
-    ...TOOL_SCHEMAS.filter((t) => COLD_TOOL_NAMES.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && !activation?.has(t.name)).map(toolCatalogLine),
-    ...mcpTools.filter((t) => !activation?.has(t.name)).map((t) => `- ${t.name}: ${String(t.description || "").slice(0, 100)}`),
-  ];
-  const systemTools = coldCatalog.length
-    ? `# Инструменты по запросу\nЕсть и другие инструменты (в т.ч. внешние MCP) — их полные описания не загружены. Нужен один — вызови tool_load{names:[...]} и используй со следующего хода:\n${coldCatalog.join("\n")}`
-    : undefined;
+  /**
+   * Набор инструментов и каталог холодных ПЕРЕСОБИРАЮТСЯ по ходу задачи.
+   *
+   * 🔴 Живой эпизод 2026-09-01: набор считался ОДИН раз перед циклом, поэтому подгруженный
+   * `tool_load`-ом инструмент в ЭТОЙ петле так и не появлялся. Модель звала `tool_load` снова и
+   * снова (три раза подряд, пока не сработал анти-runaway) и честно доложила владельцу «инструмент
+   * так и не поднялся». На основном канале дефект маскировал фолбэк dispatch (исполняет по имени и
+   * без схемы), но в резерве на подписке инструменты — это MCP-инструменты SDK: чего нет в наборе,
+   * того не вызвать. Дозапись схем в ХВОСТ `tools` — разовая перезапись префикса кеша, ровно как
+   * rolling-брейкпоинт (§15), и она дешевле лишнего круга «подгрузил → не увидел → подгрузил снова».
+   */
+  const buildToolSet = (): { tools: ToolSchema[]; systemTools: string | undefined } => {
+    const list = [
+      ...TOOL_SCHEMAS.filter(isHot),
+      ...(deps.dynamicTools?.asToolSchemas(deps.userId) ?? []),
+      ...mcpTools.filter((t) => activation?.has(t.name)), // активированные через tool_load MCP → в набор
+    ];
+    // Каталог холодных (не подгруженных) — компактные однострочники, кешируемый блок (buildSystemBlocks).
+    const coldCatalog = [
+      ...TOOL_SCHEMAS.filter((t) => COLD_TOOL_NAMES.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && !activation?.has(t.name)).map(toolCatalogLine),
+      ...mcpTools.filter((t) => !activation?.has(t.name)).map((t) => `- ${t.name}: ${String(t.description || "").slice(0, 100)}`),
+    ];
+    return {
+      tools: list,
+      systemTools: coldCatalog.length
+        ? `# Инструменты по запросу\nЕсть и другие инструменты (в т.ч. внешние MCP) — их полные описания не загружены. Нужен один — вызови tool_load{names:[...]}, и он станет доступен со СЛЕДУЮЩЕГО ШАГА этой же задачи:\n${coldCatalog.join("\n")}`
+        : undefined,
+    };
+  };
+  let { tools, systemTools } = buildToolSet();
 
   // Контекст диалога из рабочей памяти (§8). §20: «обособленная» новая задача (freshContext) НЕ
   // наследует ВЕСЬ контекст текущей, но и НЕ начинается слепой — иначе вопрос-продолжение («ты
@@ -2730,6 +2747,13 @@ async function runAgentLoop(
       // сверка состоялась в том же раунде: verify-долг не взводится/снимается БЕЗ отдельного раунда.
       // Строгость verify-LAW не ослаблена — наблюдение реальное, а не доверие к «ok» действия.
       if (!r.isError) {
+        // §15: подгрузили холодный инструмент — он обязан появиться в наборе СЛЕДУЮЩЕГО шага ЭТОЙ же
+        // задачи, иначе модель зовёт tool_load по кругу (живой эпизод 2026-09-01: три вызова подряд и
+        // честное «инструмент так и не поднялся»). На основном канале дефект маскировал фолбэк
+        // dispatch — он исполняет по имени и без схемы; в резерве на подписке набор инструментов
+        // единственный источник доступного, поэтому там подгрузка не работала совсем.
+        // ⚠️ Стоит в ОБЩЕМ пути результата: tool_load нейтрален (в mutate-ветке он не бывает).
+        if (tu.name === "tool_load") ({ tools, systemTools } = buildToolSet());
         // MCP-контракт (аудит 2026-07-28): декларация владельца в mcp.json главнее эвристики по имени —
         // «think»≠mutate (не слепит masked-failure), мутирующий get_* не проскочит neutral'ом.
         const eff = (tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolEffect(tu.name);
