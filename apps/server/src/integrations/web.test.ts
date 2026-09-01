@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { extractReadable, parseBraveResults, parseDuckDuckGoLite, stripHtml } from "./web.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebProvider, extractReadable, parseBraveResults, parseDuckDuckGoLite, stripHtml } from "./web.js";
 
 describe("parseDuckDuckGoLite (§12 keyless-фолбэк)", () => {
   const html = `
@@ -283,5 +283,61 @@ describe("extractReadable / stripHtml (§12)", () => {
     const page = extractReadable(html);
     expect(page.text).toContain("Реальный контент без семантической разметки");
     expect(page.text).toContain("крошка");
+  });
+});
+
+// Волна E (redirect-SSRF): цепочка ходится ВРУЧНУЮ, каждый hop через isFetchUrlAllowed ДО запроса —
+// раньше redirect:"follow" успевал отправить GET во внутреннюю сеть до пост-проверки resp.url.
+describe("WebProvider.fetch — redirect-цепочка (SSRF до запроса)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const provider = () => new WebProvider(undefined);
+
+  it("302 на приватный адрес: запрос в него НЕ уходит (отказ ДО второго fetch)", async () => {
+    const mock = vi.fn().mockResolvedValueOnce(Response.redirect("http://169.254.169.254/latest/meta-data", 302));
+    vi.stubGlobal("fetch", mock);
+    expect(await provider().fetch("https://short.example/x")).toBeNull();
+    expect(mock).toHaveBeenCalledTimes(1); // ко второму (внутреннему) адресу так и не сходили
+  });
+
+  it("шортенер → публичный адрес: цепочка проходит, читается ФИНАЛЬНАЯ страница", async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.redirect("https://example.com/article", 301))
+      .mockResolvedValueOnce(new Response("<html><body>Развёрнутый контент статьи после шортенера</body></html>", { status: 200 }));
+    vi.stubGlobal("fetch", mock);
+    const page = await provider().fetch("https://short.example/y");
+    expect(page?.text).toContain("Развёрнутый контент");
+    expect(mock).toHaveBeenCalledTimes(2);
+    expect(mock.mock.calls[1]![0]).toBe("https://example.com/article");
+  });
+
+  it("относительный Location резолвится от ТЕКУЩЕГО hop", async () => {
+    const mock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "/next-page" } }))
+      .mockResolvedValueOnce(new Response("<html><body>ок</body></html>", { status: 200 }));
+    vi.stubGlobal("fetch", mock);
+    await provider().fetch("https://a.example/start");
+    expect(mock.mock.calls[1]![0]).toBe("https://a.example/next-page");
+  });
+
+  it("кап hop'ов: бесконечная цепочка публичных редиректов → честный null, не вечный цикл", async () => {
+    let n = 0;
+    const mock = vi.fn().mockImplementation(() => Promise.resolve(Response.redirect(`https://pub.example/${++n}`, 302)));
+    vi.stubGlobal("fetch", mock);
+    expect(await provider().fetch("https://pub.example/0")).toBeNull();
+    expect(mock.mock.calls.length).toBeLessThanOrEqual(6); // MAX_REDIRECT_HOPS+1
+  });
+
+  it("3xx без Location — мусор, честный null", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(null, { status: 302 })));
+    expect(await provider().fetch("https://a.example/z")).toBeNull();
+  });
+
+  it("Location с не-http схемой (data:/file:) — отказ до запроса", async () => {
+    const mock = vi.fn().mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: "file:///C:/Windows/win.ini" } }));
+    vi.stubGlobal("fetch", mock);
+    expect(await provider().fetch("https://a.example/f")).toBeNull();
+    expect(mock).toHaveBeenCalledTimes(1);
   });
 });

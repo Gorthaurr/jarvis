@@ -18,11 +18,12 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { dataDir } from "../paths.js";
+import { lazyDataPath } from "../paths.js";
 import { type Logger, createLogger, foldName } from "@jarvis/shared";
 
 const log: Logger = createLogger("resolution-memory");
-const DEFAULT_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
+// ЛЕНИВО (волна E): дефолт вычисляется В МОМЕНТ ВЫЗОВА, не на импорте (см. paths.lazyDataPath).
+const defaultDir = lazyDataPath();
 const FILE_NAME = "resolutions.json";
 const TTL_MS = 180 * 24 * 60 * 60 * 1000; // резолв контакта живёт долго; полгода без обращения → выметаем
 const MAX_ENTRIES = 1000;
@@ -203,13 +204,14 @@ export function flushResolutionStores(): void {
 }
 
 /** Загрузить память резолвов с диска + навесить дебаунс-сохранение. */
-export function loadResolutionMemory(now: () => number = () => Date.now(), dir: string = DEFAULT_DIR): ResolutionMemory {
+export function loadResolutionMemory(now: () => number = () => Date.now(), dir?: string): ResolutionMemory {
+  const root = dir ?? defaultDir(); // дефолт — В МОМЕНТ ВЫЗОВА (волна E)
   const mem = new ResolutionMemory(now);
-  const entries = readPersisted(dir, now());
+  const entries = readPersisted(root, now());
   if (entries) {
     mem.restore(entries, now());
     log.info("память резолвов восстановлена с диска", { entries: mem.size });
   }
-  mem.setOnChange(() => scheduleSave(dir, mem));
+  mem.setOnChange(() => scheduleSave(root, mem));
   return mem;
 }

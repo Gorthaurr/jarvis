@@ -75,7 +75,7 @@ describe("skill_list / skill_execute (§8 — выученные показом 
   });
 
   it("guard-навык: подтверждение получено → запускается", async () => {
-    const confirm = vi.fn(async () => ({ approved: true }));
+    const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
     const { ctx, sendAction } = makeCtx({ confirm });
     const r = await dispatchTool("skill_execute", { skillId: "send_vk" }, ctx);
     expect(confirm).toHaveBeenCalled();
@@ -84,7 +84,7 @@ describe("skill_list / skill_execute (§8 — выученные показом 
   });
 
   it("guard-навык: пользователь отклонил → не запускается, нейтральный ответ", async () => {
-    const confirm = vi.fn(async () => ({ approved: false }));
+    const confirm = vi.fn(async () => ({ approved: false, outcome: "denied" as const }));
     const { ctx, sendAction } = makeCtx({ confirm });
     const r = await dispatchTool("skill_execute", { skillId: "send_vk" }, ctx);
     expect(r.isError).toBe(false); // отказ — не ошибка инструмента
@@ -124,5 +124,15 @@ describe("skill_save (§8 HERMES — самообучение навыком)", 
     const r = await dispatchTool("skill_save", { name: "X", when: "y", procedure: "z" }, ctx);
     expect(r.isError).toBe(true);
     expect(r.content).toContain("недоступно");
+  });
+
+  it("F2: провайдер вернул карантин → честная ошибка (не ложный «сохранён»), без data.id", async () => {
+    const save = vi.fn(async () => ({ quarantined: true as const, findings: [{ rule: "approval-bypass", excerpt: "…" }] }));
+    const { ctx } = makeCtx({ skills: { ...provider, save } });
+    const r = await dispatchTool("skill_save", { name: "X", when: "y", procedure: "z" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("карантин");
+    expect(r.content).toContain("approval-bypass"); // модель видит, ЧТО именно не так
+    expect(r.data).toBeUndefined(); // авто-реплей жестов к несохранённому навыку не привяжется
   });
 });

@@ -8,6 +8,8 @@
  *
  * Чистая оркестрация с инъекцией зависимостей — тестируется без сети/браузера.
  */
+import type { ConfirmOutcomeKind } from "@jarvis/protocol";
+import type { ConfirmOutcome } from "../tools/dispatch.js";
 import {
   type OrderPolicy,
   type OrderRequest,
@@ -16,7 +18,8 @@ import {
 } from "./order-guard.js";
 
 export interface OrderDeps {
-  requestConfirm: (summary: string) => Promise<{ approved: boolean }>;
+  /** Ф0 пульта: ConfirmOutcome, а не голый boolean (см. outbound.ts — тот же класс дефекта). */
+  requestConfirm: (summary: string) => Promise<ConfirmOutcome>;
   isAlreadyPlaced: (key: string) => boolean;
   markPlaced: (key: string) => void;
   /** Размещение заказа клиентской browser-автоматизацией (§6). */
@@ -30,6 +33,8 @@ export interface OrderResult {
   reason?: string;
   orderId?: string;
   key?: string;
+  /** Ф0 пульта: различимый исход §14-подтверждения (см. OutboundResult.confirmOutcome). */
+  confirmOutcome?: ConfirmOutcomeKind;
 }
 
 function orderKey(req: OrderRequest): string {
@@ -56,7 +61,7 @@ export async function placeOrder(
   if (decision.status === "needs_confirm") {
     const summary = `Заказ в «${req.vendor}» на ${req.total}: ${req.items.map((i) => i.name).join(", ")}. Оформляю?`;
     const res = await deps.requestConfirm(summary);
-    if (!res.approved) return { status: "denied", reason: "пользователь отклонил" };
+    if (!res.approved) return { status: "denied", reason: "пользователь отклонил", confirmOutcome: res.outcome };
   }
 
   // 2) Идемпотентность (§14): дубль при retry не оформляется.

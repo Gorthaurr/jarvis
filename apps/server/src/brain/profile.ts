@@ -14,10 +14,11 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
-import { dataDir } from "../paths.js";
+import { lazyDataPath } from "../paths.js";
 
 const log: Logger = createLogger("profile");
-const DATA_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
+// ЛЕНИВО (волна E): .env грузится ПОСЛЕ ESM-импортов — см. paths.lazyDataPath.
+const dataRoot = lazyDataPath();
 // Мирроринг seed-пользователя (infra/migrations/0002_seed_dev.sql / gateway/identity.ts DEV_USER):
 // его раздел остаётся в legacy-файле data/profile.json → апгрейд установки НЕ теряет имя/факты.
 const DEV_USER = "00000000-0000-0000-0000-000000000001";
@@ -41,15 +42,17 @@ export interface UserProfile {
   lastConsolidatedAt?: number;
   /** Когда последний раз звучал брифинг дня (волна D) — гейт «раз в календарный день». */
   lastBriefedAt?: number;
+  /** Когда Джарвис в последний раз докладывал о СВОИХ повторяющихся слабостях (волна I) — раз в N дней. */
+  lastSelfReviewedAt?: number;
 }
 
 const cache = new Map<string, UserProfile>();
 
 function fileFor(userId: string): string {
   // Континьюити: раздел dev-пользователя — в существующем data/profile.json (не трогаем).
-  if (userId === DEV_USER) return join(DATA_DIR, "profile.json");
+  if (userId === DEV_USER) return join(dataRoot(), "profile.json");
   const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
-  return join(DATA_DIR, "profile", `${safe}.json`);
+  return join(dataRoot(), "profile", `${safe}.json`);
 }
 
 /** Загрузить профиль пользователя с диска в кеш (на старте сессии). Безопасно при отсутствии файла. */
@@ -133,6 +136,12 @@ export async function setLastBriefed(userId: string): Promise<void> {
   await persist(userId);
 }
 
+/** Отметить состоявшийся доклад о собственных слабостях (волна I): двигаем ТОЛЬКО когда сказали вслух. */
+export async function setLastSelfReviewed(userId: string): Promise<void> {
+  entry(userId).lastSelfReviewedAt = Date.now();
+  await persist(userId);
+}
+
 /** Отметить прогон «сон-цикла» консолидации памяти (Б1, раз в день). */
 export async function setLastConsolidated(userId: string): Promise<void> {
   entry(userId).lastConsolidatedAt = Date.now();
@@ -154,7 +163,7 @@ function maxProfileFacts(): number {
 /** Путь append-only архива вытесненных фактов (рядом с партициями профиля). */
 function evictedArchiveFile(userId: string): string {
   const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
-  return join(DATA_DIR, "profile", `evicted-${safe}.jsonl`);
+  return join(dataRoot(), "profile", `evicted-${safe}.jsonl`);
 }
 
 /** Вытесненный факт — в durable-архив (fail-safe: сбой ФС не роняет addFact). */
@@ -168,14 +177,98 @@ async function archiveEvictedFact(userId: string, fact: string): Promise<void> {
   }
 }
 
+/**
+ * Вкладка «Память» (волна E): прочитать durable-архив вытесненных фактов — витрина честности
+ * «ничего не пропало молча». Только чтение; архив append-only и в промпт НЕ идёт (эти факты уже
+ * вытеснены капом), поэтому забывать оттуда нечего. Новые — первыми. Сбой ФС → пустой список
+ * (архива может не быть вовсе — это норма, а не ошибка).
+ */
+export async function readEvictedFacts(
+  userId: string,
+  limit = 50,
+  contains?: string,
+): Promise<{ items: Array<{ ts?: number; fact: string }>; total: number }> {
+  try {
+    const raw = await readFile(evictedArchiveFile(userId), "utf8");
+    // 🔴 Фильтр — ДО обрезки (адверс-ревью): раньше срезали 200 свежих и лишь потом искали подстроку,
+    // поэтому поиск по факту, вытесненному полгода назад, отвечал «Ничего не вытеснялось» при полном
+    // архиве — ложный отчёт о памяти ровно в той витрине, которая создана ради честности.
+    const needle = contains?.trim().toLowerCase();
+    const out: Array<{ ts?: number; fact: string }> = [];
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const rec = JSON.parse(s) as { ts?: string; fact?: string };
+        if (typeof rec.fact !== "string" || !rec.fact) continue;
+        if (needle && !rec.fact.toLowerCase().includes(needle)) continue;
+        const ms = rec.ts ? Date.parse(rec.ts) : Number.NaN;
+        out.push({ fact: rec.fact, ...(Number.isFinite(ms) ? { ts: ms } : {}) });
+      } catch {
+        /* битая строка архива — пропускаем, не роняем весь список */
+      }
+    }
+    // total — СКОЛЬКО ВСЕГО подошло: UI обязан показать «показаны последние N из M», иначе усечённое
+    // число подаётся владельцу как полное («вот всё, что вытеснено»).
+    return { items: out.reverse().slice(0, limit), total: out.length };
+  } catch {
+    return { items: [], total: 0 }; // архива нет (ничего не вытеснялось) — штатный случай
+  }
+}
+
+/**
+ * F3 (волна F): sidecar-провенанс фактов профиля. Сами facts остаются string[] (смена формата поехала бы
+ * по 4 потребителям: includes-дедуп, removeFactExact/Matching, id=текст в router-ws) — метаданные живут
+ * append-only рядом (паттерн evicted-архива). Пропавшая/битая мета = факт БЕЗ провенанса («неизвестно»),
+ * не ошибка. Последняя запись по факту выигрывает.
+ */
+function factMetaFile(userId: string): string {
+  const safe = userId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "default";
+  return join(dataRoot(), "profile", `fact-meta-${safe}.jsonl`);
+}
+
+async function appendFactMeta(userId: string, fact: string, source: string): Promise<void> {
+  try {
+    const file = factMetaFile(userId);
+    await mkdir(dirname(file), { recursive: true });
+    await appendFile(file, `${JSON.stringify({ ts: new Date().toISOString(), fact, source })}\n`, "utf8");
+  } catch (e) {
+    log.warn("профиль: не удалось записать провенанс факта", { userId, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** Прочитать провенанс фактов: Map<текст факта, {source, ts}>. Сбой/нет файла → пустая карта. */
+export async function readFactMeta(userId: string): Promise<Map<string, { source: string; ts?: number }>> {
+  const out = new Map<string, { source: string; ts?: number }>();
+  try {
+    const raw = await readFile(factMetaFile(userId), "utf8");
+    for (const line of raw.split("\n")) {
+      const s = line.trim();
+      if (!s) continue;
+      try {
+        const rec = JSON.parse(s) as { ts?: string; fact?: string; source?: string };
+        if (typeof rec.fact !== "string" || !rec.fact || typeof rec.source !== "string") continue;
+        const ms = rec.ts ? Date.parse(rec.ts) : Number.NaN;
+        out.set(rec.fact, { source: rec.source, ...(Number.isFinite(ms) ? { ts: ms } : {}) });
+      } catch {
+        /* битая строка — пропускаем */
+      }
+    }
+  } catch {
+    /* файла нет — штатно (легаси-факты без провенанса) */
+  }
+  return out;
+}
+
 /** Добавить факт о пользователе (без дублей; при переполнении старейший вытесняется В АРХИВ, не бесследно). */
-export async function addFact(userId: string, fact: string): Promise<void> {
+export async function addFact(userId: string, fact: string, source?: string): Promise<void> {
   const f = fact.trim();
   if (!f) return;
   const p = entry(userId);
   p.facts = p.facts ?? [];
   if (p.facts.includes(f)) return;
   p.facts.push(f);
+  if (source) await appendFactMeta(userId, f, source); // F3: провенанс — fail-safe sidecar
   const cap = maxProfileFacts();
   while (p.facts.length > cap) {
     const evicted = p.facts.shift(); // FIFO: старейшее уступает свежему
@@ -185,7 +278,7 @@ export async function addFact(userId: string, fact: string): Promise<void> {
     }
   }
   await persist(userId);
-  log.info("профиль: факт добавлен", { userId, count: p.facts.length, preview: f.slice(0, 60) });
+  log.info("профиль: факт добавлен", { userId, count: p.facts.length, source, preview: f.slice(0, 60) });
 }
 
 const foldFact = (s: string) => s.trim().toLowerCase().replace(/ё/g, "е");
@@ -210,6 +303,33 @@ const MAX_FORGET_FACTS = 5;
  * точного равенства) — «забудь Москву» больше не стирает и «работаю в Москве», и «живу в Москве».
  * Кап MAX_FORGET_FACTS. Best-effort по словам; семантику несёт episodic.markStale в forgetUserMemory.
  */
+/**
+ * 🔴 ТОЧЕЧНОЕ забывание ОДНОГО факта — для вкладки «Память» (владелец кликнул «Забыть» на конкретной
+ * строке). Отдельный примитив, НЕ `removeFactsMatching`: у того семантика ГОЛОСОВОГО забывания
+ * (needle ⊆ fact + кап 5), и для UI-клика она давала collateral — адверс-ревью воспроизвело живьём:
+ * факты «жена Оля», «жена Оля работает врачом», «жена Оля любит суши» → клик «Забыть» на первом
+ * стирал ВСЕ ТРИ; а при 6 однотемных фактах кап съедал 5 СОСЕДЕЙ, оставляя выбранный на месте
+ * (владелец видел «нажал забыть — не сработало», и минус пять чужих фактов).
+ *
+ * Здесь — только ТОЧНОЕ совпадение (после fold: регистр/ё/пробелы), ровно одна запись, и она уходит
+ * в durable-архив вытесненных: забывание из UI обратимо и видно во вкладке «Вытеснено» — как и
+ * обещает панель. Возвращает удалённый текст или null (строки уже нет — честно сообщаем).
+ */
+export async function removeFactExact(userId: string, fact: string): Promise<string | null> {
+  const p = entry(userId);
+  if (!p.facts || p.facts.length === 0) return null;
+  const target = foldFact(fact);
+  if (!target) return null;
+  const idx = p.facts.findIndex((f) => foldFact(f) === target);
+  if (idx < 0) return null;
+  const [removed] = p.facts.splice(idx, 1);
+  if (removed === undefined) return null;
+  await archiveEvictedFact(userId, removed); // обратимость: попадёт во вкладку «Вытеснено»
+  await persist(userId);
+  log.info("профиль: факт забыт владельцем из UI (точечно)", { userId, remaining: p.facts.length });
+  return removed;
+}
+
 export async function removeFactsMatching(userId: string, needles: readonly string[]): Promise<string[]> {
   const p = entry(userId);
   if (!p.facts || p.facts.length === 0) return [];

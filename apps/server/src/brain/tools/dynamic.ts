@@ -15,12 +15,12 @@ import type { CodeLang } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 import { lintCode } from "../code-guard.js";
-import { dataDir } from "../../paths.js";
+import { lazyDataPath } from "../../paths.js";
 
 const log: Logger = createLogger("dynamic-tools");
 
-const DATA_DIR = dataDir(); // §универсальность: JARVIS_DATA_DIR (инсталлер) → иначе cwd/data
-const STORE_PATH = join(DATA_DIR, "dynamic-tools.json");
+// ЛЕНИВО (волна E): .env грузится ПОСЛЕ ESM-импортов — см. paths.lazyDataPath.
+const storePath = lazyDataPath("dynamic-tools.json");
 // §6B/B3: старые записи без userId → раздел dev (континьюити существующего dynamic-tools.json).
 const DEV_USER = "00000000-0000-0000-0000-000000000001";
 
@@ -82,7 +82,7 @@ export class DynamicToolStore {
     opts: { now?: () => number; storePath?: string } = {},
   ) {
     this.now = opts.now ?? (() => Date.now());
-    this.storePath = opts.storePath ?? STORE_PATH;
+    this.storePath = opts.storePath ?? storePath();
   }
 
   private key(userId: string, name: string): string {

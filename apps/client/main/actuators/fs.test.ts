@@ -206,4 +206,43 @@ describe("fs — рекурсивный self-guard поддерева (§ ауд
     expect(res.deleted).toBe(true);
     await expect(readFile(join(dir, "a.txt"))).rejects.toBeTruthy();
   });
+
+  // Контроль-4 волны E (HIGH): 8.3-канонизация self-guard.lc() звалась НА КАЖДУЮ запись обхода —
+  // до 200 000 блокирующих realpath-сисколлов на одну операцию, морозя Electron main-процесс.
+  // Дискриминирующий тест: обход нескольких тысяч записей обязан оставаться быстрым (fast-путь БЕЗ
+  // сисколла); порог щедрый, чтобы не флапать на медленном CI, но старую (per-entry canon) реализацию
+  // на этом же объёме ловил бы на порядок — счёт шёл на секунды, не миллисекунды.
+  it("рекурсивный обход НЕ деградирует на тысячах записей (fast-путь без per-entry realpath)", async () => {
+    const dir = join(root, "guard-perf");
+    await makeDir(dir);
+    const N = 3000;
+    await Promise.all(Array.from({ length: N }, (_, i) => fsp.writeFile(join(dir, `f${i}.txt`), "x", "utf8")));
+    const t0 = Date.now();
+    const res = await deleteEntry(dir, true);
+    const ms = Date.now() - t0;
+    expect(res.deleted).toBe(true);
+    expect(ms).toBeLessThan(3000); // на fast-пути — десятки мс; per-entry realpath дал бы секунды
+  });
+
+  // Контроль-5 волны E (HIGH): у search() не было (и Fast-фикс контроль-4 не восполнил) верхнеуровневой
+  // канонизации root — junction/8.3-алиас, указывающий ПРЯМО на секретный каталог, обходил
+  // directory-based денилист (".ssh"/".aws"/".gnupg" не появлялись литерально в пути). Windows-junction
+  // (в отличие от symlink) не требует прав администратора — надёжный способ воспроизвести живьём.
+  const winIt = process.platform === "win32" ? it : it.skip;
+  winIt("search(): junction на секретный каталог НЕ обходит денилист (root канонизируется один раз)", async () => {
+    const base = join(root, "guard-search-junction");
+    const real = join(base, "real");
+    const sshDir = join(real, ".ssh"); // литеральный секретный каталог
+    await makeDir(sshDir);
+    await fsp.writeFile(join(sshDir, "known_hosts"), "секрет-хост", "utf8"); // basename НЕ в денилисте
+    const sneaky = join(base, "sneaky"); // имя алиаса НЕ содержит ".ssh" — вся защита на канонизации
+    await fsp.symlink(sshDir, sneaky, "junction");
+
+    const res = await search(sneaky, "known_hosts");
+    expect(res.matches).toHaveLength(0); // канонизация root вскрыла ".ssh" в пути → Fast-регекс сработал
+
+    // Контроль: та же папка БЕЗ алиаса (обычный вложенный путь) — секрет тоже не утекает, как и раньше.
+    const direct = await search(sshDir, "known_hosts");
+    expect(direct.matches).toHaveLength(0);
+  });
 });

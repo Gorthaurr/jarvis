@@ -268,6 +268,7 @@ function startTransport(): void {
   transport.on("transcript", (t) => win?.webContents.send(IPC.transcript, t));
   transport.on("chat", (m) => win?.webContents.send(IPC.chat, m)); // §22 чат-история
   transport.on("usage", (u) => win?.webContents.send(IPC.usage, u)); // §6B/B5 расход/лимиты → вкладка «Оплата»
+  transport.on("memory", (m) => win?.webContents.send(IPC.memory, m)); // волна E: снимок памяти → вкладка «Память»
   transport.on("nudge", (n) => win?.webContents.send(IPC.nudge, n));
   transport.on("confirmRequest", (r) => win?.webContents.send(IPC.confirmRequest, r));
   transport.on("display", (c) => win?.webContents.send(IPC.display, c));
@@ -490,6 +491,13 @@ function registerIpc(): void {
   ipcMain.on(IPC.voiceRemove, (_e, name: string) => transport?.sendVoiceRemove(name));
   // §6B/B5 вкладка «Оплата»: запрос свежего расхода/лимитов → серверу (ответ придёт usage.info).
   ipcMain.on(IPC.requestUsage, () => transport?.requestUsage());
+  // Волна E вкладка «Память»: снимок накопленного о владельце + точечное забывание (ответ — memory.state).
+  ipcMain.on(IPC.requestMemory, (_e, query?: string) => transport?.requestMemory(typeof query === "string" ? query : undefined));
+  ipcMain.on(IPC.forgetMemory, (_e, req: { layer: "fact" | "episode"; id: string; query?: string }) => {
+    if (req && (req.layer === "fact" || req.layer === "episode") && typeof req.id === "string") {
+      transport?.forgetMemory(req.layer, req.id, typeof req.query === "string" ? req.query : undefined);
+    }
+  });
 
   // §6 мультимонитор: настройка рабочего монитора Джарвиса — ЛОКАЛЬНО (main), без сервера.
   ipcMain.on(IPC.monitorList, () => win?.webContents.send(IPC.monitorInfo, monitors.monitorList()));

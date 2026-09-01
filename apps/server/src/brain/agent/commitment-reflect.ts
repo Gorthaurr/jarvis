@@ -20,6 +20,8 @@
  */
 import { type Logger, createLogger } from "@jarvis/shared";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
+import { autonomyFreeze } from "../../autonomy/freeze.js";
+import { autonomyThrottle } from "../../autonomy/throttle.js";
 import type { ILlmProvider } from "../../integrations/llm.js";
 import type { SpendGuard } from "../../billing/index.js";
 import { costUsd } from "../../obs/pricing.js";
@@ -100,7 +102,11 @@ export interface CommitmentReflectArgs {
  */
 export async function reflectCommitmentFromUtterance(args: CommitmentReflectArgs): Promise<void> {
   if (process.env.JARVIS_COMMITMENT_REFLECT === "0") return;
+  // Волна E: killswitch — ранним гейтом; throttle — ПОСЛЕ underDailyCap и ДО bumpDailyCap (контроль-
+  // ревью: фантомные штампы сверх суточного капа; и отказ предохранителя не жжёт суточный кап).
+  if (autonomyFreeze().isFrozen()) return;
   if (!underDailyCap(args.userId)) return;
+  if (!autonomyThrottle().tryAcquire("commitment-reflect")) return;
   bumpDailyCap(args.userId); // считаем ВЫЗОВ, не успех — кап ограничивает расход LLM
   const schema = TOOLS_BY_NAME.set_reminder;
   if (!schema) return;

@@ -14,7 +14,7 @@ import type {
   SpeakChunkPayload,
   SkillRecState,
 } from "../main/ipc-contract.js";
-import type { SkillSaved, VoiceEnrollProgress, VoiceEnrollDone, VoiceList, MonitorList, ChatMessage, UsageInfo } from "@jarvis/protocol";
+import type { SkillSaved, VoiceEnrollProgress, VoiceEnrollDone, VoiceList, MonitorList, ChatMessage, MemoryState, UsageInfo } from "@jarvis/protocol";
 
 /** Обёртка подписки: возвращает функцию-отписку, чистит листенер. */
 function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
@@ -48,6 +48,8 @@ const api: JarvisBridge = {
   getSettings: () => ipcRenderer.invoke(IPC.settingsGet),
   saveSettings: (patch) => ipcRenderer.invoke(IPC.settingsSave, patch),
   requestUsage: () => ipcRenderer.send(IPC.requestUsage),
+  requestMemory: (query) => ipcRenderer.send(IPC.requestMemory, query),
+  forgetMemory: (layer, id, query) => ipcRenderer.send(IPC.forgetMemory, { layer, id, query }),
 
   onState: (cb) => subscribe(IPC.state, cb),
   onTranscript: (cb) => subscribe(IPC.transcript, cb),
@@ -67,6 +69,7 @@ const api: JarvisBridge = {
   onVoiceList: (cb) => subscribe<VoiceList>(IPC.voiceVoices, cb),
   onMonitors: (cb) => subscribe<MonitorList>(IPC.monitorInfo, cb),
   onUsage: (cb) => subscribe<UsageInfo>(IPC.usage, cb),
+  onMemory: (cb) => subscribe<MemoryState>(IPC.memory, cb),
 };
 
 contextBridge.exposeInMainWorld("jarvis", api);

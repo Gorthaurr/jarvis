@@ -11,7 +11,7 @@ const TMP = vi.hoisted(() => {
 import { rmSync } from "node:fs";
 import { HashEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { InMemoryEpisodicMemory } from "./episodic.js";
-import { getProfile } from "../brain/profile.js";
+import { getProfile, readFactMeta } from "../brain/profile.js";
 import { forgetMinScore, forgetUserMemory, writeUserMemory } from "./user-memory.js";
 
 const U = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
@@ -89,5 +89,64 @@ describe("user-memory: write + forget (аудит контекста 2026-07-20)
     const r = await forgetUserMemory(noStale, U, "живёт в Москве");
     expect(r.forgotten).toBe(1); // факт профиля удалён, эпизодов не тронуто (нет markStale)
     expect(getProfile(U).facts ?? []).not.toContain("живёт в Москве");
+  });
+});
+
+describe("F3 (волна F, адаптация OpenClaw): провенанс памяти", () => {
+  it("writeUserMemory прокидывает source в эпизод И в sidecar-мету профиля", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await writeUserMemory(mem, U, "fact", "любит зелёный чай без сахара", { source: "consolidation" });
+    const [ep] = await mem.listRecent(U, 10, "зелёный чай");
+    expect(ep?.source).toBe("consolidation"); // владелец увидит «сон-цикл» у эпизода
+    // Мост в профиль — fire-and-forget (void addFact): мета дописывается чуть позже возврата.
+    await vi.waitFor(async () => {
+      const meta = await readFactMeta(U);
+      expect(meta.get("любит зелёный чай без сахара")?.source).toBe("consolidation");
+      expect(meta.get("любит зелёный чай без сахара")?.ts).toBeTypeOf("number");
+    });
+  });
+
+  it("без source — запись как раньше (легаси-совместимость, провенанс не выдумывается)", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await writeUserMemory(mem, U, "fact", "ходит в зал по средам");
+    const [ep] = await mem.listRecent(U, 10, "в зал");
+    expect(ep?.source).toBeUndefined();
+    expect((await readFactMeta(U)).get("ходит в зал по средам")).toBeUndefined();
+  });
+});
+
+describe("F3/H: supersede — устаревший факт не всплывает, но и не пропадает молча", () => {
+  it("помеченный заменённым исчезает из search/listRecent, но виден в listSuperseded", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    const U2 = "aaaaaaaa-0000-0000-0000-aaaaaaaaaaaa";
+    await writeUserMemory(mem, U2, "fact", "работает в Сбере");
+    const [old] = await mem.listRecent(U2, 10, "Сбере");
+    expect(old).toBeDefined();
+
+    expect(await mem.supersede(U2, old!.id)).toBe(true);
+    // Живые пути чтения его больше не отдают — в промпт устаревшее не попадёт.
+    expect((await mem.listRecent(U2, 10, "Сбере")).length).toBe(0);
+    expect((await mem.search(U2, "работает в Сбере", 5, 0)).length).toBe(0);
+    expect(await mem.hasEntries(U2)).toBe(false);
+    // Но владелец может увидеть, ЧТО именно заменено (иначе — молчаливое исчезновение).
+    const gone = await mem.listSuperseded(U2, 10);
+    expect(gone.map((g) => g.text)).toContain("работает в Сбере");
+    expect(gone[0]?.invalidAt).toBeTypeOf("number");
+  });
+
+  it("повторный supersede той же записи → false (идемпотентно, без двойного учёта)", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    const U3 = "bbbbbbbb-0000-0000-0000-bbbbbbbbbbbb";
+    await writeUserMemory(mem, U3, "fact", "живёт в Москве");
+    const [rec] = await mem.listRecent(U3, 10, "Москве");
+    expect(await mem.supersede(U3, rec!.id)).toBe(true);
+    expect(await mem.supersede(U3, rec!.id)).toBe(false);
+  });
+
+  it("чужую запись не помечаем", async () => {
+    const mem = new InMemoryEpisodicMemory(new HashEmbeddingProvider());
+    await writeUserMemory(mem, "cccccccc-0000-0000-0000-cccccccccccc", "fact", "мой факт");
+    const [rec] = await mem.listRecent("cccccccc-0000-0000-0000-cccccccccccc", 10);
+    expect(await mem.supersede("dddddddd-0000-0000-0000-dddddddddddd", rec!.id)).toBe(false);
   });
 });

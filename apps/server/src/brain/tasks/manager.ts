@@ -147,6 +147,19 @@ export class TaskManager {
    * что у петли агента), выставляет state "cancelled" и finishedAt. Идемпотентно:
    * false, если задачи нет или она уже терминальна.
    */
+  /**
+   * Волна H: запомнить СОВЕРШЁННОЕ необратимое действие задачи (подтверждённая отправка, заказ).
+   * Читается при самоотмене ложного запуска: остановить работу можно, вернуть отправленное — нет,
+   * и владельцу об этом говорится прямо. Дубли не копим (одно и то же действие — одна строка).
+   */
+  noteIrreversible(taskId: string, what: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task || !what.trim()) return;
+    task.irreversibleDone = task.irreversibleDone ?? [];
+    if (!task.irreversibleDone.includes(what)) task.irreversibleDone.push(what);
+    this.onChange?.();
+  }
+
   cancel(taskId: string): boolean {
     const task = this.tasks.get(taskId);
     if (!task || isTerminalState(task.state)) return false;

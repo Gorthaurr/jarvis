@@ -7,7 +7,8 @@
  * Чистая оркестрация с инъекцией зависимостей — тестируется без сети/LLM/БД.
  * Сам `send` выполняет клиентский userbot (§12), отправитель инъектируется.
  */
-import type { MessageChannel } from "@jarvis/protocol";
+import type { ConfirmOutcomeKind, MessageChannel } from "@jarvis/protocol";
+import type { ConfirmOutcome } from "../tools/dispatch.js";
 import { foldName } from "@jarvis/shared";
 import type { CadenceGuard } from "./cadence.js";
 import { normalizeSendBody } from "./resend-guard.js";
@@ -25,7 +26,13 @@ export interface OutboundParams {
 
 export interface OutboundDeps {
   /** Запрос подтверждения у пользователя (§14). revision → перегенерация. */
-  requestConfirm: (summary: string) => Promise<{ approved: boolean; revision?: string }>;
+  /**
+   * Ф0 пульта (адверс-ревью HIGH): ТИП СМЕНЁН на ConfirmOutcome осознанно. Раньше здесь было
+   * `{approved, revision?}`, и присваивание ConfirmOutcome проходило по ковариантности — `outcome`
+   * молча терялся, а любой не-approved печатался владельцу как «пользователь отклонил», даже когда
+   * владелец вопроса не видел (мёртвый сокет) или не успел ответить.
+   */
+  requestConfirm: (summary: string) => Promise<ConfirmOutcome>;
   /** Перегенерация текста по правке (§14 revise-петля). */
   regenerate: (revision: string, prevBody: string) => Promise<string>;
   cadence: CadenceGuard;
@@ -46,6 +53,9 @@ export interface OutboundResult {
   body: string;
   reason?: string;
   messageKey?: string;
+  /** Ф0 пульта: ПОЧЕМУ не подтвердили (denied/expired/undelivered) — вызывающий обязан сказать это
+   *  владельцу его словами, а не печатать «пользователь отклонил» на любой исход. */
+  confirmOutcome?: ConfirmOutcomeKind;
 }
 
 /**
@@ -89,7 +99,7 @@ export async function sendOutbound(params: OutboundParams, deps: OutboundDeps): 
       body = await deps.regenerate(res.revision, body); // перегенерация → новый confirm
       continue;
     }
-    return { status: "denied", body, reason: "пользователь отклонил" };
+    return { status: "denied", body, reason: "пользователь отклонил", confirmOutcome: res.outcome };
   }
   if (!approved) return { status: "denied", body, reason: "исчерпан лимит правок без подтверждения" };
 

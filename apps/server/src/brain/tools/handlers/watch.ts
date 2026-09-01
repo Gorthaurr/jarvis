@@ -3,7 +3,7 @@
  * озвучка при срабатывании. create/cancel/list. Зеркалит хендлеры напоминаний; маршрутизация — в dispatch (switch).
  */
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { browserUrlBlocked, err, ok } from "../dispatch-util.js";
+import { browserUrlBlocked, confirmDeclineText, err, ok } from "../dispatch-util.js";
 
 /**
  * §Волна3 ревью (#12): валидация предиката ПО СТРУКТУРЕ на постановке. Раньше проверялось лишь
@@ -108,11 +108,13 @@ export async function watchCreate(ctx: ToolContext, input: Record<string, unknow
     // СЕЙЧАС, при создании. Иначе prompt-инъекция с прочитанной страницы могла бы поставить наблюдение
     // с вредным action, который позже исполнится с доверенным фреймингом. Нет канала → fail-closed.
     if (!ctx.confirm) return err("watch_create: наблюдение с action требует подтверждения владельца (§14), а канал подтверждения недоступен.");
-    const { approved } = await ctx.confirm(
+    const gate = await ctx.confirm(
       `Поставить наблюдение с отложенным действием: когда «${condition}» — выполнить «${action}»?`,
       "irreversible",
     );
-    if (!approved) return err("Владелец не подтвердил наблюдение с действием — не ставлю.");
+    // Ф0 пульта: «владелец не подтвердил» ≠ «его не смогли спросить». Наблюдение с action —
+    // отложенное поручение от его имени, тут особенно важно не приписывать ему чужое решение.
+    if (!gate.approved) return err(confirmDeclineText(gate.outcome, "наблюдение с действием"));
   }
   const res = ctx.watch.add({ sessionId: ctx.sessionId, userId: ctx.userId, what, condition, intervalMs, continuous, predicate, action });
   if (!res.ok) {

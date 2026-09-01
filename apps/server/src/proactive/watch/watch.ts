@@ -10,6 +10,7 @@
  * Концепт: НЕ хардкодим источники. Checker — общий (LLM водит web_search/web_fetch/market_quote и сам
  * добывает текущее значение). Сервис не знает, ЧТО именно отслеживается — только «проверь и скажи, met ли».
  */
+import { createHash } from "node:crypto";
 
 /** Состояние наблюдения. active — следим; fired — сработало (one-shot завершилось); cancelled — снято;
  *  suspended — приостановлено после серии провалов проверки (dead-watch, D3): не тикает, не воскресает
@@ -67,6 +68,17 @@ export interface Watch {
    * реплику runner'а не попадает — анти-инъекция). Пусто → только уведомление, как раньше.
    */
   action?: string;
+  /**
+   * F4 (волна F, «approve recurring work once» — идея OpenClaw): отпечаток ТОЧНОЙ операции, которую
+   * владелец одобрил на confirm при постановке (sha256 от what|condition|action). Перед КАЖДЫМ
+   * исполнением действия сверяется заново: разошёлся (запись изменена любым будущим путём/правкой
+   * стора) → действие НЕ исполняется, честное уведомление «поручение изменилось после одобрения —
+   * нужно новое подтверждение». Одобрение привязано к содержимому, а не к факту «когда-то одобряли».
+   * ⚠️ predicate в отпечаток НЕ входит СОЗНАТЕЛЬНО: его tabId/url легитимно патчится self-heal'ом
+   * вкладки (2026-07-25), а владельцу на confirm показывались именно condition+action.
+   * Нет у легаси-записей (одобрены до волны F) — они исполняются как раньше (grandfather).
+   */
+  actionFingerprint?: string;
   /** Сработало с action, но живой агентской сессии не было → выполнить при следующем подключении. */
   pendingAction?: string;
   /** Когда действие отложили (для TTL: протухшее side-effect-поручение не исполняется молча). */
@@ -106,4 +118,49 @@ export type WatchChecker = (w: Watch) => Promise<CheckResult>;
 /** Время следующей проверки наблюдения: ещё не проверяли → сейчас (сразу базовый замер), иначе +интервал. */
 export function dueAt(w: Watch, now: number): number {
   return w.lastCheckAt === undefined ? now : w.lastCheckAt + w.intervalMs;
+}
+
+/**
+ * F4 (волна F): отпечаток одобренной операции наблюдения-с-действием. РОВНО то, что владелец видел на
+ * confirm («когда „condition" — выполнить „action"», в контексте what) ПЛЮС предикат — для
+ * predicate-триггерных наблюдений именно он и есть фактическое условие запуска действия (контроль
+ * волны F: без него подмена `predicate.value/op` меняла УСЛОВИЕ запуска, не трогая отпечаток).
+ *
+ * Из предиката исключены АДРЕСНЫЕ поля `tabId`/`url`: их легитимно патчит self-heal вкладки
+ * (2026-07-25) после ремонта выгруженной/закрытой вкладки — включи мы их, здоровое наблюдение
+ * получило бы ложное «поручение изменилось» и было бы приостановлено.
+ * Чистая функция — сверка при создании и перед исполнением обязана давать одинаковый результат
+ * на неизменённой записи.
+ */
+export function watchActionFingerprint(w: Pick<Watch, "what" | "condition" | "action" | "predicate">): string {
+  const basis = JSON.stringify([w.what, w.condition, w.action ?? "", stablePredicate(w.predicate)]);
+  return createHash("sha256").update(basis, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * ПРЕДЫДУЩАЯ схема отпечатка (what|condition|action, БЕЗ предиката) — записи, созданные между
+ * первым коммитом волны F и его контролем, несут именно её. Сверять их текущей схемой значило бы
+ * массово суспендить ЗДОРОВЫЕ наблюдения с ложным «поручение изменилось после одобрения» (мой же
+ * фикс как источник дефекта — типовая ловушка проекта). Совпадение по легаси-схеме доказывает
+ * неизменность ровно того, что тогда и одобрялось, — этого достаточно.
+ */
+export function watchActionFingerprintLegacy(w: Pick<Watch, "what" | "condition" | "action">): string {
+  const basis = JSON.stringify([w.what, w.condition, w.action ?? ""]);
+  return createHash("sha256").update(basis, "utf8").digest("hex").slice(0, 32);
+}
+
+/** Предикат для отпечатка: стабильный порядок ключей, без адресных tabId/url (их правит self-heal). */
+function stablePredicate(p: unknown): unknown {
+  if (p === undefined || p === null) return null;
+  if (Array.isArray(p)) return p.map(stablePredicate);
+  if (typeof p === "object") {
+    const src = p as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(src).sort()) {
+      if (k === "tabId" || k === "url") continue;
+      out[k] = stablePredicate(src[k]);
+    }
+    return out;
+  }
+  return p;
 }

@@ -89,6 +89,10 @@ const NEUTRAL_TOOLS = new Set([
   "web_search", "web_fetch", "memory_write", "memory_search", "memory_forget", "skill_save", "skill_list",
   "skill_promote", "tool_load", "tool_create", "browser_tabs", "set_reminder", "cancel_reminder", "list_reminders",
   "watch_create", "watch_cancel", "watch_list", // §долгие-задачи: durable-конфиг наблюдения, не меняет экран
+  // F4 (волна F): операции над СОГЛАСИЯМИ (§14 confirm-once) — durable-конфиг разрешений, не мир/GUI.
+  // Как mutate consent_revoke взводил бы anyMutateSucceeded → «отозвал согласие и сдался» шло бы успехом
+  // содержательной задачи; самоотчёт обеих операций честный (ok/err от стора).
+  "consent_list", "consent_revoke",
   "obligation_add", "obligation_remove", "obligation_list", // §проактив-всё: durable-конфиг счетов, не меняет экран
   // D-4: calendar_read — ЧТЕНИЕ вкладки календаря (может открыть фоновую вкладку, но экран владельца
   // не трогает и дела не делает). Как mutate он взводил бы anyMutateSucceeded → «посмотрел календарь
@@ -108,6 +112,10 @@ const NEUTRAL_TOOLS = new Set([
   // перемен (НЕ verify: хеш не доказывает исход — план §4.2); wait_for — ожидание (его met:true за
   // сверку зачитывает agent-петля по data.met, не статический класс — см. dispatch/observed).
   "window_list", "screen_probe", "wait_for",
+  // Волна I (самоулучшение): чтение СВОЕГО кода и своей телеметрии — восприятие, не дело. Как mutate
+  // они взводили бы anyMutateSucceeded → «полистал свой код и сдался» проходило бы успехом задачи
+  // «почини себя». Сама правка (self_patch) остаётся mutate — она действительно меняет мир.
+  "self_weaknesses", "self_code_search", "self_code_read",
 ]);
 
 // H3: у MCP-инструментов (mcp__server__tool) эффект не известен заранее. Читающее ИМЯ (get/list/
@@ -175,6 +183,15 @@ export function claimsObservedResult(text: string): boolean {
 // вчерашняя отправка была стёрта, потому модель её и «не нашла»), (б) в контекст явно вписаны ГРАНИЦЫ
 // этой памяти (formatRecentTasks), чтобы «не вижу» не превращалось в «этого не было», (в) persona v79
 // объявляет «проверил» действием и запрещает отрицать факт без проверки источника.
+
+/**
+ * Инструменты «исходящее сообщение/заказ ЧЕЛОВЕКУ»: их ok-результат — успех-мутация ТОЛЬКО при
+ * `ToolResult.sent:true` (честные отказы «не подтвердили»/«повтор не ушёл» — тоже isError:false, но
+ * дела не было). Живёт ЗДЕСЬ (а не в agent/index.ts), потому что этим знанием пользуются ДВА
+ * потребителя: анти-masked-failure в петле и журнал чекпойнта — разойдись они, журнал объявил бы
+ * неподтверждённую отправку совершённой (финальный контроль волны C, HIGH).
+ */
+export const OUTBOUND_SEND_TOOLS = new Set(["telegram_send", "telegram_send_voice", "message_send", "order_place"]);
 
 /** Грубая классификация по тексту ошибки (для будущих специализированных фраз/телеметрии). */
 export function classifyFailure(detail?: string): FailureClass {

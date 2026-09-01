@@ -779,6 +779,26 @@ describe("agent-loop (§7, §8)", () => {
     expect(tasks.list("u1")[0]?.state).toBe("failed"); // на «сделал?» не соврёт done
   });
 
+  it("F1 (волна F): повтор с перестановкой ключей и свежим nonce ВСЁ РАВНО ловится (нормализованная сигнатура)", async () => {
+    const session = fakeSession(); // sendAction успешен → повторы «успешные»
+    const tasks = new TaskManager();
+    // Каждый раунд «шумит»: порядок ключей чередуется, nonce всякий раз новый. Семантика действия та же.
+    const llm = new MockLlmProvider(
+      Array.from({ length: 8 }, (_, i) => ({
+        toolUses: [
+          { id: "t", name: "app_launch", input: i % 2 === 0 ? { app: "x", nonce: String(i) } : { nonce: String(i), app: "x" } },
+        ],
+      })),
+    );
+    await handleUserText(session, "сделай что-то многошаговое", await makeDeps(llm, { tasks }));
+    // Со старой сырой JSON.stringify-сигнатурой серия сбрасывалась бы каждый раунд: нуджа «ОДНО И ТО ЖЕ»
+    // не было бы, а петля флудила бы до family-капа (6+ раундов).
+    const nudged = llm.requests.some((r) => JSON.stringify(r.messages ?? []).includes("ОДНО И ТО ЖЕ"));
+    expect(nudged).toBe(true);
+    expect(llm.requests.length).toBeLessThanOrEqual(4); // нудж на 3-м, обрыв на 4-м
+    expect(tasks.list("u1")[0]?.state).toBe("failed"); // честный провал, не ложный успех
+  });
+
   it("H2: аварийный стаб LLM → честный провал задачи, стаб-текст не финалит успехом", async () => {
     const session = fakeSession();
     const tasks = new TaskManager();

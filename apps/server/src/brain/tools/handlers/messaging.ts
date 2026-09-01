@@ -6,14 +6,15 @@
  */
 import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol";
 import { AsyncMutex, TtlCache, nameSearchVariants } from "@jarvis/shared";
-import { approveSend, isSendApproved } from "../../consent.js";
+import { approveSend, isSendApproved, listConsents, revokeSendMatching } from "../../consent.js";
 import { CadenceGuard } from "../../messaging/cadence.js";
+import { type DeliveryVerdict, probeDelivery } from "../../messaging/delivery-check.js";
 import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
 import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messaging/resend-guard.js";
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
-import type { ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, err, ok } from "../dispatch-util.js";
+import type { ConfirmOutcome, ToolContext, ToolResult } from "../dispatch.js";
+import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok } from "../dispatch-util.js";
 
 /**
  * Подтверждение отправки адресату ОДИН РАЗ (§14, фидбэк пользователя). Если этого адресата уже одобряли
@@ -25,14 +26,33 @@ async function confirmSendOnce(
   channel: string,
   recipient: string,
   summary: string,
-): Promise<{ approved: boolean; revision?: string }> {
+): Promise<ConfirmOutcome> {
   if (isSendApproved(ctx.userId, channel, recipient)) {
-    return { approved: true };
+    return { approved: true, outcome: "approved" };
   }
-  if (!ctx.confirm) return { approved: false };
+  // Ф0: канала подтверждения нет вовсе → это НЕ отказ владельца, а невозможность его спросить.
+  if (!ctx.confirm) return { approved: false, outcome: "undelivered" };
   const r = await ctx.confirm(summary, "send");
   if (r.approved) await approveSend(ctx.userId, channel, recipient);
   return r;
+}
+
+/**
+ * Ф0 пульта: РАЗНЫЕ слова на разные исходы. Раньше любой неуспех звучал как «вы не подтвердили» —
+ * то есть Джарвис утверждал, что владелец ПРИНЯЛ РЕШЕНИЕ, хотя тот мог вопроса вовсе не видеть
+ * (мёртвый сокет, закрытая сессия) или не успеть ответить. Приписывать владельцу чужое решение —
+ * та же ложь, что «Готово» без результата.
+ */
+function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string, repeat = false): string {
+  const act = repeat ? `повторную отправку ${what}` : `отправку ${what}`;
+  switch (outcome) {
+    case "undelivered":
+      return `Не отправил ${what} «${to}» — не смог спросить вашего подтверждения: связь с вашим экраном была недоступна.`;
+    case "expired":
+      return `Не отправил ${what} «${to}» — вы не ответили на подтверждение, и оно истекло. Скажите, если отправить.`;
+    default:
+      return `Не отправил ${what} — вы не подтвердили ${act} «${to}».`;
+  }
 }
 
 /** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
@@ -74,6 +94,31 @@ function sendLock(userId: string): AsyncMutex {
     sendLocks.set(userId, m);
   }
   return m;
+}
+
+/**
+ * Сколько ждём ЧТЕНИЕ чата при сверке «ушло ли на самом деле» (delivery-check). Отдельный, короткий
+ * бюджет: сверка идёт уже ПОСЛЕ провала отправки, и затягивать ход ею нельзя — не сверились в срок
+ * значит «unknown», а не «не ушло».
+ */
+const DELIVERY_READ_TIMEOUT_MS = 45_000;
+
+/**
+ * Сверка факта доставки чтением чата (2026-08-31). Читаем ТЕМИ ЖЕ подсказками резолва, которыми
+ * отправляли, — иначе можно открыть чат другого человека и получить ложное «не ушло» (→ дубль).
+ */
+async function probeTelegramDelivery(
+  ctx: ToolContext,
+  args: { to: string; text: string; preferredTitle?: string; hintPeerId?: string },
+): Promise<DeliveryVerdict> {
+  return probeDelivery(args.text, async () => {
+    const r = await ctx.session.sendAction(
+      { kind: "telegram.read", to: args.to, count: 10, preferredTitle: args.preferredTitle, hintPeerId: args.hintPeerId },
+      DELIVERY_READ_TIMEOUT_MS,
+    );
+    const data = r.data as { messages?: unknown } | undefined;
+    return { ok: r.ok, messages: data?.messages };
+  });
 }
 
 /** Человекочитаемое «N с назад» для сводки confirm/ответа модели (нет возраста — честное «недавно»). */
@@ -149,9 +194,18 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
   // §14: отправка — критичное действие. Обычный путь — confirm ОДИН раз на адресата (дальше помним
   // навсегда). Повтор/вдогонку в коротком окне — ЯВНЫЙ confirm на КАЖДЫЙ случай (консент адресата
   // его не заменяет: дубль человеку — необратим, цена ложного «да» выше одного вопроса).
+  // Прошлая попытка оборвалась, и сверка чтением чата не удалась: мы НЕ знаем, ушло ли. Говорить
+  // «уже отправлял» про такую запись — утверждать непроверенное; отправить молча — рисковать дублём.
+  const uncertainPrev = recent?.prev.uncertain === true && sentKeys.get(key) === undefined;
   let confirmedByResendGate = false;
   if (identicalHit || recent) {
     if (identicalHit && !resend) {
+      if (uncertainPrev) {
+        return ok(
+          `Не знаю, ушло ли это сообщение «${to}»: прошлая попытка ${agoOf(recent?.ageMs)} оборвалась, и проверить чат не удалось. ` +
+            `Вслепую не повторяю — сначала прочитай чат (telegram_read «${to}»). Нет там этого сообщения — повтори telegram_send с resend:true.`,
+        );
+      }
       return ok(
         `Уже отправлял «${to}» то же самое ${agoOf(recent?.ageMs)} — повтор НЕ ушёл. ` +
           `Если пользователь ЯВНО просит отправить ещё раз — повтори вызов с resend:true (уйдёт после подтверждения).`,
@@ -159,18 +213,20 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
     }
     if (!ctx.confirm) return err(`Повторная отправка «${to}» требует подтверждения (§14), а канал подтверждения недоступен.`);
     const preview = `${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`;
-    const summary = identicalHit
-      ? `Повторная отправка «${to}» в Telegram (то же сообщение уже уходило ${agoOf(recent?.ageMs)}):\n${preview}`
-      : `«${to}» только что (${agoOf(recent?.ageMs)}) получил: «${recent!.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
+    const summary = uncertainPrev
+      ? `Прошлая отправка «${to}» оборвалась ${agoOf(recent?.ageMs)}, и я не смог проверить, дошло ли. Отправить ещё раз (может прийти дублем)?\n${preview}`
+      : identicalHit
+        ? `Повторная отправка «${to}» в Telegram (то же сообщение уже уходило ${agoOf(recent?.ageMs)}):\n${preview}`
+        : `«${to}» только что (${agoOf(recent?.ageMs)}) получил: «${recent!.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
     const c = await ctx.confirm(summary, "send");
-    if (!c.approved) return ok(`Не отправил — вы не подтвердили повторную отправку «${to}».`);
+    if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
     confirmedByResendGate = true;
     // Чистое «да» с показом адресата и текста — это и есть согласие §14 на адресата: фиксируем.
     await approveSend(ctx.userId, "telegram", to);
   }
   if (!confirmedByResendGate) {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить «${to}» в Telegram?\n${text.slice(0, 160)}${text.length > 160 ? "…" : ""}`);
-    if (!gate.approved) return ok(`Не отправил — вы не подтвердили отправку «${to}».`);
+    if (!gate.approved) return gateDeclined(sendGateMessage(gate.outcome, "сообщение", to), gate.outcome);
   }
   // ⚠️ Ревью р2 (peer-канал был МЁРТВ): клиентский fast-path (openHinted по peerId) входит ТОЛЬКО при
   // непустом preferredTitle. При явном peer подаём preferredTitle=to — иначе fast-path пропускался,
@@ -201,14 +257,47 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
   if (hint && isResolveIssue(rawReason)) ctx.resolutionMemory?.forget(ctx.userId, "telegram", to);
   // Проблема РЕЗОЛВА (не нашёл/неоднозначно/не залогинен) — НЕ транспортный сбой: отдаём модели без фолбэка.
   if (isResolveIssue(rawReason)) return err(reason);
-  // Иначе — транспортный сбой CDP-пути: пробуем расширение (те же транслит-варианты для recall).
+  // 🔴 НЕОПРЕДЕЛЁННЫЙ ИСХОД (эпизод «Катя получила дубль», 2026-08-31): команда дошла до ПК, но
+  // подтверждения доставки нет — сообщение могло УЙТИ (истёк таймаут действия, пузырь не успел
+  // отрисоваться за отведённую проверку). Слепой фолбэк на расширение в этом состоянии = ВТОРОЙ
+  // отправитель по тому же аккаунту = дубль живому человеку. Сначала СМОТРИМ чат.
+  // channel_down исключён осознанно: там команда физически не ушла с сервера (fail-fast закрытого
+  // сокета), сверять нечего — и читать тем же мёртвым каналом бессмысленно.
+  const markSent = (who: string, peerId?: string) => {
+    sentKeys.set(key, true);
+    cadence.record(ctx.userId, "telegram", to);
+    resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: peerId || hintPeerId, names: [to, who] }), text);
+  };
+  if (!wasChannelDown) {
+    const verdict = await probeTelegramDelivery(ctx, { to, text, preferredTitle, hintPeerId });
+    if (verdict === "delivered") {
+      markSent(to);
+      return {
+        ...ok(`Отправлено «${to}» в Telegram. Ответ инструмента потерялся (${reason}), но сообщение видно в чате — повторять НЕ нужно.`),
+        sent: true,
+      };
+    }
+    if (verdict === "unknown") {
+      // Не знаем — и не узнали. Второй отправки не делаем; окно гарда взводим «неопределённой»
+      // записью, чтобы повтор прошёл через владельца, а не молча.
+      resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to] }), text, { uncertain: true });
+      return {
+        ...err(
+          `Не знаю, ушло ли сообщение «${to}»: отправка оборвалась (${reason}), и прочитать чат для сверки не удалось. ` +
+            `Вслепую НЕ повторяю — это дало бы человеку дубль. Проверь чат (telegram_read «${to}»), и если сообщения там нет — повтори telegram_send с resend:true.`,
+        ),
+        uncertain: true,
+      };
+    }
+    // verdict === "absent": чат открылся, нашего сообщения в нём нет → отправка действительно не
+    // состоялась, фолбэк законен.
+  }
+  // Транспортный сбой CDP-пути при доказанном «не ушло» — пробуем расширение (те же транслит-варианты для recall).
   if (ctx.telegramSend) {
     try {
       const out = await ctx.telegramSend(to, text, nameSearchVariants(to));
       const who = chatTitleOf(out) || to;
-      sentKeys.set(key, true);
-      cadence.record(ctx.userId, "telegram", to);
-      resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to, who] }), text);
+      markSent(who);
       return { ...ok(`Отправлено «${who}» в Telegram (через расширение).`), sent: true };
     } catch (e) {
       const em = stripResolveMarker(e instanceof Error ? e.message : String(e));
@@ -216,6 +305,22 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
       if (wasChannelDown) {
         const cd = channelDownResult(result, "telegram_send не отправлен: канал с ПК недоступен (переподключение).");
         if (cd) return cd;
+      }
+      // Расширение могло УСПЕТЬ отправить и упасть на своей проверке — тот же класс неопределённости.
+      const after = await probeTelegramDelivery(ctx, { to, text, preferredTitle, hintPeerId });
+      if (after === "delivered") {
+        markSent(to);
+        return { ...ok(`Отправлено «${to}» в Telegram (расширение отчиталось ошибкой «${em}», но сообщение видно в чате).`), sent: true };
+      }
+      if (after === "unknown") {
+        resendGuard().record(ctx.userId, "telegram", peerIdentityKeys({ peerId: hintPeerId, names: [to] }), text, { uncertain: true });
+        return {
+          ...err(
+            `Не знаю, ушло ли сообщение «${to}»: оба пути оборвались (${reason}; расширение: ${em}), сверить чат не удалось. ` +
+              `Вслепую НЕ повторяю. Проверь telegram_read «${to}» и при отсутствии сообщения повтори с resend:true.`,
+          ),
+          uncertain: true,
+        };
       }
       return err(`Не удалось отправить в Telegram: ${reason}; расширение: ${em}`);
     }
@@ -257,11 +362,11 @@ async function telegramSendVoiceLocked(ctx: ToolContext, input: Record<string, u
       `«${to}» только что (${agoOf(recent.ageMs)}) получал: «${recent.prev.bodyPreview}».\nОтправить ещё и ГОЛОСОВОЕ:\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»?`,
       "send",
     );
-    if (!c.approved) return ok(`Не отправил голосовое — вы не подтвердили повтор «${to}».`);
+    if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "голосовое", to, true), c.outcome);
     await approveSend(ctx.userId, "telegram", to);
   } else {
     const gate = await confirmSendOnce(ctx, "telegram", to, `Отправить ГОЛОСОВОЕ «${to}» (голос филиппа)?\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»`);
-    if (!gate.approved) return ok(`Не отправил голосовое — вы не подтвердили «${to}».`);
+    if (!gate.approved) return gateDeclined(sendGateMessage(gate.outcome, "голосовое", to), gate.outcome);
   }
   try {
     const audioB64 = await ctx.synthVoice(text); // mp3 base64 голосом филиппа
@@ -311,7 +416,7 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
       ? `Повторная отправка «${to}» (${channel}) — то же сообщение уже уходило ${agoOf(recent.ageMs)}:\n${preview}`
       : `«${to}» только что (${agoOf(recent.ageMs)}) получил: «${recent.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
     const c = await ctx.confirm(summary, "send");
-    if (!c.approved) return ok(`Не отправил — вы не подтвердили повторную отправку «${to}».`);
+    if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
     confirmedByResendGate = true;
     await approveSend(ctx.userId, channel, to);
   }
@@ -324,7 +429,7 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
         `Повторная отправка «${to}» (${channel}) — то же сообщение уже уходило недавно:\n${body.slice(0, 160)}${body.length > 160 ? "…" : ""}`,
         "send",
       );
-      if (!c.approved) return ok(`Не отправил — вы не подтвердили повторную отправку «${to}».`);
+      if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "сообщение", to, true), c.outcome);
       confirmedByResendGate = true;
       await approveSend(ctx.userId, channel, to);
     }
@@ -336,7 +441,9 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
     {
       // §14: подтверждаем адресата один раз, дальше помним навсегда (как telegram_send). Ресенд-гейт
       // уже показал владельцу адресата и ТОЧНЫЙ текст → второй вопрос подряд не задаём.
-      requestConfirm: confirmedByResendGate ? async () => ({ approved: true }) : (summary) => confirmSendOnce(ctx, channel, to, summary),
+      requestConfirm: confirmedByResendGate
+        ? async () => ({ approved: true, outcome: "approved" as const })
+        : (summary: string) => confirmSendOnce(ctx, channel, to, summary),
       regenerate: async (_rev, prev) => prev, // полная перегенерация — через новый ход агента
       cadence,
       // Явный ПОДТВЕРЖДЁННЫЙ повтор обязан уйти — точный дедуп-ключ его не блокирует.
@@ -365,6 +472,12 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
     const cd = channelDownResult({ ok: false, error: { code: "channel_down" } }, "message_send не отправлен: канал с ПК недоступен (переподключение).");
     if (cd) return cd;
   }
+  // Ф0 пульта (адверс-ревью HIGH): §14-гейт не пропустил — это НЕ сбой инструмента. Говорим исходом
+  // владельца (не «пользователь отклонил» на всё подряд) и возвращаем declined, а не err: иначе
+  // недоставленный вопрос кормил бы anti-runaway и эскалацию тира «от транспорта».
+  if (res.status === "denied" && res.confirmOutcome !== undefined) {
+    return gateDeclined(sendGateMessage(res.confirmOutcome, "сообщение", to), res.confirmOutcome);
+  }
   return err(`Не отправлено (${res.status}): ${res.reason ?? ""}`);
 }
 
@@ -378,7 +491,7 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
   let channelDown = false; // Б4 (интеграционное ревью #4): channel_down теряется в обёртке — ловим сами
   try {
     const res = await placeOrder({ userId: ctx.userId, vendor, items, total }, DEFAULT_ORDER_POLICY, {
-      requestConfirm: async (summary) => ({ approved: (await ctx.confirm!(summary, "order")).approved }),
+      requestConfirm: (summary: string) => ctx.confirm!(summary, "order"), // Ф0: исход НЕ срезаем
       isAlreadyPlaced: (k) => placedOrderKeys.get(k) !== undefined,
       markPlaced: (k) => placedOrderKeys.set(k, true),
       place: async (req) => {
@@ -395,9 +508,49 @@ export async function orderPlace(ctx: ToolContext, input: Record<string, unknown
       const cd = channelDownResult({ ok: false, error: { code: "channel_down" } }, "order_place не отправлен: канал с ПК недоступен (переподключение).");
       if (cd) return cd;
     }
+    if (res.status === "denied" && res.confirmOutcome !== undefined) {
+      return gateDeclined(confirmDeclineText(res.confirmOutcome, "заказ"), res.confirmOutcome);
+    }
     return err(`Заказ не оформлен (${res.status}): ${res.reason ?? ""}`);
   } catch (e) {
     if (e instanceof CardDataError) return err(e.message); // §0: красная линия карты
     throw e;
   }
+}
+
+/**
+ * F4 (волна F, «инспекция согласий» — идея OpenClaw): показать владельцу действующие confirm-once
+ * согласия. До этого consent.json был невидим («разрешил один раз» = навсегда и втихую), а
+ * revokeSend — мёртвым кодом без единого продакшн-вызова.
+ */
+export async function consentList(ctx: ToolContext): Promise<ToolResult> {
+  const items = listConsents(ctx.userId);
+  if (items.length === 0) {
+    return ok("Действующих согласий на отправку нет — каждая отправка новому адресату спросит подтверждение.");
+  }
+  const lines = items.map(
+    (c) => `- ${c.channel}: «${c.recipient}» (одобрено ${new Date(c.ts).toLocaleDateString("ru-RU")})`,
+  );
+  return ok(`Действующие согласия на отправку без переспроса:\n${lines.join("\n")}`);
+}
+
+/**
+ * F4: отозвать согласие — следующая отправка адресату снова потребует подтверждения владельца.
+ * 🔴 Контроль (HIGH): снимаем ВСЕ написания одного человека (склонения/полное имя — ключи копятся
+ * по сырому `to` модели), иначе фраза «снова спросит подтверждения» была бы ложью: назавтра модель
+ * назвала бы контакт другим падежом и попала в оставшийся ключ. Отчёт перечисляет снятое поимённо.
+ */
+export async function consentRevoke(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  const channel = String(input.channel ?? "").trim();
+  const recipient = String(input.recipient ?? "").trim();
+  if (!channel || !recipient) return err("consent_revoke: нужны channel и recipient (сверься с consent_list)");
+  const removed = await revokeSendMatching(ctx.userId, channel, recipient);
+  if (removed.length === 0) {
+    return err(`согласия на «${recipient}» (${channel}) не было — нечего отзывать (сверься с consent_list)`);
+  }
+  const list = removed.map((r) => `«${r}»`).join(", ");
+  return ok(
+    `Согласие отозвано (${channel}): ${list} — следующая отправка снова спросит вашего подтверждения. ` +
+      `Если этот человек записан у меня под другим именем, скажите — сниму и его.`,
+  );
 }

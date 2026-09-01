@@ -19,6 +19,7 @@ import { AudioCapture, AudioPlayback } from "./audio.js";
 import { $ } from "./dom.js";
 import { buildWave } from "./wave.js";
 import { initBillingPanel } from "./billing-panel.js";
+import { initMemoryPanel } from "./memory-panel.js";
 import { initMonitorPanel } from "./monitor-panel.js";
 import { initTaskPanel } from "./task-panel.js";
 import { denyConfirm, initConfirmDialog, isConfirmOpen } from "./confirm-dialog.js";
@@ -344,10 +345,13 @@ for (const tab of document.querySelectorAll<HTMLButtonElement>(".settab")) {
     }
     // §6B/B5: при открытии вкладки «Оплата» запрашиваем свежий расход/лимиты у сервера.
     if (name === "billing") jarvis.requestUsage();
+    // Волна E: при открытии «Памяти» — свежий снимок (память меняется каждым ходом, кешировать нечего).
+    if (name === "memory") jarvis.requestMemory();
   });
 }
 
 initBillingPanel(jarvis); // §6B/B5 «Оплата» — onUsage + кнопка управления внутри
+initMemoryPanel(jarvis); // волна E «Память» — onMemory + забывание внутри
 
 // ── запись навыка демонстрацией (§8) ───────────────────────────
 initSkillRecorder(jarvis, () => settingsPanel.classList.add("settings--hidden")); // модалка + список + onSkill* внутри

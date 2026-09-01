@@ -4,7 +4,7 @@
  * Эти хелперы переиспользуют ВСЕ доменные модули хендлеров (handlers/*) + сам dispatch.
  */
 import { isFetchUrlAllowed } from "../../integrations/web.js";
-import type { ToolResult } from "./dispatch.js";
+import type { ConfirmOutcome, ToolResult } from "./dispatch.js";
 
 /**
  * §sec SSRF-гард для навигации браузера по URL: блокируем не-http(s) схемы (file:/chrome:/data:) и
@@ -92,6 +92,23 @@ function looksLikeBareHost(s: string): boolean {
 
 /** Успех инструмента. */
 export const ok = (content: string): ToolResult => ({ content, isError: false });
+
+/**
+ * Результат «§14-гейт не пропустил» (Ф0 пульта, адверс-ревью HIGH): не ошибка инструмента, но и НЕ
+ * выполненное действие — помечаем `declined`, иначе петля засчитает mutate как сделанный и перестанет
+ * ловить ложное «Готово» (см. ToolResult.declined).
+ */
+export const declined = (content: string, channelDown = false): ToolResult => ({
+  content,
+  isError: false,
+  declined: true,
+  ...(channelDown ? { channelDown: true } : {}),
+});
+
+/** `undelivered` = вопрос не дошёл, потому что канал с владельцем мёртв (Б4): петле стоит ПОДОЖДАТЬ
+ *  reconnect, а не считать раунд провалом и эскалировать тир «от транспорта» (контроль-2 Ф0). */
+export const gateDeclined = (content: string, outcome: ConfirmOutcome["outcome"]): ToolResult =>
+  declined(content, outcome === "undelivered");
 /** Ошибка инструмента (честный провал, НЕ ложный успех — §честность). */
 export const err = (content: string): ToolResult => ({ content, isError: true });
 
@@ -143,4 +160,20 @@ export function numField(input: Record<string, unknown>, names: string[], fallba
     if (typeof v === "number" && Number.isFinite(v)) return v;
   }
   return fallback;
+}
+
+/**
+ * Ф0 пульта: «отменено пользователем» можно говорить ТОЛЬКО когда пользователь реально отменил.
+ * Мёртвый канал/истёкшее окно — не его решение; приписывать ему отказ так же нечестно, как
+ * рапортовать «Готово» без результата.
+ */
+export function confirmDeclineText(outcome: ConfirmOutcome["outcome"], what: string): string {
+  switch (outcome) {
+    case "undelivered":
+      return `Не стал делать (${what}) — не смог спросить вашего подтверждения: связь с вашим экраном была недоступна.`;
+    case "expired":
+      return `Не стал делать (${what}) — вы не ответили на подтверждение, оно истекло.`;
+    default:
+      return `Отменено пользователем (${what}).`;
+  }
 }

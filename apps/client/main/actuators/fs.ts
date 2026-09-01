@@ -14,7 +14,7 @@ import { type Dirent, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createLogger } from "@jarvis/shared";
-import { assertReadable, assertWritable, isAncestorOfSelf, isProtectedSelfPath, isSecretPath } from "./self-guard.js";
+import { assertReadable, assertWritable, canonicalizePath, isAncestorOfSelf, isProtectedSelfPathFast, isSecretPathFast } from "./self-guard.js";
 
 const log = createLogger("actuator:fs");
 
@@ -59,8 +59,17 @@ async function assertTreeWritable(abs: string): Promise<void> {
   }
 }
 
-/** Первый защищённый путь в поддереве (уровень целиком до спуска — node_modules/.env обычно наверху).
- * budget.exhausted взводится при исчерпании бюджета: null тогда ≠ «чисто», а «не смогли проверить». */
+/**
+ * Первый защищённый путь в поддереве (уровень целиком до спуска — node_modules/.env обычно наверху).
+ * budget.exhausted взводится при исчерпании бюджета: null тогда ≠ «чисто», а «не смогли проверить».
+ *
+ * Контроль-4 волны E (HIGH): проверка КАЖДОЙ записи идёт БЫСТРЫМ (без realpath-сисколла) вариантом —
+ * `dir`/`d.name` из `fsp.readdir()` уже канонические длинные имена (Windows не отдаёт 8.3-алиасы из
+ * листинга), а топ-путь операции (`abs` в `assertTreeWritable`) уже прошёл канонизирующий
+ * `assertWritable` ДО вызова этой функции. Полная (`isProtectedSelfPath`) канонизация на каждую из
+ * до `TREE_GUARD_BUDGET`=200 000 записей морозила бы Electron main-процесс на секунды-минуты
+ * (сеть/OneDrive — до SMB-таймаута) — сисколл здесь не даёт защиты сверх той, что уже есть.
+ */
 async function firstProtectedInTree(dir: string, budget: { n: number; exhausted: boolean }): Promise<string | null> {
   if (budget.n <= 0) {
     budget.exhausted = true;
@@ -75,7 +84,7 @@ async function firstProtectedInTree(dir: string, budget: { n: number; exhausted:
   for (const d of ents) {
     budget.n -= 1;
     const full = join(dir, d.name);
-    if (isProtectedSelfPath(full)) return full;
+    if (isProtectedSelfPathFast(full)) return full;
   }
   for (const d of ents) {
     if (budget.n <= 0) {
@@ -226,7 +235,11 @@ export async function makeDir(path: string): Promise<{ path: string }> {
 }
 
 export async function search(root: string, query: string, inContent = false, maxResults = 50): Promise<{ matches: Array<{ path: string; line?: number; preview?: string }>; truncated: boolean }> {
-  const absRoot = expandPath(root);
+  // Контроль-5 волны E (HIGH): канонизируем КОРЕНЬ обхода ОДИН раз (не на каждую запись, как было бы
+  // при полном canon() — это и есть регрессия, которую чинил контроль-4). Без этого junction/8.3-
+  // алиас на ~/.aws/~/.ssh/~/.gnupg обходил бы directory-based денилист: full=join(root,d.name),
+  // построенный от НЕканонического root, не содержит литеральной ".aws" — Fast per-entry regex молчит.
+  const absRoot = canonicalizePath(expandPath(root));
   const limit = Math.min(Math.max(1, maxResults), MAX_SEARCH_RESULTS);
   const needle = query.toLowerCase();
   const matches: Array<{ path: string; line?: number; preview?: string }> = [];
@@ -244,7 +257,10 @@ export async function search(root: string, query: string, inContent = false, max
       if (d.isDirectory()) { await walk(full); continue; }
       if (!d.isFile()) continue;
       files += 1;
-      if (isSecretPath(full)) continue; // §0: не отдаём секретные пути ни по имени, ни по содержимому
+      // Контроль-4: быстрый (без realpath-сисколла) вариант — full уже канонический (readdir), топ-путь
+      // проверен вызывающим один раз; полная канонизация на каждый из MAX_SEARCH_FILES=20000 файлов
+      // морозила бы event loop без дополнительной защиты (см. firstProtectedInTree выше).
+      if (isSecretPathFast(full)) continue; // §0: не отдаём секретные пути ни по имени, ни по содержимому
       if (!inContent) {
         if (d.name.toLowerCase().includes(needle)) matches.push({ path: full });
         continue;

@@ -1390,3 +1390,14 @@ body.chat-active .stage { display: none; }
   cursor: pointer;
 }
 .composer__send:hover { background: var(--accent-bright); }
+
+/* ── Вкладка «Память» (волна E): честное предупреждение «не смог прочитать» ≠ «памяти нет» ── */
+.memwarn {
+  font-size: var(--fs-sec);
+  color: var(--warn, #e0a34a);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: rgba(224, 163, 74, 0.08);
+  padding: 8px 10px;
+}
+.memwarn--hidden { display: none; }

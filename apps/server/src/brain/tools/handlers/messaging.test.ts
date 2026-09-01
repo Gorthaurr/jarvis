@@ -15,7 +15,7 @@ function baseCtx(over: Partial<ToolContext> = {}): ToolContext {
     web: {} as ToolContext["web"],
     episodic: {} as ToolContext["episodic"],
     userId: `u-${Math.random().toString(36).slice(2)}`, // §14 confirm-once персистентен по userId — изолируем тесты
-    confirm: async () => ({ approved: true }),
+    confirm: async () => ({ approved: true, outcome: "approved" as const }),
     ...over,
   } as ToolContext;
 }
@@ -135,7 +135,7 @@ describe("telegramSend — ресенд-гард (эпизод «двойная 
     vi.useFakeTimers();
     try {
       const session = katyaSession();
-      const confirm = vi.fn(async (_summary: string, _kind?: string) => ({ approved: true }));
+      const confirm = vi.fn(async (_summary: string, _kind?: string) => ({ approved: true, outcome: "approved" as const }));
       const ctx = baseCtx({ session, confirm, resolutionMemory: katyaResolution() });
       await telegramSend(ctx, { to: "Катя", text: "я люблю тебя" });
       vi.advanceTimersByTime(12_000);
@@ -156,7 +156,7 @@ describe("telegramSend — ресенд-гард (эпизод «двойная 
     try {
       const session = katyaSession();
       // Первую отправку (consent адресата) одобряем, повтор-вдогонку — нет.
-      const confirm = vi.fn(async () => ({ approved: confirm.mock.calls.length <= 1 }));
+      const confirm = vi.fn(async () => { const ok = confirm.mock.calls.length <= 1; return { approved: ok, outcome: ok ? ("approved" as const) : ("denied" as const) }; });
       const ctx = baseCtx({ session, confirm, resolutionMemory: katyaResolution() });
       await telegramSend(ctx, { to: "Катя", text: "я люблю тебя" });
       vi.advanceTimersByTime(12_000);
@@ -175,7 +175,7 @@ describe("telegramSend — ресенд-гард (эпизод «двойная 
     vi.useFakeTimers();
     try {
       const session = katyaSession();
-      const confirm = vi.fn(async (_summary: string, _kind?: string) => ({ approved: true }));
+      const confirm = vi.fn(async (_summary: string, _kind?: string) => ({ approved: true, outcome: "approved" as const }));
       const ctx = baseCtx({ session, confirm, resolutionMemory: katyaResolution() });
       await telegramSend(ctx, { to: "Катя", text: "я люблю тебя" });
       vi.advanceTimersByTime(12_000);
@@ -193,7 +193,7 @@ describe("telegramSend — ресенд-гард (эпизод «двойная 
     vi.useFakeTimers();
     try {
       const session = katyaSession();
-      const confirm = vi.fn(async () => ({ approved: true }));
+      const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
       const ctx = baseCtx({ session, confirm, resolutionMemory: katyaResolution() });
       await telegramSend(ctx, { to: "Катя", text: "приду в восемь" });
       const confirmsAfterFirst = confirm.mock.calls.length; // consent нового адресата
@@ -212,7 +212,7 @@ describe("telegramSend — ресенд-гард (эпизод «двойная 
     vi.useFakeTimers();
     try {
       const session = katyaSession(); // резолвится в Катю A (peerId 42)
-      const ctx = baseCtx({ session, confirm: async () => ({ approved: true }), resolutionMemory: katyaResolution() });
+      const ctx = baseCtx({ session, confirm: async () => ({ approved: true, outcome: "approved" as const }), resolutionMemory: katyaResolution() });
       const r1 = await telegramSend(ctx, { to: "Катя", text: "привет" });
       expect(r1.sent).toBe(true);
       vi.advanceTimersByTime(12_000);
@@ -249,7 +249,7 @@ describe("telegramSendVoiceHandler — голосовое в тех же гар�
     vi.useFakeTimers();
     try {
       const session = katyaSession();
-      const confirm = vi.fn(async (_summary: string, _kind?: string) => ({ approved: true }));
+      const confirm = vi.fn(async (_summary: string, _kind?: string) => ({ approved: true, outcome: "approved" as const }));
       const telegramSendVoice = vi.fn(async () => undefined);
       const ctx = baseCtx({
         session,
@@ -327,7 +327,7 @@ describe("messageSend — ресенд-гард (симметрия с telegram_
     vi.useFakeTimers();
     try {
       const session = msgSession();
-      const confirm = vi.fn(async () => ({ approved: true }));
+      const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
       const ctx = baseCtx({ session, confirm });
       await settle(messageSend(ctx, { channel: "telegram", to: "Катя", body: "я люблю тебя" }));
       await vi.advanceTimersByTimeAsync(4_000);
@@ -338,5 +338,64 @@ describe("messageSend — ресенд-гард (симметрия с telegram_
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Ф0 пульта: формулировки отказа РАЗЛИЧАЮТСЯ по причине. Приписывать владельцу решение, которого он
+// не принимал («вы не подтвердили» про вопрос в мёртвом сокете), — та же ложь, что «Готово» без дела.
+describe("§14 отказ отправки — честная причина (Ф0)", () => {
+  it("канала подтверждения нет вовсе → «не смог спросить», НЕ «вы не подтвердили»", async () => {
+    const session = katyaSession();
+    const ctx = baseCtx({ session, resolutionMemory: katyaResolution(), userId: "u-undelivered", confirm: undefined }); // канала подтверждения НЕТ
+    const r = await telegramSend(ctx, { to: "Катя", text: "проба недоставленного подтверждения" });
+    expect(r.content).toMatch(/не смог спросить|недоступн/i);
+    expect(r.content).not.toMatch(/вы не подтвердили/i);
+    expect(r.sent).not.toBe(true); // и, разумеется, ничего не ушло
+  });
+
+  it("владелец РЕАЛЬНО отказал → прежняя формулировка «вы не подтвердили»", async () => {
+    const session = katyaSession();
+    const confirm = vi.fn(async () => ({ approved: false, outcome: "denied" as const }));
+    const ctx = baseCtx({ session, confirm, resolutionMemory: katyaResolution(), userId: "u-denied" });
+    const r = await telegramSend(ctx, { to: "Катя", text: "проба отказа владельца" });
+    expect(r.content).toMatch(/вы не подтвердили/i);
+  });
+
+  it("окно истекло → «вы не ответили», не отказ и не «не смог спросить»", async () => {
+    const session = katyaSession();
+    const confirm = vi.fn(async () => ({ approved: false, outcome: "expired" as const }));
+    const ctx = baseCtx({ session, confirm, resolutionMemory: katyaResolution(), userId: "u-expired" });
+    const r = await telegramSend(ctx, { to: "Катя", text: "проба истёкшего окна" });
+    expect(r.content).toMatch(/не ответили|истекл/i);
+    expect(r.content).not.toMatch(/вы не подтвердили отправку/i);
+  });
+});
+
+// 🔴 Адверс-ревью Ф0 (HIGH): обёртки sendOutbound/placeOrder не были мигрированы — структурная
+// типизация промолчала (ConfirmOutcome присваивался в {approved,revision?}), и любой не-approved
+// печатался как «пользователь отклонил», даже когда владелец вопроса не видел.
+describe("message_send / order_place — исход §14 доходит до формулировки (Ф0)", () => {
+  it("message_send: undelivered → «не смог спросить», НЕ «отклонил», и результат declined", async () => {
+    const ctx = baseCtx({
+      userId: "u-msg-undelivered",
+      confirm: async () => ({ approved: false, outcome: "undelivered" as const }),
+      messageSend: async () => ({ ok: true }),
+    } as Partial<ToolContext>);
+    const r = await messageSend(ctx, { channel: "vk", to: "Оля", body: "задержусь" });
+    expect(r.content).toMatch(/не смог спросить|недоступн/i);
+    expect(r.content).not.toMatch(/отклонил/i);
+    // declined: иначе петля засчитает mutate сделанным и перестанет ловить ложное «Готово».
+    expect(r.declined).toBe(true);
+    expect(r.isError).toBe(false); // не сбой инструмента → не кормит anti-runaway/эскалацию тира
+  });
+
+  it("message_send: реальный отказ владельца → прежняя формулировка", async () => {
+    const ctx = baseCtx({
+      userId: "u-msg-denied",
+      confirm: async () => ({ approved: false, outcome: "denied" as const }),
+      messageSend: async () => ({ ok: true }),
+    } as Partial<ToolContext>);
+    const r = await messageSend(ctx, { channel: "vk", to: "Оля", body: "текст" });
+    expect(r.content).toMatch(/не подтвердили/i);
   });
 });

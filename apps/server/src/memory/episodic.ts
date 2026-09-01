@@ -16,6 +16,19 @@ const log: Logger = createLogger("episodic");
 /** Тип эпизода (§13: kind). */
 export type EpisodeKind = "preference" | "fact" | "event";
 
+/**
+ * Провенанс записи (волна F, F3 — идея Dream Diary/inspect-sources OpenClaw): КТО породил факт.
+ * «model» — осознанный memory_write из петли, «reflex» — бэкстоп memory-reflect, «consolidation» —
+ * сон-цикл. Показывается во вкладке «Память» (владелец видит, ОТКУДА Джарвис это взял) и хранится
+ * в metadata JSONB (колонка есть с 0001_init).
+ *
+ * ⚠️ Источника «owner» здесь НЕТ СОЗНАТЕЛЬНО (адверс-ревью волны F): писать память напрямую владелец
+ * пока не может — во вкладке «Память» есть только забывание, а отличить «Джарвис, запомни: …» от
+ * решения модели внутри memory_write нечем. Объявленная, но недостижимая категория максимального
+ * доверия — ложь витрины честности; появится вместе с UI-вводом факта.
+ */
+export type MemorySource = "model" | "reflex" | "consolidation";
+
 export interface Episode {
   id: string;
   userId: string;
@@ -24,6 +37,8 @@ export interface Episode {
   /** unix ms. */
   ts: number;
   salience?: number;
+  /** F3: происхождение записи (нет у легаси-строк — отображается как «неизвестно»). */
+  source?: MemorySource;
 }
 
 /** Результат поиска: эпизод + косинусная близость [0,1]. */
@@ -57,6 +72,35 @@ export interface EpisodicMemory {
    * search, но строка цела. Порог держать ВЫСОКИМ (не стереть лишнее). Возвращает счётчик + тексты.
    */
   markStale?(userId: string, queryText: string, minScore: number, max?: number): Promise<{ staled: number; texts: string[] }>;
+  /**
+   * Вкладка «Память» (волна E): показать владельцу ЖИВЫЕ записи — без эмбеддинга и без семантики
+   * (обычный листинг по времени, опц. подстрочный фильтр). Семантический `search` для UI не годится:
+   * он требует запроса и порога, а владельцу нужно увидеть ВСЁ, что о нём накоплено.
+   */
+  listRecent?(userId: string, limit: number, contains?: string): Promise<Episode[]>;
+  /**
+   * Точечно забыть ОДНУ запись по id (решение владельца в UI). Отдельно от `markStale` (тот ищет
+   * семантически по тексту): здесь владелец уже выбрал конкретную строку — гадать не нужно.
+   * Мягко (stale=true), как и `markStale` — обратимо, строка цела.
+   */
+  markStaleById?(userId: string, id: string): Promise<boolean>;
+  /**
+   * ВОЛНА H (шаг 2): пометить факт ЗАМЕНЁННЫМ более свежим (bi-temporal supersede).
+   * Отличается от `markStale` принципиально: stale — решение ВЛАДЕЛЬЦА («забудь»), invalid_at — вывод
+   * СИСТЕМЫ («устарело, есть свежее»). Схлопывать нельзя: во вкладке «Память» владелец должен видеть,
+   * КТО убрал факт, иначе это молчаливое исчезновение — тот самый класс ложного отчёта, который
+   * проект выжигает. Возвращает true, если запись реально помечена.
+   */
+  supersede?(userId: string, oldId: string, newId?: string): Promise<boolean>;
+  /** Волна H: заменённые записи для витрины «было → стало» (новые первыми). */
+  listSuperseded?(userId: string, limit: number): Promise<Array<Episode & { supersededBy?: string; invalidAt?: number }>>;
+  /**
+   * ЧЕСТНОСТЬ хранилища (найдено ЖИВЫМ прогоном вкладки «Память», волна E): без БД эпизодика живёт
+   * ТОЛЬКО в процессе и умирает с рестартом. Пустой список в UI при этом читается владельцем как
+   * «пока нечего запоминать», хотя правда — «долговременная память не работает вообще». Признак
+   * позволяет сказать это прямо (декларация обязана совпадать с поведением).
+   */
+  readonly durability?: "durable" | "process-only";
 }
 
 /**
@@ -115,6 +159,8 @@ function toVectorLiteral(vec: readonly number[]): string {
 
 /** Прод: Postgres + pgvector (схема §13). Без БД деградирует в []/no-op. */
 export class PgVectorEpisodicMemory implements EpisodicMemory {
+  /** Записи переживают рестарт (Postgres) — см. EpisodicMemory.durability. */
+  readonly durability = "durable" as const;
   /** Б2: userId, у которых ТОЧНО есть записи (монотонно: раз true — навсегда true в процессе). */
   private readonly known = new Set<string>();
 
@@ -123,7 +169,7 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
   async hasEntries(userId: string): Promise<boolean> {
     if (this.known.has(userId)) return true; // уже знаем — без запроса
     const res = await query(
-      `select 1 from episodic_memory where user_id = $1 and stale = false limit 1`,
+      `select 1 from episodic_memory where user_id = $1 and stale = false and invalid_at is null limit 1`,
       [userId],
     );
     // Нет БД (res===null) → консервативно true: не глушим retrieval из-за отсутствия сигнала.
@@ -141,7 +187,7 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
               salience,
               1 - (embedding <=> $2::vector) as score
          from episodic_memory
-        where user_id = $1 and stale = false and embedding is not null
+        where user_id = $1 and stale = false and invalid_at is null and embedding is not null
         order by embedding <=> $2::vector
         limit $3`,
       [userId, toVectorLiteral(vec), k],
@@ -175,14 +221,16 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
       });
     }
     const res = await query(
-      `insert into episodic_memory (user_id, kind, text, salience, embedding)
-       values ($1, $2, $3, $4, $5::vector)`,
+      `insert into episodic_memory (user_id, kind, text, salience, embedding, metadata)
+       values ($1, $2, $3, $4, $5::vector, $6::jsonb)`,
       [
         episode.userId,
         episode.kind,
         episode.text,
         episode.salience ?? 0.5,
         vec ? toVectorLiteral(vec) : null,
+        // F3: провенанс в metadata (колонка существовала с 0001_init, но никогда не писалась).
+        JSON.stringify(episode.source ? { source: episode.source } : {}),
       ],
     );
     if (!res) log.debug("episodic.write no-op (нет БД)");
@@ -217,7 +265,7 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
     const res = await query(
       `select id, text, 1 - (embedding <=> $2::vector) as score
          from episodic_memory
-        where user_id = $1 and stale = false and embedding is not null
+        where user_id = $1 and stale = false and invalid_at is null and embedding is not null
         order by embedding <=> $2::vector
         limit $3`,
       [userId, toVectorLiteral(vec), max],
@@ -232,24 +280,133 @@ export class PgVectorEpisodicMemory implements EpisodicMemory {
     if (upd) log.info("эпизодическая память: факты помечены stale (забыто по запросу)", { count: matches.length });
     return { staled: upd ? matches.length : 0, texts: upd ? texts : [] };
   }
+
+  /** Вкладка «Память»: живые записи по времени (без эмбеддинга). `contains` — подстрочный фильтр. */
+  async listRecent(userId: string, limit: number, contains?: string): Promise<Episode[]> {
+    const needle = contains?.trim();
+    const res = needle
+      ? await query(
+          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience,
+                  metadata->>'source' as source
+             from episodic_memory
+            where user_id = $1 and stale = false and invalid_at is null and text ilike $2
+            order by created_at desc limit $3`,
+          [userId, `%${needle}%`, limit],
+        )
+      : await query(
+          `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts, salience,
+                  metadata->>'source' as source
+             from episodic_memory
+            where user_id = $1 and stale = false and invalid_at is null
+            order by created_at desc limit $2`,
+          [userId, limit],
+        );
+    // 🔴 ЧЕСТНОСТЬ «недоступно ≠ пусто»: res===null — БД не ответила. Вернуть [] здесь нельзя —
+    // владелец увидел бы «Джарвис ничего не помнит» вместо «не смог прочитать» (ровно тот класс
+    // ложного отчёта, который проект выжигает). БРОСАЕМ: вызывающий (router-ws) ловит и пишет
+    // episodesUnavailable. У search/hasEntries семантика другая (деградация ретривала — там [] ок).
+    if (!res) throw new Error("эпизодическая память недоступна: БД не отвечает");
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      userId: String(r.user_id),
+      kind: String(r.kind) as EpisodeKind,
+      text: String(r.text),
+      ts: Number(r.ts),
+      salience: r.salience == null ? undefined : Number(r.salience),
+      // F3: провенанс из metadata; чужое/легаси-значение не коэрсим в union — честнее «неизвестно».
+      ...(r.source === "model" || r.source === "reflex" || r.source === "consolidation" ? { source: r.source as MemorySource } : {}),
+    }));
+  }
+
+  /**
+   * ВОЛНА H (шаг 2): факт заменён более свежим. Не удаляем и не путаем с «владелец забыл» —
+   * ставим момент устаревания и ссылку на замену (витрина «было → стало»).
+   */
+  async supersede(userId: string, oldId: string, newId?: string): Promise<boolean> {
+    const res = await query(
+      `update episodic_memory set invalid_at = now(), superseded_by = $3
+        where id = $1 and user_id = $2 and invalid_at is null`,
+      [oldId, userId, newId ?? null],
+    );
+    if (!res) return false;
+    const ok = (res.rowCount ?? 0) > 0;
+    if (ok) log.info("память: факт помечен устаревшим (заменён свежим)", { oldId, newId });
+    return ok;
+  }
+
+  /** Волна H: список заменённых записей для витрины «было → стало». */
+  async listSuperseded(userId: string, limit: number): Promise<Array<Episode & { supersededBy?: string; invalidAt?: number }>> {
+    const res = await query(
+      `select id, user_id, kind, text, extract(epoch from created_at) * 1000 as ts,
+              extract(epoch from invalid_at) * 1000 as invalid_ms, superseded_by,
+              metadata->>'source' as source
+         from episodic_memory
+        where user_id = $1 and invalid_at is not null
+        order by invalid_at desc limit $2`,
+      [userId, limit],
+    );
+    if (!res) return [];
+    return res.rows.map((r) => ({
+      id: String(r.id),
+      userId: String(r.user_id),
+      kind: String(r.kind) as EpisodeKind,
+      text: String(r.text),
+      ts: Number(r.ts),
+      ...(r.invalid_ms == null ? {} : { invalidAt: Number(r.invalid_ms) }),
+      ...(r.superseded_by == null ? {} : { supersededBy: String(r.superseded_by) }),
+      ...(r.source === "model" || r.source === "reflex" || r.source === "consolidation" ? { source: r.source as MemorySource } : {}),
+    }));
+  }
+
+  /** Точечное мягкое забывание по id (владелец нажал «забыть» в UI). user_id в WHERE — не чужое. */
+  async markStaleById(userId: string, id: string): Promise<boolean> {
+    const res = await query(`update episodic_memory set stale = true where id = $1 and user_id = $2`, [id, userId]);
+    if (!res) return false; // БД не ответила → false = «не забыл»; UI перечитает снимок и увидит запись на месте
+    const ok = (res.rowCount ?? 0) > 0;
+    if (ok) log.info("эпизодическая память: запись забыта владельцем из UI", { id });
+    return ok;
+  }
 }
 
 /** Dev/тесты: косинусный поиск в памяти процесса. */
 export class InMemoryEpisodicMemory implements EpisodicMemory {
+  /** Живёт только в процессе: рестарт стирает всё — UI обязан сказать это владельцу прямо. */
+  readonly durability = "process-only" as const;
   private readonly store: Array<{ episode: Episode; vec: number[] }> = [];
   private seq = 0;
 
   constructor(private readonly embedder: IEmbeddingProvider) {}
 
+  /** Волна H: заменённые (superseded) записи — id → момент устаревания и ссылка на замену. */
+  private readonly invalidated = new Map<string, { at: number; by?: string }>();
+
   async search(userId: string, queryText: string, k: number, minScore = 0): Promise<EpisodeHit[]> {
     const vec = await this.embedder.embed(queryText, "query");
     if (!vec) return [];
     return this.store
-      .filter((e) => e.episode.userId === userId)
+      .filter((e) => e.episode.userId === userId && !this.invalidated.has(e.episode.id))
       .map((e) => ({ episode: e.episode, score: cosine(vec, e.vec) }))
       .filter((h) => h.score >= minScore)
       .sort((a, b) => b.score - a.score)
       .slice(0, k);
+  }
+
+  /** Волна H: пометить заменённым (в pg — invalid_at; здесь эквивалент через карту). */
+  async supersede(userId: string, oldId: string, newId?: string): Promise<boolean> {
+    const rec = this.store.find((e) => e.episode.id === oldId && e.episode.userId === userId);
+    if (!rec || this.invalidated.has(oldId)) return false;
+    this.invalidated.set(oldId, { at: Date.now(), ...(newId ? { by: newId } : {}) });
+    return true;
+  }
+
+  /** Волна H: витрина «было → стало». */
+  async listSuperseded(userId: string, limit: number): Promise<Array<Episode & { supersededBy?: string; invalidAt?: number }>> {
+    const out: Array<Episode & { supersededBy?: string; invalidAt?: number }> = [];
+    for (const [id, meta] of this.invalidated) {
+      const rec = this.store.find((e) => e.episode.id === id && e.episode.userId === userId);
+      if (rec) out.push({ ...rec.episode, invalidAt: meta.at, ...(meta.by ? { supersededBy: meta.by } : {}) });
+    }
+    return out.sort((a, b) => (b.invalidAt ?? 0) - (a.invalidAt ?? 0)).slice(0, limit);
   }
 
   async write(episode: Omit<Episode, "id">): Promise<void> {
@@ -262,7 +419,7 @@ export class InMemoryEpisodicMemory implements EpisodicMemory {
   }
 
   async hasEntries(userId: string): Promise<boolean> {
-    return this.store.some((e) => e.episode.userId === userId);
+    return this.store.some((e) => e.episode.userId === userId && !this.invalidated.has(e.episode.id));
   }
 
   async markStale(userId: string, queryText: string, minScore: number, max = 5): Promise<{ staled: number; texts: string[] }> {
@@ -280,6 +437,26 @@ export class InMemoryEpisodicMemory implements EpisodicMemory {
     this.store.length = 0;
     this.store.push(...kept);
     return { staled: ranked.length, texts: ranked.map((x) => x.text) };
+  }
+
+  /** Вкладка «Память»: живые записи по времени (новые первыми), опц. подстрочный фильтр.
+   *  Волна H: заменённые (superseded) в живой список не идут — они в отдельной витрине. */
+  async listRecent(userId: string, limit: number, contains?: string): Promise<Episode[]> {
+    const needle = contains?.trim().toLowerCase();
+    return this.store
+      .filter((e) => e.episode.userId === userId && !this.invalidated.has(e.episode.id))
+      .filter((e) => !needle || e.episode.text.toLowerCase().includes(needle))
+      .map((e) => e.episode)
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, limit);
+  }
+
+  /** Точечное забывание по id (в in-memory — физическое удаление, для search-путей эквивалентно). */
+  async markStaleById(userId: string, id: string): Promise<boolean> {
+    const idx = this.store.findIndex((e) => e.episode.id === id && e.episode.userId === userId);
+    if (idx < 0) return false;
+    this.store.splice(idx, 1);
+    return true;
   }
 
   /** Размер хранилища (диагностика тестов). */

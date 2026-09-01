@@ -186,3 +186,60 @@ describe("router task control (§20)", () => {
     expect(() => handleTakeover(ctx, true)).not.toThrow();
   });
 });
+
+// ─── Волна E: killswitch автономии («полный стоп» / «включи автономию») ────────────────────────────
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AutonomyFreeze, setAutonomyFreezeForTests } from "../autonomy/freeze.js";
+
+describe("killswitch автономии (волна E)", () => {
+  function freshFreeze(): AutonomyFreeze {
+    const f = new AutonomyFreeze(mkdtempSync(join(tmpdir(), "jarvis-ks-")));
+    setAutonomyFreezeForTests(f);
+    return f;
+  }
+
+  it("«полный стоп» отменяет задачи, ставит durable-латч и честно называет команду возврата", () => {
+    const tasks = new TaskManager();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "долгая работа" });
+    const { ctx, sent } = fakeCtx(tasks);
+    const freeze = freshFreeze();
+
+    expect(handleControlUtterance(ctx, "Джарвис, полный стоп")).toBe(true);
+    expect(freeze.isFrozen()).toBe(true);
+    expect(tasks.get(t.taskId)?.state).toBe("cancelled");
+    const ack = sent.find((s) => s.type === "transcript")?.payload.text as string;
+    expect(ack).toContain("включи автономию"); // обещаем РОВНО ту команду, которую матчер принимает
+    expect(ack.toLowerCase()).toContain("напоминания"); // честно: напоминания НЕ глушатся
+    setAutonomyFreezeForTests(undefined);
+  });
+
+  it("«включи автономию» снимает латч, ПИНАЕТ watch-тик (иначе «продолжится само» — без механизма) и идемпотентна", () => {
+    const tasks = new TaskManager();
+    const { ctx } = fakeCtx(tasks);
+    const tickNow = vi.fn();
+    (ctx.agentDeps as unknown as { watch: { tickNow: () => void } }).watch = { tickNow };
+    const freeze = freshFreeze();
+    freeze.freeze("тест");
+
+    expect(handleControlUtterance(ctx, "включи автономию")).toBe(true);
+    expect(freeze.isFrozen()).toBe(false);
+    expect(tickNow).toHaveBeenCalled(); // контроль-ревью: без пинка созревшие проверки ждали бы 30с-переопрос
+    expect(handleControlUtterance(ctx, "включи автономию")).toBe(true); // идемпотентно, без падения
+    setAutonomyFreezeForTests(undefined);
+  });
+
+  it("обычные «стоп»/«отмени»/контент killswitch НЕ трогают", () => {
+    const tasks = new TaskManager();
+    tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });
+    const { ctx } = fakeCtx(tasks);
+    const freeze = freshFreeze();
+
+    handleControlUtterance(ctx, "стоп");
+    handleControlUtterance(ctx, "отмени");
+    expect(handleControlUtterance(ctx, "останови музыку")).toBe(false);
+    expect(freeze.isFrozen()).toBe(false);
+    setAutonomyFreezeForTests(undefined);
+  });
+});

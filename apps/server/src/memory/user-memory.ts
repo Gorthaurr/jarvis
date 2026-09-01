@@ -4,8 +4,9 @@
  * пишет осознанно) и рефлекс-бэкстопом (`agent/memory-reflect.ts`). Один код — одна дисциплина.
  */
 import { type Logger, createLogger } from "@jarvis/shared";
-import { type EpisodeKind, type EpisodicMemory } from "./episodic.js";
-import { addFact, removeFactsMatching } from "../brain/profile.js";
+import { type EpisodeKind, type EpisodicMemory, type MemorySource } from "./episodic.js";
+import { type ContradictionDeps, findContradictions, nearbyCandidates } from "./contradiction-hook.js";
+import { addFact, removeFactExact, removeFactsMatching } from "../brain/profile.js";
 
 const log: Logger = createLogger("memory:write");
 
@@ -46,11 +47,17 @@ export async function writeUserMemory(
   userId: string,
   kind: EpisodeKind,
   text: string,
+  // F3 (волна F): провенанс — КТО породил запись; уходит и в эпизод (metadata), и в мост профиля.
+  // Волна H: `contradiction` — деп для хука противоречий (нет → хук не работает, память как раньше).
+  opts?: { source?: MemorySource; contradiction?: ContradictionDeps },
 ): Promise<WriteMemoryOutcome> {
   const t = text.trim();
   if (!t) return "empty";
+  // Соседи нужны и дедупу, и хуку противоречий — берём их ОДНИМ поиском (горячий путь не удваиваем).
+  let neighbours: Awaited<ReturnType<EpisodicMemory["search"]>> = [];
   try {
-    const [top] = await episodic.search(userId, t, 1, 0);
+    neighbours = await episodic.search(userId, t, 6, 0);
+    const top = neighbours[0];
     if (top && top.score >= DEDUP_MIN) {
       log.info("память: дубль факта не записан (семантический дедуп)", {
         score: Number(top.score.toFixed(3)),
@@ -61,11 +68,49 @@ export async function writeUserMemory(
   } catch {
     /* поиск упал — пишем как есть */
   }
-  await episodic.write({ userId, kind, text: t, ts: Date.now() });
+  await episodic.write({ userId, kind, text: t, ts: Date.now(), ...(opts?.source ? { source: opts.source } : {}) });
   // Мост в курируемый профиль: его читают промпт и контекстное приветствие; переживает pgvector-down.
-  if (kind === "fact" || kind === "preference") void addFact(userId, t);
-  log.info("память: факт записан", { kind, preview: t.slice(0, 60) });
+  if (kind === "fact" || kind === "preference") void addFact(userId, t, opts?.source);
+  log.info("память: факт записан", { kind, source: opts?.source, preview: t.slice(0, 60) });
+  // ВОЛНА H (шаг 3): новый факт мог ОТМЕНИТЬ старый («работает в Сбере» → «…в Яндексе»). Соседи в
+  // зоне 0.7–0.93 — не дубли (те отсеклись выше) и не «мимо»; спрашиваем дешёвую модель, что из них
+  // противоречит, и помечаем устаревшее. Fire-and-forget: ход владельца этого не ждёт.
+  // ЧЕСТНОСТЬ: хук не ответил/выключен/упал → НИЧЕГО не помечаем (память как раньше) — «не проверено»
+  // не равно «противоречит», а молча стирать факт по неуверенной догадке нельзя.
+  if (opts?.contradiction) {
+    void supersedeContradicted(episodic, userId, t, neighbours, opts.contradiction).catch(() => {});
+  }
   return "written";
+}
+
+/**
+ * Волна H: пометить устаревшими те факты, которые новый ОТМЕНИЛ. Отдельная функция (не в горячем
+ * пути записи): вызывается fire-and-forget, ошибки глушатся вызывающим.
+ * Профиль чистим ТОЛЬКО от реально помеченных текстов — чтобы asserted-блок и эпизодика не разошлись.
+ */
+async function supersedeContradicted(
+  episodic: EpisodicMemory,
+  userId: string,
+  newFact: string,
+  neighbours: readonly { episode: { id: string; text: string }; score: number }[],
+  deps: ContradictionDeps,
+): Promise<void> {
+  if (!episodic.supersede) return; // старый провайдер без поддержки — деградируем молча
+  const candidates = nearbyCandidates(neighbours as never);
+  if (candidates.length === 0) return;
+  const idx = await findContradictions(deps, newFact, candidates);
+  if (idx.length === 0) return;
+  const outdated: string[] = [];
+  for (const i of idx) {
+    const c = candidates[i];
+    if (!c) continue;
+    const ok = await episodic.supersede(userId, c.episode.id);
+    if (ok) outdated.push(c.episode.text);
+  }
+  if (outdated.length === 0) return;
+  // Мост в профиль: убираем ровно те строки, что помечены устаревшими (точное совпадение).
+  for (const text of outdated) await removeFactExact(userId, text).catch(() => null);
+  log.info("память: устаревшие факты помечены заменёнными", { newFact: newFact.slice(0, 50), outdated: outdated.map((t) => t.slice(0, 40)) });
 }
 
 export interface ForgetOutcome {

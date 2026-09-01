@@ -9,7 +9,7 @@
  * Возвращает текст для tool_result и флаг ошибки. Декуплен от Session минимальным
  * интерфейсом ActuatorSink — тестируется с моком.
  */
-import type { ActionCommand, ActionResult, ActionKind } from "@jarvis/protocol";
+import type { ActionCommand, ActionResult, ActionKind, ConfirmOutcomeKind } from "@jarvis/protocol";
 import { DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "@jarvis/protocol";
 import type { ResolutionMemory } from "../../memory/resolution-memory.js";
 import type { ToolResultContent } from "../../integrations/llm.js";
@@ -18,6 +18,7 @@ import type { EpisodicMemory } from "../../memory/episodic.js";
 import { forgetUserMemory, writeUserMemory } from "../../memory/user-memory.js";
 import { knowledgeConsult, memorySearch, webFetch, webSearch } from "./handlers/info.js";
 import type { IWebProvider } from "../../integrations/web.js";
+import type { ContradictionDeps } from "../../memory/contradiction-hook.js";
 /** Инструменты, навигирующие браузер по URL → SSRF-гард обязателен (C5: web_* раньше его обходили). */
 const URL_NAV_TOOLS: ReadonlySet<string> = new Set([
   "web_open",
@@ -27,12 +28,12 @@ const URL_NAV_TOOLS: ReadonlySet<string> = new Set([
   "web_login", // C1: одноразовый видимый вход по URL — тоже навигация, тоже под SSRF-гардом
 ]);
 import { executeGuardedCode, runCodeGuarded } from "./handlers/code.js";
-import { messageSend, orderPlace, telegramSend, telegramSendVoiceHandler } from "./handlers/messaging.js";
+import { consentList, consentRevoke, messageSend, orderPlace, telegramSend, telegramSendVoiceHandler } from "./handlers/messaging.js";
 import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { browserUrlBlocked, channelDownResult, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, confirmDeclineText, declined, gateDeclined, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted } from "./dispatch-util.js";
 import { sleep } from "@jarvis/shared";
 import { type BrowserCondition, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 import {
@@ -69,10 +70,25 @@ import { watchCancel, watchCreate, watchList } from "./handlers/watch.js";
 import { obligationAdd, obligationList, obligationRemove } from "./handlers/obligations.js";
 import { calendarRead } from "./handlers/calendar.js";
 import { mailRead } from "./handlers/mail.js";
+import { selfCodeRead, selfCodeSearch, selfPatch, selfWeaknesses } from "./handlers/self.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
   sendAction(cmd: ActionCommand, timeoutMs?: number): Promise<ActionResult>;
+}
+
+/**
+ * Исход §14-подтверждения (Ф0 пульта). `approved` — производное от `outcome === "approved"`;
+ * ветвиться по нему можно, но НОВЫЙ код обязан различать `denied` (владелец сказал «нет») и
+ * `undelivered` (владелец вопроса НЕ ВИДЕЛ) — иначе вернётся дефект «сказали „вы не подтвердили"
+ * про вопрос, ушедший в мёртвый сокет».
+ */
+export interface ConfirmOutcome {
+  outcome: ConfirmOutcomeKind;
+  approved: boolean;
+  revision?: string;
+  /** Ф1: идентификатор припаркованного запроса (outcome === "deferred"). */
+  approvalId?: string;
 }
 
 export interface ToolContext {
@@ -82,11 +98,20 @@ export interface ToolContext {
   userId: string;
   /** §бесшумный-ввод: происхождение хода — "user" (реактивный, физ.ввод не гейтить) | "proactive" (само-инициатива). */
   origin?: "user" | "proactive";
-  /** Подтверждение необратимого (§14). kind задаёт вид модалки: send|order|irreversible. */
+  /**
+   * Подтверждение необратимого (§14). kind задаёт вид модалки: send|order|irreversible.
+   *
+   * Ф0 пульта: возвращает РАЗЛИЧИМЫЙ исход, а не голый boolean — «владелец отказал» и «я не смог его
+   * спросить» требуют РАЗНЫХ слов владельцу (см. ConfirmOutcomeKind). `approved` оставлено как
+   * производное поле, чтобы существующие ветки не сломались, но новые call-sites обязаны смотреть на
+   * `outcome`: молчаливая деградация всего в deny — ровно то, что чинит эта фаза.
+   */
   confirm?: (
     summary: string,
     kind?: "send" | "order" | "irreversible",
-  ) => Promise<{ approved: boolean; revision?: string }>;
+  ) => Promise<ConfirmOutcome>;
+  /** Волна H: деп хука противоречий памяти (нет → memory_write пишет как раньше, без пометок). */
+  contradiction?: ContradictionDeps;
   /** Реестр самописных инструментов (§8+ саморасширение). */
   dynamicTools?: DynamicToolStore;
   /** §15 ленивая загрузка: набор подгруженных холодных инструментов (tool_load его мутирует). */
@@ -179,6 +204,25 @@ export interface ToolResult {
    */
   sent?: boolean;
   /**
+   * 🔴 Ф0 пульта (адверс-ревью, HIGH): действие НЕ выполнено, потому что §14-гейт его не пропустил —
+   * владелец отказал, не ответил, или его вообще не смогли спросить. Такой результат `isError:false`
+   * (это не сбой инструмента), и без метки петля взводила `anyMutateSucceeded` для mutate-инструментов
+   * (fs_delete/system_power/code_run/skill_execute/MCP) — то есть считала дело СДЕЛАННЫМ. Следствие:
+   * masked-failure и анти-капитуляция отключались, и ход заканчивался «Готово, сэр» при том, что
+   * ничего не удалено, а владельца даже не спросили (задача писалась в реестр как успешная).
+   * Зеркало `sent` для отправок людям: «нет ошибки» ≠ «сделано».
+   */
+  declined?: boolean;
+  /**
+   * ИСХОД НЕИЗВЕСТЕН (2026-08-31, продолжение фикса дублей): действие могло СОСТОЯТЬСЯ, но
+   * подтвердить это не удалось (транспорт оборвался, сверка чтением не прошла). Формально это
+   * ошибка инструмента — но для ПАМЯТИ о сделанном «ошибка» опаснее: журнал прерванной задачи
+   * пишет «ОШИБКА» = «не сделано», и продолжение по правилу «не повторяй сделанное» повторяет
+   * отправку, которая, возможно, уже ушла человеку. Поэтому неопределённость несёт отдельный флаг,
+   * а журнал говорит «сверь перед повтором» (зеркало `sent`/`declined`).
+   */
+  uncertain?: boolean;
+  /**
    * fix 2026-07-15: ЧИСТОЕ время БЛОКИРУЮЩЕГО ОЖИДАНИЯ внутри вызова (wait_for browser поллит DOM до
    * met/таймаута). Петля вычитает его из бюджета задачи (как queueWaitMs): идл-ожидание не должно
    * раздувать avgRoundMs и жечь потолок → иначе early-wrap срубал бы задачу ДО действия после ожидания.
@@ -264,6 +308,20 @@ export async function dispatchTool(
       return syncLogins(ctx, input);
     case "message_send":
       return messageSend(ctx, input);
+    // F4 (волна F): инспекция/отзыв согласий на отправку без переспроса (§14 confirm-once).
+    case "consent_list":
+      return consentList(ctx);
+    case "consent_revoke":
+      return consentRevoke(ctx, input);
+    // Волна I (самоулучшение): свой код, свои слабости, своя правка под рельсами.
+    case "self_weaknesses":
+      return selfWeaknesses(ctx, input);
+    case "self_code_search":
+      return selfCodeSearch(ctx, input);
+    case "self_code_read":
+      return selfCodeRead(ctx, input);
+    case "self_patch":
+      return selfPatch(ctx, input);
     // Саморасширение (§8+): Джарвис создаёт/смотрит/удаляет собственные инструменты.
     case "tool_create":
       return toolCreate(ctx, input);
@@ -359,8 +417,8 @@ export async function dispatchTool(
           return "";
         }
       })();
-      const { approved } = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
-      if (!approved) return ok(`Отменено пользователем (${name}).`);
+      const gate = await ctx.confirm(`Выполнить MCP-инструмент «${name}»${argsPreview}? Это внешнее действие.`, "irreversible");
+      if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, name), gate.outcome);
     }
     const r = await ctx.mcp.callTool(name, input);
     // §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (аудит контекста 2026-07-20 + ревью батча F7): вывод MCP-инструмента —
@@ -425,8 +483,8 @@ export async function dispatchTool(
         : name === "app_close"
           ? `Закрыть «${String(input.app ?? "")}» принудительно? Несохранённое будет потеряно.`
           : `Питание: ${String(input.op ?? "")}. Несохранённая работа будет потеряна. Выполнится с задержкой и предупреждением — можно отменить. Подтвердите?`;
-    const { approved } = await ctx.confirm(summary, "irreversible");
-    if (!approved) return ok(`Отменено пользователем (${name}).`);
+    const gate = await ctx.confirm(summary, "irreversible");
+    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, name), gate.outcome);
   }
 
   // C5 SSRF: web_* (невидимый ЗАЛОГИНЕННЫЙ браузер Джарвиса) тоже навигируют по URL — прогоняем через тот
@@ -641,7 +699,11 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   if (!text) return err("memory_write: пустой content");
   // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
-  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text);
+  const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, {
+    source: "model",
+    // Волна H: новый факт мог отменить старый — хук пометит устаревшее (fire-and-forget, ход не ждёт).
+    ...(ctx.contradiction ? { contradiction: ctx.contradiction } : {}),
+  });
   return ok(outcome === "duplicate" ? "Уже помню это, сэр." : "Запомнил.");
 }
 

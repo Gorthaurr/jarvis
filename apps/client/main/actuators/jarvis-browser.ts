@@ -32,6 +32,9 @@ const STEALTH_FLAGS = [
 ];
 const WEBK_URL = "https://web.telegram.org/k/";
 const IDLE_CLOSE_MS = 5 * 60 * 1000; // закрыть тёплый браузер после простоя (экономия ресурсов)
+/** Сколько ждём появления своего пузыря после Enter и с каким шагом опрашиваем (см. telegramSend). */
+const VERIFY_TIMEOUT_MS = 8000;
+const VERIFY_POLL_MS = 400;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Профиль браузера Джарвиса. ASCII-путь ОБЯЗАТЕЛЕН (кириллица ломает IndexedDB webK).
@@ -458,9 +461,19 @@ export class JarvisBrowser {
       if (!typed || !typed.text) throw new Error("telegram: текст не лёг в поле ввода");
       const enter = (type: "keyDown" | "keyUp") => cdp.send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 });
       await enter("keyDown"); await enter("keyUp");
-      await sleep(1300);
-      const verify = await cdp.evaluate<{ delivered: boolean }>(`window.__tg.verify(${JSON.stringify(text)})`);
-      if (!verify || !verify.delivered) throw new Error("telegram: сообщение не появилось в чате — не доставлено");
+      // Ждём появления СВОЕГО пузыря ПОЛЛИНГОМ (2026-08-31). Раньше была одна проверка через 1.3с:
+      // на медленной сети/загруженной вкладке пузырь не успевал, действие объявлялось провалом — а
+      // сообщение уходило. Дальше сервер брал фолбэк-канал, и человек получал дубль. Поллинг делает
+      // такой исход редким; остаточную неопределённость сервер закрывает сверкой чтением чата.
+      let delivered = false;
+      for (let waited = 0; waited < VERIFY_TIMEOUT_MS && !delivered; waited += VERIFY_POLL_MS) {
+        await sleep(VERIFY_POLL_MS);
+        const verify = await cdp.evaluate<{ delivered: boolean }>(`window.__tg.verify(${JSON.stringify(text)})`);
+        delivered = verify?.delivered === true;
+      }
+      // Enter НАЖАТ: отсюда «не подтвердилось» ≠ «не ушло». Формулируем честно — сервер по этой
+      // ветке идёт сверять чат, а не слепо переотправлять.
+      if (!delivered) throw new Error(`telegram: не увидел своё сообщение в чате за ${Math.round(VERIFY_TIMEOUT_MS / 1000)}с — доставка НЕ подтверждена (могло и уйти)`);
       log.info("telegram доставлено", { chatTitle: opened.chatTitle, peerId: opened.peerId });
       return { delivered: true, chatTitle: opened.chatTitle, peerId: opened.peerId };
     });

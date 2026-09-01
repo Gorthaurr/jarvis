@@ -6,7 +6,11 @@
  */
 import type { TaskControl, TaskStatus } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
+import { isOfferDeclined, resumeOfferWindowMs } from "../brain/agent/checkpoint.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
+import { irreversibleDone, looksLikeMisfire, misfireAck } from "../brain/tasks/misfire.js";
+import { stripWakeAndFiller } from "../brain/router/index.js";
 import { statusReport } from "../brain/tasks/narrate.js";
 import type { Task } from "../brain/tasks/task.js";
 import { verbalize } from "../brain/verbalize/index.js";
@@ -50,6 +54,87 @@ function ackControl(ctx: SessionContext, text: string, source: ControlSource): v
  */
 export function handleControlUtterance(ctx: SessionContext, text: string, source: ControlSource = "voice"): boolean {
   if (!ctx.agentDeps.tasks) return false;
+  // ── KILLSWITCH автономии (волна E) — ПЕРЕД классификатором задач: «полный стоп» не должен
+  // падать в обычное «стоп» (stop_tts). Позитивный anchored-матч, нормализация как у роутера
+  // (та же грабля, что у resume-гарда: своя копия нормализации разошлась бы).
+  const killswitch = matchAutonomyCommand(stripWakeAndFiller(text));
+  if (killswitch === "freeze") {
+    const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId);
+    const durable = autonomyFreeze().freeze(`команда владельца («${text.trim().slice(0, 60)}»)`);
+    // Ack честный по составу: что остановлено, что НЕ остановлено (напоминания — заказаны на время),
+    // и КАК вернуть (обещаем ровно ту команду, которую матчер принимает, — обещание без срока годности).
+    // «Переживёт перезапуск» звучит ТОЛЬКО когда латч реально лёг на диск (контроль-ревью: freeze мог
+    // проглотить провал записи, а супервизор поднимает сервер за 1с — ложная гарантия durable-стопа).
+    const stopped = `Полный стоп, сэр: ${cancelled.length > 0 ? `остановил задач: ${cancelled.length}, ` : ""}автономные проверки и проактив заморожены`;
+    ackControl(
+      ctx,
+      durable
+        ? `${stopped} — переживёт и перезапуск. Напоминания продолжат срабатывать. Вернуть: «включи автономию».`
+        : `${stopped}, но на диск стоп не записался — перезапуск сервера его снимет, повторите команду после рестарта. Напоминания продолжат срабатывать. Вернуть: «включи автономию».`,
+      source,
+    );
+    log.warn("killswitch: владелец остановил автономию", { source, cancelled: cancelled.length, durable });
+    return true;
+  }
+  if (killswitch === "unfreeze") {
+    if (!autonomyFreeze().isFrozen()) {
+      // Контроль-2: даже при «и так работает» дочищаем остаточный файл-латч — прошлый unfreeze мог
+      // не снять его с диска (Windows-лок уже отпустил), и без ретрая рестарт вернул бы стоп,
+      // хотя владелец ДВАЖДЫ явно велел его снять.
+      const residualClean = autonomyFreeze().unfreeze();
+      ackControl(
+        ctx,
+        residualClean
+          ? "Автономия и так работает, сэр."
+          : "Автономия и так работает, сэр, но остаточный файл-стоп с диска снять не удалось — после перезапуска она замрёт, скажите тогда «включи автономию».",
+        source,
+      );
+      return true;
+    }
+    const clean = autonomyFreeze().unfreeze();
+    // Контроль-ревью (HIGH): «продолжится само» должно иметь МЕХАНИЗМ — пинаем watch-тик сразу
+    // (созревшие проверки/отложенные уведомления не ждут 30с-переопроса замороженного таймера;
+    // ambient на setInterval и оживает сам). Fire-and-forget: unfreeze уже случился.
+    void ctx.agentDeps.watch?.tickNow();
+    // Честность: латч мог не сняться С ДИСКА (Windows-лок) — тогда после рестарта стоп вернётся.
+    ackControl(
+      ctx,
+      clean
+        ? "Автономия включена, сэр: наблюдения, проактив и фоновые проверки снова работают."
+        : "Автономию включил, сэр, но файл-стоп не удалился с диска — после перезапуска она снова замрёт, скажите тогда ещё раз.",
+      source,
+    );
+    log.info("killswitch: владелец включил автономию", { source, diskClean: clean });
+    return true;
+  }
+  // 🔴 ЛОЖНЫЙ ЗАПУСК (волна H, живой эпизод): владелец сообщает, что мы приняли его слова за команду
+  // («это не призыв к действию был»). Раньше такая реплика НЕ распознавалась: задача продолжала идти,
+  // а сама фраза уходила в модель как НОВАЯ цель — то есть ошибка интерпретации порождала вторую
+  // ошибку. Теперь отменяем ВСЁ запущенное (владелец не обязан разбираться, какую задачу гасить) и
+  // честно называем уже совершённое необратимое: остановка задачи не отменяет отправленного.
+  if (looksLikeMisfire(text)) {
+    const tasks = ctx.agentDeps.tasks;
+    if (!tasks.hasAnyActive(ctx.session.userId)) {
+      // Нечего останавливать — но признать ошибку понимания всё равно нужно (иначе владелец
+      // не поймёт, услышали ли его вообще).
+      ackControl(ctx, misfireAck(0), source);
+      log.info("ложный запуск: активных задач нет — только признание ошибки понимания", { source });
+      return true;
+    }
+    // Необратимое собираем ДО отмены — у отменённых задач состояние уже терминальное, а знать, что
+    // ушло владельцу, нужно именно сейчас.
+    const cancelledTasks = tasks.cancelUser(ctx.session.userId);
+    const irreversible = cancelledTasks.flatMap((t) => irreversibleDone(t));
+    const cancelled = cancelledTasks.length;
+    ackControl(ctx, misfireAck(cancelled, irreversible), source);
+    log.warn("ложный запуск: реплика владельца была принята за команду — всё остановлено", {
+      source,
+      cancelled,
+      irreversible: irreversible.length,
+    });
+    return true;
+  }
+
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;
 
@@ -76,7 +161,20 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   // (любая активная задача userId, вкл. скрытую разговорную). Иначе «отмени напоминание/подписку»/«забудь
   // что просил» БЕЗ §20-задачи должно уйти в АГЕНТ (cancel_reminder и пр.), а не съесться «Нет задачи».
   if (decision.kind === "cancel") {
-    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false; // нечего останавливать — в агент
+    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) {
+      // Волна C (финальный контроль): активных задач нет, но мы ТОЛЬКО ЧТО предложили продолжить
+      // прерванную — «не надо / забудь» в это окно есть ОТКАЗ от предложения. Гасим чекпойнт, иначе
+      // обещание живёт весь TTL: сказанное плееру «продолжи» воскрешало бы ЯВНО отклонённую работу.
+      // Реплику НЕ съедаем (return false) — она может быть «отмени напоминание» и нужна агенту.
+      // ⚠️ Только ГОЛЫЙ отказ (isOfferDeclined): «отмени напоминание про таблетки» — отмена ЧЕГО-ТО
+      // ДРУГОГО, и она МОЛЧА уничтожала журнал 12-раундовой работы (контроль-5).
+      const cp = isOfferDeclined(text) ? ctx.agentDeps.checkpoints?.peek(ctx.session.userId) : undefined;
+      if (cp?.offeredAt !== undefined && Date.now() - cp.offeredAt <= resumeOfferWindowMs()) {
+        ctx.agentDeps.checkpoints?.clearIf(ctx.session.userId, cp.taskId);
+        log.info("§волна C: владелец отказался продолжать — чекпойнт снят", { taskId: cp.taskId });
+      }
+      return false; // нечего останавливать — в агент
+    }
     handleTaskControl(ctx, "cancel", undefined, source);
     return true;
   }
@@ -150,8 +248,20 @@ export function handleTaskControl(
     case "resume": {
       const ok = tasks.resume(task.taskId);
       emitTaskStatus(ctx.session, task);
-      log.info("task.control: resume", { source, taskId: task.taskId, ok });
-      ackControl(ctx, ok ? "Продолжаю." : "Нечего возобновлять.", source);
+      log.info("task.control: resume", { source, taskId: task.taskId, ok, state: task.state });
+      // «Нечего возобновлять» на ИДУЩЕЙ задаче — ложный отказ (контрольное ревью-3 волны C): резюме не
+      // требуется, работа не стоит. Тем более теперь «доделай» — слово, которое Джарвис сам предлагает
+      // владельцу для продолжения ПРЕРВАННОЙ задачи; услышать на него «нечего» при активной работе
+      // сбивает с толку. Честный статус вместо отказа.
+      // Ложный отказ был не только на running (финальный контроль волны C): задача в admission-очереди
+      // (queued) или на §14-подтверждении (waiting_confirm) — тоже ИДЁТ, «нечего возобновлять» про неё
+      // неправда. Тем более «доделай» — слово, которое Джарвис сам предлагает владельцу.
+      const inFlight = task.state === "running" || task.state === "queued" || task.state === "waiting_confirm";
+      ackControl(
+        ctx,
+        ok ? "Продолжаю." : inFlight ? "Уже занимаюсь этим, сэр." : "Нечего возобновлять.",
+        source,
+      );
       break;
     }
     case "status": {

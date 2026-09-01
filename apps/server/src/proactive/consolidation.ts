@@ -24,6 +24,7 @@ import type { EpisodicMemory } from "../memory/episodic.js";
 import type { SpendGuard } from "../billing/index.js";
 import { costUsd } from "../obs/pricing.js";
 import { writeUserMemory } from "../memory/user-memory.js";
+import { appendConsolidationRun } from "./consolidation-journal.js";
 
 const log: Logger = createLogger("consolidation");
 
@@ -150,6 +151,8 @@ export async function consolidateMemory(
     return 0;
   }
   let facts: string[];
+  let droppedDirectives = 0; // F3: журнал прогона показывает и отброшенное анти-инъекцией
+  let extractedRaw = 0; // сколько «фактов» выдал LLM ДО фильтра/капа (журнал обязан быть арифметичен)
   try {
     const resp = await deps.llm.complete({
       tier: "sonnet",
@@ -170,12 +173,19 @@ export async function consolidateMemory(
       .filter((x): x is string => typeof x === "string")
       .map((s) => s.trim())
       .filter((s) => s.length >= 3 && s.length <= 200)
+      // F3-контроль: «извлечено» в журнале — это то, что ВЫДАЛ LLM (до анти-инъекционного фильтра и
+      // капа), иначе витрина показывала бы арифметически несовместимые числа (extracted 0 / dropped 3).
+      .map((s) => {
+        extractedRaw += 1;
+        return s;
+      })
       // Ревью волны Б 5-й проход (#1) ЗАЩИТА В ГЛУБИНУ: даже если модель поддалась инъекции и извлекла
       // «факт»-директиву — код отсекает всё, что похоже на инструкцию/контакт для пересылки (email, URL,
       // forwarding-глаголы). Такое НЕ должно оседать в доверенном profile.facts, рендерящемся каждый ход.
       .filter((s) => {
         if (looksLikeDirective(s)) {
           log.warn("сон-цикл: извлечённый «факт» похож на директиву/контакт — отброшен (анти-инъекция)", { preview: s.slice(0, 80) });
+          droppedDirectives += 1;
           return false;
         }
         return true;
@@ -188,20 +198,39 @@ export async function consolidateMemory(
     deps.spend?.finishTask(consId); // #1: закрыть учётную «задачу» траты (как memory-reflect)
   }
   if (facts.length === 0) {
-    log.info("сон-цикл: устойчивых фактов не найдено", { userId, turns: turns.length });
+    log.info("сон-цикл: устойчивых фактов не найдено", { userId, turns: turns.length, dropped: droppedDirectives });
+    // 🔴 F3-контроль: прогон, где ВСЁ отбил анти-инъекционный фильтр, — самое важное событие для
+    // витрины «Журнал сна» (фильтр реально сработал по подозрительному контенту), а ранний return
+    // оставлял владельца с надписью «Сон-цикл ещё ничего не записывал». Журналируем такой прогон.
+    if (droppedDirectives > 0) {
+      await appendConsolidationRun(userId, { ts: Date.now(), extracted: extractedRaw, written: 0, dropped: droppedDirectives, facts: [] });
+    }
     return 0;
   }
 
   // Запись через ЕДИНЫЙ писатель (user-memory): семантический дедуп ≥0.93 + мост fact→профиль (кап 20).
   let written = 0;
+  const writtenFacts: string[] = [];
   for (const f of facts) {
     try {
-      const outcome = await writeUserMemory(deps.episodic, userId, "fact", f);
-      if (outcome === "written") written += 1;
+      const outcome = await writeUserMemory(deps.episodic, userId, "fact", f, { source: "consolidation" });
+      if (outcome === "written") {
+        written += 1;
+        writtenFacts.push(f);
+      }
     } catch (e) {
       log.debug("сон-цикл: запись факта не удалась", { error: e instanceof Error ? e.message : String(e) });
     }
   }
-  log.info("сон-цикл: консолидация завершена", { userId, extracted: facts.length, written });
+  log.info("сон-цикл: консолидация завершена", { userId, extracted: extractedRaw, kept: facts.length, written });
+  // F3 (волна F): durable-журнал прогона — раньше итог терялся в `void ...` на server.ts, и владелец
+  // не мог узнать, что фоновый LLM записал ему в профиль. Вкладка «Память» читает этот журнал.
+  await appendConsolidationRun(userId, {
+    ts: Date.now(),
+    extracted: extractedRaw, // то, что выдал LLM (до фильтра/капа) — иначе extracted < dropped
+    written,
+    dropped: droppedDirectives,
+    facts: writtenFacts,
+  });
   return written;
 }

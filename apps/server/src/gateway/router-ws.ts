@@ -27,6 +27,10 @@ import {
   type DemoSave,
   type DevText,
   type Envelope,
+  type MemoryForget,
+  type MemoryItem,
+  type MemoryRequest,
+  type MemoryState,
   type MessageType,
   type SkillSaved,
   type Takeover,
@@ -36,11 +40,18 @@ import {
 import { AsyncMutex, type Logger, Semaphore, type ThinkingEffort, type Tier, createLogger, envInt } from "@jarvis/shared";
 import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/index.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
+import { autonomyFreeze } from "../autonomy/freeze.js";
+import { renderCapabilityPassport } from "../brain/capabilities.js";
+import { lastSubscriptionFailure } from "../integrations/subscription-llm.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, setLanguage, setContext, setLastBriefed } from "../brain/profile.js";
+import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed, setLastSelfReviewed } from "../brain/profile.js";
+import { readConsolidationRuns } from "../proactive/consolidation-journal.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
+import { buildSelfReview, shouldSelfReview } from "../proactive/self-review.js";
+import { collectWeaknesses } from "../self/weaknesses.js";
+import { dataPath } from "../paths.js";
 import { upcomingDue } from "../proactive/ambient/obligations.js";
 import { parseCalendarChips } from "../proactive/ambient/calendar-parse.js";
 import type { CalendarReadResult } from "../proactive/ambient/calendar-source.js";
@@ -67,6 +78,7 @@ import type { McpManager } from "../brain/mcp/manager.js";
 import { noteClientContext } from "../proactive/salience.js";
 import { metrics } from "../obs/metrics.js";
 import { TaskManager } from "../brain/tasks/manager.js";
+import type { CheckpointStore } from "../brain/agent/checkpoint-store.js";
 import type { TradingService } from "../brain/trading/index.js";
 import type { KnowledgeBase } from "../brain/knowledge/index.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
@@ -113,6 +125,11 @@ export interface BrainProviders {
   tierThinking: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
   /** Реестр долгих задач (§20) — общий на gateway: голос/UI управляют активной задачей. */
   tasks: TaskManager;
+  /**
+   * Волна C (P0 #4): чекпойнты прерванных задач — «продолжи с того же места» перестаёт быть пустым
+   * обещанием. Durable, один на gateway (переживает рестарт сервера). Опционален: нет → фича молчит.
+   */
+  checkpoints?: CheckpointStore;
   /** Тёплость сессий для §15-кеширования — общая на gateway. */
   warmth: SessionWarmth;
   /** Реестр самописных инструментов (§8+ саморасширение) — общий на gateway. */
@@ -218,6 +235,115 @@ function sendUsage(session: Session, spend: SpendGuard): void {
   session.send("usage.info", { plan, ...s });
 }
 
+/** Сколько записей каждого слоя отдаём в UI (владельцу нужен обзор, не выгрузка всей БД). */
+const MEMORY_UI_LIMIT = 200;
+
+/**
+ * Волна E (вкладка «Память», идея Skales — единственное место, где их память была лучше нашей):
+ * снимок ВСЕГО, что Джарвис помнит о владельце, тремя честно разделёнными слоями:
+ *   • facts — курируемые факты профиля (в промпт идут ASSERTED, высокая уверенность);
+ *   • episodes — эпизодическая память (в промпт идёт ХЕДЖИРОВАННО «возможно, всплыло»);
+ *   • evicted — вытесненные капом (в промпт НЕ идут; витрина честности «ничего не пропало молча»).
+ * Провенанс слоёв в UI обязан совпадать с провенансом в промпте — иначе владелец правит не то.
+ */
+async function sendMemoryState(ctx: SessionContext, queryText?: string): Promise<void> {
+  const userId = ctx.session.userId;
+  const needle = queryText?.trim();
+  // F3 (волна F): провенанс фактов из sidecar-меты (fail-safe: нет меты → факт без пометки).
+  const factMeta = await readFactMeta(userId);
+  const facts = (getProfile(userId).facts ?? [])
+    .filter((f) => !needle || f.toLowerCase().includes(needle.toLowerCase()))
+    .map((f) => {
+      const meta = factMeta.get(f);
+      return {
+        id: f, // у факта профиля нет id — сам текст и есть ключ
+        text: f,
+        ...(meta?.source ? { source: meta.source } : {}),
+        ...(meta?.ts !== undefined ? { ts: meta.ts } : {}),
+      };
+    });
+  const episodic = ctx.agentDeps.episodic;
+  let episodes: MemoryItem[] = [];
+  let episodesUnavailable: string | undefined;
+  let episodesTotal: number | undefined;
+  let episodesHasMore = false;
+  if (!episodic?.listRecent) {
+    // ЧЕСТНО: «не умею прочитать» ≠ «памяти нет» (закон честности — пустой список выглядел бы как
+    // «Джарвис ничего не помнит», хотя записи на диске есть).
+    episodesUnavailable = "эпизодическая память недоступна в этой сборке";
+  } else {
+    try {
+      // +1 сверх капа — дешёвый признак «есть ещё» без вытягивания всей таблицы.
+      const rows = await episodic.listRecent(userId, MEMORY_UI_LIMIT + 1, needle);
+      const shown = rows.slice(0, MEMORY_UI_LIMIT);
+      episodesHasMore = rows.length > MEMORY_UI_LIMIT; // точного числа не знаем — но честно скажем «есть ещё»
+      if (!episodesHasMore) episodesTotal = rows.length;
+      episodes = shown.map((e) => ({ id: e.id, text: e.text, ts: e.ts, kind: e.kind, ...(e.source ? { source: e.source } : {}) }));
+      // 🔴 Найдено ЖИВЫМ прогоном: без БД эпизодика — process-only, и ПУСТОЙ список читается как
+      // «пока нечего запоминать», хотя правда — «долговременная память не работает, всё умрёт с
+      // рестартом». Говорим прямо (декларация обязана совпадать с поведением).
+      if (episodic.durability === "process-only") {
+        episodesUnavailable =
+          "долговременная память сейчас без базы данных: записи живут только до перезапуска сервера" +
+          (episodes.length > 0 ? " (показанное ниже тоже)" : "");
+      }
+    } catch (e) {
+      episodesUnavailable = "не смог прочитать эпизодическую память (БД не отвечает)";
+      log.warn("вкладка «Память»: чтение эпизодов упало", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  // Фильтр уходит ВНУТРЬ (не после обрезки) — иначе поиск по давно вытесненному врал бы «пусто».
+  const arch = await readEvictedFacts(userId, MEMORY_UI_LIMIT, needle);
+  const evicted = arch.items.map((r) => ({ id: r.fact, text: r.fact, ...(r.ts !== undefined ? { ts: r.ts } : {}) }));
+  // F3: журнал сон-цикла — «что фоновая консолидация записала». Фильтром не режется (это журнал
+  // прогонов, а не слой записей). Сбой ЧТЕНИЯ существующего журнала не выдаём за «ничего не было»
+  // (контроль-2, класс «недоступно ≠ пусто»): честно говорим об этом в предупреждении панели.
+  let consolidationRuns: Awaited<ReturnType<typeof readConsolidationRuns>> = [];
+  let journalUnavailable: string | undefined;
+  try {
+    consolidationRuns = await readConsolidationRuns(userId, 10);
+  } catch (e) {
+    journalUnavailable = "журнал сна прочитать не удалось";
+    log.warn("вкладка «Память»: чтение журнала сон-цикла упало", { error: e instanceof Error ? e.message : String(e) });
+  }
+  const state: MemoryState = {
+    facts,
+    episodes,
+    evicted,
+    ...(episodesUnavailable || journalUnavailable
+      ? { episodesUnavailable: [episodesUnavailable, journalUnavailable].filter(Boolean).join("; ") }
+      : {}),
+    // Честные тоталы: показанное ≠ всё накопленное (кап MEMORY_UI_LIMIT).
+    totals: { evicted: arch.total, ...(episodesTotal !== undefined ? { episodes: episodesTotal } : {}) },
+    ...(needle ? { query: needle } : {}), // эхо: панель не должна догадываться, что было применено
+    ...(episodesHasMore ? { hasMore: { episodes: true } } : {}),
+    ...(consolidationRuns.length > 0 ? { consolidation: consolidationRuns } : {}),
+  };
+  ctx.session.send("memory.state", state);
+}
+
+/** Точечно забыть по решению владельца и сразу вернуть обновлённый снимок (UI не гадает об исходе). */
+async function forgetMemoryItem(ctx: SessionContext, req: MemoryForget): Promise<void> {
+  const userId = ctx.session.userId;
+  try {
+    if (req?.layer === "fact" && typeof req.id === "string" && req.id) {
+      // 🔴 removeFactExact, а НЕ removeFactsMatching (адверс-ревью, HIGH): у последнего семантика
+      // голосового забывания (needle ⊆ fact + кап 5) — клик «Забыть» на «жена Оля» сносил и
+      // «жена Оля работает врачом», и «жена Оля любит суши». Владелец выбрал КОНКРЕТНУЮ строку.
+      const removed = await removeFactExact(userId, req.id);
+      log.info("вкладка «Память»: владелец забыл факт профиля", { removed: removed !== null });
+    } else if (req?.layer === "episode" && typeof req.id === "string" && req.id) {
+      const ok = (await ctx.agentDeps.episodic?.markStaleById?.(userId, req.id)) ?? false;
+      log.info("вкладка «Память»: владелец забыл эпизод", { id: req.id, ok });
+    }
+  } catch (e) {
+    log.warn("вкладка «Память»: забывание не удалось", { error: e instanceof Error ? e.message : String(e) });
+  }
+  // Свежий снимок: владелец ВИДИТ факт удаления. Фильтр СОХРАНЯЕМ — иначе список под поиском
+  // молча превращался в полный, а подпись оставалась «по запросу» (адверс-ревью).
+  await sendMemoryState(ctx, req?.query);
+}
+
 /** Создать контекст для свежей/возобновлённой сессии. */
 export function makeSessionContext(
   session: Session,
@@ -260,6 +386,10 @@ export function makeSessionContext(
       language: getProfile(session.userId).language,
     },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
+    // Волна C: чекпойнт прерванной задачи → честное «продолжи». DEV-ГЕЙТ обязателен (правило проекта
+    // для всего, что ПОТРЕБЛЯЕТ накопленное владельцем): слот один на пользователя, и утренний прогон
+    // текст-драйвера иначе перетёр бы недоделку владельца своей — а его «доделай» доводило бы смоук.
+    checkpoints: isDevSession(clientVersion) ? undefined : brain.checkpoints,
     warmth: brain.warmth, // общая тёплость сессий (§15)
     dynamicTools: brain.dynamicTools, // §8+ самописные инструменты в наборе модели
     // §15 ленивая загрузка: набор подгруженных холодных инструментов — per-session (скоуплен на Session,
@@ -283,6 +413,20 @@ export function makeSessionContext(
     openOrFocus: (url) => brain.extBridge.openOrFocus(url),
     // §: браузер пользователя через расширение для browser_open/read/act (его реальные вкладки/сессия).
     ext: brain.extBridge,
+    // Волна E: паспорт возможностей — живой снимок на КАЖДЫЙ ход ($0: читаем флаги, не сеть).
+    // «Ключ есть» ≠ «канал жив» — формулировки в renderCapabilityPassport это различают.
+    capabilities: () =>
+      renderCapabilityPassport({
+        extensionConnected: brain.extBridge.connected,
+        mcpServers: brain.mcp?.status() ?? [],
+        braveKey: Boolean(process.env.BRAVE_SEARCH_API_KEY),
+        tinkoffToken: Boolean(process.env.TINKOFF_INVEST_TOKEN),
+        obsConfigured: Boolean(process.env.OBS_WEBSOCKET_PASSWORD || process.env.OBS_WEBSOCKET_HOST),
+        autonomyFrozenReason: autonomyFreeze().info()?.reason ?? null,
+        // Почему лёг резерв на подписке (протухшая авторизация/исчерпанный лимит) — знание на каждый
+        // ход: иначе владелец слышит «связь прервалась» и не догадывается, что нужно переавторизоваться.
+        subscriptionFailure: lastSubscriptionFailure(),
+      }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
     obligations: brain.obligations, // §проактив-всё: счета/обязательства (инструменты obligation_*)
@@ -309,6 +453,9 @@ export function makeSessionContext(
   /** День (toDateString), в который брифинг УЖЕ пробовали в этом соединении, и латч in-flight. */
   let briefingTriedDay: string | undefined;
   let briefingInFlight = false;
+  // Волна I: самоосмотр — одна попытка на сессию (гейт по дням живёт в профиле и переживает рестарт).
+  let selfReviewTried = false;
+  let selfReviewInFlight = false;
   /** Занят ли владелец ПРЯМО СЕЙЧАС (полный экран/звонок/блокировка) — §9 «не мешать». */
   const ownerBusy = (): boolean => {
     const c = ctxForBusy?.lastContext;
@@ -404,11 +551,50 @@ export function makeSessionContext(
       briefingInFlight = false;
     }
   };
+  /**
+   * Волна I: РЕДКИЙ самоосмотр — «вот что у меня повторяется, могу починить». Данные уже лежат в
+   * durable-логах, но владелец не обязан догадываться спросить. Гейт — раз в несколько дней и только
+   * когда реально сказали (молчание не съедает гейт), как у брифинга; при аварийном стопе автономии
+   * молчим вовсе — предлагать себя чинить, когда владелец всё остановил, неуместно.
+   */
+  const flushSelfReview = async (): Promise<void> => {
+    if (devSession || selfReviewTried || selfReviewInFlight) return;
+    if (autonomyFreeze().isFrozen()) return;
+    const everyDays = Math.max(1, Number(process.env.JARVIS_SELF_REVIEW_DAYS ?? 3) || 3);
+    if (!shouldSelfReview({ lastReviewedAt: getProfile(session.userId).lastSelfReviewedAt, everyDays, enabled: true }, Date.now())) {
+      selfReviewTried = true;
+      return;
+    }
+    if (ownerBusy()) return; // занят — попробуем на следующей реплике (гейт не тратим)
+    selfReviewInFlight = true;
+    try {
+      const report = await collectWeaknesses(dataPath("logs"));
+      const line = report.unavailable ? null : buildSelfReview(report.weaknesses);
+      selfReviewTried = true;
+      if (!line) return; // не за что зацепиться — молчим, гейт НЕ двигаем
+      if (!session.channelUp()) {
+        selfReviewTried = false; // канал умер, пока читали логи — пусть попробует следующая сессия
+        return;
+      }
+      voice.speakQueued(verbalize(line));
+      session.send("chat", { role: "assistant", text: line });
+      void setLastSelfReviewed(session.userId).catch((e) =>
+        log.warn("самоосмотр: метка не сохранилась", e instanceof Error ? e.message : String(e)),
+      );
+      log.info("самоосмотр озвучен", { weaknesses: report.weaknesses.length });
+    } catch (e) {
+      log.warn("самоосмотр не собрался", e instanceof Error ? e.message : String(e));
+    } finally {
+      selfReviewInFlight = false;
+    }
+  };
   /** ЕДИНАЯ точка «владелец здесь»: всё, что нельзя говорить в пустую комнату. */
   const onOwnerPresent = (): void => {
     flushIncidentReport();
     // Брифинг ждёт чтения календаря (сеть/расширение) — не задерживаем реплику владельца.
     void flushDailyBriefing();
+    // Самоосмотр читает логи с диска — тоже фоном и тоже не в пустую комнату.
+    void flushSelfReview();
   };
   // §Волна2 (2.6): пост-STT нормализатор лексики. Источники: статика роутера (сервисы/алиасы),
   // приложения/игры из client.env (объект мутируется хендлером client.env ниже), имена/триггеры
@@ -750,6 +936,16 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "client.usage.request": {
       // §6B/B5: клиент (вкладка «Оплата») просит свежий снимок расхода/лимитов.
       sendUsage(ctx.session, ctx.agentDeps.spend);
+      break;
+    }
+    case "memory.request": {
+      // Волна E (вкладка «Память»): владелец хочет ВИДЕТЬ, что Джарвис о нём помнит.
+      void sendMemoryState(ctx, (env.payload as MemoryRequest | undefined)?.query);
+      break;
+    }
+    case "memory.forget": {
+      // Точечное забывание по решению владельца (мягкое: профиль-факт убирается, эпизод → stale).
+      void forgetMemoryItem(ctx, env.payload as MemoryForget);
       break;
     }
     case "client.keys": {

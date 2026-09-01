@@ -20,6 +20,7 @@ import type {
   VoiceList,
   MonitorList,
   ChatMessage,
+  MemoryState,
   UsageInfo,
 } from "@jarvis/protocol";
 
@@ -47,6 +48,8 @@ export const IPC = {
   settingsGet: "jarvis:settingsGet", // настройки: получить срез (invoke) — язык/контекст/флаги ключей
   settingsSave: "jarvis:settingsSave", // настройки: сохранить патч (invoke) — возвращает честный отчёт
   requestUsage: "jarvis:requestUsage", // §6B/B5 вкладка «Оплата»: запросить свежий расход/лимиты
+  requestMemory: "jarvis:requestMemory", // волна E вкладка «Память»: показать всё, что Джарвис помнит
+  forgetMemory: "jarvis:forgetMemory", // волна E: точечно забыть факт/эпизод по решению владельца
   // main -> renderer (push-события)
   state: "jarvis:state", // смена ClientState (орб)
   transcript: "jarvis:transcript",
@@ -66,6 +69,7 @@ export const IPC = {
   voiceVoices: "jarvis:voiceVoices", // §3 список enrolled-голосов
   monitorInfo: "jarvis:monitorInfo", // §6 список мониторов + текущая настройка (для UI)
   usage: "jarvis:usage", // §6B/B5 расход/лимиты периода → вкладка «Оплата»
+  memory: "jarvis:memory", // волна E снимок памяти о владельце → вкладка «Память»
 } as const;
 
 /** Состояние записи навыка демонстрацией — для индикатора в UI (§8). */
@@ -179,6 +183,10 @@ export interface JarvisBridge {
   saveSettings(patch: SettingsPatch): Promise<SettingsSaveResult>;
   /** §6B/B5: запросить свежий расход/лимиты для вкладки «Оплата». */
   requestUsage(): void;
+  /** Волна E: запросить снимок памяти о владельце (вкладка «Память»); `query` — опц. фильтр. */
+  requestMemory(query?: string): void;
+  /** Волна E: точечно забыть запись памяти (мягко: факт из профиля, эпизод → stale). */
+  forgetMemory(layer: "fact" | "episode", id: string, query?: string): void;
   // подписки на события main -> renderer
   onState(cb: (state: ClientState) => void): () => void;
   onTranscript(cb: (t: Transcript) => void): () => void;
@@ -206,4 +214,6 @@ export interface JarvisBridge {
   onMonitors(cb: (l: MonitorList) => void): () => void;
   /** §6B/B5: расход/лимиты периода для вкладки «Оплата». */
   onUsage(cb: (u: UsageInfo) => void): () => void;
+  /** Волна E: снимок памяти о владельце (вкладка «Память»). */
+  onMemory(cb: (m: MemoryState) => void): () => void;
 }

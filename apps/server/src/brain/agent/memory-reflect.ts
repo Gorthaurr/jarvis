@@ -13,6 +13,8 @@
  */
 import { type Logger, createLogger } from "@jarvis/shared";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
+import { autonomyFreeze } from "../../autonomy/freeze.js";
+import { autonomyThrottle } from "../../autonomy/throttle.js";
 import type { ILlmProvider } from "../../integrations/llm.js";
 import type { EpisodicMemory } from "../../memory/episodic.js";
 import { writeUserMemory } from "../../memory/user-memory.js";
@@ -85,7 +87,12 @@ export interface MemoryReflectArgs {
  */
 export async function reflectFactFromUtterance(args: MemoryReflectArgs): Promise<void> {
   if (process.env.JARVIS_MEMORY_REFLECT === "0") return;
+  // Волна E: killswitch — ранним гейтом; throttle — ПОСЛЕ дешёвого underDailyCap и ДО bumpDailyCap
+  // (контроль-ревью: иначе реплики сверх суточного капа жгли часовой бюджет фантомно; и наоборот —
+  // отказ предохранителя не должен сжигать суточный кап). Бэкстопу пропустить тише, чем соврать.
+  if (autonomyFreeze().isFrozen()) return;
   if (!underDailyCap(args.userId)) return;
+  if (!autonomyThrottle().tryAcquire("memory-reflect")) return;
   bumpDailyCap(args.userId); // считаем ВЫЗОВ, не успех — кап ограничивает расход LLM
   const memWriteSchema = TOOLS_BY_NAME.memory_write;
   if (!memWriteSchema) return;
@@ -109,7 +116,7 @@ export async function reflectFactFromUtterance(args: MemoryReflectArgs): Promise
     const text = String(input.content ?? input.text ?? "").trim();
     if (!text) return;
     const kind = input.kind === "preference" ? "preference" : "fact";
-    const outcome = await writeUserMemory(args.episodic, args.userId, kind, text);
+    const outcome = await writeUserMemory(args.episodic, args.userId, kind, text, { source: "reflex" });
     log.info("рефлекс памяти: устойчивый факт из реплики", { outcome, preview: text.slice(0, 60) });
   } catch (e) {
     log.debug("рефлекс памяти пропущен", e instanceof Error ? e.message : String(e));

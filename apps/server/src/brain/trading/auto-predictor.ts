@@ -10,6 +10,8 @@
  * ⚠️ прогнозы в одном режиме коррелированы (не вполне независимая статистика) — честно держим в уме.
  */
 import { type Logger, createLogger } from "@jarvis/shared";
+import { autonomyFreeze } from "../../autonomy/freeze.js";
+import { autonomyThrottle } from "../../autonomy/throttle.js";
 import type { BaseRateResult } from "./backtest.js";
 import type { TradeExpert } from "./expert.js";
 import type { Direction, Market, Prediction, TradingService } from "./index.js";
@@ -194,6 +196,8 @@ export class AutoPredictor {
   /** Один проход: сверить истёкшие + по каждому кандидату прогноз ТОЛЬКО при историческом перевесе. */
   async tick(): Promise<void> {
     if (this.running) return; // не наслаиваем проходы
+    // Killswitch (волна E): «полный стоп» замораживает и авто-предиктор (сеть/LLM-эксперта не дёргаем).
+    if (autonomyFreeze().isFrozen()) return;
     this.running = true;
     try {
       await this.svc.resolvePredictions(this.cfg.userId).catch(() => undefined);
@@ -217,6 +221,9 @@ export class AutoPredictor {
             if (htfTrend && !alignsWithHigherTrend(d.direction, htfTrend)) continue; // против старшего тренда — пропуск
           }
           let p: Prediction;
+          // Часовой предохранитель автономных LLM-вызовов (волна E): эксперт — единственный LLM-путь
+          // предиктора; отказ = честный пропуск сетапа этим проходом (скрин детерминирован и бесплатен).
+          if (this.expert && !autonomyThrottle().tryAcquire("auto-predict-expert")) continue;
           if (this.expert) {
             // СЛОЙ 2: отобранный сетап эскалируем эксперту (сверка с базой знаний → стоп+тейк по R:R). Пас → пропуск.
             const analysis = await this.svc.analyze(w.symbol, { market: w.market, interval: w.tf }).catch(() => null);
