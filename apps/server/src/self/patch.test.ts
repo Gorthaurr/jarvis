@@ -1,6 +1,6 @@
 // Рельсы самоправки (волна I, 2026-08-31). Проверяем ЧИСТУЮ логику ограничителей — git здесь не гоняем.
 import { describe, expect, it } from "vitest";
-import { PROTECTED_PATHS, branchNameFor, parsePorcelain, protectedHits } from "./patch.js";
+import { PROTECTED_PATHS, branchNameFor, isTestFile, parseNameStatus, parsePorcelain, protectedHits } from "./patch.js";
 import { affectedPackages } from "./verify.js";
 
 describe("protectedHits — автономия не снимает собственные ограничители", () => {
@@ -113,8 +113,18 @@ describe("рельсы перепроверяются на КАЖДОМ шаге
     const apply = src.slice(src.indexOf("export async function applySelfPatch"), src.indexOf("export async function abortSelfPatch"));
     for (const [name, body] of [["commit", commit], ["apply", apply]] as const) {
       expect(body, `${name} обязан перепроверять рельсы`).toContain("protectedHits");
-      expect(body, `${name} обязан сверять отпечаток проверенного дерева`).toContain("verifiedFingerprint");
+      expect(body, `${name} обязан сверять, что применяется ИМЕННО проверенный коммит`).toContain("verifiedCommit");
     }
+  });
+
+  it("проверка идёт в ОДНОРАЗОВОМ дереве (тест-файл правки не видит боевые данные)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { selfRepoRoot } = await import("./repo.js");
+    const { join } = await import("node:path");
+    const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
+    const verify = src.slice(src.indexOf("export async function verifySelfPatch"), src.indexOf("export async function commitSelfPatch"));
+    expect(verify).toContain("worktree");
+    expect(verify).toContain("removedTests"); // и покрытие не должно тихо уменьшаться
   });
 
   it("apply не применяет правку без отметки о пройденной проверке", async () => {
@@ -143,7 +153,9 @@ describe("parsePorcelain — разбор состояния репозитор�
 
   it("разные состояния: добавлен, удалён, неотслеживаемый, переименован", () => {
     const raw = ["A  apps/server/src/new.ts", " D apps/server/src/old.ts", "?? apps/server/src/untracked.ts", "R  a/old.ts -> a/new.ts"].join("\n");
-    expect(parsePorcelain(raw)).toEqual(["apps/server/src/new.ts", "apps/server/src/old.ts", "apps/server/src/untracked.ts", "a/new.ts"]);
+    // У переименования нужны ОБЕ стороны: иначе ограничитель, уведённый из-под защищённого пути,
+    // исчезает из проверки (контроль-2 волны I).
+    expect(parsePorcelain(raw)).toEqual(["apps/server/src/new.ts", "apps/server/src/old.ts", "apps/server/src/untracked.ts", "a/old.ts", "a/new.ts"]);
   });
 
   it("путь в кавычках (кириллица при core.quotepath) разворачивается", () => {
@@ -153,5 +165,31 @@ describe("parsePorcelain — разбор состояния репозитор�
   it("пустой вывод — пустой список (чистое дерево)", () => {
     expect(parsePorcelain("")).toEqual([]);
     expect(parsePorcelain("\n\n")).toEqual([]);
+  });
+});
+
+/** Находки контроля-2: обходы, каждый закрыт и закреплён тестом. */
+describe("контроль-2: обходы рельсов", () => {
+  it("переименование ограничителя ловится по СТАРОМУ пути (git mv self-guard.ts guard.ts)", () => {
+    const files = parsePorcelain("R  apps/client/main/actuators/self-guard.ts -> apps/client/main/actuators/guard.ts");
+    expect(files).toContain("apps/client/main/actuators/self-guard.ts");
+    expect(protectedHits(files)).toHaveLength(1);
+  });
+
+  it("то же в diff --name-status (коммиты ветки)", () => {
+    const changed = parseNameStatus("R100\tapps/server/src/brain/consent.ts\tapps/server/src/brain/consent2.ts").map((c) => c.path);
+    expect(protectedHits(changed)).toHaveLength(1);
+  });
+
+  it("границы чтения своего кода — тоже ограничитель", () => {
+    expect(protectedHits(["apps/server/src/self/repo.ts"])).toHaveLength(1);
+  });
+
+  it("удалённые тесты опознаются (зелено, купленное удалением проверок)", () => {
+    expect(parsePorcelain(" D apps/server/src/self/patch.test.ts", { onlyDeleted: true })).toEqual(["apps/server/src/self/patch.test.ts"]);
+    expect(parsePorcelain(" M apps/server/src/self/patch.test.ts", { onlyDeleted: true })).toEqual([]);
+    expect(isTestFile("a/b.test.ts")).toBe(true);
+    expect(isTestFile("a/b.spec.tsx")).toBe(true);
+    expect(isTestFile("a/b.ts")).toBe(false);
   });
 });

@@ -92,16 +92,16 @@ function runCommand(
  * сообщение печатает в OEM-кодировке (в UTF-8 это нечитаемый мусор — проверено живьём). Поэтому
  * спрашиваем прямо: `npx --version`. Не ответил → вся проверка НЕПРОВЕДЕНА, а не провалена.
  */
-export async function toolchainAvailable(cmd = "npx", packageDir = "apps/server"): Promise<boolean> {
-  const cwd = join(selfRepoRoot(), packageDir);
+export async function toolchainAvailable(cmd = "npx", packageDir = "apps/server", rootDir = selfRepoRoot()): Promise<boolean> {
+  const cwd = join(rootDir, packageDir);
   const { code } = await runCommand(cmd, ["--version"], cwd, 60_000);
   return code === 0;
 }
 
 /** Прогнать одну проверку в пакете монорепо. */
-export async function runCheck(name: string, cmd: string, args: readonly string[], packageDir: string): Promise<CheckResult> {
+export async function runCheck(name: string, cmd: string, args: readonly string[], packageDir: string, rootDir = selfRepoRoot()): Promise<CheckResult> {
   const startedAt = Date.now();
-  const cwd = join(selfRepoRoot(), packageDir);
+  const cwd = join(rootDir, packageDir);
   const { code, out, spawnFailed, timedOut } = await runCommand(cmd, args, cwd, CHECK_TIMEOUT_MS);
   const tail = out.length > TAIL_CHARS ? `…${out.slice(-TAIL_CHARS)}` : out;
   // «Не запустилось» и «не дождались» — оба означают НЕПРОВЕРЕНО (ok: undefined), а не провал кода.
@@ -134,12 +134,18 @@ export interface VerifyOutcome {
 }
 
 /** Компилятор + тесты по затронутым пакетам. Пустой список файлов → проверяем сервер (общий случай). */
-export async function verifyChanges(changedFiles: readonly string[]): Promise<VerifyOutcome> {
+export async function verifyChanges(changedFiles: readonly string[], rootDir = selfRepoRoot()): Promise<VerifyOutcome> {
   const packages = affectedPackages(changedFiles);
   const targets = packages.length > 0 ? packages : ["apps/server"];
+  // 🔴 Контроль-2: правки ВНЕ проверяемых пакетов (расширение Chrome, сайдкар, infra) не покрыты ни
+  // компилятором, ни тестами — а вердикт звучал как «проверки зелёные». Владелец подтверждает,
+  // опираясь на это слово, поэтому непокрытое обязано быть названо.
+  const uncovered = changedFiles
+    .map((f) => f.split("\\").join("/"))
+    .filter((f) => !f.startsWith("apps/server/") && !f.startsWith("apps/client/") && !f.startsWith("packages/"));
   // Среда сломана (нет npx после обновления Node, битый PATH) → честно «не проверено»: рапортовать
   // «упало» значило бы отправить Джарвиса чинить исправный код.
-  if (!(await toolchainAvailable("npx", targets[0] ?? "apps/server"))) {
+  if (!(await toolchainAvailable("npx", targets[0] ?? "apps/server", rootDir))) {
     return {
       ok: false,
       checks: [{ name: "проба инструментов", ok: undefined, tail: "npx недоступен в этой среде", durationMs: 0 }],
@@ -148,19 +154,20 @@ export async function verifyChanges(changedFiles: readonly string[]): Promise<Ve
   }
   const checks: CheckResult[] = [];
   for (const pkg of targets) {
-    checks.push(await runCheck(`typecheck ${pkg}`, "npx", ["tsc", "--noEmit"], pkg));
-    checks.push(await runCheck(`tests ${pkg}`, "npx", ["vitest", "run"], pkg));
+    checks.push(await runCheck(`typecheck ${pkg}`, "npx", ["tsc", "--noEmit"], pkg, rootDir));
+    checks.push(await runCheck(`tests ${pkg}`, "npx", ["vitest", "run"], pkg, rootDir));
   }
   const failed = checks.filter((c) => c.ok === false);
   const unknown = checks.filter((c) => c.ok === undefined);
   const ok = failed.length === 0 && unknown.length === 0;
+  const uncoveredNote = uncovered.length > 0 ? ` ⚠️ Вне проверки остались: ${uncovered.slice(0, 5).join(", ")} — их ни компилятор, ни тесты не покрывают.` : "";
   const summary = ok
-    ? `Проверки зелёные: ${checks.map((c) => c.name).join(", ")}.`
+    ? `Проверки зелёные: ${checks.map((c) => c.name).join(", ")}.${uncoveredNote}`
     : [
         failed.length ? `Упало: ${failed.map((c) => c.name).join(", ")}.` : "",
         unknown.length ? `Не удалось запустить: ${unknown.map((c) => c.name).join(", ")} — считаю НЕпроверенным.` : "",
       ]
         .filter(Boolean)
-        .join(" ");
+        .join(" ") + uncoveredNote;
   return { ok, checks, summary };
 }
