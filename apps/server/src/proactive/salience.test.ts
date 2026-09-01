@@ -1,6 +1,21 @@
+/**
+ * ⚠️ ЧЕСТНО О ГРАНИЦАХ ЭТОГО ФАЙЛА (аудит тестовой базы 2026-09-01).
+ *
+ * `shouldInterrupt` и `NudgeQueue` в рантайме НЕ ЗОВЁТСЯ НИКЕМ — это задел проактивного слоя (§9),
+ * его единственный потребитель `hub.ts` тоже не подключён. Тесты ниже фиксируют КОНТРАКТ на будущее
+ * и не защищают ни один работающий путь: держим их именно с этой оговоркой, чтобы зелёный прогон
+ * не читался как «проактивный слой проверен».
+ *
+ * Из рантайма модуля живут только `noteClientContext`/`forgetClientContext` (router-ws и server), но
+ * накопленный ими контекст в текущем коде НИКТО НЕ ЧИТАЕТ — это накопитель без потребителя, а не
+ * механизм; тестировать в нём нечего, кроме отсутствия утечки, а для этого нужен геттер, которого
+ * нет. Появится потребитель — тест писать вместе с ним и против реальной проводки.
+ *
+ * Удалено отсюда: проверка `isExpired` — тавтология на однострочном `expiresAt < now`.
+ */
 import { describe, expect, it } from "vitest";
 import type { ClientContext } from "@jarvis/protocol";
-import { NudgeQueue, isExpired, shouldInterrupt } from "./salience.js";
+import { NudgeQueue, shouldInterrupt } from "./salience.js";
 import type { Trigger } from "./triggers/index.js";
 
 const ctxFree: ClientContext = { activeApp: "explorer", fullscreen: false, micBusyByOtherApp: false, locked: false };
@@ -44,9 +59,5 @@ describe("NudgeQueue (§9: копить при занятости, отбрас�
     const out = q.flush("u1", 2_000);
     expect(out.map((t) => t.id)).toEqual(["a"]);
     expect(q.size("u1")).toBe(0);
-  });
-  it("isExpired", () => {
-    expect(isExpired(1000, 2000)).toBe(true);
-    expect(isExpired(3000, 2000)).toBe(false);
   });
 });
