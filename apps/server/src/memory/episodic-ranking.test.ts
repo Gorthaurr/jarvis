@@ -13,10 +13,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { InMemoryEpisodicMemory } from "./episodic.js";
-import { HashEmbeddingProvider } from "../integrations/openai-embeddings.js";
+import type { IEmbeddingProvider } from "../integrations/openai-embeddings.js";
 
 /** Эмбеддер, где близость задаётся явно: так тест не зависит от капризов настоящей модели. */
-class ToyEmbedder {
+class ToyEmbedder implements IEmbeddingProvider {
+  readonly dim = 3;
+  readonly live = true;
   async embed(text: string): Promise<number[] | null> {
     const t = text.toLowerCase();
     // Три ортогональные «темы»; вес — доля темы в тексте.
