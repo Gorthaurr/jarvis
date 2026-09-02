@@ -20,6 +20,7 @@ import { $ } from "./dom.js";
 import { buildWave } from "./wave.js";
 import { initBillingPanel } from "./billing-panel.js";
 import { initMemoryPanel } from "./memory-panel.js";
+import { initModelPanel } from "./model-panel.js";
 import { initMonitorPanel } from "./monitor-panel.js";
 import { initTaskPanel } from "./task-panel.js";
 import { denyConfirm, initConfirmDialog, isConfirmOpen } from "./confirm-dialog.js";
@@ -271,6 +272,7 @@ const KEY_FIELDS: ReadonlyArray<{ input: HTMLInputElement; name: KeyName; ph: st
   { input: keyEleven, name: "eleven", ph: "voiceId Джарвиса" },
   { input: keyDeepgram, name: "deepgram", ph: "резерв STT" },
 ];
+const modelPanel = initModelPanel(jarvis); // 2026-09-02 селекты «Модель» — onModelsCatalog внутри; выбор уходит в saveSettings
 
 /**
  * Подтянуть сохранённые настройки в форму. Секреты ключей в renderer НЕ возвращаются:
@@ -281,6 +283,7 @@ async function loadSettings(): Promise<void> {
     const s = await jarvis.getSettings();
     langSelect.value = s.language || "ru";
     contextInput.value = s.context || "";
+    modelPanel.setChoice(s.models); // выбор модели («» = авто); подписи/доступность подтянет models.catalog
     for (const f of KEY_FIELDS) {
       f.input.value = "";
       f.input.placeholder = s.keys[f.name] ? "сохранён — введите новый, чтобы заменить" : f.ph;
@@ -312,7 +315,7 @@ settingsSave.addEventListener("click", () => {
     if (v) keys[f.name] = v; // пусто = не трогаем сохранённый ключ
   }
   jarvis
-    .saveSettings({ language: langSelect.value, context: contextInput.value.trim(), keys })
+    .saveSettings({ language: langSelect.value, context: contextInput.value.trim(), keys, models: modelPanel.choice() })
     .then((res) => {
       if (!res.ok) {
         settingsSave.textContent = "Не удалось сохранить";

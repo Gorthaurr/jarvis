@@ -6,6 +6,8 @@
 export * from "./name-match.js";
 // Робастный матч кликабельного элемента по тексту (общий browser_act, §6 Фаза 5): без ложных подстрок.
 export * from "./ui-match.js";
+// Каталог моделей мозга (точные id, цены, роли) + наложение выбора пользователя на лестницу тиров.
+export * from "./models.js";
 
 /** Тиры маршрутизации моделей (§7). */
 export type Tier = "tier0" | "haiku" | "sonnet" | "fable";
@@ -97,6 +99,18 @@ export function envInt(name: string, fallback: number): number {
   return Number.isNaN(n) ? fallback : n;
 }
 
+/**
+ * Обрезать строку до `max` код-юнитов, НЕ разрывая суррогатную пару: одинокий high-surrogate на конце —
+ * невалидный Unicode в JSON запроса к модели (ревью 2026-09-01: капы 8000/500/200 резали эмодзи пополам).
+ */
+export function cutText(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut;
+}
+
 export function envOptional(name: string): string | undefined {
   const v = process.env[name];
   return v === undefined || v === "" ? undefined : v;
@@ -149,8 +163,16 @@ export function createLogger(scope = "jarvis", minLevel: LogLevel = "info"): Log
     if (LEVELS[level] < LEVELS[minLevel]) return;
     const line = `[${level.toUpperCase()}] (${scope}) ${msg}`;
     const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
-    if (meta !== undefined) fn(line, meta);
-    else fn(line);
+    // stdout/stderr могут быть МЁРТВЫ (читатель трубы ушёл: супервизор, «| head», закрытая консоль). Без
+    // этого try запись бросала EPIPE, uncaughtException-бэкстоп писал об этом СНОВА в тот же поток и лог
+    // рос лавиной (живой прогон 2026-09-02: 3,6 ГБ и 55 тыс. одинаковых записей за сутки). Консоль —
+    // не критичный канал: молчим и идём в durable-sink ниже, который и есть источник истины.
+    try {
+      if (meta !== undefined) fn(line, meta);
+      else fn(line);
+    } catch {
+      /* консоль недоступна (EPIPE/закрытый дескриптор) — не наша беда, файловый sink ниже отработает */
+    }
     // Дополнительные приёмники (файл и т.п.). Fail-safe: сбой sink не должен ломать вызвавший код.
     if (logSinks.length > 0) {
       const entry = { ts: Date.now(), level, scope, msg, meta };

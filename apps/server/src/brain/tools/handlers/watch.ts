@@ -2,6 +2,7 @@
  * Хендлеры НАБЛЮДЕНИЯ/мониторинга (§долгие-задачи) — durable повторяющаяся проверка условия + проактивная
  * озвучка при срабатывании. create/cancel/list. Зеркалит хендлеры напоминаний; маршрутизация — в dispatch (switch).
  */
+import { isBlind, lastOkSince } from "../../../proactive/watch/watch.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, confirmDeclineText, err, ok } from "../dispatch-util.js";
 
@@ -143,9 +144,20 @@ export function watchList(ctx: ToolContext): ToolResult {
   if (!ctx.watch) return err("Наблюдение сейчас недоступно.");
   const items = ctx.watch.list({ userId: ctx.userId });
   if (items.length === 0) return ok("Активных наблюдений нет.");
-  const lines = items.map(
-    (w) =>
-      `• «${w.what}» → уведомлю когда «${w.condition}» (каждые ${Math.round(w.intervalMs / 1000)} с${w.continuous ? ", постоянно" : ""}, id=${w.id})`,
-  );
+  const now = Date.now();
+  const lines = items.map((w) => {
+    // ЧЕСТНОСТЬ списка: «слежу» ≠ «вижу». У ослепшего наблюдения (источник недоступен дольше порога)
+    // показываем давность последней УДАЧНОЙ проверки — иначе список выглядит одинаково и для живого,
+    // и для того, что 12 часов не видит цель (живой сценарий: Chrome закрыт на ночь).
+    const hours = Math.max(1, Math.round((now - lastOkSince(w)) / 3600_000));
+    const health = !isBlind(w, now)
+      ? ""
+      : w.lastOkAt === undefined
+        ? // Честно про ЗНАНИЕ, а не про историю: у записи прошлых волн поля lastOkAt нет, хотя проверки
+          // шли — «ни одной удачной проверки» было бы утверждением о том, чего мы не знаем.
+          `, ВНИМАНИЕ: удачных проверок не записано (поставлено ${hours} ч назад)`
+        : `, ВНИМАНИЕ: последняя удачная проверка ${hours} ч назад`;
+    return `• «${w.what}» → уведомлю когда «${w.condition}» (каждые ${Math.round(w.intervalMs / 1000)} с${w.continuous ? ", постоянно" : ""}${health}, id=${w.id})`;
+  });
   return ok(`Активные наблюдения:\n${lines.join("\n")}`);
 }

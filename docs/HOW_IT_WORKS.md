@@ -58,6 +58,18 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
 
 ---
 
+### 2e. Живой прогон КЛИЕНТСКОГО актуатора БЕЗ запущенного клиента (2026-09-01)
+- **Чистые актуаторы (fs, sniff, self-guard)** — обычный `npx tsx` из `apps/client` с ОТНОСИТЕЛЬНЫМ импортом
+  (`import { search } from "./main/actuators/fs.ts"`; абсолютный `C:/...` в ESM падает с ERR_UNSUPPORTED_ESM_URL_SCHEME).
+- **Актуаторы, которым нужен Electron (nativeImage, desktopCapturer)** — собрать одноразовую пробу тем же esbuild,
+  что и `scripts/build.mjs` (`platform:"node", format:"cjs", external:["electron","ws"]`), entry с
+  `app.whenReady().then(...)`, результат писать в файл (не в stdout) и `app.exit(0)`; запуск `npx electron _probe/x.cjs`.
+  Так `file_view` прогнан на реальных PDF/PNG/JPG с рабочего стола (PDF через python+PyMuPDF за 255 мс) без
+  рестарта живого клиента владельца. Пробу удалять после прогона.
+- **Индекс Windows** — прямой ADO-запрос из PowerShell (`Search.CollatorDSO`), см. рецепт в `app-channels.ts`.
+- ⚠️ Bash-команда длиннее ~30 КБ падает `ENAMETOOLONG` до исполнения — большие правки писать файлами (Write) и
+  python-скриптами в scratchpad, вызывать короткой командой.
+
 ## 3. ПОТОК РАБОТЫ (как реплика становится действием)
 - **Голос:** wake(«Джарвис») → STT Deepgram → `pipeline.onUserTurn` → `handleUserText` → перехваты(имя/режим/эмоция) →
   tier0 ($0, без LLM: запуск/сайт/уточнение) ИЛИ `runAgentLoop` (LLM Opus + tool-use) → tool: server-side ИЛИ

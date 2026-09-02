@@ -42,6 +42,29 @@ describe("matchLocalIntent", () => {
     expect(matchLocalIntent("открой Spotify")).toEqual({ kind: "app.launch", app: "spotify" });
   });
 
+  it("сценарии 2026-09-02 (причина №1): доменные существительные НЕ схлопываются в app.launch — решает модель", () => {
+    for (const phrase of [
+      "включи стрим", "запусти трансляцию", "включи запись", "включи сцену игра", "запусти тесты", "запусти сервер",
+      "запусти сборку", "запусти билд", "запусти скрипт деплоя", "запусти деплой", "открой лекцию про интегралы",
+      "включи фильм", "включи мультики", "открой статистику",
+    ]) {
+      expect(matchLocalIntent(phrase), phrase).toBeUndefined();
+    }
+    // голое имя приложения по-прежнему tier0
+    expect(matchLocalIntent("запусти обс")).toEqual({ kind: "app.launch", app: "обс" });
+    expect(matchLocalIntent("открой блокнот")).toEqual({ kind: "app.launch", app: "блокнот" });
+  });
+
+  it("сервис + содержательный остаток → модель (не голая главная сервиса с ложным «Открыл.»)", () => {
+    expect(matchLocalIntent("открой ютуб студию")).toBeUndefined();
+    expect(matchLocalIntent("открой лекцию на ютубе про интегралы")).toBeUndefined();
+    expect(matchLocalIntent("включи видео про котиков на ютубе")).toBeUndefined();
+    // служебные слова рядом с сервисом — по-прежнему просто открытие
+    expect(matchLocalIntent("открой ютуб в новой вкладке")).toEqual({ kind: "browser.open", url: "https://youtube.com", inDefault: true });
+    expect(matchLocalIntent("открой мне ютуб")).toEqual({ kind: "browser.open", url: "https://youtube.com", inDefault: true });
+    expect(matchLocalIntent("запусти ютубе")).toEqual({ kind: "browser.open", url: "https://youtube.com", inDefault: true }); // fuzzy без остатка
+  });
+
   it("срезает слово-будильник и вежливость из транскрипта STT", () => {
     // STT включает «Джарвис, привет!» в текст — без среза LAUNCH_RE не сработал бы.
     expect(matchLocalIntent("Джарвис, привет! Запусти Инстаграм.")).toEqual({

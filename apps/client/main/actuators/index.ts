@@ -19,12 +19,15 @@ import * as apps from "./apps.js";
 import * as input from "./input.js";
 import * as ground from "./ground.js";
 import * as windows from "./windows.js";
+import * as audioSessions from "./audio-sessions.js";
+import * as windowArrange from "./window-arrange.js";
 import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
 import * as fs from "./fs.js";
+import { viewFile } from "./file-view.js";
 import { type CaptureRect, captureScreen, getLastCaptureMapping, probeScreen } from "./screen.js";
 import { screenOcr, waitFor } from "./sensors-cheap.js";
-import { observeAfterAction } from "./observe.js";
+import { captureUiFingerprint, observeAfterAction } from "./observe.js";
 import * as system from "./system.js";
 import * as office from "./office.js";
 import * as obs from "./obs.js";
@@ -64,6 +67,49 @@ const JARVIS_INPUT_TOLERANCE_MS = 900;
 let lastJarvisInputAt = 0;
 /** Команды, которые ФИЗИЧЕСКИ инжектят ввод в сессию пользователя (в отличие от UIA-invoke/CDP). */
 const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key", "input.mouse"]);
+/**
+ * Команды, после которых снимается fused-наблюдение → для них нужен снимок структуры ДО действия
+ * (иначе дельту не с чем считать). Список ровно повторяет call-site'ы observeAfterAction.
+ */
+const OBSERVING_KINDS = new Set<ActionCommand["kind"]>([
+  "input.click",
+  "input.type",
+  "input.key",
+  "input.mouse",
+  "ui.invoke",
+  "skill.execute",
+]);
+
+/**
+ * Будет ли после этой команды снято fused-наблюдение. ЧИСТАЯ функция — ОДИН источник правды для
+ * снимка «до» и для самого наблюдения.
+ *
+ * Ревью 2026-09-01: решение по одному лишь `kind` было неверным — наблюдение условно ВНУТРИ вида
+ * (input.key не наблюдает середину жеста down/up, input.mouse — только drag/wheel/up). Снимок «до»
+ * при этом делался всё равно: блокирующий обход UIA перед КАЖДЫМ удержанием клавиши в игре, и его
+ * результат сразу выбрасывался. Тайминг-зависимые жесты от этого едут.
+ */
+export function willObserve(cmd: ActionCommand): boolean {
+  if (!OBSERVING_KINDS.has(cmd.kind)) return false;
+  if (cmd.kind === "input.key") return cmd.mode !== "down" && cmd.mode !== "up";
+  if (cmd.kind === "input.mouse") return cmd.op === "drag" || cmd.op === "wheel" || cmd.op === "up";
+  return true;
+}
+
+/**
+ * Нужен ли снимок ДО действия. Уже НЕ равно willObserve (адверс-ревью 2026-09-01):
+ * — `input.mouse{op:"up"}` наблюдают ПОСЛЕ, но снимок ДО пришёлся бы на момент, когда кнопка мыши
+ *   ФИЗИЧЕСКИ зажата предыдущим `down` — блокирующий обход UIA прямо посреди жеста рвёт drag;
+ * — `skill.execute` идёт под собственным бюджетом реплея, и лишние секунды съедают слак, ради
+ *   которого этот бюджет и считался («нет двух писателей в GUI»); дельта между состояниями,
+ *   разделёнными десятками секунд берста, всё равно малоинформативна.
+ */
+export function needsBeforeSnapshot(cmd: ActionCommand): boolean {
+  if (!willObserve(cmd)) return false;
+  if (cmd.kind === "input.mouse" && cmd.op === "up") return false;
+  if (cmd.kind === "skill.execute") return false;
+  return true;
+}
 
 /**
  * Активен ли пользователь ПРЯМО СЕЙЧАС (недавно вводил сам, а не Джарвис). Логика — в user-presence.
@@ -140,6 +186,13 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       );
     }
 
+    // 🔴 Снимок структуры окна ДО действия — база для наблюдения-ДЕЛЬТЫ (форензика 2026-09-01:
+    // прежнее наблюдение описывало окно, а не изменение, и модель всё равно шла за скриншотом —
+    // пара «screen_capture → input_click» самая частая во всей истории). Снимаем ТОЛЬКО для
+    // действий, которые потом наблюдают: лишний опрос UIA на каждую команду не нужен.
+    // Не вышло (сайдкар лежит/долго) → undefined: наблюдение честно вернётся в прежний режим.
+    const beforeUi = needsBeforeSnapshot(cmd) ? await captureUiFingerprint() : undefined;
+
     switch (cmd.kind) {
       // ── РЕАЛЬНО в M0 ──────────────────────────────────────────
       case "app.launch": {
@@ -202,14 +255,14 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       case "input.type": {
         await input.typeText(cmd.text);
         lastJarvisInputAt = Date.now(); // наш ввод сбросит системный idle — пометим, чтобы не счесть «юзер активен»
-        const observation = await observeAfterAction({ settleMs: 150 });
+        const observation = await observeAfterAction({ settleMs: 150, before: beforeUi });
         return okResult(commandId, startedAt, observation ? { observation } : undefined);
       }
       case "input.key": {
         await input.pressKey(cmd.combo, cmd.mode, cmd.scancode);
         lastJarvisInputAt = Date.now();
         // Игровое удержание (down/up) — середина жеста, наблюдение неуместно (см. Волна2 2.1).
-        const observation = cmd.mode === "down" || cmd.mode === "up" ? undefined : await observeAfterAction({ settleMs: 250 });
+        const observation = cmd.mode === "down" || cmd.mode === "up" ? undefined : await observeAfterAction({ settleMs: 250, before: beforeUi });
         return okResult(commandId, startedAt, observation ? { observation } : undefined);
       }
       case "input.click": {
@@ -225,6 +278,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         const observation = await observeAfterAction({
           settleMs: 400,
           clickPoint: clicked ? { x: clicked.screenX, y: clicked.screenY } : undefined,
+          before: beforeUi,
         });
         return okResult(commandId, startedAt, observation ? { ...clicked, observation } : clicked);
       }
@@ -233,7 +287,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         await input.mouse(cmd);
         lastJarvisInputAt = Date.now();
         // Наблюдение — для завершённых жестов (drag/wheel/up); move/down — середина жеста.
-        const wantsObserve = cmd.op === "drag" || cmd.op === "wheel" || cmd.op === "up";
+        const wantsObserve = willObserve(cmd);
         // Точка для OCR-региона — конец drag в экранных DIP (координаты команды — vision-координаты
         // последнего снимка, кроме space:"screen"; маппинг тот же, что внутри input.mouse).
         const dragEnd = (() => {
@@ -243,13 +297,13 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           return m ? { x: m.boundsX + cmd.toX / m.scale, y: m.boundsY + cmd.toY / m.scale } : { x: cmd.toX, y: cmd.toY };
         })();
         const observation = wantsObserve
-          ? await observeAfterAction({ settleMs: 400, clickPoint: dragEnd })
+          ? await observeAfterAction({ settleMs: 400, clickPoint: dragEnd, before: beforeUi })
           : undefined;
         return okResult(commandId, startedAt, observation ? { op: cmd.op, observation } : { op: cmd.op });
       }
       case "ui.invoke": {
         await ground.invoke(cmd.target, cmd.pattern, cmd.value);
-        const observation = await observeAfterAction({ settleMs: 350 });
+        const observation = await observeAfterAction({ settleMs: 350, before: beforeUi });
         return okResult(commandId, startedAt, observation ? { observation } : undefined);
       }
       case "ui.ground": {
@@ -296,6 +350,49 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
             : `фокус не взят: ${sidecarErr || "окно не найдено"}. Проверь имя/hwnd через window_list.`,
         );
       }
+      case "window.arrange": {
+        // Цель: hwnd напрямую или поиск по подстроке заголовка/процесса (как window.focus).
+        // Текущий rect нужен, чтобы перенос СОХРАНИЛ размер окна, а не растянул его.
+        const all = await windows.listWindows();
+        const q = (cmd.query ?? "").trim().toLowerCase();
+        const target =
+          (cmd.hwnd ? all.find((w) => w.hwnd === cmd.hwnd) : undefined) ??
+          (q ? all.find((w) => w.title.toLowerCase().includes(q) || w.process.toLowerCase().includes(q)) : undefined);
+        if (!target) {
+          return errResult(
+            commandId,
+            startedAt,
+            "runtime",
+            cmd.hwnd
+              ? `окна с hwnd ${cmd.hwnd} нет — перечитай window_list`
+              : `окно «${cmd.query ?? ""}» не найдено среди открытых — проверь window_list`,
+          );
+        }
+        const r = await windowArrange.arrangeWindow({
+          hwnd: target.hwnd,
+          op: cmd.op,
+          monitor: cmd.monitor,
+          current: target.rect,
+          maximizeAfterMove: cmd.maximizeAfterMove,
+        });
+        return okResult(commandId, startedAt, { ...r, title: target.title, process: target.process });
+      }
+      case "audio.sessions": {
+        // Кто СЕЙЧАС звучит (Core Audio sessions): процесс, состояние, мьют, громкость, пик.
+        // Ответ на «что это за звук?» — первая строка списка (сортировка по пику).
+        return okResult(commandId, startedAt, { sessions: await audioSessions.listAudioSessions() });
+      }
+      case "audio.set": {
+        // Точечный мьют/громкость приложения. Актуатор САМ падает ошибкой, если подходящей
+        // сессии нет (глушить нечего) — ложного «готово» тут быть не может.
+        const r = await audioSessions.setAudioSession({
+          pid: cmd.pid,
+          process: cmd.process,
+          mute: cmd.mute,
+          level: cmd.level,
+        });
+        return okResult(commandId, startedAt, r);
+      }
       case "browser.act":
         await browser.act(cmd.intent, cmd.params);
         return okResult(commandId, startedAt);
@@ -304,7 +401,12 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         return okResult(commandId, startedAt, r);
       }
       case "code.run": {
-        const r = await codeRunner.run(cmd.lang, cmd.code);
+        if (cmd.background) {
+          // Фоновое задание: ответ сразу; исход — job.status. Честность: «запущено» ≠ «сделано», это в note.
+          const j = await codeRunner.startJob(cmd.lang, cmd.code, { cwd: cmd.cwd });
+          return okResult(commandId, startedAt, { ...j, background: true, note: "фоновое задание запущено; исход НЕ известен — проверяй job.status, результат сверяй по файлу/выводу" });
+        }
+        const r = await codeRunner.run(cmd.lang, cmd.code, { cwd: cmd.cwd, timeoutMs: cmd.timeoutMs });
         // ЧЕСТНОСТЬ (ревью C1): ненулевой exitCode = скрипт УПАЛ (исключение / sys.exit(1) / таймаут).
         // Раньше всегда okResult → модель видела «успех» и врала «готово, результат N», а exitCode/stderr
         // прятались в JSON. Теперь провал явный: модель видит ошибку и заходит иначе.
@@ -313,12 +415,14 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
             commandId,
             startedAt,
             "runtime",
-            `код завершился с кодом ${r.exitCode}${r.exitCode === -1 ? " (таймаут/прервано)" : ""}. ` +
+            `код завершился с кодом ${r.exitCode}${r.timedOut ? " (ТАЙМАУТ: окно исполнения исчерпано, процесс убит — для долгого запуска задай timeoutMs или background:true)" : r.exitCode === -1 ? " (прервано)" : ""}. ` +
               `stderr: ${(r.stderr || "").slice(0, 500) || "(пусто)"}${r.stdout ? ` | stdout: ${r.stdout.slice(0, 300)}` : ""}`,
           );
         }
         return okResult(commandId, startedAt, r);
       }
+      case "job.status":
+        return okResult(commandId, startedAt, await codeRunner.jobStatus(cmd.jobId, cmd.kill === true));
 
       // ── skill-runner (tier-0.5, §8): локальное исполнение шагов без LLM ──
       case "skill.execute": {
@@ -346,10 +450,16 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         // §Волна2 (2.1/2.2): успешный реплей/берст — приложить наблюдение итогового состояния
         // (fused observe): сервер увидит реальный экран в том же tool_result.
         if (skillRes.ok) {
-          const observation = await observeAfterAction({ settleMs: 400 });
+          const observation = await observeAfterAction({ settleMs: 400, before: beforeUi });
           if (observation) skillRes.data = { observation };
         }
         return skillRes;
+      }
+      case "fs.view": {
+        // §3.9 зрение на файл: картинка/страница PDF с диска → base64 для vision (тип — по сигнатуре;
+        // не декодировалось/нечем отрендерить/секрет → исключение → error.runtime, не пустая картинка).
+        const out = await viewFile(cmd.path, { page: cmd.page, maxSide: cmd.maxSide });
+        return okResult(commandId, startedAt, out);
       }
       case "screen.capture":
         // Зрение (§): снять активный монитор (под курсором) / выбранный → base64 PNG в ActionResult.data.
@@ -435,7 +545,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
 
       // ── Файловая система (§6): прямое управление файлами ──────
       case "fs.read":
-        return okResult(commandId, startedAt, await fs.readFile(cmd.path, cmd.maxBytes));
+        return okResult(commandId, startedAt, await fs.readFile(cmd.path, cmd.maxBytes, { offset: cmd.offset, lines: cmd.lines, tail: cmd.tail }));
       case "fs.write":
         return okResult(commandId, startedAt, await fs.writeFile(cmd.path, cmd.content, cmd.createDirs));
       case "fs.edit":
@@ -452,7 +562,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       case "fs.mkdir":
         return okResult(commandId, startedAt, await fs.makeDir(cmd.path));
       case "fs.search":
-        return okResult(commandId, startedAt, await fs.search(cmd.root, cmd.query, cmd.inContent, cmd.maxResults));
+        return okResult(commandId, startedAt, await fs.search(cmd.root, cmd.query, cmd.inContent, cmd.maxResults, Array.isArray(cmd.ignore) ? { ignore: cmd.ignore.map(String) } : undefined));
 
       // ── Системное управление (§6): питание/блокировка/медиа/громкость/буфер ──
       case "system.lock":

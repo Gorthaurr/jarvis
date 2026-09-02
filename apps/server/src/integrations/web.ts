@@ -4,6 +4,8 @@
  * Server-side инструменты мозга — Q&A никогда не гоняет GUI-браузер юзера (§12).
  * Сеть через глобальный fetch (Node 22). Без BRAVE_SEARCH_API_KEY поиск отдаёт [];
  * fetch работает без ключа (нужна лишь сеть). Парсеры — чистые, тестируются без сети.
+ * Тело декодируется по ЗАЯВЛЕННОЙ кодировке (Content-Type / XML-пролог / meta), а `application/json`
+ * отдаётся КАК ЕСТЬ (readability его бы сломал); усечение всегда помечается явно.
  */
 import { type CacheStats, type Logger, TtlCache, createLogger } from "@jarvis/shared";
 
@@ -80,12 +82,29 @@ function isPrivateIpv4(host: string): boolean {
   return false;
 }
 
-/** Прочитать тело с жёстким лимитом байт ПОТОКОВО (не буферизуя весь ответ в память). */
-async function readCappedText(resp: Response, maxBytes: number): Promise<string> {
+/** Кап текста страницы, уезжающего в LLM (§15). */
+const MAX_TEXT_CHARS = 8_000;
+/** Сколько байт от начала тела смотрим в поисках объявления кодировки (пролог/meta обязаны быть в начале). */
+const CHARSET_SNIFF_BYTES = 1024;
+
+/**
+ * Прочитать тело ПОТОКОВО с жёстким лимитом байт и декодировать по ЗАЯВЛЕННОЙ кодировке.
+ * Раньше здесь стояло `Buffer.concat(chunks).toString("utf8")` — кодировка ответа игнорировалась, и
+ * cp1251 (ЦБ РФ `XML_daily.asp` и множество РФ-сайтов) приезжал мусором: живой прогон дал
+ * «036 AUD 1 ??????? 62,2019» — название не читается, номинал не отличить от курса, т.е. молчаливая
+ * ошибка в 100 раз. `truncated` — упёрлись ли в лимит: усечение обязано быть ВИДИМЫМ (закон честности),
+ * иначе половина документа выдаётся за целый.
+ */
+async function readCappedBody(resp: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+  const contentType = resp.headers.get("content-type") ?? "";
   const reader = resp.body?.getReader();
-  if (!reader) return (await resp.text()).slice(0, maxBytes);
+  if (!reader) {
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return { text: decodeBody(buf.subarray(0, maxBytes), contentType), truncated: buf.length > maxBytes };
+  }
   const chunks: Uint8Array[] = [];
   let total = 0;
+  let truncated = false;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -93,12 +112,73 @@ async function readCappedText(resp: Response, maxBytes: number): Promise<string>
       chunks.push(value);
       total += value.length;
       if (total >= maxBytes) {
+        truncated = true; // хвост читать не стали — так и скажем (лишняя оговорка честнее ложной полноты)
         await reader.cancel().catch(() => undefined);
         break;
       }
     }
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return { text: decodeBody(Buffer.concat(chunks).subarray(0, maxBytes), contentType), truncated };
+}
+
+/** Метка кодировки из заголовка (`text/xml; charset=windows-1251`). */
+function charsetFromHeader(contentType: string): string | null {
+  const m = /charset\s*=\s*"?([\w:.+-]+)"?/i.exec(contentType);
+  return m === null ? null : m[1]!;
+}
+
+/**
+ * Метка кодировки из САМОГО документа: XML-пролог `<?xml … encoding="windows-1251"?>` (так отдаёт ЦБ РФ)
+ * либо `<meta charset=…>` / `<meta http-equiv=content-type … charset=…>`. Смотрим только первые
+ * CHARSET_SNIFF_BYTES байт и читаем их как latin1: ASCII-часть объявления одинакова в любой ANSI/UTF-8
+ * кодировке, а сами байты ещё не декодированы (курица-яйцо). Регексы работают по КОРОТКОМУ окну —
+ * ReDoS-риска нет (в отличие от парсеров по всему телу, ср. `extractReadable`).
+ */
+function charsetFromDocument(bytes: Buffer): string | null {
+  const head = bytes.subarray(0, CHARSET_SNIFF_BYTES).toString("latin1");
+  const xml = /<\?xml[^<>]{0,200}?encoding\s*=\s*["']([\w:.+-]+)["']/i.exec(head);
+  if (xml !== null) return xml[1]!;
+  const meta = /<meta[^<>]{0,300}?charset\s*=\s*["']?([\w:.+-]+)/i.exec(head);
+  return meta === null ? null : meta[1]!;
+}
+
+/**
+ * Декодировать тело: charset из Content-Type главнее (так велит HTTP), иначе — объявление внутри
+ * документа; НЕИЗВЕСТНАЯ/битая метка → utf8 (прежнее поведение — не хуже, чем было).
+ * Экспортируется для тестов кодировки по РЕАЛЬНЫМ байтам.
+ */
+export function decodeBody(bytes: Buffer, contentType: string): string {
+  const label = charsetFromHeader(contentType) ?? charsetFromDocument(bytes);
+  try {
+    return new TextDecoder(label ?? "utf-8").decode(bytes);
+  } catch {
+    // TextDecoder бросает RangeError на неизвестной метке — не роняем чтение, честно откатываемся в utf8.
+    log.warn("web: неизвестная кодировка ответа — читаю как utf8", { label });
+    return new TextDecoder("utf-8").decode(bytes);
+  }
+}
+
+/** JSON ли это по Content-Type (`application/json`, `application/ld+json`, `text/json`). */
+function isJsonContentType(contentType: string): boolean {
+  const mime = contentType.split(";")[0]!.trim().toLowerCase();
+  return mime === "text/json" || /^application\/(?:[\w.-]+\+)?json$/.test(mime);
+}
+
+/**
+ * Обрезать текст под LLM и ЧЕСТНО пометить, что обрезали (закон честности): молча срезанный хвост
+ * читается моделью как ВЕСЬ документ — на JSON это ещё и обрывок структуры, из которого следует
+ * ложный вывод «такого поля нет» вместо «я не дочитал».
+ */
+function capForLlm(text: string, bodyTruncated: boolean, maxChars = MAX_TEXT_CHARS): string {
+  const cut = text.length > maxChars;
+  if (!cut && !bodyTruncated) return text;
+  const why = [
+    cut ? `показано ${maxChars} символов из ${text.length}` : null,
+    bodyTruncated ? `чтение тела прервано на лимите ${MAX_HTML_BYTES} байт — хвост НЕ читался` : null,
+  ]
+    .filter((s): s is string => s !== null)
+    .join("; ");
+  return `${cut ? text.slice(0, maxChars) : text}\n\n[УСЕЧЕНО: ${why}. Это НЕ весь документ — не делай выводов о том, чего здесь нет.]`;
 }
 
 /** Разобрать ответ Brave Search в SearchHit[] (чистая функция). */
@@ -497,7 +577,7 @@ export class WebProvider implements IWebProvider {
         log.warn("DuckDuckGo не ок", { status: resp.status });
         return [];
       }
-      return parseDuckDuckGoLite(await readCappedText(resp, MAX_HTML_BYTES), limit);
+      return parseDuckDuckGoLite((await readCappedBody(resp, MAX_HTML_BYTES)).text, limit);
     } catch (e) {
       log.warn("DuckDuckGo ошибка", e instanceof Error ? e.message : String(e));
       return [];
@@ -551,11 +631,19 @@ export class WebProvider implements IWebProvider {
         return null;
       }
       if (!resp.ok) return null;
-      // Потоковое чтение с жёстким лимитом байт (не доверяем content-length, не буферизуем всё).
-      const html = await readCappedText(resp, MAX_HTML_BYTES);
-      const page = extractReadable(html, current); // база — ФИНАЛЬНЫЙ URL (относительные ссылки честны)
-      // Ограничим объём текста (вход в LLM, §15).
-      return { ...page, text: page.text.slice(0, 8000) };
+      // Потоковое чтение с жёстким лимитом байт (не доверяем content-length, не буферизуем всё) +
+      // декодирование по заявленной кодировке (cp1251 и т.п. — см. readCappedBody).
+      const { text: body, truncated } = await readCappedBody(resp, MAX_HTML_BYTES);
+      if (isJsonContentType(resp.headers.get("content-type") ?? "")) {
+        // JSON — ДАННЫЕ, а не разметка: `extractReadable` вырезал бы «теги» (любой `<` внутри строки) и
+        // схлопнул пробелы, а `decodeEntities` переписал бы `&amp;`/`&#39;` ВНУТРИ значений — структура
+        // ломается МОЛЧА, и модель разбирает уже не тот документ, что отдал сервер. Отдаём КАК ЕСТЬ.
+        // Заголовка у JSON нет — не выдумываем (title остаётся пустым).
+        return { url: current, title: "", text: capForLlm(body, truncated) };
+      }
+      const page = extractReadable(body, current); // база — ФИНАЛЬНЫЙ URL (относительные ссылки честны)
+      // Ограничим объём текста (вход в LLM, §15) — с ЧЕСТНОЙ пометкой усечения, а не молча.
+      return { ...page, text: capForLlm(page.text, truncated) };
     } catch (e) {
       log.warn("web.fetch ошибка", e instanceof Error ? e.message : String(e));
       return null;

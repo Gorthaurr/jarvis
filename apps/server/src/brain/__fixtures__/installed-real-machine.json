@@ -1,0 +1,1246 @@
+[
+ {
+  "name": "antigravity:",
+  "exe": "antigravity.exe",
+  "uri": "antigravity"
+ },
+ {
+  "name": "antigravity-ide:",
+  "exe": "antigravity ide.exe",
+  "uri": "antigravity-ide"
+ },
+ {
+  "name": "armodelviewing:",
+  "uri": "armodelviewing"
+ },
+ {
+  "name": "bingmaps:",
+  "uri": "bingmaps"
+ },
+ {
+  "name": "bingweather:",
+  "uri": "bingweather"
+ },
+ {
+  "name": "calculator:",
+  "uri": "calculator"
+ },
+ {
+  "name": "capcut:",
+  "exe": "capcut.exe",
+  "uri": "capcut"
+ },
+ {
+  "name": "clash:",
+  "exe": "hiddify.exe",
+  "uri": "clash"
+ },
+ {
+  "name": "clashmeta:",
+  "exe": "hiddify.exe",
+  "uri": "clashmeta"
+ },
+ {
+  "name": "claude:",
+  "exe": "claude.exe",
+  "uri": "claude"
+ },
+ {
+  "name": "claude-cli:",
+  "exe": "claude.exe",
+  "uri": "claude-cli"
+ },
+ {
+  "name": "codex:",
+  "uri": "codex"
+ },
+ {
+  "name": "cryptopro:",
+  "exe": "cptools.exe",
+  "uri": "cryptopro"
+ },
+ {
+  "name": "cryptopro-csp:",
+  "exe": "cptools.exe",
+  "uri": "cryptopro-csp"
+ },
+ {
+  "name": "cursor:",
+  "exe": "cursor.exe",
+  "uri": "cursor"
+ },
+ {
+  "name": "daas:",
+  "exe": "termidesk-client.exe",
+  "uri": "daas"
+ },
+ {
+  "name": "daass:",
+  "exe": "termidesk-client.exe",
+  "uri": "daass"
+ },
+ {
+  "name": "discord:",
+  "exe": "discord.exe",
+  "uri": "discord"
+ },
+ {
+  "name": "discord-1339223268225187920:",
+  "exe": "wwm.exe",
+  "uri": "discord-1339223268225187920"
+ },
+ {
+  "name": "dlna-playsingle:",
+  "exe": "wmplayer.exe",
+  "uri": "dlna-playsingle"
+ },
+ {
+  "name": "dota2:",
+  "exe": "dota2.exe",
+  "uri": "dota2"
+ },
+ {
+  "name": "feed:",
+  "exe": "outlook.exe",
+  "uri": "feed"
+ },
+ {
+  "name": "feedback-hub:",
+  "uri": "feedback-hub"
+ },
+ {
+  "name": "feeds:",
+  "exe": "outlook.exe",
+  "uri": "feeds"
+ },
+ {
+  "name": "figma:",
+  "exe": "figma.exe",
+  "uri": "figma"
+ },
+ {
+  "name": "git-client:",
+  "uri": "git-client"
+ },
+ {
+  "name": "google-chrome:",
+  "exe": "chrome.exe",
+  "uri": "google-chrome"
+ },
+ {
+  "name": "googleplaygames:",
+  "exe": "bootstrapper.exe",
+  "uri": "googleplaygames"
+ },
+ {
+  "name": "grvopen:",
+  "exe": "onedrive.exe",
+  "uri": "grvopen"
+ },
+ {
+  "name": "hiddify:",
+  "exe": "hiddify.exe",
+  "uri": "hiddify"
+ },
+ {
+  "name": "hyp-global:",
+  "exe": "launcher.exe",
+  "uri": "hyp-global"
+ },
+ {
+  "name": "hyp-global-1-0:",
+  "exe": "launcher.exe",
+  "uri": "hyp-global-1-0"
+ },
+ {
+  "name": "iehistory:",
+  "uri": "iehistory"
+ },
+ {
+  "name": "ierss:",
+  "uri": "ierss"
+ },
+ {
+  "name": "insiderhub:",
+  "uri": "insiderhub"
+ },
+ {
+  "name": "jnlp:",
+  "exe": "jp2launcher.exe",
+  "uri": "jnlp"
+ },
+ {
+  "name": "jnlps:",
+  "exe": "jp2launcher.exe",
+  "uri": "jnlps"
+ },
+ {
+  "name": "ldap:",
+  "exe": "wab.exe",
+  "uri": "ldap"
+ },
+ {
+  "name": "lmstudio:",
+  "exe": "lm studio.exe",
+  "uri": "lmstudio"
+ },
+ {
+  "name": "lync15:",
+  "exe": "lync.exe",
+  "uri": "lync15"
+ },
+ {
+  "name": "lync15classic:",
+  "exe": "lync.exe",
+  "uri": "lync15classic"
+ },
+ {
+  "name": "magnet:",
+  "exe": "mediaget.exe",
+  "uri": "magnet"
+ },
+ {
+  "name": "mapi:",
+  "uri": "mapi"
+ },
+ {
+  "name": "mapi16:",
+  "uri": "mapi16"
+ },
+ {
+  "name": "mediagetcatalogparams:",
+  "exe": "mediaget.exe",
+  "uri": "mediagetcatalogparams"
+ },
+ {
+  "name": "microsoft-edge:",
+  "exe": "msedge.exe",
+  "uri": "microsoft-edge"
+ },
+ {
+  "name": "microsoft-edge-holographic:",
+  "uri": "microsoft-edge-holographic"
+ },
+ {
+  "name": "microsoftmusic:",
+  "uri": "microsoftmusic"
+ },
+ {
+  "name": "microsoftsolitairecollection:",
+  "uri": "microsoftsolitairecollection"
+ },
+ {
+  "name": "microsoftvideo:",
+  "uri": "microsoftvideo"
+ },
+ {
+  "name": "mk:",
+  "uri": "mk"
+ },
+ {
+  "name": "mms:",
+  "exe": "wmplayer.exe",
+  "uri": "mms"
+ },
+ {
+  "name": "ms-aad-brokerplugin:",
+  "uri": "ms-aad-brokerplugin"
+ },
+ {
+  "name": "ms-access:",
+  "exe": "protoc~1.exe",
+  "uri": "ms-access"
+ },
+ {
+  "name": "ms-actioncenter:",
+  "uri": "ms-actioncenter"
+ },
+ {
+  "name": "ms-advancedsettings:",
+  "uri": "ms-advancedsettings"
+ },
+ {
+  "name": "ms-appinstaller:",
+  "uri": "ms-appinstaller"
+ },
+ {
+  "name": "ms-apprep:",
+  "uri": "ms-apprep"
+ },
+ {
+  "name": "ms-availablenetworks:",
+  "exe": "launchwinapp.exe",
+  "uri": "ms-availablenetworks"
+ },
+ {
+  "name": "ms-calculator:",
+  "uri": "ms-calculator"
+ },
+ {
+  "name": "ms-clock:",
+  "uri": "ms-clock"
+ },
+ {
+  "name": "ms-companion-launch:",
+  "uri": "ms-companion-launch"
+ },
+ {
+  "name": "ms-contact-support:",
+  "uri": "ms-contact-support"
+ },
+ {
+  "name": "ms-cortana2:",
+  "uri": "ms-cortana2"
+ },
+ {
+  "name": "ms-crossdevice-settings:",
+  "uri": "ms-crossdevice-settings"
+ },
+ {
+  "name": "ms-cxh:",
+  "uri": "ms-cxh"
+ },
+ {
+  "name": "ms-cxh-full:",
+  "uri": "ms-cxh-full"
+ },
+ {
+  "name": "ms-cxh-wam:",
+  "uri": "ms-cxh-wam"
+ },
+ {
+  "name": "ms-default-location:",
+  "uri": "ms-default-location"
+ },
+ {
+  "name": "ms-device-enrollment:",
+  "uri": "ms-device-enrollment"
+ },
+ {
+  "name": "ms-drive-to:",
+  "uri": "ms-drive-to"
+ },
+ {
+  "name": "ms-edu-secureassessment:",
+  "uri": "ms-edu-secureassessment"
+ },
+ {
+  "name": "ms-excel:",
+  "exe": "protoc~1.exe",
+  "uri": "ms-excel"
+ },
+ {
+  "name": "ms-eyecontrolspeech:",
+  "uri": "ms-eyecontrolspeech"
+ },
+ {
+  "name": "ms-gamebar:",
+  "uri": "ms-gamebar"
+ },
+ {
+  "name": "ms-gamebarservices:",
+  "uri": "ms-gamebarservices"
+ },
+ {
+  "name": "ms-gamingoverlay:",
+  "uri": "ms-gamingoverlay"
+ },
+ {
+  "name": "ms-get-started:",
+  "uri": "ms-get-started"
+ },
+ {
+  "name": "ms-getoffice:",
+  "uri": "ms-getoffice"
+ },
+ {
+  "name": "ms-holographicfirstrun:",
+  "uri": "ms-holographicfirstrun"
+ },
+ {
+  "name": "ms-inputapp:",
+  "uri": "ms-inputapp"
+ },
+ {
+  "name": "ms-insights:",
+  "uri": "ms-insights"
+ },
+ {
+  "name": "ms-ipmessaging:",
+  "uri": "ms-ipmessaging"
+ },
+ {
+  "name": "ms-media-player:",
+  "uri": "ms-media-player"
+ },
+ {
+  "name": "ms-meetnowflyout:",
+  "uri": "ms-meetnowflyout"
+ },
+ {
+  "name": "ms-mmsys:",
+  "exe": "rundll32.exe",
+  "uri": "ms-mmsys"
+ },
+ {
+  "name": "ms-msdt:",
+  "exe": "msdt.exe",
+  "uri": "ms-msdt"
+ },
+ {
+  "name": "ms-msime-imepad:",
+  "exe": "imepadsv.exe",
+  "uri": "ms-msime-imepad"
+ },
+ {
+  "name": "ms-msime-imjpdct:",
+  "exe": "imjpdct.exe",
+  "uri": "ms-msime-imjpdct"
+ },
+ {
+  "name": "ms-newsandinterests:",
+  "uri": "ms-newsandinterests"
+ },
+ {
+  "name": "ms-officeapp:",
+  "uri": "ms-officeapp"
+ },
+ {
+  "name": "ms-officecmd:",
+  "uri": "ms-officecmd"
+ },
+ {
+  "name": "ms-oobenetwork:",
+  "uri": "ms-oobenetwork"
+ },
+ {
+  "name": "ms-outlook:",
+  "uri": "ms-outlook"
+ },
+ {
+  "name": "ms-paint:",
+  "uri": "ms-paint"
+ },
+ {
+  "name": "ms-penworkspace:",
+  "uri": "ms-penworkspace"
+ },
+ {
+  "name": "ms-people:",
+  "uri": "ms-people"
+ },
+ {
+  "name": "ms-perception-simulation:",
+  "exe": "perceptionsimulationinput.exe",
+  "uri": "ms-perception-simulation"
+ },
+ {
+  "name": "ms-phone:",
+  "uri": "ms-phone"
+ },
+ {
+  "name": "ms-photos:",
+  "uri": "ms-photos"
+ },
+ {
+  "name": "ms-playto-audio:",
+  "uri": "ms-playto-audio"
+ },
+ {
+  "name": "ms-powerpoint:",
+  "exe": "protoc~1.exe",
+  "uri": "ms-powerpoint"
+ },
+ {
+  "name": "ms-print-addprinter:",
+  "uri": "ms-print-addprinter"
+ },
+ {
+  "name": "ms-print-printjobs:",
+  "uri": "ms-print-printjobs"
+ },
+ {
+  "name": "ms-quick-assist:",
+  "exe": "quickassist.exe",
+  "uri": "ms-quick-assist"
+ },
+ {
+  "name": "ms-rdx-document:",
+  "exe": "rundll32.exe",
+  "uri": "ms-rdx-document"
+ },
+ {
+  "name": "ms-retaildemo-launchstart:",
+  "uri": "ms-retaildemo-launchstart"
+ },
+ {
+  "name": "ms-screenclip:",
+  "uri": "ms-screenclip"
+ },
+ {
+  "name": "ms-screensketch:",
+  "uri": "ms-screensketch"
+ },
+ {
+  "name": "ms-search:",
+  "uri": "ms-search"
+ },
+ {
+  "name": "ms-settings:",
+  "uri": "ms-settings"
+ },
+ {
+  "name": "ms-settings-airplanemode:",
+  "uri": "ms-settings-airplanemode"
+ },
+ {
+  "name": "ms-settings-bluetooth:",
+  "uri": "ms-settings-bluetooth"
+ },
+ {
+  "name": "ms-settings-cellular:",
+  "uri": "ms-settings-cellular"
+ },
+ {
+  "name": "ms-settings-connectabledevices:",
+  "exe": "launchwinapp.exe",
+  "uri": "ms-settings-connectabledevices"
+ },
+ {
+  "name": "ms-settings-displays-topology:",
+  "exe": "launchwinapp.exe",
+  "uri": "ms-settings-displays-topology"
+ },
+ {
+  "name": "ms-settings-emailandaccounts:",
+  "uri": "ms-settings-emailandaccounts"
+ },
+ {
+  "name": "ms-settings-language:",
+  "uri": "ms-settings-language"
+ },
+ {
+  "name": "ms-settings-location:",
+  "uri": "ms-settings-location"
+ },
+ {
+  "name": "ms-settings-lock:",
+  "uri": "ms-settings-lock"
+ },
+ {
+  "name": "ms-settings-mobilehotspot:",
+  "uri": "ms-settings-mobilehotspot"
+ },
+ {
+  "name": "ms-settings-notifications:",
+  "uri": "ms-settings-notifications"
+ },
+ {
+  "name": "ms-settings-power:",
+  "uri": "ms-settings-power"
+ },
+ {
+  "name": "ms-settings-privacy:",
+  "uri": "ms-settings-privacy"
+ },
+ {
+  "name": "ms-settings-proximity:",
+  "uri": "ms-settings-proximity"
+ },
+ {
+  "name": "ms-settings-screenrotation:",
+  "uri": "ms-settings-screenrotation"
+ },
+ {
+  "name": "ms-settings-wifi:",
+  "uri": "ms-settings-wifi"
+ },
+ {
+  "name": "ms-settings-workplace:",
+  "uri": "ms-settings-workplace"
+ },
+ {
+  "name": "ms-sttoverlay:",
+  "uri": "ms-sttoverlay"
+ },
+ {
+  "name": "ms-taskswitcher:",
+  "uri": "ms-taskswitcher"
+ },
+ {
+  "name": "ms-unistore-email:",
+  "uri": "ms-unistore-email"
+ },
+ {
+  "name": "ms-virtualtouchpad:",
+  "exe": "launchwinapp.exe",
+  "uri": "ms-virtualtouchpad"
+ },
+ {
+  "name": "ms-voip-call:",
+  "uri": "ms-voip-call"
+ },
+ {
+  "name": "ms-voip-video:",
+  "uri": "ms-voip-video"
+ },
+ {
+  "name": "ms-walk-to:",
+  "uri": "ms-walk-to"
+ },
+ {
+  "name": "ms-wcrv:",
+  "uri": "ms-wcrv"
+ },
+ {
+  "name": "ms-windows-search:",
+  "uri": "ms-windows-search"
+ },
+ {
+  "name": "ms-windows-store:",
+  "uri": "ms-windows-store"
+ },
+ {
+  "name": "ms-windows-store-deskext:",
+  "uri": "ms-windows-store-deskext"
+ },
+ {
+  "name": "ms-windows-store2:",
+  "uri": "ms-windows-store2"
+ },
+ {
+  "name": "ms-windowsbackup:",
+  "uri": "ms-windowsbackup"
+ },
+ {
+  "name": "ms-word:",
+  "exe": "protoc~1.exe",
+  "uri": "ms-word"
+ },
+ {
+  "name": "ms-wpc:",
+  "uri": "ms-wpc"
+ },
+ {
+  "name": "ms-wpdrmv:",
+  "uri": "ms-wpdrmv"
+ },
+ {
+  "name": "ms-xbet-survey:",
+  "uri": "ms-xbet-survey"
+ },
+ {
+  "name": "ms-xbl-3d8b930f:",
+  "uri": "ms-xbl-3d8b930f"
+ },
+ {
+  "name": "ms-xgpueject:",
+  "uri": "ms-xgpueject"
+ },
+ {
+  "name": "msi-mc:",
+  "uri": "msi-mc"
+ },
+ {
+  "name": "msnweather:",
+  "uri": "msnweather"
+ },
+ {
+  "name": "msonedrivesyncserviceclient:",
+  "exe": "onedrive.sync.service.exe",
+  "uri": "msonedrivesyncserviceclient"
+ },
+ {
+  "name": "mswindowsmusic:",
+  "uri": "mswindowsmusic"
+ },
+ {
+  "name": "mswindowsvideo:",
+  "uri": "mswindowsvideo"
+ },
+ {
+  "name": "notion:",
+  "exe": "notion.exe",
+  "uri": "notion"
+ },
+ {
+  "name": "nvidiaapp:",
+  "exe": "nvidia app.exe",
+  "uri": "nvidiaapp"
+ },
+ {
+  "name": "odopen:",
+  "exe": "onedrive.exe",
+  "uri": "odopen"
+ },
+ {
+  "name": "ollama:",
+  "exe": "ollama app.exe",
+  "uri": "ollama"
+ },
+ {
+  "name": "oms:",
+  "exe": "rundll32.exe",
+  "uri": "oms"
+ },
+ {
+  "name": "onenote:",
+  "uri": "onenote"
+ },
+ {
+  "name": "onenote-cmd:",
+  "uri": "onenote-cmd"
+ },
+ {
+  "name": "onenote-uwp:",
+  "uri": "onenote-uwp"
+ },
+ {
+  "name": "outlookaccounts:",
+  "uri": "outlookaccounts"
+ },
+ {
+  "name": "outlookcal:",
+  "uri": "outlookcal"
+ },
+ {
+  "name": "outlookmail:",
+  "uri": "outlookmail"
+ },
+ {
+  "name": "read:",
+  "uri": "read"
+ },
+ {
+  "name": "receiver:",
+  "exe": "webhelper.exe",
+  "uri": "receiver"
+ },
+ {
+  "name": "res:",
+  "uri": "res"
+ },
+ {
+  "name": "rlogin:",
+  "exe": "rundll32.exe",
+  "uri": "rlogin"
+ },
+ {
+  "name": "rtkuwp:",
+  "uri": "rtkuwp"
+ },
+ {
+  "name": "search:",
+  "exe": "explorer.exe",
+  "uri": "search"
+ },
+ {
+  "name": "search-ms:",
+  "exe": "explorer.exe",
+  "uri": "search-ms"
+ },
+ {
+  "name": "sing-box:",
+  "exe": "hiddify.exe",
+  "uri": "sing-box"
+ },
+ {
+  "name": "skype:",
+  "uri": "skype"
+ },
+ {
+  "name": "skypecast15:",
+  "exe": "lync.exe",
+  "uri": "skypecast15"
+ },
+ {
+  "name": "skypewin:",
+  "uri": "skypewin"
+ },
+ {
+  "name": "sms:",
+  "uri": "sms"
+ },
+ {
+  "name": "steam:",
+  "exe": "steam.exe",
+  "uri": "steam"
+ },
+ {
+  "name": "steamlink:",
+  "exe": "steam.exe",
+  "uri": "steamlink"
+ },
+ {
+  "name": "stssync:",
+  "exe": "outlook.exe",
+  "uri": "stssync"
+ },
+ {
+  "name": "tbauth:",
+  "uri": "tbauth"
+ },
+ {
+  "name": "tel:",
+  "exe": "lync.exe",
+  "uri": "tel"
+ },
+ {
+  "name": "telnet:",
+  "exe": "rundll32.exe",
+  "uri": "telnet"
+ },
+ {
+  "name": "tg:",
+  "exe": "telegram.exe",
+  "uri": "tg"
+ },
+ {
+  "name": "tn3270:",
+  "exe": "rundll32.exe",
+  "uri": "tn3270"
+ },
+ {
+  "name": "tonsite:",
+  "exe": "telegram.exe",
+  "uri": "tonsite"
+ },
+ {
+  "name": "vmware-view:",
+  "exe": "vmware-view.exe",
+  "uri": "vmware-view"
+ },
+ {
+  "name": "vstfs:",
+  "uri": "vstfs"
+ },
+ {
+  "name": "vsweb:",
+  "uri": "vsweb"
+ },
+ {
+  "name": "vsweb+diag:",
+  "exe": "microsoft.visualstudio.vswebprotocolselector.exe",
+  "uri": "vsweb+diag"
+ },
+ {
+  "name": "vsweb+githubsi:",
+  "exe": "microsoft.visualstudio.githubprotocolhandler.exe",
+  "uri": "vsweb+githubsi"
+ },
+ {
+  "name": "vsweb+mcp:",
+  "exe": "microsoft.visualstudio.vswebprotocolselector.exe",
+  "uri": "vsweb+mcp"
+ },
+ {
+  "name": "vsweb+teamstoolkit:",
+  "exe": "microsoft.visualstudio.vswebprotocolselector.exe",
+  "uri": "vsweb+teamstoolkit"
+ },
+ {
+  "name": "webcal:",
+  "exe": "outlook.exe",
+  "uri": "webcal"
+ },
+ {
+  "name": "webcals:",
+  "exe": "outlook.exe",
+  "uri": "webcals"
+ },
+ {
+  "name": "windows-feedback:",
+  "uri": "windows-feedback"
+ },
+ {
+  "name": "windowsdefender:",
+  "uri": "windowsdefender"
+ },
+ {
+  "name": "wp-autoplay:",
+  "uri": "wp-autoplay"
+ },
+ {
+  "name": "wpa:",
+  "exe": "wpa.exe",
+  "uri": "wpa"
+ },
+ {
+  "name": "wsl-settings:",
+  "uri": "wsl-settings"
+ },
+ {
+  "name": "xbls:",
+  "uri": "xbls"
+ },
+ {
+  "name": "xbox:",
+  "uri": "xbox"
+ },
+ {
+  "name": "xbox-arena:",
+  "uri": "xbox-arena"
+ },
+ {
+  "name": "xbox-captures:",
+  "uri": "xbox-captures"
+ },
+ {
+  "name": "xbox-friendfinder:",
+  "uri": "xbox-friendfinder"
+ },
+ {
+  "name": "xbox-gamehub:",
+  "uri": "xbox-gamehub"
+ },
+ {
+  "name": "xbox-lfg:",
+  "uri": "xbox-lfg"
+ },
+ {
+  "name": "xbox-network:",
+  "uri": "xbox-network"
+ },
+ {
+  "name": "xbox-profile:",
+  "uri": "xbox-profile"
+ },
+ {
+  "name": "xbox-settings:",
+  "uri": "xbox-settings"
+ },
+ {
+  "name": "xbox-store:",
+  "uri": "xbox-store"
+ },
+ {
+  "name": "xbox-tcui:",
+  "uri": "xbox-tcui"
+ },
+ {
+  "name": "xboxgames:",
+  "uri": "xboxgames"
+ },
+ {
+  "name": "xboxidp:",
+  "uri": "xboxidp"
+ },
+ {
+  "name": "xboxliveapp-1297287741:",
+  "uri": "xboxliveapp-1297287741"
+ },
+ {
+  "name": "xboxmusic:",
+  "uri": "xboxmusic"
+ },
+ {
+  "name": "yabrowser:",
+  "exe": "browser.exe",
+  "uri": "yabrowser"
+ },
+ {
+  "name": "yandexmusic:",
+  "uri": "yandexmusic"
+ },
+ {
+  "name": "zune:",
+  "uri": "zune"
+ },
+ {
+  "name": "hak-browser 0.2.0",
+  "exe": "hak-browser.exe"
+ },
+ {
+  "name": "Hiddify, версия 2.5.7+20507"
+ },
+ {
+  "name": "CPUID CPU-Z MSI 2.15",
+  "exe": "cpuz.exe"
+ },
+ {
+  "name": "Git"
+ },
+ {
+  "name": "Google Play Games"
+ },
+ {
+  "name": "HoYoPlay",
+  "exe": "launcher.exe",
+  "uri": "hyp-global"
+ },
+ {
+  "name": "Zenless Zone Zero"
+ },
+ {
+  "name": "Microsoft Office профессиональный плюс 2016"
+ },
+ {
+  "name": "PostgreSQL 18"
+ },
+ {
+  "name": "ELDEN RING"
+ },
+ {
+  "name": "It Takes Two"
+ },
+ {
+  "name": "Plague Inc: Evolved"
+ },
+ {
+  "name": "Mount & Blade II: Bannerlord"
+ },
+ {
+  "name": "Where Winds Meet"
+ },
+ {
+  "name": "Dota 2"
+ },
+ {
+  "name": "Tesseract-OCR - open source OCR engine"
+ },
+ {
+  "name": "WinRAR 7.13 (64-разрядная)",
+  "exe": "winrar.exe"
+ },
+ {
+  "name": "WizTree v4.31",
+  "exe": "wiztree.exe"
+ },
+ {
+  "name": "Microsoft System CLR Types для SQL Server 2019"
+ },
+ {
+  "name": "Microsoft Update Health Tools"
+ },
+ {
+  "name": "Blender"
+ },
+ {
+  "name": "КриптоПро CSP"
+ },
+ {
+  "name": "Termidesk Client 6.0.2.25216 (64-bit)"
+ },
+ {
+  "name": "Termidesk Viewer 1.11.2.25216 (64-bit)"
+ },
+ {
+  "name": "Langflow"
+ },
+ {
+  "name": "Microsoft Visual Studio Installer"
+ },
+ {
+  "name": "Java 8 Update 491 (64-bit)"
+ },
+ {
+  "name": "Node.js"
+ },
+ {
+  "name": "NVIDIA Графический драйвер 610.88"
+ },
+ {
+  "name": "NVIDIA App 11.0.8.299"
+ },
+ {
+  "name": "NVIDIA Системное программное обеспечение PhysX 9.23.1019"
+ },
+ {
+  "name": "NVIDIA Аудиодрайвер HD 1.4.5.7"
+ },
+ {
+  "name": "AmneziaVPN"
+ },
+ {
+  "name": "Oracle VirtualBox 7.2.4"
+ },
+ {
+  "name": "КриптоПро ЭЦП Browser plug-in"
+ },
+ {
+  "name": "Плагин пользователя систем электронного правительства (версия 3.1.1.0) x64"
+ },
+ {
+  "name": "GitHub CLI"
+ },
+ {
+  "name": "Visual Studio Community 2026 (2)",
+  "exe": "devenv.exe"
+ },
+ {
+  "name": "AIDA64 Extreme v7.50",
+  "exe": "aida64.exe"
+ },
+ {
+  "name": "AMD Chipset Software"
+ },
+ {
+  "name": "Atomic Heart"
+ },
+ {
+  "name": "Cisco AnyConnect Secure Mobility Client",
+  "exe": "installhelper.exe"
+ },
+ {
+  "name": "Citrix Workspace 1912",
+  "exe": "trolleyexpress.exe"
+ },
+ {
+  "name": "Clink v1.9.21"
+ },
+ {
+  "name": "Visual Studio Build Tools 2026"
+ },
+ {
+  "name": "Диаг.Плагин (Администратор) 3.0.29.1003"
+ },
+ {
+  "name": "Google Chrome",
+  "exe": "chrome.exe",
+  "uri": "google-chrome"
+ },
+ {
+  "name": "Microsoft Edge",
+  "exe": "msedge.exe"
+ },
+ {
+  "name": "OBS Studio",
+  "exe": "obs64.exe"
+ },
+ {
+  "name": "rtCOMLite 1.0.3.1"
+ },
+ {
+  "name": "Приложение диагностики ПК от Контура 0.7.0.2470"
+ },
+ {
+  "name": "Контур.Плагин (Администратор) 4.14.0.5574 (64-bit)"
+ },
+ {
+  "name": "Steam"
+ },
+ {
+  "name": "TLauncher"
+ },
+ {
+  "name": "x264vfw - H.264/MPEG-4 AVC codec (remove only)"
+ },
+ {
+  "name": "Yandex (All Users)",
+  "exe": "browser.exe",
+  "uri": "yabrowser"
+ },
+ {
+  "name": "Драйверы Рутокен",
+  "exe": "rtdrivers.exe"
+ },
+ {
+  "name": "Cisco AnyConnect Diagnostics and Reporting Tool"
+ },
+ {
+  "name": "Помощник по установке Windows 11",
+  "exe": "windows10upgraderapp.exe"
+ },
+ {
+  "name": "vs_CoreEditorFonts"
+ },
+ {
+  "name": "Cisco AnyConnect ISE Posture Module",
+  "exe": "installhelper.exe"
+ },
+ {
+  "name": "VMware Horizon Client",
+  "exe": "vmware-horizon-client-5.5.2-18802628.exe"
+ },
+ {
+  "name": "Cisco AnyConnect ISE Compliance Module"
+ },
+ {
+  "name": "Epic Games Launcher"
+ },
+ {
+  "name": "Python Launcher"
+ },
+ {
+  "name": "Epic Online Services"
+ },
+ {
+  "name": "Radmin VPN 1.4.1"
+ },
+ {
+  "name": "Ассистент 6.5",
+  "exe": "ico_all.exe"
+ },
+ {
+  "name": "Antigravity 2.1.4",
+  "exe": "antigravity.exe",
+  "uri": "antigravity"
+ },
+ {
+  "name": "Notion 7.6.1",
+  "exe": "notion.exe",
+  "uri": "notion"
+ },
+ {
+  "name": "LM Studio 0.4.6+1",
+  "exe": "lm studio.exe",
+  "uri": "lmstudio"
+ },
+ {
+  "name": "CapCut"
+ },
+ {
+  "name": "Discord"
+ },
+ {
+  "name": "Figma"
+ },
+ {
+  "name": "Figma Agent",
+  "exe": "figma_agent.exe"
+ },
+ {
+  "name": "Госплагин"
+ },
+ {
+  "name": "FFmpeg"
+ },
+ {
+  "name": "Microsoft OneDrive",
+  "exe": "onedrivesetup.exe"
+ },
+ {
+  "name": "pgAdmin 4 version 9.13",
+  "exe": "pgadmin4.exe"
+ },
+ {
+  "name": "Python 3.14.3",
+  "exe": "python.exe"
+ },
+ {
+  "name": "Кнопки сервисов Яндекса на панели задач",
+  "exe": "yandex.exe"
+ },
+ {
+  "name": "Ollama version 0.18.3"
+ },
+ {
+  "name": "Telegram Desktop",
+  "exe": "telegram.exe",
+  "uri": "tg"
+ },
+ {
+  "name": "Python 3.14.0 (64-bit)",
+  "exe": "python-3.14.0-amd64.exe"
+ },
+ {
+  "name": "Antigravity IDE (User)",
+  "exe": "antigravity ide.exe",
+  "uri": "antigravity-ide"
+ },
+ {
+  "name": "Cursor (User)",
+  "exe": "cursor.exe",
+  "uri": "cursor"
+ }
+]

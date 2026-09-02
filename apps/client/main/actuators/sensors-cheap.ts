@@ -19,6 +19,7 @@ import { NotImplementedError } from "./input.js";
 import { sidecar } from "./sidecar-client.js";
 import * as system from "./system.js";
 import { raceWithCap } from "./race-cap.js";
+import { checkFile, checkProcess, resetFileWait, validateFileCond, validateProcessCond } from "./wait-file-process.js";
 
 const log = createLogger("actuator:sensors");
 
@@ -104,6 +105,7 @@ const WAIT_MAX_TIMEOUT_MS = 120_000;
 /** Дефолтный шаг опроса по типу условия: OCR тяжелее UIA/окон — реже. */
 function defaultPollMs(cond: WaitCondition): number {
   if (cond.kind === "gsi") return 400; // локальная память процесса — почти бесплатно
+  if (cond.kind === "file" || cond.kind === "process") return 500;
   return cond.kind === "text" ? 1_200 : 600;
 }
 
@@ -113,6 +115,8 @@ function validateCondition(cond: WaitCondition): void {
     throw new Error("wait_for window: нужен titleContains и/или process");
   }
   if (cond.kind === "text" && !cond.text.trim()) throw new Error("wait_for text: пустой текст");
+  if (cond.kind === "file") validateFileCond(cond);
+  if (cond.kind === "process") validateProcessCond(cond);
 }
 
 /** Один опрос условия → [выполнено?, что видели, gsi-состояние?, не-смог-проверить?]. Сенсорные сбои НЕ
@@ -186,6 +190,10 @@ async function checkOnce(cond: WaitCondition): Promise<CheckTuple> {
       const detail = `GSI ${cond.path} = «${v.slice(0, 80)}»`;
       return [cond.gone === true ? !matched : matched, detail, "fresh"];
     }
+    case "file":
+      return checkFile(cond); // сценарии 2026-09-02: «работа кончилась» = файл дописан (stableMs), не «появился»
+    case "process":
+      return checkProcess(cond);
     case "browser":
       // fix 2026-07-15: browser-условие (video.currentTime и т.п.) оценивается на СЕРВЕРЕ через ext-мост
       // (расширение подключено к серверу, клиент до него не достаёт). Сюда доходить не должно — честный «нет».
@@ -219,6 +227,7 @@ function checkOnceCapped(cond: WaitCondition, budgetMs: number): Promise<CheckTu
  */
 export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: number): Promise<WaitOutcome> {
   validateCondition(cond); // непригодное условие — честная ошибка СРАЗУ, не 30с пустого ожидания
+  if (cond.kind === "file") resetFileWait(cond); // стабилизация считается с ЭТОГО ожидания
   const timeout = Math.min(WAIT_MAX_TIMEOUT_MS, Math.max(1_000, timeoutMs ?? WAIT_DEFAULT_TIMEOUT_MS));
   const poll = Math.max(150, pollMs ?? defaultPollMs(cond));
   const startedAt = Date.now();

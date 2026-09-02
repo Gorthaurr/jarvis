@@ -40,6 +40,7 @@ import type {
   ClientSystem,
   ClientContext,
   ClientSettings,
+  ModelsCatalog,
   DisplayCard,
   ProtocolError,
   Hello,
@@ -72,7 +73,12 @@ export interface TransportConfig {
   token: string;
   /** версия клиента для Hello.clientVersion. */
   clientVersion: string;
+  /** Per-install UUID — уходит в hello ТОЛЬКО с device-токеном продукта (сервер сверяет привязку). */
+  installId?: string;
 }
+
+/** Коды ошибок протокола, после которых реконнект бессмыслен: нужен человек (обновление / вход / отзыв). */
+const NO_RECONNECT_CODES: ReadonlySet<string> = new Set(["version_mismatch", "login_required", "device_revoked", "subscription_required", "account_blocked"]);
 
 /**
  * Исполнитель команд: внедряется снаружи (actuators.dispatch), чтобы transport
@@ -83,6 +89,8 @@ export type CommandExecutor = (commandId: string, cmd: ActionCommand) => Promise
 /** События, которые transport эмитит наружу (потребляет main -> renderer). */
 export interface TransportEvents {
   connected: [ServerHello];
+  /** Продукт: сервер ротировал device-токен — main обязан персистить новый (транспорт уже шлёт его в hello). */
+  tokenRotated: [string];
   disconnected: [{ reason: string }];
   transcript: [Transcript];
   chat: [ChatMessage];
@@ -103,6 +111,8 @@ export interface TransportEvents {
   /** §6B/B5: расход/лимиты периода для вкладки «Оплата». */
   usage: [UsageInfo];
   memory: [MemoryState];
+  /** 2026-09-02: каталог моделей + выбор/применилось/отклонено (ответ на client.settings и на коннект). */
+  modelsCatalog: [ModelsCatalog];
   /** изменение «связности» для индикатора в UI. */
   link: [{ online: boolean }];
 }
@@ -226,8 +236,15 @@ export class Transport extends EventEmitter {
 
   /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту.
    *  §Волна2 (2.6): + структурные списки приложений/игр — лексикон STT-нормализатора. */
-  sendEnv(summary: string, apps?: string[], games?: string[]): void {
-    this.send(makeEnvelope<ClientEnv>("client.env", { summary, ...(apps?.length ? { apps } : {}), ...(games?.length ? { games } : {}) }));
+  sendEnv(summary: string, apps?: string[], games?: string[], installed?: ClientEnv["installed"]): void {
+    this.send(
+      makeEnvelope<ClientEnv>("client.env", {
+        summary,
+        ...(apps?.length ? { apps } : {}),
+        ...(games?.length ? { games } : {}),
+        ...(installed?.length ? { installed } : {}),
+      }),
+    );
   }
 
   /** Живой системный снимок (§контекст): что открыто/на переднем плане/мониторы → хвост промпта. */
@@ -343,6 +360,7 @@ export class Transport extends EventEmitter {
       clientVersion: this.cfg.clientVersion,
       protocolVersion: PROTOCOL_VERSION,
       resumeSessionId: this.sessionId, // §5: продолжить сессию после реконнекта
+      ...(this.cfg.token.startsWith("jdt_") && this.cfg.installId ? { installId: this.cfg.installId } : {}),
     };
     this.send(makeEnvelope<Hello>("client.hello", hello));
   }
@@ -394,6 +412,11 @@ export class Transport extends EventEmitter {
       case "server.hello": {
         const hello = env.payload as ServerHello;
         this.sessionId = hello.sessionId; // запоминаем для resume
+        if (hello.rotatedToken) {
+          // Продукт: следующий hello — уже новым токеном; durable-персист делает main (device-token-store).
+          this.cfg.token = hello.rotatedToken;
+          this.emit("tokenRotated", hello.rotatedToken);
+        }
         log.info(`server.hello: session=${hello.sessionId} resumed=${hello.resumed}`);
         this.emit("connected", hello);
         this.emit("link", { online: true });
@@ -423,6 +446,9 @@ export class Transport extends EventEmitter {
         break;
       case "memory.state":
         this.emit("memory", env.payload as MemoryState);
+        break;
+      case "models.catalog":
+        this.emit("modelsCatalog", env.payload as ModelsCatalog);
         break;
       case "speak.chunk":
         this.emit("speak", env.payload as SpeakChunk);
@@ -458,8 +484,9 @@ export class Transport extends EventEmitter {
         const pe = env.payload as ProtocolError;
         log.error(`protocol error: ${pe.code} ${pe.message}`);
         this.emit("protocolError", pe);
-        // version_mismatch -> НЕ реконнектим молча: сигналим «требуется обновление».
-        if (pe.code === "version_mismatch") this.closedByUser = true;
+        // version_mismatch / login_required / device_revoked / subscription_required -> НЕ реконнектим:
+        // шторм реконнектов и карточек до убийства процесса (ревью 2026-09-02); нужен человек.
+        if (NO_RECONNECT_CODES.has(pe.code)) this.closedByUser = true;
         break;
       }
       default:

@@ -96,7 +96,36 @@
     пересборка + **reload в `chrome://extensions` + смоук** (боевые инжекторы Telegram/browser_act проверяются ТОЛЬКО живым Chrome).
 - C#-сайдкар (`apps/sidecar-win`): UIA-грундинг + запись навыков показом. `SidecarWin.exe` собран на диске.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL` в .env); фолбэк — PGlite. Docker НЕ используется.
-- Тесты: `apps/server` `npx vitest run` (≈1023), `apps/client` `npx vitest run` (≈138). Typecheck: `npx tsc --noEmit`. Линтера нет.
+- Тесты: `apps/server` `npx vitest run` (**2589**), `apps/client` `npx vitest run` (**443**), `packages/tools` (10), `packages/shared` (67). Typecheck: `npx tsc --noEmit`. Линтера нет.
+  - 🔴 **АУДИТ ТЕСТОВОЙ БАЗЫ (2026-09-01, 6 агентов, ~70 мутаций с прогоном и откатом; запрос владельца
+    «многие тесты бесполезны, нужны рил тесты функциональности»).** Итог по числам: декоративных 2,3%
+    (57 из 2470), остальные 97,7% реально падают на сломанном коде. **Но настоящая беда не мусор, а
+    ДЫРЫ: ≈30 точечных поломок продакшн-кода оставляли ВЕСЬ прогон зелёным** — покрыты чистые функции
+    и политики, а ПРОВОДКА между механизмами нет. Проверено лично на HEAD: снятие `r.declined !== true`
+    (§14-гейт снова = «сделано») → 2208 зелёных; обезвреживание ТРЁХ гардов рельсов самоправки
+    (`hits.length > 0` → `> 999`) → 93 зелёных.
+    **ПРАВИЛА, ЗАКРЕПЛЁННЫЕ ЭТИМ АУДИТОМ:**
+    (1) **Тест ценен, только если ПАДАЕТ на сломанной реализации** — новый тест обязан пройти
+    реверт-проверку (сломай то, что он охраняет; не упал → тест декоративный).
+    (2) **Гард проверяется ПОВЕДЕНИЕМ, а не грепом по исходнику.** `expect(body).toContain("protectedHits")`
+    было главным примером самообмана: три гарда обезврежены — зона зелёная. Заменено на
+    `self/patch-rails.test.ts` (реальный git во временном репозитории через `_setSelfRepoRootForTest`).
+    (3) **Проводку между механизмами проверяем ПЕТЛЁЙ** (`handleUserText`), а не чистой функцией —
+    эталоны: `gate-declined-loop`, `tool-load-loop`, `declined-success-loop`, `response-cache-loop`,
+    `send-outcome-loop`, `reflex-wiring-loop`.
+    (4) **Фикстура обязана бить в проверяемое место**: релевантная запись в тесте ретривала лежала
+    ПЕРВОЙ, поэтому `hits[0]` был верен и без сортировки; ветка монотонности трат не исполнялась без
+    БД; ветка «нет мастер-ключа» была недостижима, а имя теста обещало обратное тому, что он делал.
+    (5) **Тест на неподключённом коде удаляем, модуль помечаем** (hub/presence/scheduler): зелёный
+    прогон на мёртвом модуле читается как «проверено» там, где в рантайме проверять нечего.
+    (6) **Порог ассерта не равен таймауту теста** — иначе он падает по таймауту вместо осмысленного
+    провала (перф-тест ReDoS-защиты был флаки именно так).
+    🔴 **ЧТО НАШЛОСЬ ПО ХОДУ — МЁРТВЫЙ ФИКС (третий случай этого класса в проекте):** метка
+    «ИСХОД НЕИЗВЕСТЕН» для неопределённой отправки не ставилась НИКОГДА — `uncertainCalls.add()`
+    стоял внутри `if (!r.isError)`, а неопределённый исход возвращается ошибкой. Журнал писал
+    «ОШИБКА» = «не сделано», и «доделай» повторило бы отправку человеку — ровно тот дубль, ради
+    которого флаг вводился. Проверка перенесена ДО разветвления по `isError`. Предшественники:
+    мёртвый `gateStoppedRound` (контроль-3 Ф0), мёртвый `break` в `selFor` (§AX-Ref).
   - **Гигиена данных (аудит 2026-07-02):** `apps/server/vitest.setup.ts` ставит изолированный `JARVIS_DATA_DIR`
     во временную папку на прогон — тесты НЕ пишут в боевой `apps/server/data` (раньше засоряли стор фикстурами
     `learned__test-distillyacii-*`, «Полить кактус», напоминания «Конец теста»). Тестам со своим каталогом
@@ -2224,6 +2253,7 @@
 | Мультимонитор (назначить рабочий экран) | `monitor_list`/`monitor_assign`/`monitor_set` + UI Настройки | ✅ автономно + вручную |
 | Q&A / поиск в вебе | `web_search` (Brave→DDG keyless) / `web_fetch` | ✅ работает БЕЗ ключа (DuckDuckGo Lite фолбэк) |
 | Текстовый чат + mute озвучки | вкладка «Чат» + кнопка mute в топбаре (§22) | ✅ печать→текст; mute=слышит+делает молча, ответ текстом |
+| Увидеть файл с диска (скрин ошибки, фото, СТРАНИЦА PDF) | `file_view{path,page?,maxSide?}` (nativeImage / PyMuPDF) | ✅ новое 2026-09-01; живьём в Electron |
 | Word/Excel | `office_word`/`office_excel` (COM) | ✅ (фолбэк code_run если нет Office) |
 | Напоминания/таймеры | `set_reminder`/`cancel`/`list` | ✅ новое (durable + проактивная озвучка) |
 | Рынок: котировки/свечи/теханализ/ФЬЮЧИ | `market_quote`/`market_candles`/`market_analyze` (MOEX ISS+Binance, спот+фьючи) | ✅ read-only (данные не совет) |
@@ -2285,6 +2315,9 @@
   (каскад ЖИВ). Haiku НЕ используем (забракована). `DEFAULT_MODELS` (shared) тоже без Haiku: дешёвый
   слот = Sonnet. Хочешь иной сплит — TIER1/2/3_MODEL в .env (boot-WARN ловит схлопывание в одну модель).
 - НЕ закрывать сам Джарвис (electron/node) и критические процессы — `CRITICAL_PROCESSES` в apps.ts.
+- **НЕ запускать сервер через `| head`/закрывающийся пайп** (2026-09-02): закрытая труба stdout = EPIPE на каждой
+  строке лога; до EPIPE-гарда в `createGateway` это давало вечный цикл на 100% CPU с мёртвым healthz. Гард теперь
+  есть, но фоновый запуск — только с выводом в файл.
 
 ## Боли по форензике логов (2026-06-18, приоритет открытых)
 1. **STT Deepgram WS churn** (HIGH): открытие/закрытие WS КАЖДЫЙ ход (~1600 open/close), 925 «ws error», 726 «ПУСТОЙ финал» (часть — реальная речь при peak>0.3) → главный корень «не слышит». Фикс: persistent WS + KeepAlive/Finalize вместо open-per-utterance.
@@ -2365,6 +2398,281 @@
   CLM/firewall/CWD-jail), confirm на каждый PowerShell. **Инфра/отложено:** TLS/wss (reverse-proxy),
   overwrite-confirm fs, admin-гейт `skill_promote` (hosted).
 
+## ПЛАН §4.1 — ЗРЕНИЕ НА ФАЙЛ, ЧЕСТНОСТЬ ФАЙЛОВ, URL СТРАНИЦЫ, ИНДЕКС WINDOWS (2026-09-01, вечер)
+Четыре куска из `docs/NEXT_SESSION.md` §4.1 (обоснования — `docs/CAPABILITY_GAPS_2026-09-01.md` §3.3/§3.9/§3.11):
+- **`file_view`** (ГОРЯЧИЙ; `ActionCommand fs.view`, таймаут 30 с): клиент `actuators/file-view.ts` — тип ПО
+  СИГНАТУРЕ (`file-sniff.ts`, эвристика текст/бинарник ОДНА на клиент — `fs-content.looksBinary`, иначе пинг-понг
+  fs_read↔file_view), stat ДО чтения (кап 32 МБ), гейт 50 МП по заголовку (decode-bomb морозил main), PNG/JPEG
+  через nativeImage (JPEG-исходник → JPEG), GIF/WEBP как есть только целые и ≤8000 px (иначе 400 на весь ход),
+  PDF — `file-view-pdf.ts` (python `-c` + PyMuPDF, argv без shell, коды 3/4/5/6 = нет fitz/страница вне
+  диапазона/пароль/нет страниц, stderr санитизирован как данные). Сервер `handlers/file-view.ts`: image-блок
+  через `normalizeMcpImages` (один allowlist с MCP), текст с маркером `FILE_VIEW_MARK` (`agent/image-marks.ts` —
+  ЕДИНОЕ место сборки/разбора), `observed` не ставится, `toolEffect` neutral, в `PARALLEL_READONLY_TOOLS`,
+  метка шага «Смотрю файл», персона v82.
+- **Свёртка картинок — три класса** (`agent/prune-images.ts`): скриншот (`SCREEN_CAPTURE_MARK`, устаревает) /
+  документ (`FILE_VIEW_MARK`, «свёрнута, НЕ устарела, вызови file_view заново») / прочее (MCP — нейтрально).
+  🔴 ХВОСТ (результаты текущего раунда) НЕ режется — prune зовётся сразу после `convo.push`, параллельный
+  раунд из трёх страниц терял стр. 1 до показа модели. Бюджет документов `JARVIS_KEEP_DOC_IMAGES` (деф 2).
+  Семейный anti-runaway: `file_view` по разным (path,page) — не флуд (`seenFileViews`). Чекпойнт подписывает
+  класс картинки верно. Всё — тестом ПЕТЛЁЙ `agent/file-view-loop.test.ts`.
+- **`fs_search` честность** (клиент `fs.ts` + `fs-search-report.ts`): `stopReason` max_results/scan_cap/
+  time_budget (бюджет 40 с < таймаут действия 60 с), `exhausted` только без ЕДИНОГО пропуска (счётчики
+  skippedDirs/skippedLinks/unreadableFiles/oversizedFiles/undecodedFiles), `note` по-русски, каталоги матчатся
+  по имени, корень не существует/файл/секрет → ошибка. **`fs_read`**: бинарник → честная ошибка с классом и
+  каналом (`fs-content.ts`; подсказка «file_view» только для форматов, которые он показывает), UTF-16 BOM
+  (с проверкой, что это текст), cp1251 → note. **`expandPath`: allowlist путевых `%VAR%`** — иначе
+  `fs_search{root:"%OBS_WEBSOCKET_PASSWORD%"}` печатал секрет в тексте ошибки. `fs.read`/`fs.search` — в
+  `<untrusted_content>` (M11).
+- **URL страницы** (`handlers/browser.ts`): `browser_read` → `[URL: …]` внутри untrusted (усечение ВИДИМОЕ
+  «…(обрезано: полная длина N)», title санитизирован, «цель открытия» не выдаётся за текущий адрес),
+  `browser_tabs` — полный url; рецепт хоста на первом read/inspect per-session (`recipeHintOnce`) — но гейт
+  `refModeOn()` не снят: под дефолтным `JARVIS_BROWSER_REF` хинт не звучит (решение владельца).
+- **Рецепт индекса Windows** (`app-channels.ts`): по живому прогону — `.md` без IFilter (CONTAINS слеп),
+  папка `jarvis` внутри профиля в индексе отсутствует, слэши в SCOPE любые; проба покрытия ОБЯЗАТЕЛЬНА.
+- **Вторая волна фиксов (2026-09-02):** таблица сигнатур ОДНА (`file-sniff.sniffFile` → `fs-content.sniffContent`,
+  `SniffFormat`); байты не UTF-8 пробуются как cp1251 (`decodeTextDetailed`, принимается только кириллический
+  текст → `encoding:"cp1251"`, в поиске `recodedFiles` — не пропуск; Latin-1 остаётся `undecodedFiles`);
+  `shared.cutText` — капы без одинокого high-surrogate (JSON запроса к модели); `dispatch-util.neutralizeDelimiters`
+  — литеральный `</untrusted_content>` в ТЕЛЕ (страница/OCR/файл) больше не закрывает нашу обёртку.
+- **ПРИЧИНЫ №1 и №2 из `docs/USER_SCENARIOS_2026-09-02.md` ЗАКРЫТЫ (2026-09-02):**
+  (1) **жадный tier0** — `LAUNCH_CONTENT_RE` (router) знает доменные существительные стрим/трансляц/запис/сцен/
+  микрофон/тест/сборк/билд/сервер/скрипт/деплой/лекци/фильм/сериал/клип/статистик/студи → «включи стрим»,
+  «запусти тесты», «открой лекцию про…» уходят модели; `findWebService` отдаёт ОСТАТОК фразы — сервис с
+  содержательным остатком («ютуб студию», «видео про котиков на ютубе») больше не открывает голую главную с
+  ложным «Открыл.» (`SERVICE_FILLER` — служебные слова, которые остатком не считаются); и главное — `runLocalIntent`
+  на `app.launch`+`not_found` возвращает `AgentReply.fallbackToLlm`, а `handleUserText` вместо терминала «не
+  нашёл» передаёт ход модели тиром sonnet (тест ПЕТЛЁЙ `agent/tier0-fallback-loop.test.ts`; другие коды провала —
+  прежний честный терминал; промотированный/фоновый tier0 озвучивает voice как раньше).
+  (2) **`code_run`** — `cwd` (репозиторий для git/npm/тестов; несуществующий → честная ошибка), `timeoutMs`
+  (кламп [1 с, 180 с], серверный таймаут действия = timeoutMs+5 с) и **`background:true`** → `startJob`
+  (вывод в файлы `%TEMP%/jarvis-job-*`, реестр в памяти клиента, кап 4 одновременных, потолок сутки) +
+  инструмент **`job_status{jobId, kill?}`** (`ActionCommand job.status`, HOT, neutral, параллелим); ответ
+  на фоновый запуск прямо говорит «ИСХОД ЕЩЁ НЕ ИЗВЕСТЕН». Таймаут sync-запуска теперь помечен
+  `timedOut:true` с exitCode -1 (taskkill даёт процессу код 1 — раньше таймаут был неотличим от падения
+  скрипта). `jarvis.py` кладётся на PYTHONPATH во временный каталог, а не в cwd (cwd может быть репозиторием).
+  **`wait_for{kind:"file"}`** (path, `stableMs` — «появился» ≠ «дописан», `minBytes`, `gone`) и
+  **`wait_for{kind:"process"}`** (pid/name, gone) — `actuators/wait-file-process.ts` (чистый модуль, тесты на
+  реальной ФС/процессах); секретный путь отвергается до ожидания. Рецепт Git велит `cwd`.
+- **ПРИЧИНЫ №3 и №4 ЗАКРЫТЫ (2026-09-02, вечер):**
+  (3) **Исходящая почта — `mail_send{to,subject,body,resend?}`** (HOT; `handlers/mail.ts` рядом с `mailRead`):
+  собственные минимальные клиенты `integrations/smtp.ts` (implicit TLS 465 / STARTTLS 587 / plain для тестов,
+  AUTH PLAIN→LOGIN, RFC 2047 тема, base64-тело, dot-stuffing) и `integrations/imap.ts` (LOGIN/LIST по \Sent
+  и известным именам/SELECT/SEARCH HEADER Message-ID). Конфигурация ТОЛЬКО из .env (`MAIL_SMTP_HOST/PORT`,
+  `MAIL_USER`, `MAIL_PASSWORD` = пароль ПРИЛОЖЕНИЯ, опц. `MAIL_FROM`, `MAIL_IMAP_HOST/PORT`, `MAIL_IMAP=0`) —
+  не настроено → честная ошибка с тем, что завести (и паспорт возможностей это говорит). Гейты — ТЕ ЖЕ, что у
+  telegram_send (экспортированы из `handlers/messaging.ts`: `confirmSendOnce`/cadence/`sentKeys`/`resendGuard`/
+  `sendLock`), `OUTBOUND_SEND_TOOLS += mail_send`. 🔴 ТРИ исхода, не два: SMTP 250 → `sent:true`; ошибка до
+  тела → «НЕ отправлено»; обрыв ПОСЛЕ тела → `SmtpUncertainError` → сверка IMAP по Message-ID → нашли: sent;
+  нет: `uncertain:true` + «не знаю, ушло ли — не повторяю вслепую» (ресенд-гард помнит uncertain). Тесты —
+  против ФЕЙКОВЫХ SMTP/IMAP на loopback (`mail.test.ts`). **Загрузка файла**: `web_act{intent:"upload",
+  params:{path, selector?}}` в невидимом браузере Джарвиса через CDP `DOM.setFileInputFiles` (без лимита
+  размера; путь через `assertReadable`). Файл в реальный Chrome через расширение и файл в Telegram — НЕ сделаны
+  (нужен живой webK-смоук; см. NEXT_SESSION).
+  (4) **§14-гейт необратимых кликов — `brain/tools/commit-gate.ts`** (данные: `RISKY_HOSTS` банки/платежи/
+  ЭДО/госуслуги/маркетплейсы/соцсети/мессенджеры, `RISKY_PROCESSES` 1cv8/банк-клиенты/КриптоПро/мессенджеры/
+  почтовики, `COMMIT_WORDS_RE` опубликов/отправ/оплат/подтвер/провест/подпис/купит/оформ/перевод + EN). Гейтится
+  ПЕРЕСЕЧЕНИЕ «опасное место × коммит»: веб — `browser_act` (click по тексту/подписи ref из последнего inspect,
+  type+enter, enter, submit), `browser_batch` (один вопрос на все коммит-шаги), `web_act` (по хосту последнего
+  `web_open`, `rememberWebTarget`); GUI — `ui_invoke` (имя элемента по handle из последнего `ui_snapshot`,
+  `rememberUiHandles`), `input_key` Enter/ctrl+enter, `input_click` по тексту — при опасном ПРОЦЕССЕ на переднем
+  плане (`parseForegroundProcess` из живого `client.system`; в `ToolContext` добавлен `systemContext()`).
+  Отказ → `declined` (петля не считает сделанным). ⚠️ Осознанный предел: координатный клик и безымянный селектор
+  не судятся; ложно-положительный (подписаться на YouTube) стоит один вопрос. Тесты: чистые + проводка через
+  `dispatchTool` (`commit-gate*.test.ts`).
+- **ПРИЧИНЫ №5 и №6 ЗАКРЫТЫ (2026-09-02, ночь):**
+  (5) **Бытовые инструменты больше не в COLD.** Безусловно горячие: `telegram_read`, `fs_move`/`fs_mkdir`/`fs_delete`,
+  `system_power`/`system_lock` (вычеркнуты из `COLD_TOOL_NAMES`; прецедент watch_*/ui_*: cold-танец load→call =
+  лишний раунд на каждую «перенеси в папку»/«что написал X»/«выключи компьютер»). `obs_request`/`office_word`/
+  `office_excel` — холодные по умолчанию, но **промоутятся по факту установленной программы**:
+  `brain/tools/hot-promotions.ts` (`hotPromotionsFor`, чистая) читает СМАТЧЕННЫЕ КАНАЛЫ сессии
+  (`deps.appChannels` ← `client.env.installed` → `matchChannels`: OBS по exe, Word/Excel на Click-to-Run — по
+  URI-схеме ms-word/ms-excel) — есть канал «OBS Studio» → obs_request в горячем наборе и исчезает из каталога
+  холодных; нет OBS — как раньше (каталог + tool_load). Снимок на задачу (`promoted` рядом с `activation` в
+  `runAgentLoop`) → префикс кеша §15 стабилен внутри задачи, меняется только с client.env (TTL 6 ч; первые ходы
+  после холодного старта клиента — до его прихода, одна перезапись). Тест ПЕТЛЁЙ (`hot-promotions.test.ts`: набор
+  `tools` первого запроса к модели) + ПРИВЯЗКА ключей карты к именам рецептов через реальный `matchChannels`.
+  ⚠️ Текст-драйвер `_jarvis_cmd.mjs` client.env не шлёт — живой смоук промоута только Electron-клиентом.
+  (6) **Большие файлы и репозитории.** `fs_read{offset,lines}` / `fs_read{tail}` — окно строк (клиент
+  `actuators/fs-read-window.ts`, чистый `applyLineWindow` + `readWindow` в fs.ts): ответ несёт `totalLines`,
+  `range{from,to}` и note с ГОТОВЫМ `offset` следующего куска; окно за концом файла — пустой content + note (не
+  ошибка и не «файл пуст»); большой файл целиком в память не поднимается: `tail` на файле >4 МБ читает только
+  последний кусок (`readTailBytes`; кодировка сниффится ПО ГОЛОВЕ файла, кусок начинается с ПОЛНОЙ строки на
+  уровне байтов — ревью HIGH: обрубок UTF-8 посреди символа включал эвристику cp1251, и кириллический лог уезжал
+  моджибейком; totalLines/«выше ещё N» внутри куска НЕ выдаются), `lines` без offset на файле >32 МБ — только
+  голова 4 МБ, `offset` на таком файле → честная ошибка с каналом (code_run); без окна файл >32 МБ тоже не
+  поднимается — читается голова в maxBytes (ревью MED: 1,5 ГБ дампа = OOM main-процесса). Без окна — прежнее
+  чтение + `totalLines` (при усечении по maxBytes НЕ считается — соврал бы; note велит читать окном).
+  🔴 `content`/`matches` — ПОСЛЕДНИЙ ключ результата: серверный кап режет JSON с хвоста, и поля честности
+  (`truncated`/`note`/`exhausted`/`stopReason`) обязаны пережить обрезку (ревью MED). `fs_search{ignore}`: служебные каталоги
+  (`DEFAULT_IGNORED_DIRS`: node_modules/.git/dist/build/.next/target/__pycache__/.venv/coverage/…) по умолчанию не
+  обходятся — ВИДИМО: `ignoredDirs`/`ignoredNames` + note «пропущено намеренно, повтори с ignore:[]»; `exhausted`
+  это НЕ ломает (пропуск намеренный, не «не смог»); папка с таким именем по ИМЕНИ находится, внутрь не заходим;
+  `ignore:[]` — полный обход. Рецепт Git (`app-channels.ts`) и описание fs_search велят искать по репозиторию
+  `git grep -n -I` через code_run{cwd}, не обходом дерева. **Серверный кап tool_result** (`dispatch-util.capResultBody`,
+  env `JARVIS_TOOL_RESULT_MAX_CHARS` деф 80 000, пол 4 000): применён в generic-ветке, сенсорах, fs.read/fs.search
+  (подсказка «читай окном»/«сузь запрос») и ОБЕИХ ветках MCP; обрезка видимая (полная длина в пометке), пометка —
+  СНАРУЖИ untrusted-обёртки (`untrustedCapped`/`wrapUntrustedCapped`: внутри наш статус неотличим от текста
+  файла-инъекции, а персона велит инструкции внутри игнорировать — ревью MED), картинок не касается. Тест через реальный `dispatchTool` (`result-cap.test.ts`).
+- Ревью: 6 линз → 50 сырых → ~25 закрыто вручную (скептики отменены владельцем: **не больше 5 агентов**,
+  авто-память `max-five-agents`). Живьём: `file_view` в настоящем Electron через esbuild-пробу
+  (HOW_IT_WORKS §2e), `fs.search` по рабочему столу, ADO-запрос к индексу. ⚠️ Chrome-смоук URL — за владельцем.
+
+## ПРОДУКТОВЫЙ КАРКАС — ЗА МАСТЕР-ПЕРЕКЛЮЧАТЕЛЕМ (2026-09-02)
+Решение владельца: Джарвис — продукт с сервером («всё на одной машине» временно); аккаунты, токены, подписки,
+оплата, квоты, отчёты и выбор модели реализованы, но **живут за `JARVIS_PRODUCT_MODE`**: 0 (дефолт) = сегодняшнее
+поведение байт-в-байт (dev-token → DEV_USER, потолок трат владельца, ни одного нового роута/сообщения/таблицы);
+1 = путь пользователя. Замысел, экономика, риски — `docs/PRODUCT_FRAMEWORK_PLAN_2026-09-02.md`; топология —
+`docs/adr/0001-profile-and-skills-mapping.md`. Модель монетизации — **гибрид** (подписка за софт + пакеты
+кредитов «мозга проекта»), выбрана ассистентом по поручению владельца; провайдер оплаты `none` = планы выдаёт админ
+(демо для друзей), оплата реализована и выключена.
+- **Политика** `product/policy.ts` (`resolveProductFlags` → `config.product`): подфлаги `JARVIS_PRODUCT_AUTH/QUOTAS/BILLING`
+  (деф 1 при мастере 1), `_LIBRARY/_TELEMETRY` (деф 0), `JARVIS_ROLE=all|node|brain`, `JARVIS_BILLING_PROVIDER=none|fake|yookassa`,
+  `JARVIS_PRODUCT_DEFAULT_PLAN`, `JARVIS_ADMIN_TOKEN`, `JARVIS_RUB_PER_USD`, `JARVIS_EMAIL_PEPPER`. ИНВАРИАНТ (тест таблицей):
+  ни один подфлаг не true при мастере 0. Канарейка `product/product-mode-off.test.ts`: PRODUCT_OFF → ноль роутов,
+  рантайм инертен, `loadConfig` без флага → PRODUCT_OFF даже при включённых подфлагах.
+- **Проводка в gateway** — одна точка `product/gateway-hooks.ts` (`createProductRuntime` → `brain.product`, `ctx.product`):
+  handshake (`resolveHello`: `jdt_`-device-токен → аккаунт; dev-token на роли `brain` → `login_required`; на `all`/`node` —
+  прежний `resolveAndProvision`), `afterProvision` (лимиты плана в SpendGuard, durable kill-switch, план/статус в
+  `server.hello.user`, `rotatedToken`), `usageInfoFor` (кредиты/план/пороги во вкладку «Оплата»), `usageSinkFor`
+  (ledger per вызов), `quotaExhaustedText` (честный терминал «кредиты тарифа исчерпаны» — `agent/index.ts` по
+  `limitedReason==="spend_cap"`), `attachThreshold` (80/100% → usage.info + ОДНО голосовое, retriable, durable
+  `warned_*`). Резерв на личной подписке владельца в продуктовом режиме **не конструируется**; заданный
+  `CLAUDE_CODE_OAUTH_TOKEN` — отказ старта. Петля: `AgentDeps.usageSink` на ВСЕХ трёх платных точках (раунд,
+  префилл, рефлексия самообучения) — ровно там, где `spend.recordUsage`.
+- **Идентичность** `product/{accounts,accounts-lifecycle,tokens,tokens-lifecycle,devices,auth,rate-limit,identity,pepper}.ts`:
+  email — только HMAC-хеш (`email_enc` лишь при `JARVIS_EMAIL_STORE=1`), токены `jdt_/jat_/jrt_` = base64url(32 байта),
+  в БД sha256 (0003 + kind/revoked_at/device_id), device 365 дн с ротацией (старый доживает 24 ч), access 1 ч,
+  refresh 30 дн one-time, OTP 6 цифр/10 мин/5 попыток/лимиты 5-ч на email и 20-ч на IP; удаление — tombstone +
+  отзыв токенов + purge через 30 дн; экспорт аккаунта.
+- **Деньги** `product/{plans,subscriptions,subscription-rows,credits,ledger,quota,quota-usage-info}.ts` + `billing/{provider,
+  invoices,payments,webhooks}.ts` + `billing/providers/{none,fake,yookassa,ip-allowlist}.ts`: единица — **микро-доллары
+  integer** (`obs/pricing.costMicroUsd`; `usage_quota.cost_estimate NUMERIC(12,2)` округляла раунд до цента);
+  `usage_ledger` per round; `usage_quota.tokens_used` пишет ТОЛЬКО SpendGuard, ledger — `cost_micro/tts_chars_used`
+  (иначе двойной счёт); `QuotaResolver.limitsFor`: cap = квота плана + кредиты + овердрафт; byo — runaway-кап;
+  вебхуки идемпотентны по `(provider,event_id)`, сумма/статус — только из API провайдера, `amount_mismatch` → подписка
+  не выдаётся; ЮKassa — по публичной документации, **живьём не проверена**. Сиды планов — `infra/migrations-product/
+  0102` (demo/trial/byo/basic/pro + pack50/100/300; цифры стартовые, правятся админом). `sweepLifecycle`
+  (trialing→past_due→expired, grace 7 дн) зовётся `/v1/admin/sweep` и `/dev/product/sweep` — таймера пока нет.
+- **Тарифы моделей** `obs/pricing.ts` теперь по ТОЧНОМУ id из каталога `packages/shared/src/models.ts` (Fable 5.1
+  $10/$50, Sonnet 5 $2/$10, Opus 5 $5/$25…); подстрочный матч — лишь семейный фолбэк. Это исправление правильности
+  БЕЗ флага (раньше Fable 5.1 считался как Opus → SpendGuard недоучитывал сильный тир вдвое).
+- **Выбор модели пользователем** (работает в ОБОИХ режимах — это выбор пользователя на его машине; пустой = дефолт):
+  `ClientSettings.models{primary,strong}` → `profile.models` (`setModelChoice`) → `shared.resolveTierModels` (primary →
+  слоты haiku+sonnet, strong → fable; неизвестное/вне allowlist плана — ОТКЛОНЯЕТСЯ с причиной, не молча) →
+  `agentDeps.models`; сервер отвечает `models.catalog` (каталог, chosen, effective, allowed, rejected). Клиент:
+  `renderer/model-panel.ts` (секция «Модель» в «Общем»), `settings-store.models`, `IPC.modelsCatalog`.
+  Вкладка «Оплата» печатает **$** (раньше USD под знаком ₽ — ложь UI, исправлено без флага) и кредиты плана.
+- **HTTP** `product/routes/*` (регистрируется ТОЛЬКО при мастере 1): `/v1/meta`, `/v1/auth/{otp/request,otp/verify,
+  refresh,logout}`, `/v1/me[/export|/devices]`, `/v1/subscription[/checkout|/cancel]`, `/v1/usage`,
+  `/v1/webhooks/:provider` (сырое тело), `/v1/admin/{users,users/:id/{grant,kill,role,status,purge},plans,sweep,reports,
+  reports/:name?format=md}` (гард: `JARVIS_ADMIN_TOKEN` | роль admin | loopback без токена), `/dev/product/{user,otp,
+  usage,webhook,subscription,sweep}` (тот же `devPre`, что у `/dev/*`). Ответы `{ok, data|error{code,message}}`.
+- **Отчёты** `product/reports/*` (8 + сводка, JSON и markdown): пользователи, подписки (MRR, отток), выручка, расход/COGS
+  по пользователям и планам с маржой, модели (доля cache-write), квоты, удержание, объёмы данных. Без БД —
+  `available:false`, не нули.
+- **Миграции** `infra/migrations-product/0101..0104` применяются ТОЛЬКО `node infra/migrate.mjs --product` (или при
+  `JARVIS_PRODUCT_MODE=1`); дефолтный `pnpm db:migrate` их не трогает. Тест-хелпер `product/test-db.ts` поднимает PGlite
+  с базовыми + продуктовыми миграциями (сид 0002 даёт DEV_USER — считать в отчётах).
+- **Стенд владельца** — второй инстанс: `.env.product` (шаблон `.env.product.example`; данные `C:\JarvisProduct\{data,pgdata}`,
+  порт 8797) → `powershell -File infra\run-product.ps1 [-Migrate]`; текст-драйвер: `JARVIS_WS_URL=ws://127.0.0.1:8797/ws
+  JARVIS_CLIENT_TOKEN=jdt_… node _jarvis_cmd.mjs "…"` (оба драйвера читают `JARVIS_CLIENT_TOKEN`, деф `dev`). Проверено
+  живьём 2026-09-02: boot «PRODUCT MODE ON», `/v1/meta`, `/dev/product/user`, hello по device-токену → `server.hello.user`
+  + `usage.info` + `models.catalog`, `/v1/me`, отчёт админа; dev-token на роли `all` → DEV_USER; боевой 8787 не затронут.
+- 🔴 **АДВЕРС-РЕВЬЮ КАРКАСА (2026-09-02, 4 линзы → 32 находки, 9 HIGH; все HIGH/MED закрыты, контроль тремя агентами):**
+  (1) **перец email_hash был НЕ durable** — первый boot без keyfile брал публичную dev-константу, второй — производную
+  ключа → все аккаунты «исчезали» между рестартами; теперь `product/pepper.ts`: env → мастер-ключ → СВОЙ файл
+  `data/email-pepper.key` (бэкапить!), dev-константы нет, невозможность записи = отказ старта. (2) **кредиты пакетов
+  никогда не списывались** (кап каждого месяца включал пакет заново) → `QuotaResolver.settleCredits` после каждой записи
+  ledger: перерасход сверх квоты плана уходит в `consumeCredits`, списанное в периоде — `usage_quota.credits_consumed_micro`
+  (миграция 0105), кап = квота + остаток + списанное; списания per-user сериализованы. (3) **ротация device-токена
+  плодила наследников на каждом hello** → минтится один раз (`NOT EXISTS` по `rotated_from`), хвост 24 ч → 1 ч, клиент
+  персистит новый токен ШИФРОВАННО (`main/device-token-store.ts`, safeStorage) и шлёт `installId` только с jdt_-токеном,
+  сервер сверяет `devices.install_id`. (4) удалить аккаунт → войти заново = бесконечный триал → tombstone переносит
+  `trial_used_at`. (5) `sweepLifecycle` НИКТО не звал → таймер в `runtime.start()` из `gateway.listen()` (10 мин, applyTo
+  после переходов); истёкший триал → сразу `expired` (grace — только для плативших); `past_due` = квота плана 0.
+  (6) BYO-план на ключе ПРОЕКТА → без LLM-прокси кап 0 + честная пометка, план выключен в каталоге (0105).
+  (7) после рестарта потолок «обнулялся» (`hydrate` читает `cost_estimate`, округлённый до цента) → в продукте
+  `hydrate({source:"ledger"})` читает точный `cost_micro`; пороги 80/100 — per-session, с dev-гейтом, durable `warned_*`
+  сверяется ДО озвучки, метка ставится только после доставки живой сессии, `fireIfDue` на подключении.
+  (8) клиент штормил реконнектами на `login_required`/`device_revoked` → транспорт не реконнектится, карточка одна на код.
+  (9) вебхук помечал инвойс paid ДО выдачи (провал выдачи = «оплачено за воздух», повтор отвечал already_paid) →
+  выдача первой, `already_paid` сверяет и довыдаёт; fake-провайдер только на закрытом сервере и только с loopback;
+  админ-токен через `timingSafeEqual`, loopback-фолбэк лишь при `!allowRemote`, `JARVIS_TRUST_PROXY=1` → trustProxy;
+  `login_required` при `auth` и (brain ИЛИ allowRemote); refresh одноразовый атомарно; блокировка отзывает токены;
+  MRR только по `source=payment`; тексты ошибок анонимам без внутренностей; при квотах первый ход на ДЕФОЛТНЫХ моделях
+  (выбор применяется после фильтра плана); `downgrade` (сильная дешевле основной) в каталоге и панели.
+  ⚠️ Уроки ревью: `ProductRouteDeps` расширен обязательным `usageInfo` (HTTP подгружает состояние до первого WS) —
+  компилятор заставил мигрировать тест; фикс тестов — `tier0-fallback-loop` был флаки на регистре варианта фразы.
+  🔴 **КОНТРОЛЬ-2 (3 агента с прогоном; 36 находок, 5 HIGH — все закрыты; ТРИ из HIGH породили мои же фиксы
+  первого раунда):** (а) `trustProxy: true` доверял ВСЕМ хопам → клиент подделывал `X-Forwarded-For: 127.0.0.1` и
+  получал loopback-привилегии (админ без токена, dev-роуты = токены без OTP) → `JARVIS_TRUST_PROXY` = число хопов
+  или адреса прокси (`config.parseTrustProxy`), `true` не поддерживается; (б) гейты «открыт наружу» висели на
+  `ALLOW_REMOTE`, а loopback-bind за туннелем/прокси — штатный деплой → `policy.exposed` (brain / ALLOW_REMOTE /
+  TRUST_PROXY / явный `JARVIS_PRODUCT_EXPOSED=1`): при exposed настоящий админ-токен ОБЯЗАТЕЛЕН и dev-роуты
+  недопустимы (отказ старта, не WARN), loopback-фолбэка нет, вход только по jdt_, fake-провайдер выключен;
+  (в) СМЕНА МЕСЯЦА внутри живого процесса: ledger создавал строку периода без лимитов → списание сжигало кредиты
+  за расход, покрытый квотой плана, а кап прошлого месяца жил в новом → лимиты применяются к КАЖДОМУ периоду
+  (`appliedPeriod` в рантайме, `settleCredits` ждёт `cap_micro`), `hydrate` делает rollover ДО чтения (прямое
+  присваивание `periodKey` переносило траты сентября в октябрь); (г) вебхук после фикса «выдача до paid» стал
+  неидемпотентным: сбой между выдачей и платежом → повтор в 5-мин окне отвечал `duplicate`, после — выдавал
+  ВТОРОЙ раз → выдача сверяется по инвойсу (`credit_grants.note`, `subscriptions.last_invoice_id`, миграция 0106),
+  упавшее событие забирается сразу, идущее отвечает `retry_later` (503); (д) `hydrate` читал `cost_estimate`
+  (NUMERIC 12,2 округляет КАЖДЫЙ раунд до цента: 100 × $0.006 → $1.00) → продукт читает `cost_micro`.
+  Остальное: перец — файл главнее env (добавленный позже `CREDENTIALS_MASTER_KEY` молча менял перец → отказ старта
+  при расхождении); ротация атомарна (partial UNIQUE по `rotated_from`), dev-сессия наследника не съедает, env-токен
+  jdt_ уступает персистнутому наследнику; привязанный токен без `installId` → `login_required` (не `device_revoked` —
+  клиент по нему стирал токен), регистр UUID нормализуется, Electron шлёт installId с jdt_ без опт-ина; БД-транзиент
+  ≠ `not_found` (`unavailable`, 503 на refresh, hello без разлогина); `account_blocked` — свой код; sweep↔оплата —
+  оптимистическая блокировка и по `current_period_end`; истёкший триал → `expired` сразу; `warned_*` снимаются при
+  росте капа; отметка порога откатывается по `onOutcome(false)`; kill-switch — `bool_or` по периодам; MRR видит
+  оплаченные продления (renew патчит `source=payment`); обрыв стрима оценивается по размеру промпта (ledger
+  `estimated` + SpendGuard), стаб не пишется; `trial_claims` переживает purge; `/v1/meta` — по реальному провайдеру;
+  канарейка флага 0 теперь со шпионом на клиенте БД (ноль запросов из рантайма). Живьём: EPIPE-гард на
+  stdout/stderr — закрытая труба читателя (супервизор/`| head`) давала вечный цикл uncaughtException→лог→EPIPE на
+  100% CPU с мёртвым healthz (воспроизведено на стенде).
+- 🔴 **СКВОЗНЫЕ СЦЕНАРИИ НА ЖИВЫХ ИНСТАНСАХ (2026-09-02, 4 агента; 19 дефектов, 6 серьёзных — все закрыты).**
+  Владелец: «качество и функциональность самое важное, багов быть не должно» — поэтому проверяли не код, а
+  ПРОХОДИТ ЛИ ПУТЬ: вход по коду → триал → работа → исчерпание → оплата → продолжение; деньги на живых ходах;
+  флаг 0 без регресса; выбор модели по-настоящему. Что нашлось и починено:
+  (1) 🔴 **тариф не ограничивал ДЕФОЛТНУЮ лестницу** — панель писала «Opus недоступна на тарифе», а эскалация §7
+  молча уходила на `claude-opus-4-8`: пользователю солгали, владельцу выставили счёт по $5/$25 вместо $2/$10.
+  `resolveTierModels` прижимает дефолты к allowlist (лучшая разрешённая своей роли; нет сильной — лестница
+  схлопывается и это ЧЕСТНО объявляется `collapsed`, панель предупреждает). При `allowed=null` (флаг 0) — байт-в-байт
+  как было. Живьём: тариф basic → обе модели внутри тарифа; боевой 8787 → прежние sonnet/opus.
+  (2) 🔴 **«заплатил — не заработало»**: оплата применялась, кредиты начислялись, а ОТКРЫТОЕ приложение и сам
+  Джарвис до реконнекта продолжали говорить «кредиты исчерпаны» (и показывали `remaining=0` рядом с
+  `credits.remaining=2228`). `ProductRuntime.pushUsage` толкает свежий баланс во все живые сессии пользователя
+  сразу после оплаты/гранта. Живьём: потолок 8 → 12.37, предупреждение снялось.
+  (3) 🔴 **самоосмотр и самоправка достались арендатору**: новому платящему пользователю ПЕРВОЙ репликой
+  доложили статистику сбоев ПО ВСЕМУ СЕРВЕРУ («24 из 34 ходов не дошли до модели») и предложили «почини себя»;
+  `self_code_search`/`self_code_read`/`self_patch` формально были доступны. Гейт `ToolContext.productMode` на все
+  четыре инструмента + продуктовый режим в гейте самоосмотра (`router-ws`).
+  (4) 🔴 **EPIPE-лавина**: логгер падал на `console.log` в закрытый stdout, `uncaughtException`-бэкстоп писал об
+  этом В ТОТ ЖЕ поток → 3,6 ГБ лога и 55 тыс. одинаковых записей за сутки, диск выедался под ноль. Вывод в консоль
+  обёрнут try/catch (`packages/shared`), плюс слушатель `error` на stdout/stderr в `createGateway`.
+  (5) 🔴 **dev-стенд вёл себя ХУЖЕ продакшена** (а именно им владелец принимает работу): `/dev/product/webhook`
+  рапортовал `applied`, но потолок не поднимал, `/dev/product/usage` не списывал кредиты, выданный токен не
+  регистрировал устройство (невидимо в `/v1/me/devices`, отозвать нечем). Все три пути повторяют боевые.
+  (6) 🔴 **«тише» в тишине не делало НИЧЕГО** — ни действия, ни ответа: перехват «замолчи» (`stop_tts`) съедал
+  реплику раньше роутера, хотя обрывать было нечего; синонимы «потише»/«убавь громкость» при этом работали.
+  Гейт «есть что обрывать» (речь идёт ∨ есть активная задача), иначе реплика уходит в роутер как команда
+  громкости. Живьём: «тише» → команда громкости с честным исходом вместо тишины.
+  Мелкие, но видимые человеку: причина отказа модели НАЗЫВАЕТСЯ (`llmFailureLine`: «у сервиса кончился баланс
+  доступа к модели» вместо «связь прервалась» — живьём подтверждено); аварийный стоп администратора больше не
+  выдаётся за «достигнут лимит» (человек шёл покупать кредиты); разговорный ход не получает ack «Занимаюсь, сэр»
+  («вопрос ≠ задача»); `/cogs` считает ФАКТИЧЕСКИ начисленное (ход по подписке = $0, не полный прайс); отчёт
+  «Квоты» перестал себе противоречить («$21.5 из $8 = 84.5%» → отдельная колонка полного потолка); кредиты
+  показываются с единицей («371 ₽ работы модели», а не голое число); панель «Оплата» до первого снимка больше не
+  утверждает «Тариф: Pro», а сервер не выдумывает имя плана из потолка трат; кривой `installId` возвращает
+  причину рядом с токенами; `JARVIS_PRODUCT_SIGNUP_PLAN` задокументирован (друзьям обещали демо, а выдавался
+  7-дневный триал).
+  Новые тесты — с реверт-проверкой: `product/product-guards-loop.test.ts` (self_*-гейт петлёй, ack разговорного
+  хода, причина стопа администратора), `router-ws.test.ts` («тише» в тишине не съедается), `shared/models.test.ts`
+  (тариф ограничивает дефолтную лестницу). Каждый проверен мутацией: снимаешь фикс — падает.
+- Открыто: refresh-семьи (отзыв всех при повторе); overage не биллится (в кап не входит); возврат за продление не
+  откатывает период; живые WS-сессии заблокированного не рвутся до следующего handshake; регресс-тесты транспорта
+  клиента (fake ws) — нет; LLM-прокси проекта (ступень 1 ADR) и роли `node`/`brain` — следующие волны.
+
 ## Где искать
 - Новый инструмент → `packages/tools/src/index.ts` (схема) + `brain/tools/dispatch.ts` (хендлер) +
   (если ActionCommand) `packages/protocol/actions.ts` + `apps/client/main/actuators/`.
@@ -2374,3 +2682,11 @@
   выдачи, + честность если критерия среди фильтров нет (живой провал «найди чёрные длинные шорты» — всё
   свалено в поиск, размер/длина не соблюдены). Парный сид-навык `learned__catalog-filtered-search`.
 - Что было сделано/решено → авто-память `MEMORY.md` (project_jarvis_*), `docs/STATUS.md`, `docs/NEXT_SESSION.md`.
+- Что умеет/не умеет Джарвис ДЛЯ КОНКРЕТНОЙ РОЛИ (стример, блогер, программист, девопс, офис, бухгалтер, геймер,
+  студент, дом) → `docs/USER_SCENARIOS_2026-09-02.md` (72 сценария по коду, 8 структурных причин пробелов);
+  видео (просмотр/поиск момента/монтаж) → `docs/VIDEO_PLAN_2026-09-02.md`.
+- Внешний план «профиль + навыки + общая библиотека» и его сопоставление с кодом (конфликты, решения
+  владельца, перекрой фаз) → `docs/adr/0001-profile-and-skills-mapping.md` (2026-09-02).
+- Продуктовый каркас (мастер-переключатель `JARVIS_PRODUCT_MODE`, аккаунты/токены/подписки/квоты, LLM-прокси и
+  облачный мозг, реестр рисков, чек-лист до первого платящего, юнит-экономика на реальной телеметрии, решения
+  владельца) → `docs/PRODUCT_FRAMEWORK_PLAN_2026-09-02.md` (2026-09-02).

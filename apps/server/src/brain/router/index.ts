@@ -365,7 +365,11 @@ export function matchLocalIntent(text: string): LocalIntent | undefined {
     // Известный веб-сервис ГДЕ-УГОДНО во фразе («инстаграм в браузере», «открой ютуб
     // пожалуйста») → сайт в браузере. Сканируем токены, не требуем точного совпадения.
     const site = findWebService(arg);
-    if (site) return { kind: "browser.open", url: site, inDefault: true };
+    if (site) {
+      // Сервис + содержательный остаток → это не «открой сайт», а задача на сайте: решает модель.
+      if (site.remainder.length > 0) return undefined;
+      return { kind: "browser.open", url: site.url, inDefault: true };
+    }
     // Имя приложения — короткое (≤3 слов) и без вопросительных слов («открой мне почему
     // так дорого» → не приложение, уходит в LLM).
     const app = normalizeAppName(arg);
@@ -466,15 +470,22 @@ function stripTrailingFiller(arg: string): string {
   return a.replace(/[\s,.!?]+$/u, "").trim();
 }
 
-/** Найти известный веб-сервис среди токенов фразы (а не точным совпадением всей строки). */
-function findWebService(arg: string): string | undefined {
+/**
+ * Найти известный веб-сервис среди токенов фразы (а не точным совпадением всей строки). Возвращает и
+ * ОСТАТОК — содержательные токены помимо имени сервиса и служебных слов (пусто = «просто открой сайт»).
+ */
+function findWebService(arg: string): { url: string; remainder: string[] } | undefined {
   const norm = normalizeAppName(arg);
-  if (WEB_SERVICES[norm]) return WEB_SERVICES[norm];
-  for (const tok of norm.split(/\s+/u)) {
-    if (WEB_SERVICES[tok]) return WEB_SERVICES[tok];
+  if (WEB_SERVICES[norm]) return { url: WEB_SERVICES[norm]!, remainder: [] };
+  const tokens = norm.split(/\s+/u).filter(Boolean);
+  const remainderWithout = (matched: string): string[] =>
+    tokens.filter((t) => t !== matched && !SERVICE_FILLER.has(t) && /\p{L}{2,}|\p{N}/u.test(t));
+  for (const tok of tokens) {
+    if (WEB_SERVICES[tok]) return { url: WEB_SERVICES[tok]!, remainder: remainderWithout(tok) };
   }
   // Опечатка/ослышка STT («ютюп»→ютуб, «тельаграм»→телеграм) — fuzzy по словарю сервисов.
-  return fuzzyWebService(norm);
+  const fuzzy = fuzzyWebService(norm);
+  return fuzzy ? { url: fuzzy.url, remainder: remainderWithout(fuzzy.token) } : undefined;
 }
 
 /**
@@ -482,9 +493,9 @@ function findWebService(arg: string): string | undefined {
  * в пределах порога (короткие слова — строже, чтобы «вк»/«икс» не путались). Закрытый
  * словарь → ложных срабатываний почти нет; нераспознанное уходит в LLM, как и раньше.
  */
-function fuzzyWebService(norm: string): string | undefined {
+function fuzzyWebService(norm: string): { url: string; token: string } | undefined {
   const keys = Object.keys(WEB_SERVICES);
-  let best: { url: string; dist: number } | undefined;
+  let best: { url: string; token: string; dist: number } | undefined;
   for (const tok of norm.split(/\s+/u)) {
     if (tok.length < 5) continue; // короткие слова — слишком много ложных совпадений
     // СТРОГО: расстояние ≤1 (одна опечатка/ослышка). Иначе обычные слова ловятся как
@@ -497,10 +508,10 @@ function fuzzyWebService(norm: string): string | undefined {
       // Замена ТОЛЬКО последней буквы при равной длине — это падежное окончание («почту» vs
       // «почта»), а не опечатка STT. Не матчим: иначе склонение обычного слова → ложный сервис.
       if (d === 1 && tok.length === key.length && tok.slice(0, -1) === key.slice(0, -1)) continue;
-      if (d <= thr && (!best || d < best.dist)) best = { url: WEB_SERVICES[key]!, dist: d };
+      if (d <= thr && (!best || d < best.dist)) best = { url: WEB_SERVICES[key]!, token: tok, dist: d };
     }
   }
-  return best?.url;
+  return best ? { url: best.url, token: best.token } : undefined;
 }
 
 /** Расстояние Левенштейна (две строки, O(n) память) — для fuzzy-матчинга названий. */
@@ -530,8 +541,22 @@ const NON_APP_WORDS_RE = /(?<![\p{L}\p{N}])(?:почему|зачем|как|ч�
 const LAUNCH_PREP_RE = /(?<![\p{L}\p{N}])(?:в|во|на|по|через|для|под|про|об|из|от|без|с|со)(?![\p{L}\p{N}])/iu;
 // Контент-существительные (медиа/сообщения/поиск): «включи джазовый ПЛЕЙЛИСТ», «найди ТРЕК» — это
 // задача-действие через браузер/инструменты, а не запуск exe с таким именем. Модель справится лучше.
+// Сценарии 2026-09-02 (USER_SCENARIOS, причина №1): «включи стрим/запись/сцену», «запусти тесты/сервер/билд/
+// скрипт», «открой лекцию про…» — самые частые фразы стримера/программиста/студента съедались в app.launch и
+// умирали честным «не нашёл» БЕЗ отката в модель. Доменные существительные = задача для модели.
 const LAUNCH_CONTENT_RE =
-  /(?<![\p{L}\p{N}])(?:плейлист\p{L}*|песн\p{L}*|музык\p{L}*|трек\p{L}*|видео|ролик\p{L}*|поиск\p{L}*|вкладк\p{L}*|сообщени\p{L}*|письм\p{L}*|подкаст\p{L}*)(?![\p{L}\p{N}])/iu;
+  /(?<![\p{L}\p{N}])(?:плейлист\p{L}*|песн\p{L}*|музык\p{L}*|трек\p{L}*|видео|ролик\p{L}*|поиск\p{L}*|вкладк\p{L}*|сообщени\p{L}*|письм\p{L}*|подкаст\p{L}*|стрим\p{L}*|трансляци\p{L}*|запис\p{L}*|сцен\p{L}*|микрофон\p{L}*|тест\p{L}*|сборк\p{L}*|билд\p{L}*|сервер\p{L}*|скрипт\p{L}*|деплой\p{L}*|лекци\p{L}*|фильм\p{L}*|сериал\p{L}*|мультик\p{L}*|клип\p{L}*|статистик\p{L}*|студи[юяи]\p{L}*)(?![\p{L}\p{N}])/iu;
+
+/**
+ * Служебные слова рядом с именем сервиса («открой ютуб в новой вкладке») — не содержательный остаток.
+ * Всё прочее рядом с сервисом («ютуб СТУДИЮ», «лекцию на ютубе ПРО ИНТЕГРАЛЫ») — инструкция для модели:
+ * открыть голую главную и сказать «Открыл.» было бы ложным успехом (сценарии 2026-09-02, B1/S5/H2).
+ */
+const SERVICE_FILLER = new Set([
+  "в", "во", "на", "к", "браузере", "браузер", "сайт", "сайте", "страницу", "страница", "окне", "окно", "вкладке", "вкладку",
+  "новой", "новую", "новом", "мне", "нам", "пожалуйста", "плиз", "давай", "ка", "же", "сейчас", "быстро", "быстренько",
+  "снова", "опять", "ещё", "еще", "приложение", "приложении", "программу", "программе", "через", "сам", "сама", "и",
+]);
 
 /** Похоже ли на имя приложения: ≤3 слов, без вопросительных слов, без предлога-связки и контент-нуждов. */
 function looksLikeAppName(arg: string): boolean {

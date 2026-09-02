@@ -40,6 +40,29 @@ describe("router task control (§20)", () => {
     expect(tasks.get(t.taskId)?.state).toBe("running"); // §20: задача жива
   });
 
+  it("🔴 «тише» в тишине НЕ съедается перехватом stop_tts — уходит в роутер как команда громкости", () => {
+    // Живой прогон 2026-09-02: Джарвис молчит, задач нет, человек говорит «тише» (о музыке) — и НЕ
+    // происходит ничего: ни действия, ни ответа. Перехват «замолчи» съедал реплику, хотя обрывать нечего.
+    // Реверт: убери гейт «есть что обрывать» в task-control.ts — тест упадёт.
+    const tasks = new TaskManager();
+    const { ctx, onVadEvent } = fakeCtx(tasks);
+    for (const phrase of ["тише", "сделай тише"]) {
+      expect(handleControlUtterance(ctx, phrase), phrase).toBe(false);
+    }
+    expect(onVadEvent).not.toHaveBeenCalled();
+
+    // Во время РЕЧИ то же слово означает «замолчи» — перехват обязан работать как раньше.
+    const speaking = fakeCtx(tasks);
+    (speaking.ctx as unknown as { voice: { state: string } }).voice.state = "speaking";
+    expect(handleControlUtterance(speaking.ctx, "тише")).toBe(true);
+    expect(speaking.onVadEvent).toHaveBeenCalledWith("barge_in");
+
+    // И при активной задаче — тоже (её итог сейчас озвучивается).
+    const busy = fakeCtx(tasks);
+    tasks.create({ userId: "u1", sessionId: "s1", goal: "долгая" });
+    expect(handleControlUtterance(busy.ctx, "тише")).toBe(true);
+  });
+
   it("«отмени» отменяет активную задачу (§20)", () => {
     const tasks = new TaskManager();
     const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });

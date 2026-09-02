@@ -87,6 +87,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "fs.move",
       "fs.mkdir",
       "fs.search",
+      "fs.view", // §3.9: зрение на файл (картинка/страница PDF → vision)
       "system.lock",
       "system.power",
       "system.media",
@@ -107,6 +108,11 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "screen.ocr",
       "screen.probe",
       "wait.for",
+      "job.status", // сценарии 2026-09-02: фоновые задания code_run
+      // Уже есть в карте (окна/звук по приложениям), но в списке отсутствовали — тест падал на числе.
+      "window.arrange",
+      "audio.sessions",
+      "audio.set",
     ];
     for (const kind of expectedKinds) {
       const toolName = ACTUATOR_TOOL_BY_KIND[kind];

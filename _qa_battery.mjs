@@ -32,7 +32,7 @@ function nextCmd() {
   clearTimeout(hardTimer); hardTimer = setTimeout(() => finishCurrent("HARD"), HARD_MS);
   armSettle();
 }
-ws.onopen = () => send("client.hello", { token: "dev", clientVersion: "qa", protocolVersion: 1 });
+ws.onopen = () => send("client.hello", { token: process.env.JARVIS_CLIENT_TOKEN || "dev", clientVersion: "qa", protocolVersion: 1 });
 ws.onmessage = (ev) => {
   let e; try { e = JSON.parse(ev.data); } catch { return; }
   const p = e.payload || {};

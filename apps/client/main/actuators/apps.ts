@@ -29,6 +29,14 @@ export interface LaunchOutcome {
   /** Тип цели (exe|uri|path) и источник резолва (AppPaths/Steam/StartMenu/PATH/uri). */
   kind?: string;
   source?: string;
+  /**
+   * ЧЕСТНОСТЬ: наблюдали ли мы факт запуска. false = ОС лишь приняла обработчик URI/стаб-лончер
+   * (сверить нечем) — тогда рядом идёт note, чтобы модель не выдала «принял» за «запустил».
+   */
+  confirmed?: boolean;
+  /** Чем подтверждено: process | appid | appid-already | handoff. */
+  verified?: string;
+  note?: string;
 }
 
 /**
@@ -129,7 +137,22 @@ export async function launchApp(app: string): Promise<LaunchOutcome> {
   const query = resolveAppTarget(app);
   log.info(`launch: "${app}" -> резолв "${query}"`);
   const r = await smartLaunch(query);
-  return { resolved: r.resolved, pid: r.pid, display: r.display, kind: r.kind, source: r.source };
+  // Ветка URI без признаков запуска (ms-settings:, https:, tg:) и стаб-лончеры UWP подтвердить нечем:
+  // говорим это ПРЯМО в результате, иначе «ОС приняла обработчик» снова прочитается как «запустил»
+  // (живой дефект steam://rungameid/<мусор> → «Готово»; у Steam-игры теперь есть настоящая сверка).
+  const confirmed = r.verified !== "handoff";
+  return {
+    resolved: r.resolved,
+    pid: r.pid,
+    display: r.display,
+    kind: r.kind,
+    source: r.source,
+    confirmed,
+    verified: r.verified,
+    note: confirmed
+      ? undefined
+      : "ОС приняла обработчик, но факт запуска НЕ подтверждён — если он важен, сверь (window_list/wait_for/screen_capture).",
+  };
 }
 
 export { LaunchError };

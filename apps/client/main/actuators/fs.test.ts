@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   appendFile,
   deleteEntry,
@@ -113,9 +113,13 @@ describe("fs actuator (§6) — CRUD на файлах", () => {
     expect(byName.matches.some((m) => m.path.includes("env-notes.txt"))).toBe(true);
   });
 
-  it("expandPath раскрывает переменные окружения", () => {
-    process.env.JARVIS_TEST_DIR = root;
-    expect(expandPath("%JARVIS_TEST_DIR%")).toBe(root);
+  it("expandPath раскрывает ТОЛЬКО путевые переменные (allowlist): чужой env не раскрывается и не утекает в текст ошибок", () => {
+    // Ревью 2026-09-01: раскрытие любой %VAR% отдавало значение переменной клиента в тексте ошибки поиска.
+    process.env.JARVIS_TEST_SECRET = "sk-ant-secret-value";
+    expect(expandPath("%JARVIS_TEST_SECRET%\\x")).not.toContain("sk-ant-secret-value");
+    expect(expandPath("%JARVIS_TEST_SECRET%\\x")).toContain("%JARVIS_TEST_SECRET%");
+    const temp = process.env.TEMP ?? process.env.TMP;
+    if (temp) expect(expandPath("%TEMP%").toLowerCase()).toBe(resolve(temp).toLowerCase()); // путевая — раскрыта
   });
 });
 
@@ -238,11 +242,16 @@ describe("fs — рекурсивный self-guard поддерева (§ ауд
     const sneaky = join(base, "sneaky"); // имя алиаса НЕ содержит ".ssh" — вся защита на канонизации
     await fsp.symlink(sshDir, sneaky, "junction");
 
-    const res = await search(sneaky, "known_hosts");
-    expect(res.matches).toHaveLength(0); // канонизация root вскрыла ".ssh" в пути → Fast-регекс сработал
+    // Канонизация root вскрыла ".ssh" в пути → корень-секрет получает ЧЕСТНЫЙ отказ (§0), а не пустой
+    // список (2026-09-01: раньше per-entry денилист молча выкидывал всё, и «ничего не найдено» читалось
+    // моделью как «файлов нет»). Без канонизации sneaky прошёл бы гард и known_hosts утёк бы.
+    await expect(search(sneaky, "known_hosts")).rejects.toThrow(/секрет/i);
 
-    // Контроль: та же папка БЕЗ алиаса (обычный вложенный путь) — секрет тоже не утекает, как и раньше.
-    const direct = await search(sshDir, "known_hosts");
-    expect(direct.matches).toHaveLength(0);
+    // Контроль: та же папка БЕЗ алиаса (обычный вложенный путь) — тот же отказ.
+    await expect(search(sshDir, "known_hosts")).rejects.toThrow(/секрет/i);
+
+    // И секрет НЕ утекает через родителя: обход base видит .ssh как запись и молча её пропускает.
+    const viaParent = await search(base, "known_hosts");
+    expect(viaParent.matches).toHaveLength(0);
   });
 });

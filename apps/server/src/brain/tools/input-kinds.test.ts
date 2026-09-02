@@ -1,22 +1,36 @@
 import { describe, expect, it } from "vitest";
 import type { ActionKind } from "@jarvis/protocol";
-import { kindNeedsInput, toolNeedsInput } from "./input-kinds.js";
+import { INPUT_BEARING_KINDS, kindNeedsInput, toolNeedsInput } from "./input-kinds.js";
 
+/**
+ * 🔴 Аудит тестовой базы 2026-09-01: прежний тест перечислял 10 видов из 13 — выпали `input.mouse`
+ * (та самая мышь, ради которой §20-арбитраж и существует), `app.close` и `window.focus`. Их удаление
+ * из набора прогон не заметил бы: две фоновые задачи начали бы драться за курсор и фокус окна.
+ * Поэтому здесь пиннится ПОЛНЫЙ состав: удалил вид — тест падает; добавил — обязан обновить осознанно.
+ */
 describe("классификация аренды ввода (§20)", () => {
-  it("GUI-команды (мышь/клава/фокус/окно/скилл/чекаут) требуют аренды", () => {
-    const inputKinds: ActionKind[] = [
-      "input.type",
-      "input.key",
-      "input.click",
-      "ui.invoke",
-      "app.launch",
-      "app.focus",
-      "browser.open",
-      "browser.act",
-      "skill.execute",
-      "order.place",
-    ];
-    for (const k of inputKinds) expect(kindNeedsInput(k)).toBe(true);
+  it("состав видов, требующих аренды, зафиксирован целиком", () => {
+    expect([...INPUT_BEARING_KINDS].sort()).toEqual(
+      [
+        "app.close",
+        "app.focus",
+        "app.launch",
+        "browser.act",
+        "browser.open",
+        "input.click",
+        "input.key",
+        "input.mouse",
+        "input.type",
+        "order.place",
+        "skill.execute",
+        "ui.invoke",
+        "window.focus",
+      ].sort(),
+    );
+  });
+
+  it("каждый из них действительно требует аренды через kindNeedsInput", () => {
+    for (const k of INPUT_BEARING_KINDS) expect(kindNeedsInput(k)).toBe(true);
   });
 
   it("чтение/файлы/код/память/Office/system не требуют аренды (параллелятся)", () => {

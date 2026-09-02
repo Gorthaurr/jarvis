@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BROWSER_SPECS, detectApps, detectAutomationTools, detectBrowsers, formatHardwareSummary, formatProfileSummary, onPath, progIdToBrowserId } from "./system-profiler.js";
 
@@ -76,6 +77,53 @@ describe("system-profiler (§9) — авто-детект окружения", (
     const tools = detectAutomationTools(has, "");
     expect(tools.map((t) => t.id)).toContain("obs");
     expect(tools.find((t) => t.id === "obs")?.surface).toMatch(/obs_request/);
+  });
+
+  // 🔴 Живой дефект 2026-09-01: Blender на машине владельца ЕСТЬ
+  // (C:\Program Files\Blender Foundation\Blender 5.1\blender.exe), но установщик не кладёт exe на
+  // PATH, а в реестре у него пустой DisplayIcon — значит ни детект PATH, ни инвентарь установленного
+  // его не видели, и app_channels уверенно отвечал «канала нет» про установленную программу.
+  describe("Blender: версионный каталог вместо PATH", () => {
+    const pf = process.env.ProgramFiles ?? "";
+    const dir = join(pf, "Blender Foundation");
+    const exe = join(dir, "Blender 5.1", "blender.exe");
+    // PATH пустой — ровно как на машине владельца.
+    const listDir = (d: string): string[] => (d === dir ? ["Blender 5.1"] : []);
+
+    it("находится по glob-пути, хотя его нет на PATH", () => {
+      const tools = detectAutomationTools((p) => p === exe, "", listDir);
+      expect(tools.map((t) => t.id), "Blender не найден по версионному каталогу").toContain("blender");
+    });
+
+    it("🔴 surface несёт ФАКТИЧЕСКИЙ путь: голое `blender` в code_run не запустится", () => {
+      const tools = detectAutomationTools((p) => p === exe, "", listDir);
+      expect(tools.find((t) => t.id === "blender")?.surface).toContain(exe);
+    });
+
+    it("id совпадает с cmd рецепта — в этой форме клиент шлёт инструмент серверу ({name: id, cli: true})", () => {
+      const tools = detectAutomationTools((p) => p === exe, "", listDir);
+      expect(tools.find((t) => t.id === "blender")?.id).toBe("blender");
+    });
+
+    it("версия не выдумывается: каталога нет — инструмента нет", () => {
+      // Обратная сторона того же инварианта: без неё «починкой» была бы выдача blender всегда.
+      const tools = detectAutomationTools(
+        () => false,
+        "",
+        () => [],
+      );
+      expect(tools.map((t) => t.id)).not.toContain("blender");
+    });
+
+    it("glob разворачивает ЛЮБУЮ версию (хардкод «Blender 5.1» протух бы на обновлении)", () => {
+      const exe9 = join(dir, "Blender 9.0", "blender.exe");
+      const tools = detectAutomationTools(
+        (p) => p === exe9,
+        "",
+        (d) => (d === dir ? ["Blender 9.0"] : []),
+      );
+      expect(tools.find((t) => t.id === "blender")?.surface).toContain(exe9);
+    });
   });
 
   it("detectAutomationTools находит OfficeCLI по .cmd-шиму npm (реальный путь установки)", () => {

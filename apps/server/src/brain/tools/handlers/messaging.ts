@@ -21,7 +21,7 @@ import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok 
  * когда-либо (в т.ч. в прошлой сессии — согласие персистентно) — не переспрашиваем. Иначе спрашиваем;
  * чистое одобрение запоминаем НАВСЕГДА (ревизия текста согласие не фиксирует).
  */
-async function confirmSendOnce(
+export async function confirmSendOnce(
   ctx: ToolContext,
   channel: string,
   recipient: string,
@@ -43,7 +43,7 @@ async function confirmSendOnce(
  * (мёртвый сокет, закрытая сессия) или не успеть ответить. Приписывать владельцу чужое решение —
  * та же ложь, что «Готово» без результата.
  */
-function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string, repeat = false): string {
+export function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string, repeat = false): string {
   const act = repeat ? `повторную отправку ${what}` : `отправку ${what}`;
   switch (outcome) {
     case "undelivered":
@@ -56,12 +56,12 @@ function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: s
 }
 
 /** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
-const cadence = new CadenceGuard();
+export const cadence = new CadenceGuard();
 // Аудит-2 [8]: дедуп отправки — ОКНО, а не «навсегда». Прежний Set<string> без TTL/eviction: (а) блокировал
 // ЛЕГИТИМНЫЙ повтор той же фразы тому же адресату НАВСЕГДА («напиши маме 'еду домой'» назавтра не уходил);
 // (б) рос без ограничения на долгоживущем сервере. TtlCache даёт окно дедупа (анти-retry burst) + eviction.
 const SEND_DEDUP_MS = Math.max(30_000, Number(process.env.JARVIS_SEND_DEDUP_MS) || 10 * 60_000);
-const sentKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
+export const sentKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
 /** Идемпотентность заказов — окно (§14; аудит-2 [8]). */
 const placedOrderKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
 /**
@@ -72,7 +72,7 @@ const placedOrderKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2
  * игнорируя JARVIS_RESEND_GUARD_MS; та же грабля, что device у эмбеддера).
  */
 let _resendGuard: ResendGuard | undefined;
-function resendGuard(): ResendGuard {
+export function resendGuard(): ResendGuard {
   _resendGuard ??= new ResendGuard(resendGuardWindowMs());
   return _resendGuard;
 }
@@ -87,7 +87,7 @@ export function _resetResendGuardForTest(): void {
  * record» атомарным относительно других отправок того же пользователя; отправки редки — очередь дёшева.
  */
 const sendLocks = new Map<string, AsyncMutex>();
-function sendLock(userId: string): AsyncMutex {
+export function sendLock(userId: string): AsyncMutex {
   let m = sendLocks.get(userId);
   if (!m) {
     m = new AsyncMutex();

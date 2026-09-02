@@ -13,10 +13,12 @@
  * если сложность всплыла в петле — это место для филлера «секунду» и продолжения на
  * старшем тире (// TODO: динамическая эскалация).
  */
+import { llmFailureLine } from "../../integrations/anthropic.js";
 import type { ActionCommand, ActionKind, SkillStep, TaskStatus } from "@jarvis/protocol";
 import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, actionTimeoutMs, newId } from "@jarvis/protocol";
 import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, envInt, foldText, sleep } from "@jarvis/shared";
 import { COLD_TOOL_NAMES, TOOL_SCHEMAS, type ToolSchema, toolCatalogLine } from "@jarvis/tools";
+import { hotPromotionsFor } from "../tools/hot-promotions.js";
 import type { McpManager } from "../mcp/manager.js";
 import { kindNeedsInput, toolNeedsInput } from "../tools/input-kinds.js";
 import { cleanDisfluency } from "../nlu/disfluency.js";
@@ -27,6 +29,7 @@ import { pruneStaleImages } from "./prune-images.js";
 import { maskOldObservations } from "./mask-observations.js";
 import { repeatSignature } from "./repeat-key.js";
 import { describeIrreversible } from "../tasks/misfire.js";
+import type { MatchedChannel } from "../app-channels.js";
 import {
   type CheckpointReason,
   type TaskCheckpoint,
@@ -116,6 +119,12 @@ function confirmWindowMs(): number {
 export interface AgentReply {
   voice: string;
   display?: { title?: string; markdown: string };
+  /**
+   * tier0 app.launch не нашёл цель (сценарии 2026-09-02, причина №1): «запусти тесты»/«включи стрим» с
+   * НЕизвестным именем умирали честным «не нашёл» без шанса для модели. Флаг — внутренний: handleUserText
+   * на инлайн-пути отдаёт реплику модели вместо терминала; фоновые/промотированные пути озвучивают voice как есть.
+   */
+  fallbackToLlm?: true;
 }
 
 /**
@@ -179,6 +188,8 @@ const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
   // Волна I: чтение своего кода/телеметрии — чистые чтения с диска, параллелятся безопасно
   // (self_patch сюда НЕ входит: он меняет ветку и гоняет тесты — строго последовательно).
   "self_weaknesses", "self_code_search", "self_code_read",
+  "file_view", // §3.9: чтение картинки/страницы PDF с диска — чистое чтение, GUI не трогает
+  "job_status",
 ]);
 
 /**
@@ -222,6 +233,23 @@ const maskObservationsOn = (): boolean => process.env.JARVIS_MASK_OBSERVATIONS !
 
 
 /** Зависимости агента (инъекция для тестируемости и разделения слоёв). */
+/** Событие расхода одного вызова LLM для ledger продукта (см. AgentDeps.usageSink). */
+export interface UsageSinkEvent {
+  taskId: string;
+  /** Раунд петли (у префилла/рефлексии — undefined). */
+  round?: number;
+  model: string;
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
+  /** Стоимость по obs/pricing в USD (0 у хода по подписке). */
+  costUsd: number;
+  kind: "turn" | "prefill" | "reflect";
+  channel: "api" | "subscription";
+  /** Ответ — аварийный стаб без вызова API: расхода нет, строку ledger не писать. */
+  stubbed?: boolean;
+  /** Размер промпта (watermark прошлого usage) — оценка стоимости, если стрим оборвался до usage-события. */
+  promptTokensEstimate?: number;
+}
+
 export interface AgentDeps {
   memory: WorkingMemory;
   llm: ILlmProvider;
@@ -232,6 +260,20 @@ export interface AgentDeps {
   /** «Эффорт» рассуждения (thinking) по тиру (§7). Нет → без thinking. */
   tierThinking?: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
   spend: SpendGuard;
+  /**
+   * ПРОДУКТОВЫЙ РЕЖИМ (2026-09-02): честный текст терминала при исчерпании квоты ТАРИФА (spend_cap из
+   * плана) — «кредиты исчерпаны, продлите/добавьте ключ», а не «достигнут лимит» владельца. Отсутствует
+   * при мастер-флаге 0 → прежняя формулировка байт-в-байт.
+   */
+  quotaExhaustedText?: string;
+  /** Продуктовый режим: self_*-инструменты (телеметрия и исходники машины владельца) арендатору закрыты. */
+  productMode?: boolean;
+  /**
+   * ПРОДУКТОВЫЙ РЕЖИМ: приёмник расхода per вызов LLM (ledger в микро-долларах). Зовётся на КАЖДОМ платном
+   * вызове петли (раунд, префилл, рефлексия самообучения) — ровно там, где `spend.recordUsage`. При
+   * мастер-флаге 0 отсутствует → ни одной новой записи.
+   */
+  usageSink?: (e: UsageSinkEvent) => void;
   userId: string;
   /** §15 семантический кэш чисто-вербальных ответов (опц.) — пропуск LLM на близком фактическом повторе. */
   responseCache?: SemanticResponseCache;
@@ -247,6 +289,12 @@ export interface AgentDeps {
    */
   taskAccepted?: () => void;
   userContext?: UserContextSlot;
+  /**
+   * Реестр программных каналов установленных приложений (2026-09-01): «у этой программы есть
+   * API/CLI/протокол — не кликай». Наполняется из client.env; в промпт идёт ОДНОЙ строкой паспорта,
+   * подробности модель берёт инструментом app_channels.
+   */
+  appChannels?: MatchedChannel[];
   /**
    * Консьерж (§): висящее уточнение — мы задали короткий вопрос («Волну или коллекцию?») и ждём
    * ответ. Per-session мутируемое состояние; следующая реплика сперва пробуется как ответ (tier0,
@@ -479,7 +527,14 @@ const LIVE_SNAPSHOT_MARKER = "🖥️ ОБСТАНОВКА НА ПК ОБНОВ�
  * Ревью Волны 3 (#5): схемы URI, безопасные для ДЕТЕРМИНИРОВАННОГО реплея app.launch/browser.open
  * (клиент шелл-открывает их без модели в петле). Всё остальное со схемой (file:/ms-msdt:/search-ms:/
  * ms-settings:/shell:…) — потенциальный локальный эксплойт из отравленного навыка → реплей отменяем,
- * задача идёт обычной петлёй через гардированный browser_open. Голое имя приложения (без схемы) — ок.
+ * задача идёт обычной петлёй. Голое имя приложения (без схемы) — ок.
+ *
+ * ⚠️ ГРАНИЦА ЭТОГО РУБЕЖА (честно, адверс-ревью 2026-09-01): он закрывает ТОЛЬКО слепой реплей навыка.
+ * ПРЯМОЙ вызов `app_launch` фильтра схем НЕ имеет (в URL_NAV_TOOLS его нет), и рецепты каналов
+ * (`app-channels.ts`) СОЗНАТЕЛЬНО учат модель открывать через него ms-settings:/steam:/tg:/vscode:/
+ * com.epicgames.launcher: — browser_open такие схемы отвергает по построению. Значит «обычная петля»
+ * тут НЕ означает «через гардированный browser_open»: у прямого пути гарда нет. Сузить его до
+ * allowlist нельзя без решения владельца — allowlist сломает эти самые рецепты.
  */
 const REPLAY_SAFE_URI_SCHEMES = new Set(["http", "https", "steam", "mailto", "tel"]);
 
@@ -702,7 +757,10 @@ export async function handleUserText(
   // Машинный реэнтри (watch-action) — всегда ОТДЕЛЬНОЕ дело со свежим контекстом: scope/steer/дубль-гейты
   // калиброваны под ЖИВУЮ речь (STT-шум/правки/повторы) и к сгенерированному поручению неприменимы.
   const machineTurn = meta?.origin === "watch-action";
-  const freshContext = Boolean(activeTask) && (machineTurn || classifyTaskScope(clean) === "new");
+  // Цель ИМЕННО той задачи, в которую полетит steer — классификатор гейтит «edit» связью с её
+  // объектом (иначе реплика на другую тему уезжала в чужую задачу под ложное «Принял, поправляю»).
+  const freshContext =
+    Boolean(activeTask) && (machineTurn || classifyTaskScope(clean, activeTask?.goal ?? "") === "new");
   if (activeTask && !machineTurn) {
     log.info("§20 область реплики при активной задаче", {
       active: activeTask.title,
@@ -899,6 +957,7 @@ export async function handleUserText(
 
   const decision = classifyTier(clean);
   log.info("маршрутизация", { tier: decision.tier, reason: decision.reason });
+  let tier0FellBack = false;
 
   // tier0 (запуск/фокус/сайт) — детерминированно, без LLM. Под арендой ввода (§20):
   // свободна → инлайн (мгновенно), занята фоновой задачей → не крадём фокус.
@@ -909,9 +968,14 @@ export async function handleUserText(
       deps.pendingClarify = { key: decision.local.key };
       return finishReply({ voice: decision.local.question });
     }
-    return finishReply(await runTier0(session, decision.local, deps, sink));
+    const t0 = await runTier0(session, decision.local, deps, sink);
+    if (!t0.fallbackToLlm) return finishReply(t0);
+    // Приложение по имени не нашлось → модель решает, что это было («тесты», «стрим», «сервер») — как
+    // ЗАДАЧА-ДЕЙСТВИЕ (sonnet), не как болтовня. Раньше здесь был терминал «не нашёл» без второго шанса.
+    log.info("tier0: app.launch не нашёл цель — передаю модели", { app: (decision.local as { app?: string }).app });
+    tier0FellBack = true;
   }
-  const tier: Exclude<Tier, "tier0"> = decision.tier === "tier0" ? "haiku" : decision.tier;
+  const tier: Exclude<Tier, "tier0"> = decision.tier === "tier0" ? (tier0FellBack ? "sonnet" : "haiku") : decision.tier;
 
   // §15 Семантический кэш ответа: на близкий ФАКТИЧЕСКИЙ вопрос, на который уже был чисто-вербальный
   // ответ, отдаём кэш СРАЗУ — без вызова LLM (мгновенно, $0). Безопасно: кэшируются лишь ходы без
@@ -1003,6 +1067,7 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
     if (timer) clearTimeout(timer);
     if (outcome.kind === "error") throw outcome.error;
     if (outcome.kind === "done") {
+      if (outcome.reply.fallbackToLlm) return outcome.reply; // ход продолжит модель — ассистентской реплики ещё нет
       deps.memory.pushTurn("assistant", outcome.reply.voice);
       return outcome.reply; // результат сразу этим ходом
     }
@@ -1032,7 +1097,7 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
   if (useArbiter) await useArbiter.acquire();
   try {
     const reply = await runLocalIntent(session, local, undefined, undefined, deps.openOrFocus);
-    deps.memory.pushTurn("assistant", reply.voice);
+    if (!reply.fallbackToLlm) deps.memory.pushTurn("assistant", reply.voice);
     return reply;
   } finally {
     if (useArbiter) useArbiter.release();
@@ -1375,21 +1440,42 @@ async function runAgentLoop(
   // одной строкой в кешируемом каталоге `systemTools`; модель подгружает по имени. dispatch исполняет
   // инструмент по имени независимо от того, была ли схема в наборе (фолбэк-безопасность).
   const activation = deps.toolActivation; // Set<string> | undefined (имена подгруженных холодных)
-  const isHot = (t: ToolSchema): boolean => !EXCLUDED_TOOLS.has(t.name) && (!COLD_TOOL_NAMES.has(t.name) || Boolean(activation?.has(t.name)));
+  // Причина №5 (USER_SCENARIOS_2026-09-02): холодные obs_request/office_* горячие там, где программа РЕАЛЬНО
+  // установлена (по сматченным каналам client.env). Снимок на задачу — префикс кеша стабилен внутри неё.
+  const promoted = hotPromotionsFor(deps.appChannels);
+  const isHot = (t: ToolSchema): boolean =>
+    !EXCLUDED_TOOLS.has(t.name) && (!COLD_TOOL_NAMES.has(t.name) || Boolean(activation?.has(t.name)) || promoted.has(t.name));
   const mcpTools = deps.mcp?.asToolSchemas() ?? []; // § MCP-инструменты (все холодные)
-  const tools = [
-    ...TOOL_SCHEMAS.filter(isHot),
-    ...(deps.dynamicTools?.asToolSchemas(deps.userId) ?? []),
-    ...mcpTools.filter((t) => activation?.has(t.name)), // активированные через tool_load MCP → в набор
-  ];
-  // Каталог холодных (не подгруженных) — компактные однострочники, кешируемый блок (см. buildSystemBlocks).
-  const coldCatalog = [
-    ...TOOL_SCHEMAS.filter((t) => COLD_TOOL_NAMES.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && !activation?.has(t.name)).map(toolCatalogLine),
-    ...mcpTools.filter((t) => !activation?.has(t.name)).map((t) => `- ${t.name}: ${String(t.description || "").slice(0, 100)}`),
-  ];
-  const systemTools = coldCatalog.length
-    ? `# Инструменты по запросу\nЕсть и другие инструменты (в т.ч. внешние MCP) — их полные описания не загружены. Нужен один — вызови tool_load{names:[...]} и используй со следующего хода:\n${coldCatalog.join("\n")}`
-    : undefined;
+  /**
+   * Набор инструментов и каталог холодных ПЕРЕСОБИРАЮТСЯ по ходу задачи.
+   *
+   * 🔴 Живой эпизод 2026-09-01: набор считался ОДИН раз перед циклом, поэтому подгруженный
+   * `tool_load`-ом инструмент в ЭТОЙ петле так и не появлялся. Модель звала `tool_load` снова и
+   * снова (три раза подряд, пока не сработал анти-runaway) и честно доложила владельцу «инструмент
+   * так и не поднялся». На основном канале дефект маскировал фолбэк dispatch (исполняет по имени и
+   * без схемы), но в резерве на подписке инструменты — это MCP-инструменты SDK: чего нет в наборе,
+   * того не вызвать. Дозапись схем в ХВОСТ `tools` — разовая перезапись префикса кеша, ровно как
+   * rolling-брейкпоинт (§15), и она дешевле лишнего круга «подгрузил → не увидел → подгрузил снова».
+   */
+  const buildToolSet = (): { tools: ToolSchema[]; systemTools: string | undefined } => {
+    const list = [
+      ...TOOL_SCHEMAS.filter(isHot),
+      ...(deps.dynamicTools?.asToolSchemas(deps.userId) ?? []),
+      ...mcpTools.filter((t) => activation?.has(t.name)), // активированные через tool_load MCP → в набор
+    ];
+    // Каталог холодных (не подгруженных) — компактные однострочники, кешируемый блок (buildSystemBlocks).
+    const coldCatalog = [
+      ...TOOL_SCHEMAS.filter((t) => COLD_TOOL_NAMES.has(t.name) && !EXCLUDED_TOOLS.has(t.name) && !activation?.has(t.name) && !promoted.has(t.name)).map(toolCatalogLine),
+      ...mcpTools.filter((t) => !activation?.has(t.name)).map((t) => `- ${t.name}: ${String(t.description || "").slice(0, 100)}`),
+    ];
+    return {
+      tools: list,
+      systemTools: coldCatalog.length
+        ? `# Инструменты по запросу\nЕсть и другие инструменты (в т.ч. внешние MCP) — их полные описания не загружены. Нужен один — вызови tool_load{names:[...]}, и он станет доступен со СЛЕДУЮЩЕГО ШАГА этой же задачи:\n${coldCatalog.join("\n")}`
+        : undefined,
+    };
+  };
+  let { tools, systemTools } = buildToolSet();
 
   // Контекст диалога из рабочей памяти (§8). §20: «обособленная» новая задача (freshContext) НЕ
   // наследует ВЕСЬ контекст текущей, но и НЕ начинается слепой — иначе вопрос-продолжение («ты
@@ -1436,9 +1522,11 @@ async function runAgentLoop(
           approved: r.approved,
           ...(r.revision !== undefined ? { revision: r.revision } : {}),
         })),
+    productMode: deps.productMode, // self_* — инструменты владельца машины, не арендатора
     dynamicTools: deps.dynamicTools,
     skills: deps.skills,
     market: deps.market, // §трейдинг: рыночные данные + анализ (только чтение)
+    appChannels: deps.appChannels, // реестр программных каналов: «у приложения есть API — не кликай»
     knowledge: deps.knowledge, // §экспертность: база знаний (свериться перед экспертной задачей)
     telegramSend: deps.telegramSend, // §6: невидимая отправка в TG через расширение
     telegramSendVoice: deps.telegramSendVoice, // §: голосовое в TG голосом филиппа
@@ -1451,6 +1539,7 @@ async function runAgentLoop(
 
     resolutionMemory: deps.resolutionMemory, // §: опытная память резолва (скорость)
     sessionId: session.sessionId,
+    systemContext: () => deps.userContext?.systemContext ?? "", // §14 гейт GUI-коммитов: процесс на переднем плане
     ext: deps.ext, // §: браузер пользователя через расширение (browser_open/read/act в его вкладках)
     toolActivation: deps.toolActivation, // §15: набор подгруженных холодных инструментов (tool_load)
     mcp: deps.mcp, // § MCP-host: исполнение mcp__-инструментов через callTool
@@ -1491,6 +1580,7 @@ async function runAgentLoop(
   })();
   let cancelled = false;
   let limited = false;
+  let limitedReason: string | undefined; // причина предохранителя (spend_cap → продуктовый текст квоты)
   let timedOut = false;
   let earlyWrap = false; // подвид timedOut: свернулись ЗАРАНЕЕ (остаток < среднего раунда), потолок не превышен
   let channelLost = false; // Б4 (г): канал ПК не вернулся за окно ожидания → задача честно прервана обрывом
@@ -1621,6 +1711,10 @@ async function runAgentLoop(
   let contextNudged = false;
   let contextWrap = false;
   let lastPromptTokens = 0; // размер ПОСЛЕДНЕГО отправленного промпта (input+cache_read+cache_creation)
+  // Фактически НАЧИСЛЕННЫЕ деньги задачи: ход по подписке оплачен помесячно и стоит $0 (см. ниже), а
+  // пересчёт по прайсу модели завышал /cogs и metrics.jsonl в разы — дашборд юнит-экономики врал владельцу
+  // ровно там, где по нему считают цену продукта (живой прогон 2026-09-02).
+  let taskChargedUsd = 0;
   // Аудит контекста 2026-07-20 (PROACTIVE-гард): оценка токенов tool_result'ов ТЕКУЩЕГО раунда, которые
   // попадут в СЛЕДУЮЩИЙ промпт, но ещё НЕ учтены в lastPromptTokens (тот — из usage прошлого ответа, до
   // добавления результатов). Раньше гард сверял ТОЛЬКО lastPromptTokens прошлого раунда → один раунд с
@@ -1711,6 +1805,10 @@ async function runAgentLoop(
   // «дублирует команды»). Считаем вызовы по ИМЕНИ за задачу: на пороге — интервент-нудж «смени подход» +
   // эскалация на Opus; упорствует дальше — честный обрыв. env JARVIS_TOOL_FAMILY_CAP.
   const toolNameCount = new Map<string, number>();
+  // §3.9: file_view по РАЗНЫМ страницам/файлам — легитимная серия, а не флуд (ревью 2026-09-01: на 6-й странице
+  // отчёта модель получала «топтание» + Opus, на 12-й — ложный «Застрял на file_view»). Повтором считается
+  // только та же пара (path, page).
+  const seenFileViews = new Set<string>();
   let familyNudges = 0;
   const FAMILY_SOFT_CAP = (() => {
     const n = Number.parseInt(process.env.JARVIS_TOOL_FAMILY_CAP ?? "", 10);
@@ -1731,7 +1829,10 @@ async function runAgentLoop(
     return Number.isFinite(n) && n >= 0 ? n : 4000;
   })();
   let ackTimer: NodeJS.Timeout | undefined;
-  if (!sink && deps.speakResult && taskAckMs > 0) {
+  // Разговорный ход (вопрос/смолток) ack НЕ получает — «вопрос ≠ задача, нет карточки/ack» (карта проекта).
+  // Живой прогон 2026-09-02: в текстовом канале «сколько будет два плюс два» отвечало «Занимаюсь, сэр» и лишь
+  // потом ответ — болтливость на пустом месте.
+  if (!sink && !isConversational && deps.speakResult && taskAckMs > 0) {
     ackTimer = setTimeout(() => {
       if (task.cancel.cancelled || task.state !== "running" || spokeAny || deps.isClosed?.()) return;
       spokeAny = true; // прозвучала фраза → сбойный терминал строит «…продолжение», не противоречит
@@ -1748,6 +1849,12 @@ async function runAgentLoop(
   const KEEP_SCREENSHOTS = (() => {
     const n = Number.parseInt(process.env.JARVIS_KEEP_SCREENSHOTS ?? "", 10);
     return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 1;
+  })();
+  // §3.9: страницы документов (file_view) — ОТДЕЛЬНЫЙ бюджет: они не устаревают, как скриншоты, но
+  // тоже ~2K токенов каждая; сравнение двух страниц требует держать ≥2. env JARVIS_KEEP_DOC_IMAGES, кламп [1,8].
+  const KEEP_DOC_IMAGES = (() => {
+    const n = Number.parseInt(process.env.JARVIS_KEEP_DOC_IMAGES ?? "", 10);
+    return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 2;
   })();
   // §скорость: усиление family-нуджа ОДНОРАЗОВОЕ — раунд переосмысления идёт на сильной модели,
   // затем возвращаемся на прежний тир. Раньше эскалация была липкой, и вся оставшаяся МЕХАНИКА
@@ -1809,6 +1916,16 @@ async function runAgentLoop(
   let verifyNudges = 0;
   // P0.2: было жёстко 1 (сработав однажды, дальше не давил — конфабуляция второго действия проходила).
   // Теперь из env, дефолт 2, кламп [1,5] — verify обязателен СТРУКТУРНО, а не «один раз и забыли».
+  /** Структурные «глаза»: читают дерево элементов, а не пиксели (дёшево, точно, с именами и состояниями). */
+  const STRUCTURAL_SENSORS = new Set(["ui_snapshot", "browser_inspect", "browser_read", "screen_read_text", "context_read", "ui_ground"]);
+  /** Смотрел ли уже структурой в этой задаче (иначе первый скриншот получит подсказку). */
+  let sawStructuralLook = false;
+  /** Задача идёт в браузере — там структурный путь свой (browser_inspect), подсказка про UIA не нужна. */
+  let browserish = false;
+  /** Подсказка про лестницу даётся ОДИН раз за задачу — это совет, а не гейт. */
+  let ladderHinted = false;
+  /** Врезка отложена до конца раунда: внутри цикла tool_use её вставлять нельзя (см. ниже). */
+  let ladderHintPending = false;
   const MAX_VERIFY_NUDGES = (() => {
     const n = Number.parseInt(process.env.JARVIS_MAX_VERIFY_NUDGES ?? "", 10);
     return Number.isFinite(n) && n >= 1 && n <= 5 ? n : 2;
@@ -1960,6 +2077,7 @@ async function runAgentLoop(
             onUsage: (u) => {
               deps.spend.recordStep(taskId);
               deps.spend.recordUsage(taskId, u.inputTokens + u.outputTokens, costUsd(deps.models.sonnet, u));
+              deps.usageSink?.({ taskId, model: deps.models.sonnet, usage: u, costUsd: costUsd(deps.models.sonnet, u), kind: "prefill", channel: "api" });
             },
           },
           text,
@@ -2226,6 +2344,7 @@ async function runAgentLoop(
     if (!guard.allowed) {
       log.warn("предохранитель остановил петлю", { reason: guard.reason });
       limited = true;
+      limitedReason = guard.reason;
       break;
     }
 
@@ -2389,7 +2508,12 @@ async function runAgentLoop(
     // потолок SpendGuard и заблокировали бы работу. Токены учитываем (это реальный расход лимита
     // подписки и полезная телеметрия), деньги — нет.
     const turnCostUsd = resp.channel === "subscription" ? 0 : costUsd(model, resp.usage);
+    taskChargedUsd += turnCostUsd; // фактически начисленные деньги задачи — для /cogs (см. metrics.record ниже)
     deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, turnCostUsd);
+    deps.usageSink?.({
+      taskId, round, model, usage: resp.usage, costUsd: turnCostUsd, kind: "turn", channel: resp.channel === "subscription" ? "subscription" : "api",
+      stubbed: resp.stopReason === "stub", promptTokensEstimate: lastPromptTokens,
+    });
     cacheReadTokens += resp.usage.cacheReadTokens;
     cacheCreationTokens += resp.usage.cacheCreationTokens;
     // Телеметрия: вход/выход за ход (cache_* копятся отдельно выше) + число вызовов инструментов.
@@ -2729,12 +2853,49 @@ async function runAgentLoop(
       // в ЭТОТ ЖЕ tool_result (a11y/OCR после действия, DOM-диф браузера, met:true у wait_for) →
       // сверка состоялась в том же раунде: verify-долг не взводится/снимается БЕЗ отдельного раунда.
       // Строгость verify-LAW не ослаблена — наблюдение реальное, а не доверие к «ok» действия.
+      // 🔴 «ИСХОД НЕИЗВЕСТЕН» ставится ДО разветвления по isError (аудит тестовой базы 2026-09-01).
+      // Прежде эта строка стояла ВНУТРИ ветки успеха — то есть была мёртвым кодом: неопределённый
+      // исход отправки возвращается как ОШИБКА (`err(...)`, isError:true), и метка не ставилась
+      // никогда. Журнал прерванной задачи писал «ОШИБКА» = «не сделано», и продолжение по «доделай»
+      // повторило бы отправку живому человеку. Тот же класс, что мёртвый `gateStoppedRound` из
+      // контроля-3 пульта Ф0: фикс есть, а проводки нет.
+      if (r.uncertain === true) uncertainCalls.add(tu.id);
       if (!r.isError) {
+        // §15: подгрузили холодный инструмент — он обязан появиться в наборе СЛЕДУЮЩЕГО шага ЭТОЙ же
+        // задачи, иначе модель зовёт tool_load по кругу (живой эпизод 2026-09-01: три вызова подряд и
+        // честное «инструмент так и не поднялся»). На основном канале дефект маскировал фолбэк
+        // dispatch — он исполняет по имени и без схемы; в резерве на подписке набор инструментов
+        // единственный источник доступного, поэтому там подгрузка не работала совсем.
+        // ⚠️ Стоит в ОБЩЕМ пути результата: tool_load нейтрален (в mutate-ветке он не бывает).
+        if (tu.name === "tool_load") ({ tools, systemTools } = buildToolSet());
         // MCP-контракт (аудит 2026-07-28): декларация владельца в mcp.json главнее эвристики по имени —
         // «think»≠mutate (не слепит masked-failure), мутирующий get_* не проскочит neutral'ом.
         const eff = (tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolEffect(tu.name);
+        // 🔴 ЛЕСТНИЦА ВОСПРИЯТИЯ (форензика 2026-09-01). Числа: screen_capture — 156 вызовов (самый
+        // частый инструмент вообще), ui_snapshot — 0 из 973 за два месяца; задачи со скринами дают
+        // 76% успеха против 88% у остальных. Лестница была прописана только словами в персоне и в
+        // verify-нуджах, а механики у неё не было — модель шла за картинкой, потому что картинка
+        // универсальна. Отмечаем факты, чтобы один раз за задачу дать конкретную подсказку.
+        if (STRUCTURAL_SENSORS.has(tu.name)) sawStructuralLook = true;
+        if (tu.name === "browser_open" || tu.name === "browser_act" || tu.name === "browser_read") browserish = true;
+        // Первый в задаче screen_capture ДО единого структурного взгляда (и не в браузерной задаче) →
+        // ОДНА подсказка. Не запрет: на UIA-слепом окне (игра/canvas) картинка — единственный путь, и
+        // ui_snapshot честно вернёт пустоту с пометкой. Цена ошибки подсказки — один дешёвый вызов;
+        // цена молчания — «смотрю на компьютер как на картинку», что и показала форензика.
+        // ⚠️ ВРЕЗКУ ЗДЕСЬ ДЕЛАТЬ НЕЛЬЗЯ (адверс-ревью 2026-09-01, HIGH): мы внутри цикла по tool_use,
+        // и appendUserNote вставил бы user-сообщение МЕЖДУ assistant(tool_use) и tool_result —
+        // Anthropic отвечает 400 на первом же скриншоте. Копим флаг, впрыск после resultBlocks.
+        if (tu.name === "screen_capture" && !sawStructuralLook && !browserish && !ladderHinted) {
+          ladderHinted = true;
+          ladderHintPending = true;
+        }
         const observed = r.observed === true;
-        const realVerify = eff === "verify"; // ЯВНЫЙ взгляд (screen_capture/ui_snapshot/browser_read/…)
+        // ЯВНЫЙ взгляд (screen_capture/ui_snapshot/browser_read/…). 🔴 Ревью 2026-09-01: одного
+        // ФАКТА вызова мало — сенсор мог отработать без ошибки и не увидеть ничего (UIA-слепое окно
+        // отдаёт items:[], OCR — пустой текст). Такой «взгляд» гасил и обычный verify-долг, и долг
+        // сверки отправки, притом что соседний fused-путь то же самое пустое наблюдение считает
+        // слабым. Пустой и ошибочный результат сверкой не считаем.
+        const realVerify = eff === "verify" && !r.isError && r.empty !== true;
         const combo = (tu.input as { combo?: unknown }).combo;
         // §P1-отправка (форензика «Отправлено — ушло в Клод», а сообщение осталось в поле): КОММИТ =
         // send-key после набора (composedPending), ЛИБО берст compose→send одним input_batch (ревью р1
@@ -2774,7 +2935,6 @@ async function runAgentLoop(
           // (isError:false) взводил флаг для fs_delete/system_power/code_run/skill_execute/MCP →
           // masked-failure и анти-капитуляция глохли, и ход заканчивался «Готово» при нулевом деле.
           if (r.declined !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) anyMutateSucceeded = true;
-          if (r.uncertain === true) uncertainCalls.add(tu.id); // «могло и выполниться» — журнал скажет сверить
           if (r.declined === true) {
             declinedCalls.add(tu.id); // журнал не должен звать это «сделанным»
             // Контроль-2 Ф0: остановка §14-ГЕЙТОМ — это НЕ капитуляция модели. Без этого флага мой же
@@ -2833,6 +2993,18 @@ async function runAgentLoop(
       }
     }
     convo.push({ role: "user", content: resultBlocks });
+    // Подсказка лестницы — ПОСЛЕ результатов инструментов: теперь последнее сообщение user, и
+    // appendUserNote допишет её в него, не разрывая пару assistant(tool_use)↔tool_result.
+    if (ladderHintPending) {
+      ladderHintPending = false;
+      pushSystemNote(
+        "Подсказка по лестнице восприятия: ты смотришь на экран КАРТИНКОЙ, ни разу не посмотрев СТРУКТУРУ. " +
+          "ui_snapshot отдаёт элементы окна с ролью, именем, СОСТОЯНИЕМ (checked/expanded/value) и хендлом — " +
+          "по нему можно действовать точно (ui_invoke по handle), он в разы дешевле кадра и не требует " +
+          "прицеливания по пикселям. Начинай оконные задачи с него; картинка нужна там, где структуры нет " +
+          "(игра, canvas, нестандартный UI) — если ui_snapshot вернёт пусто, так и будет сказано, тогда картинка.",
+      );
+    }
     // Волна C: результаты раунда УЖЕ в истории (мутации совершены) — даже если петля сейчас выйдет по
     // обрыву канала/отмене до `round += 1`, журнал чекпойнта обязан их включить.
     committedToolRounds += 1;
@@ -2873,7 +3045,7 @@ async function runAgentLoop(
     if (resp.toolUses.length > 0) lastRoundHadVerify = sawVerifyThisRound;
 
     // §скорость (зрение): старые скрины — вон из контекста (см. prune-images.ts: токены, TTFT, кеш).
-    const prunedImages = pruneStaleImages(convo, KEEP_SCREENSHOTS);
+    const prunedImages = pruneStaleImages(convo, KEEP_SCREENSHOTS, KEEP_DOC_IMAGES);
     if (prunedImages > 0) {
       prunedLastRound = true; // диагностика кеша (1.8): prune мутирует историю → перезапись префикса
       log.debug("зрение: устаревшие скрины вырезаны из контекста", { pruned: prunedImages });
@@ -3005,7 +3177,17 @@ async function runAgentLoop(
     // Мягкий anti-runaway по СЕМЕЙСТВУ инструментов (фикс «дублирует команды»): один tool NAME вызван
     // слишком много раз за задачу → флуд без сходимости. Сначала интервент-нудж (смени подход / оцени, не
     // достигнута ли цель) + эскалация на Opus; при упорстве — честный обрыв ДО упора в max_steps(50).
-    for (const tu of resp.toolUses) toolNameCount.set(tu.name, (toolNameCount.get(tu.name) ?? 0) + 1);
+    for (const tu of resp.toolUses) {
+      if (tu.name === "file_view") {
+        const inp = tu.input as { path?: unknown; page?: unknown };
+        const sig = `${String(inp.path ?? "")}#${String(inp.page ?? 1)}`;
+        if (!seenFileViews.has(sig)) {
+          seenFileViews.add(sig);
+          continue;
+        }
+      }
+      toolNameCount.set(tu.name, (toolNameCount.get(tu.name) ?? 0) + 1);
+    }
     const worst = [...toolNameCount.entries()].sort((a, b) => b[1] - a[1])[0];
     if (worst && worst[1] >= FAMILY_SOFT_CAP * (familyNudges + 1)) {
       if (familyNudges < MAX_FAMILY_NUDGES) {
@@ -3214,7 +3396,7 @@ async function runAgentLoop(
     outputTokens: outputTokensTotal,
     cacheReadTokens,
     cacheCreationTokens,
-    costUsd: Number(estimateCostUsd(taskUsage, model).toFixed(6)),
+    costUsd: Number(taskChargedUsd.toFixed(6)), // ровно то, что начислено (подписка = $0), не пересчёт по прайсу
     ok: taskOk,
   });
 
@@ -3285,6 +3467,13 @@ async function runAgentLoop(
   if (limited) {
     tasks.fail(taskId, "достигнут лимит на задачу (spend cap §14)");
     if (shown) emitTaskStatus(session, task);
+    // Продуктовый режим: потолок — квота ТАРИФА → говорим про кредиты (продлить/свой ключ), не «лимит».
+    const quotaText = limitedReason === "spend_cap" ? deps.quotaExhaustedText : undefined;
+    if (quotaText) return terminal(verbalize(spokeAny ? `…дальше остановился. ${quotaText}` : quotaText));
+    // Аварийный стоп администратора — НЕ лимит задачи: назвать неверную причину значит отправить человека
+    // покупать кредиты вместо разговора с администратором (живой прогон 2026-09-02).
+    if (limitedReason === "kill_switch")
+      return terminal(verbalize(spokeAny ? "…дальше остановился: работа приостановлена администратором." : "Работа приостановлена администратором, сэр — это не мой лимит."));
     return terminal(verbalize(spokeAny ? "…дальше остановился — достигнут лимит." : "Остановился — достигнут лимит на задачу."));
   }
   // Б4 (г): канал с ПК не вернулся за окно ожидания — задача прервана обрывом связи (НЕ провал модели,
@@ -3367,9 +3556,9 @@ async function runAgentLoop(
     // тот текст, что прозвучал (не перезаписываем другой фразой). terminal() при streamedFinal в sink
     // повторно не отдаёт — двойного голоса нет.
     if (stubSpokenText) return terminal(stubSpokenText);
-    return terminal(verbalize(spokeAny
-      ? "…и тут связь с сервером прервалась, сэр. Повторите чуть позже."
-      : "Связь с сервером прервалась, сэр. Повторите, пожалуйста."));
+    // Причина названа честно (кончился баланс ключа / ключ не принят / перегруз), а не «связь прервалась»
+    // вслепую: живой прогон 2026-09-02 показал, что пользователь шёл чинить сеть при исчерпанном балансе.
+    return terminal(verbalize(spokeAny ? `…и тут не получилось: ${llmFailureLine()}` : llmFailureLine()));
   }
   // H4: топтание на одном действии без результата — честный провал, а не «Готово».
   if (runawayStuck) {
@@ -3522,7 +3711,11 @@ async function runLocalIntent(
     void insertActionLog(buildActionLogEntry(session.sessionId, result.commandId, command, result));
     if (result.ok) return { voice: verbalize(successPhrase(intent)) };
     log.warn("локальное действие не удалось", { kind: command.kind, code: result.error?.code });
-    return { voice: verbalize(failurePhrase(intent, result.error?.code)) };
+    const voice = verbalize(failurePhrase(intent, result.error?.code));
+    // Не нашёл ПРИЛОЖЕНИЕ по имени — это не приговор, а сигнал «имя не exe»: модель разберёт («тесты» →
+    // code_run vitest, «стрим» → obs_request). Голос оставляем — потребители без отката озвучат честный провал.
+    if (intent.kind === "app.launch" && result.error?.code === "not_found") return { voice, fallbackToLlm: true };
+    return { voice };
   } finally {
     if (arbiter) arbiter.release();
   }
@@ -3660,6 +3853,7 @@ async function selfLearnSkill(args: {
       });
       deps.spend.recordStep(reflectId);
       deps.spend.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(model, resp.usage));
+      deps.usageSink?.({ taskId: reflectId, model, usage: resp.usage, costUsd: costUsd(model, resp.usage), kind: "reflect", channel: resp.channel === "subscription" ? "subscription" : "api" });
 
       if (resp.toolUses.length === 0) return null; // модель решила не сохранять — это нормально
 

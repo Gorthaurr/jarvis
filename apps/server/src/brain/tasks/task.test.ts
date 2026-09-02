@@ -169,6 +169,7 @@ describe("formatActiveTasks — «в работе сейчас» для «сде
 describe("stepLabelFor — «что делаю сейчас» для чипа (§20, жалоба «не видно, что делает»)", () => {
   it("процессные инструменты (actionTitle=null) получают глагольную метку", () => {
     expect(stepLabelFor("screen_capture", {})).toBe("Смотрю на экран");
+    expect(stepLabelFor("file_view", { path: "C:/doc.pdf", page: 2 })).toBe("Смотрю файл"); // §3.9: не «Работаю…»
     expect(stepLabelFor("browser_read", {})).toBe("Читаю страницу");
     expect(stepLabelFor("browser_inspect", {})).toBe("Изучаю страницу");
     expect(stepLabelFor("input_click", {})).toBe("Кликаю");

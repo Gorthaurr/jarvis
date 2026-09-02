@@ -81,4 +81,21 @@ describe("SettingsStore — персист настроек (язык/конте
     expect(s.snapshot().language).toBe("en"); // не-секретное сохранилось
     expect(s.getKey("eleven")).toBeUndefined();
   });
+
+  // 2026-09-02: выбор модели пользователем — plain JSON (не секрет), пустые слоты = «авто».
+  it("выбор модели: сохраняется, нормализуется, пустые слоты очищают, переживает рестарт", () => {
+    const cfg = tmpCfg();
+    const s = new SettingsStore(cfg);
+    expect(s.snapshot().models).toBeUndefined(); // дефолт — авто, без ложного «выбора»
+    expect(s.save({ models: { primary: " Claude-Sonnet-5 ", strong: "" } }).ok).toBe(true);
+    expect(s.snapshot().models).toEqual({ primary: "claude-sonnet-5" }); // strong:"" не хранится
+    expect(new SettingsStore(cfg).snapshot().models).toEqual({ primary: "claude-sonnet-5" });
+    // Патч без models — выбор НЕ трогается (как ключи/язык: отсутствующее поле = «оставить»).
+    s.save({ language: "en" });
+    expect(s.snapshot().models).toEqual({ primary: "claude-sonnet-5" });
+    // Оба слота пустые — очистка, и она тоже персистится (не только в памяти процесса).
+    s.save({ models: { primary: "", strong: "  " } });
+    expect(s.snapshot().models).toBeUndefined();
+    expect(new SettingsStore(cfg).snapshot().models).toBeUndefined();
+  });
 });

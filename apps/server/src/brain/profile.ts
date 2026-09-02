@@ -36,6 +36,12 @@ export interface UserProfile {
   language?: string;
   /** Свободный контекст о пользователе из настроек UI (стиль, привычки, как обращаться). */
   context?: string;
+  /**
+   * Выбор модели пользователем (настройки «Общее», 2026-09-02): primary — дефолт ходов, strong —
+   * эскалация §7. Отсутствует/пусто = авто (лестница тиров сервера). Здесь хранится то, что пользователь
+   * ПОПРОСИЛ; что реально применилось (каталог + allowlist плана) — решает product/models.ts.
+   */
+  models?: { primary?: string; strong?: string };
   /** Когда последний раз звучало приветствие-онбординг (unix ms) — кулдаун А6, ревью 2026-07-10. */
   lastGreetedAt?: number;
   /** Когда последний раз прогонялся «сон-цикл» консолидации памяти (unix ms) — триггер Б1, раз в день. */
@@ -122,6 +128,27 @@ export async function setContext(userId: string, context: string): Promise<void>
   p.context = c;
   await persist(userId);
   log.info("профиль: контекст сохранён", { userId, len: c.length });
+}
+
+/**
+ * Сохранить выбор модели пользователем (из настроек UI, персист). Пустые/пробельные слоты → undefined,
+ * оба пустые → поле снимается целиком: профиль не должен хранить «выбор», которого нет (UI показал бы
+ * его как сделанный). id приводится к нижнему регистру — каталог сравнивает без учёта регистра, а
+ * селект в UI ищет опцию по точному значению. Валидации по каталогу здесь НЕТ (см. product/models.ts).
+ */
+export async function setModelChoice(userId: string, choice: { primary?: string; strong?: string }): Promise<void> {
+  const norm = (v: string | undefined): string | undefined => {
+    const t = (v ?? "").trim().toLowerCase();
+    return t ? t : undefined;
+  };
+  const primary = norm(choice.primary);
+  const strong = norm(choice.strong);
+  const p = entry(userId);
+  if ((p.models?.primary ?? undefined) === primary && (p.models?.strong ?? undefined) === strong) return;
+  if (primary === undefined && strong === undefined) delete p.models;
+  else p.models = { ...(primary ? { primary } : {}), ...(strong ? { strong } : {}) };
+  await persist(userId);
+  log.info("профиль: выбор модели сохранён", { userId, primary: primary ?? "auto", strong: strong ?? "auto" });
 }
 
 /** Отметить произнесённое приветствие (кулдаун онбординга А6, ревью 2026-07-10). */

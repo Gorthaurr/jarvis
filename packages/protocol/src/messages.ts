@@ -55,6 +55,7 @@ export type MessageType =
   | "ui.display" // DisplayCard — карточка с подробностями в renderer (§21)
   | "chat" // ChatMessage — реплика для текстового чата (роль+текст), §22
   | "usage.info" // UsageInfo — расход/потолок/лимиты периода для вкладки «Оплата» (§6B/B5)
+  | "models.catalog" // ModelsCatalog — каталог моделей + выбор пользователя + allowlist плана (настройки «Общее»)
   | "memory.state" // MemoryState — снимок памяти о владельце для вкладки «Память»
   | "skill.saved" // SkillSaved — навык записан/сохранён, доступен для повтора (§8)
   | "voice.enroll.progress" // VoiceEnrollProgress — % готовности записи отпечатка (§3)
@@ -71,6 +72,11 @@ export interface Hello {
   protocolVersion: number;
   /** Реконнект: продолжить сессию (§5). */
   resumeSessionId?: string;
+  /**
+   * Продуктовый режим: per-install UUID клиента (identity-store) — привязка device-токена к установке.
+   * При мастер-флаге 0 не шлётся и не читается.
+   */
+  installId?: string;
 }
 
 export type ClientState = "idle" | "listening" | "thinking" | "speaking";
@@ -145,6 +151,17 @@ export interface ClientSettings {
   language?: string;
   /** Свободный контекст о пользователе (стиль, привычки, как обращаться). */
   context?: string;
+  /**
+   * Выбор модели пользователем (2026-09-02): primary — дефолт ходов, strong — эскалация §7. Пусто = авто.
+   * Сервер валидирует по каталогу и allowlist плана и ОТВЕЧАЕТ `models.catalog` с тем, что применилось.
+   */
+  models?: ModelChoice;
+}
+
+/** Выбор модели пользователем; id — точные из каталога @jarvis/shared MODEL_CATALOG. Пусто/undefined = авто. */
+export interface ModelChoice {
+  primary?: string;
+  strong?: string;
 }
 
 /**
@@ -230,6 +247,14 @@ export interface ClientEnv {
   apps?: string[];
   /** §Волна2 (2.6): имена установленных Steam-игр (из манифестов) — туда же. */
   games?: string[];
+  /**
+   * РЕЕСТР ПРОГРАММНЫХ КАНАЛОВ (2026-09-01): что РЕАЛЬНО установлено на машине — перечислением из
+   * реестра Windows, а не по хардкод-списку из 9 путей (форензика: «нашлось 3, всё остальное для
+   * Джарвиса не существует», и он кликал там, где у программы есть команда/протокол).
+   * Сервер сопоставляет это с таблицей рецептов (`brain/app-channels.ts`) и говорит модели,
+   * что можно сделать программно вместо GUI. В промпт список целиком НЕ идёт.
+   */
+  installed?: Array<{ name: string; exe?: string; uri?: string; cli?: boolean }>;
 }
 
 /**
@@ -247,6 +272,12 @@ export interface ServerHello {
   sessionId: string;
   protocolVersion: number;
   resumed: boolean;
+  /** Продуктовый режим сервера (мастер-флаг). Отсутствует при 0 — старый клиент ничего не замечает. */
+  productMode?: boolean;
+  /** Продуктовый режим: аккаунт пользователя (план/статус/роль) — read-only, клиент только показывает. */
+  user?: { id: string; planId?: string; status?: string; role?: string };
+  /** Продуктовый режим: сервер ротировал device-токен — клиент ОБЯЗАН персистнуть новый (старый доживает 24 ч). */
+  rotatedToken?: string;
 }
 
 export interface SpeakChunk {
@@ -366,7 +397,12 @@ export interface ScreenCaptureResult {
 }
 
 export interface ProtocolError {
-  code: "version_mismatch" | "unauthorized" | "internal";
+  /**
+   * Продуктовые коды (2026-09-02): login_required — нужен вход (dev-token на облачной роли),
+   * subscription_required — подписки нет/истекла, device_revoked — установка отозвана. Новый клиент на
+   * них НЕ реконнектится (показывает экран входа); старый — как на unauthorized.
+   */
+  code: "version_mismatch" | "unauthorized" | "internal" | "login_required" | "subscription_required" | "device_revoked" | "account_blocked" | "unavailable";
   message: string;
 }
 
@@ -388,6 +424,46 @@ export interface UsageInfo {
   remaining: number;
   /** Аварийный стоп активен (платные операции заблокированы, §14). */
   killSwitch: boolean;
+  /**
+   * Валюта spent/cap/remaining. Отсутствует = "USD" (так было всегда: SpendGuard считает в долларах по
+   * obs/pricing; вкладка печатала «₽» — ложь UI, исправлена 2026-09-02).
+   */
+  currency?: "USD";
+  /** Продуктовый режим (квоты плана): кредиты — 1 кредит = 1 ₽ по курсу периода, µ$ внутри. */
+  /**
+   * Кредиты периода в ЕДИНИЦАХ, понятных человеку: `unit` — валюта пересчёта, `note` — что это такое.
+   * Без них голое число («начислено 371» за 900 ₽) читается как обман (живой прогон 2026-09-02).
+   */
+  credits?: { quota: number; used: number; remaining: number; pct: number; unit?: string; note?: string };
+  planId?: string;
+  planName?: string;
+  /** trialing | active | past_due | canceled | expired | none */
+  status?: string;
+  /** ISO конца периода/пробного срока. */
+  periodEnd?: string;
+  /** Пересечён порог: "80" | "100" (озвучивается один раз, durable). */
+  warn?: "80" | "100" | null;
+  /** Порог мягкого предупреждения (%), из плана — клиент/озвучка не хардкодят 80. */
+  softPct?: number;
+  /** Ссылка на страницу оплаты (hosted-checkout провайдера); нет провайдера — отсутствует. */
+  checkoutUrl?: string;
+}
+
+/**
+ * Каталог моделей для селекта в настройках (2026-09-02, требование владельца: пользователь сам выбирает
+ * модель). `chosen` — что сохранил пользователь, `effective` — что реально применилось после валидации
+ * (каталог + allowlist плана), `rejected` — что отклонено и почему (не молча!). `allowed` null = любая.
+ */
+export interface ModelsCatalog {
+  catalog: Array<{ id: string; label: string; family: string; role: "cheap" | "strong"; costClass: 1 | 2 | 3 }>;
+  chosen: ModelChoice;
+  effective: { primary: string; strong: string };
+  allowed: string[] | null;
+  rejected: Array<{ slot: "primary" | "strong"; id: string; reason: "unknown" | "not_allowed" | "unavailable" }>;
+  /** Сильная модель дешевле/слабее основной — эскалация §7 ответ не усилит; UI обязан предупредить. */
+  downgrade?: boolean;
+  /** Основная и сильная модель совпали (в т.ч. когда тариф не разрешает ни одной сильной) — усиления не будет. */
+  collapsed?: boolean;
 }
 
 /**

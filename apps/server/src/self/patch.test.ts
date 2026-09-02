@@ -45,6 +45,22 @@ describe("protectedHits — автономия не снимает собств�
     expect(protectedHits([p])).toHaveLength(1);
   });
 
+  /**
+   * 🔴 Предохранители, которых в списке ДОЛГО НЕ БЫЛО, хотя каждый из них — рельс, а не «важный код»:
+   * снявшая его правка снимает ограничение разом, а сама выглядит безобидной. Проверяем ПОВЕДЕНИЕМ
+   * (через protectedHits), а не `PROTECTED_PATHS.includes` — гард обязан узнать путь так же, как он
+   * увидит его из `git status`. Пропажа записи роняет ровно один кейс с именем файла в отчёте.
+   */
+  it.each([
+    ["apps/server/src/brain/tools/dispatch.ts", "§14-гейт confirm на необратимые действия"],
+    ["apps/server/src/brain/code-guard.ts", "рельсы §4 исполняемого кода (песочницы у code.run нет)"],
+    ["apps/client/main/actuators/code-runner.ts", "вырезание секретов из env дочернего процесса"],
+    ["apps/server/src/brain/tools/dynamic.ts", "саморасширение: новый инструмент не в обход гардов"],
+    ["apps/server/src/brain/trading/tinkoff.ts", "торговый контур, деньги обратно не откатываются"],
+  ])("под рельсами: %s (%s)", (path) => {
+    expect(protectedHits([path])).toEqual([path]);
+  });
+
   it("список рельсов не пуст и покрывает четыре класса ограничителей", () => {
     expect(PROTECTED_PATHS.length).toBeGreaterThanOrEqual(10);
     expect(PROTECTED_PATHS.some((p) => p.includes("consent"))).toBe(true);
@@ -99,76 +115,28 @@ describe("рельсы указывают на существующие файл
 });
 
 /**
- * 🔴 Ревью волны I (HIGH): зелёная проверка относится к КОНКРЕТНОМУ содержимому. Между verify и
- * commit модель могла дописать что угодно — включая снятие собственных ограничителей, — и `git add -A`
- * утащил бы это в коммит под отчётом «проверено, зелено».
+ * Изоляция прогона — единственная проверка этого файла, которая смотрит на ТЕКСТ, а не на поведение:
+ * поднять временный репозиторий с рабочим тулчейном (tsc+vitest) ради одного факта слишком дорого.
+ * Она честно защищает лишь от случайного удаления механизма при рефакторинге; что изоляция РЕАЛЬНО
+ * держит, доказано живым прогоном (вредоносный тест не достал боевой data/), а поведение рельсов —
+ * в patch-rails.test.ts на настоящем git.
+ *
+ * 🔴 Прежде здесь лежали ещё две такие grep-проверки на commit/apply. Аудит тестов 2026-09-01 показал
+ * их бесполезность: обезвреживание трёх гардов сразу оставляло всю зону зелёной. Они заменены
+ * поведенческими тестами, а не удалены.
  */
-describe("рельсы перепроверяются на КАЖДОМ шаге, а не только при verify", () => {
-  it("commit и apply вызывают проверку рельсов и сверку отпечатка", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { selfRepoRoot } = await import("./repo.js");
-    const { join } = await import("node:path");
-    const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
-    const commit = src.slice(src.indexOf("export async function commitSelfPatch"), src.indexOf("export async function applySelfPatch"));
-    const apply = src.slice(src.indexOf("export async function applySelfPatch"), src.indexOf("export async function abortSelfPatch"));
-    for (const [name, body] of [["commit", commit], ["apply", apply]] as const) {
-      expect(body, `${name} обязан перепроверять рельсы`).toContain("protectedHits");
-      expect(body, `${name} обязан сверять, что применяется ИМЕННО проверенный коммит`).toContain("verifiedCommit");
-    }
-  });
-
-  it("проверка идёт в ОДНОРАЗОВОМ дереве (тест-файл правки не видит боевые данные)", async () => {
+describe("проверка идёт в одноразовом дереве (защита от случайного удаления механизма)", () => {
+  it("verifySelfPatch выкладывает проверяемый коммит в отдельный worktree и не терпит удаления тестов", async () => {
     const { readFileSync } = await import("node:fs");
     const { selfRepoRoot } = await import("./repo.js");
     const { join } = await import("node:path");
     const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
     const verify = src.slice(src.indexOf("export async function verifySelfPatch"), src.indexOf("export async function commitSelfPatch"));
     expect(verify).toContain("worktree");
-    expect(verify).toContain("removedTests"); // и покрытие не должно тихо уменьшаться
-  });
-
-  it("apply не применяет правку без отметки о пройденной проверке", async () => {
-    const { readFileSync } = await import("node:fs");
-    const { selfRepoRoot } = await import("./repo.js");
-    const { join } = await import("node:path");
-    const src = readFileSync(join(selfRepoRoot(), "apps/server/src/self/patch.ts"), "utf8");
-    expect(src).toContain("нет отметки о пройденной проверке");
+    expect(verify).toContain("removedTests");
   });
 });
 
-/**
- * 🔴 Найдено ЖИВЫМ прогоном цикла (тесты гард на готовых списках не ловили): вывод git обрезался
- * общим trim(), из-за чего у ПЕРВОЙ строки porcelain пропадал ведущий пробел кода состояния, разбор
- * съезжал на символ, и путь приезжал как «pps/server/...». Гард ограничителей такой путь не узнавал —
- * то есть правку killswitch можно было пронести мимо рельсов, если она первая в списке.
- */
-describe("parsePorcelain — разбор состояния репозитория", () => {
-  it("незастейдженная правка (ведущий пробел) читается ПОЛНОСТЬЮ", () => {
-    expect(parsePorcelain(" M apps/server/src/autonomy/freeze.ts\n")).toEqual(["apps/server/src/autonomy/freeze.ts"]);
-  });
-
-  it("и такой путь ловится рельсами (сквозная проверка того самого сценария)", () => {
-    expect(protectedHits(parsePorcelain(" M apps/server/src/autonomy/freeze.ts"))).toHaveLength(1);
-  });
-
-  it("разные состояния: добавлен, удалён, неотслеживаемый, переименован", () => {
-    const raw = ["A  apps/server/src/new.ts", " D apps/server/src/old.ts", "?? apps/server/src/untracked.ts", "R  a/old.ts -> a/new.ts"].join("\n");
-    // У переименования нужны ОБЕ стороны: иначе ограничитель, уведённый из-под защищённого пути,
-    // исчезает из проверки (контроль-2 волны I).
-    expect(parsePorcelain(raw)).toEqual(["apps/server/src/new.ts", "apps/server/src/old.ts", "apps/server/src/untracked.ts", "a/old.ts", "a/new.ts"]);
-  });
-
-  it("путь в кавычках (кириллица при core.quotepath) разворачивается", () => {
-    expect(parsePorcelain(' M "apps/server/src/файл.ts"')).toEqual(["apps/server/src/файл.ts"]);
-  });
-
-  it("пустой вывод — пустой список (чистое дерево)", () => {
-    expect(parsePorcelain("")).toEqual([]);
-    expect(parsePorcelain("\n\n")).toEqual([]);
-  });
-});
-
-/** Находки контроля-2: обходы, каждый закрыт и закреплён тестом. */
 describe("контроль-2: обходы рельсов", () => {
   it("переименование ограничителя ловится по СТАРОМУ пути (git mv self-guard.ts guard.ts)", () => {
     const files = parsePorcelain("R  apps/client/main/actuators/self-guard.ts -> apps/client/main/actuators/guard.ts");

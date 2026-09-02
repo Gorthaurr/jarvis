@@ -12,6 +12,10 @@
  * поля webK — ТОЛЬКО нативный CDP Input.insertText (+Enter); подтверждение — по реальному DOM.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { expandPath } from "./fs.js";
+import { assertReadable } from "./self-guard.js";
+import { promises as fsp } from "node:fs";
+import { basename } from "node:path";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -360,6 +364,25 @@ export class JarvisBrowser {
       if (params.selector) await cdp.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(String(params.selector))}); if(e) e.focus();})()`);
       await cdp.send("Input.insertText", { text: String(params.text ?? "") });
       return "ok";
+    }
+    if (intent === "upload") {
+      // Файл с диска в <input type=file> через CDP (DOM.setFileInputFiles) — без DataTransfer и без лимита
+      // размера (причина №3 USER_SCENARIOS_2026-09-02: класса «загрузить файл» не было). Путь — от модели →
+      // секреты не отдаём (assertReadable), файл обязан существовать.
+      const path = String(params.path ?? "").trim();
+      if (!path) throw new Error("upload: нужен params.path (файл на диске)");
+      const abs = expandPath(path);
+      assertReadable(abs);
+      const st = await fsp.stat(abs).catch(() => null);
+      if (!st || !st.isFile()) throw new Error(`upload: файла «${abs}» нет или это не файл`);
+      const selector = String(params.selector ?? "input[type=file]");
+      const doc = (await cdp.send("DOM.getDocument", { depth: 1 })) as { root?: { nodeId?: number } };
+      const rootId = doc?.root?.nodeId;
+      if (!rootId) throw new Error("upload: не получил DOM-документ страницы");
+      const q = (await cdp.send("DOM.querySelector", { nodeId: rootId, selector })) as { nodeId?: number };
+      if (!q?.nodeId) throw new Error(`upload: элемент «${selector}» не найден на странице — сначала открой диалог/форму загрузки (web_inspect покажет input[type=file])`);
+      await cdp.send("DOM.setFileInputFiles", { nodeId: q.nodeId, files: [abs] });
+      return `ok:upload ${basename(abs)} (${Math.round(st.size / 1024)} КБ) в ${selector}`;
     }
     if (intent === "key") {
       const key = String(params.key ?? "Enter");

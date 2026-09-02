@@ -25,6 +25,10 @@ import { autonomyFreeze } from "../autonomy/freeze.js";
 import { autonomyThrottle } from "../autonomy/throttle.js";
 import type { ServerConfig } from "../config.js";
 import { SpendGuards } from "../billing/index.js";
+import { describeProductPolicy } from "../product/policy.js";
+import { createProductRuntime } from "../product/gateway-hooks.js";
+import { registerProductRoutes } from "../product/routes/index.js";
+import { sameSecret } from "../product/routes/guards.js";
 import { metrics } from "../obs/metrics.js";
 import { type FileLogSink, initFileLog } from "../obs/file-log.js";
 import { SessionWarmth } from "../brain/agent/warmth.js";
@@ -78,7 +82,8 @@ import { DEV_USER, resolveAndProvision } from "./identity.js";
 import { isLoopbackHost, resolveBindHost } from "./bind.js";
 import { buildGreeting } from "../proactive/greeting.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
-import { ExtensionBridge, type ExtSocket } from "./extension-bridge.js";
+import { ExtensionBridge } from "./extension-bridge.js";
+import { registerWsRoutes } from "./ws-routes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
 import { PreHandshakeBuffer } from "./pre-handshake-buffer.js";
@@ -120,8 +125,16 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     gatewayBackstopInstalled = true;
     process.on("uncaughtException", (e) => log.error("uncaughtException (сервер выжил, backstop)", e instanceof Error ? `${e.message}\n${e.stack}` : String(e)));
     process.on("unhandledRejection", (e) => log.error("unhandledRejection (backstop)", e instanceof Error ? e.message : String(e)));
+    // EPIPE на stdout/stderr (читатель трубы умер: супервизор, «| head» при ручном запуске): без слушателя
+    // КАЖДАЯ строка лога даёт uncaughtException, бэкстоп выше пишет об этом снова в тот же stdout → бесконечный
+    // цикл на 100% CPU, event loop мёртв, healthz не отвечает (воспроизведено живьём на стенде 2026-09-02).
+    // Слушатель делает ошибку потока обработанной; логировать её некуда — молчим осознанно.
+    for (const stream of [process.stdout, process.stderr]) stream.on("error", () => undefined);
   }
-  const app = Fastify({ logger: false });
+  // JARVIS_TRUST_PROXY — за reverse-proxy req.ip берётся из X-Forwarded-For (иначе лимиты OTP и loopback-гарды
+  // видят всех как один адрес прокси). Значение = число хопов или адреса прокси, НИКОГДА `true` (см. config).
+  // Без env объект опций тот же, что и раньше.
+  const app = Fastify({ logger: false, ...(config.trustProxy !== false ? { trustProxy: config.trustProxy } : {}) });
   const registry = new SessionRegistry();
   // Наблюдаемость (аудит 2026-07-02): файловый лог поднимается в listen(), закрывается в close().
   let fileLog: FileLogSink | null = null;
@@ -185,13 +198,29 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // Agent SDK вместо стаба «связь прервалась» (см. integrations/subscription-llm.ts — там же честно
   // расписано, чем резерв ХУЖЕ основного канала: нет наших кеш-брейкпоинтов, история идёт текстом).
   // Резерв активируется САМ и только при реальном отказе основного; выключатель JARVIS_SUBSCRIPTION_FALLBACK=0.
-  const subscriptionLlm = new SubscriptionLlmProvider();
-  const anthropicLlm = new FallbackLlmProvider(apiLlm, subscriptionLlm);
-  if (subscriptionLlm.live) {
-    log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)", { auth: SubscriptionLlmProvider.authMode() });
-    void subscriptionLlm.warmup(); // fire-and-forget: первый ход владельца не платит за холодный старт
+  let anthropicLlm: AnthropicLlmProvider | FallbackLlmProvider = apiLlm;
+  if (config.product.enabled) {
+    // ПРОДУКТОВЫЙ РЕЖИМ (2026-09-02): резерв на ЛИЧНОЙ подписке владельца НЕ конструируется вовсе —
+    // «отдавать этот канал другим людям нельзя» (subscription-llm.ts). Не «выключен флагом», а
+    // отсутствует по построению. Заданный токен подписки в продуктовом профиле — отказ старта: иначе
+    // пользователи продукта молча жили бы на подписке владельца. Файл ~/.claude/.credentials.json
+    // (он есть на машине владельца всегда) — не повод не стартовать, лишь предупреждение.
+    if ((process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim()) {
+      throw new Error(
+        "PRODUCT MODE: задан CLAUDE_CODE_OAUTH_TOKEN — личная подписка владельца не может обслуживать пользователей продукта; уберите переменную из продуктового профиля env",
+      );
+    }
+    log.info(describeProductPolicy(config.product));
+    log.info("резерв мозга на подписке в продуктовом режиме НЕ создаётся (канал личный, не для пользователей)");
   } else {
-    log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
+    const subscriptionLlm = new SubscriptionLlmProvider();
+    anthropicLlm = new FallbackLlmProvider(apiLlm, subscriptionLlm);
+    if (subscriptionLlm.live) {
+      log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)", { auth: SubscriptionLlmProvider.authMode() });
+      void subscriptionLlm.warmup(); // fire-and-forget: первый ход владельца не платит за холодный старт
+    } else {
+      log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
+    }
   }
   // Реестр самописных инструментов (§8+): имена встроенных — зарезервированы.
   // Рехидратация с диска — в listen() ДО приёма соединений (чтобы ранние сессии видели
@@ -258,6 +287,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // Реестр задач нужен ДВУМ потребителям: агенту (§20) и сервису фоновых активностей (чип живёт, пока
   // идёт автолистание) — поэтому создаём его отдельной переменной, а не инлайном в brain.
   const taskManager = loadTaskManager();
+  const spendGuards = new SpendGuards({ spendCap: config.defaultSpendCap });
   const brain: BrainProviders = {
     llm: anthropicLlm,
     episodic: createEpisodicMemory(embedder, Boolean(config.databaseUrl)),
@@ -266,7 +296,10 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     web,
     market, // §трейдинг (слой 1): рыночные данные + технический анализ (только чтение, без денег)
     knowledge, // §экспертность: база знаний по доменам (knowledge_consult перед экспертной задачей)
-    spend: new SpendGuards({ spendCap: config.defaultSpendCap }), // §6B/B5: реестр гвардов по userId
+    spend: spendGuards, // §6B/B5: реестр гвардов по userId
+    // ПРОДУКТОВЫЙ КАРКАС (2026-09-02): рантайм существует всегда, но при мастер-флаге 0 отдаёт undefined
+    // во всех продуктовых точках (handshake/квоты/ledger) — поведение gateway байт-в-байт прежнее.
+    product: createProductRuntime(config, spendGuards),
     models: config.models,
     tierThinking: config.tierThinking,
     tasks: taskManager, // §20: реестр долгих задач, ПЕРЕЖИВАЕТ рестарт (диск-персист §5) — для «сделал?»
@@ -339,34 +372,14 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // Регистрация плагина WebSocket до объявления маршрутов.
   void app.register(fastifyWebsocket);
 
+  // §sec: маршруты + гард происхождения живут в ws-routes.ts (см. его шапку про CSWSH).
+  // Гард на /ws закрывает вектор «страница владельца управляет Джарвисом»; на /ext он был с H13.
   void app.register(async (instance) => {
-    instance.get("/ws", { websocket: true }, (connection) => {
-      // @fastify/websocket v11: первый аргумент — это сам WebSocket (ws.WebSocket).
-      const socket = connection as unknown as RawWs;
-      onConnection(socket, config, registry, providers, brain, log);
-    });
-    // Канал расширения (Chrome). Своя WS, отдельно от клиентского /ws (другой протокол).
-    instance.get("/ext", { websocket: true }, (connection, request) => {
-      const ws = connection as unknown as RawWs;
-      // §sec (H13): /ext = «руки браузера» (telegram.send, чтение залогиненных вкладок). Раньше
-      // принимали ЛЮБОЕ соединение → вредоносная веб-страница открывала ws://…/ext и перехватывала
-      // канал. Теперь пускаем ТОЛЬКО расширение (Origin chrome-extension://) ИЛИ локальный клиент без
-      // Origin (тесты/нативный). Веб-страница (http/https Origin) → отклоняем.
-      const origin = String((request as { headers?: Record<string, unknown> })?.headers?.origin ?? "").toLowerCase();
-      if (origin && !origin.startsWith("chrome-extension://")) {
-        log.warn("§sec: /ext соединение отклонено по Origin (не расширение)", { origin });
-        try {
-          ws.close();
-        } catch {
-          /* уже закрыт */
-        }
-        return;
-      }
-      const sock: ExtSocket = { send: (d) => ws.send(d), close: () => ws.close() };
-      extBridge.attach(sock);
-      ws.on("message", (raw: unknown) => extBridge.handleMessage(rawToText(raw)));
-      ws.on("close", () => extBridge.detach(sock));
-      ws.on("error", () => extBridge.detach(sock));
+    registerWsRoutes(instance, {
+      onClient: (socket) => onConnection(socket as unknown as RawWs, config, registry, providers, brain, log),
+      ext: extBridge,
+      rawToText,
+      log,
     });
   });
 
@@ -380,7 +393,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const devPre = async (req: { ip?: string; headers: Record<string, unknown> }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): Promise<unknown> => {
     const ip = String(req.ip ?? "").replace(/^::ffff:/, "");
     if (!isLoopbackHost(ip)) return reply.code(403).send({ ok: false, error: "dev-роуты доступны только с loopback" });
-    if (devToken && String(req.headers["x-jarvis-dev-token"] ?? "") !== devToken)
+    if (devToken && !sameSecret(String(req.headers["x-jarvis-dev-token"] ?? ""), devToken))
       return reply.code(403).send({ ok: false, error: "неверный dev-токен" });
     return undefined;
   };
@@ -493,6 +506,23 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   });
   } // end if (devHttpOn) — §sec gate for DEV/EXT HTTP routes
 
+  // ПРОДУКТОВЫЙ КАРКАС (2026-09-02): HTTP-роуты /v1/* (аккаунты, подписки, usage, вебхуки, админ/отчёты) и
+  // /dev/product/* — ТОЛЬКО при мастер-флаге. При 0 сюда не заходим: в дереве роутов ни одного нового пути.
+  if (config.product.enabled && brain.product) {
+    const groups = registerProductRoutes(app, brain.product.routeDeps(devHttpOn ? { preHandler: devPre as never } : undefined));
+    log.info("продуктовые роуты зарегистрированы", { groups, billing: config.product.billingProvider });
+    // Открыт наружу (brain / ALLOW_REMOTE / TRUST_PROXY / PRODUCT_EXPOSED): loopback ничего не доказывает —
+    // настоящий админ-токен ОБЯЗАТЕЛЕН, dev-роуты (выдают токены без OTP) недопустимы. Отказ старта, не WARN.
+    const adminToken = config.product.adminToken ?? "";
+    if (config.product.exposed) {
+      if (!adminToken || adminToken.startsWith("change-me"))
+        throw new Error("PRODUCT MODE открыт наружу (exposed) — задайте настоящий JARVIS_ADMIN_TOKEN (loopback за прокси/туннелем не доказывает владельца)");
+      if (devHttpOn) throw new Error("PRODUCT MODE открыт наружу (exposed) — JARVIS_DEV_HTTP=1 недопустим: dev-роуты выдают токены любому пользователю без OTP");
+    }
+    if (adminToken.startsWith("change-me") || devToken.startsWith("change-me"))
+      log.warn("токены из .env.product.example (change-me-*) — замените ДО выхода за loopback");
+  }
+
   // health-чек + метрики кеша (§15): hit/miss по эмбеддингам/web/TTS — для замера
   // эффективности кеширования платных вызовов.
   app.get("/healthz", async () => ({
@@ -527,6 +557,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       fileLog = initFileLog();
       metrics.enableJsonl();
       metrics.startProcessHealth(); // durable process_health-строки (rss/heap/cpu) — стоп в close() через disableJsonl
+      brain.product?.start(); // продукт: таймер жизненного цикла подписок (no-op при мастер-флаге 0 / без биллинга)
       // Волна E: срабатывание часового предохранителя автономных LLM-вызовов — durable-деградация
       // (не тихий дроп); killswitch-латч, переживший рестарт, виден в boot-логе честно.
       autonomyThrottle().setOnBlocked((kind) => metrics.recordDegradation("autonomy_throttled", { kind }));
@@ -639,6 +670,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       brain.reminders.stop(); // §9: остановить таймер напоминаний (симметрично watch/ambient) перед flush
       brain.watch?.stop(); // §долгие-задачи: остановить таймер наблюдений
       brain.ambient?.stop(); // §проактив-всё: остановить ambient-движок
+      brain.product?.stop(); // продукт: таймер жизненного цикла подписок
       flushTaskStores(); // §5/§20: дописать отложенный снимок реестра, чтобы «сделал?» пережил graceful-рестарт
       flushResolutionStores(); // §: дописать опытную память резолвов перед выходом
       flushWorkingStores(); // H9: дописать рабочую память диалога (иначе ход за <120мс до рестарта теряется)
@@ -889,13 +921,30 @@ async function doHandshake(
   // §13/Фаза 6B: userId из токена (identity.ts) + lazy-provision строки users ДО createOrResume —
   // иначе per-user INSERT в сессии молча падает на FK (Hazard 1). На дефолтном loopback это ПАРТИЦИЯ
   // (токен = ключ раздела), не auth; реальная сверка по auth_tokens дремлет за JARVIS_AUTH_STRICT.
-  const userId = await resolveAndProvision(hello.token);
-  if (userId === null) {
-    // Срабатывает ТОЛЬКО в strict-режиме (LAN/hosted) при отклонённом токене — на дефолте недостижимо.
-    log.warn("unauthorized — токен отклонён (strict)");
-    sendError(ws, { code: "unauthorized", message: "token rejected" });
-    ws.close(4003, "unauthorized");
-    return null;
+  let userId: string;
+  let rotatedToken: string | undefined;
+  if (config.product.enabled && config.product.auth && brain.product) {
+    // ПРОДУКТОВЫЙ РЕЖИМ: device-токен jdt_ → аккаунт; dev-token на облачной роли → login_required;
+    // на локальном узле — прежний резолв (см. product/identity.ts). Отказ — честный код в error + 4003.
+    const ident = await brain.product.resolveHello(hello);
+    if (!ident.ok) {
+      log.warn("product: hello отклонён", { code: ident.code });
+      sendError(ws, { code: ident.code, message: ident.message });
+      ws.close(4003, ident.code);
+      return null;
+    }
+    userId = ident.userId;
+    rotatedToken = ident.rotatedToken;
+  } else {
+    const resolved = await resolveAndProvision(hello.token);
+    if (resolved === null) {
+      // Срабатывает ТОЛЬКО в strict-режиме (LAN/hosted) при отклонённом токене — на дефолте недостижимо.
+      log.warn("unauthorized — токен отклонён (strict)");
+      sendError(ws, { code: "unauthorized", message: "token rejected" });
+      ws.close(4003, "unauthorized");
+      return null;
+    }
+    userId = resolved;
   }
 
   // §6B/B3: грузим РАЗДЕЛ профиля этого userId в кеш ДО makeSessionContext/онбординга — иначе
@@ -904,7 +953,11 @@ async function doHandshake(
   // resolveAndProvision (FK-родитель провижен) → грузим параллельно, экономя один RTT на connect.
   // §6B/B5: hydrate — траты периода из usage_quota ДО первого check (рестарт не обнуляет месячный
   // потолок). Оба идемпотентны; без БД/userId — no-op (best-effort).
-  await Promise.all([loadProfile(userId), brain.spend.hydrate(userId)]);
+  // Продукт: источник трат — точный ledger (cost_micro), не cost_estimate (округлён до цента на каждом раунде).
+  await Promise.all([loadProfile(userId), brain.spend.hydrate(userId, brain.product?.policy.quotas ? { source: "ledger" } : undefined)]);
+  // ПРОДУКТОВЫЙ РЕЖИМ: лимиты плана в SpendGuard + durable kill-switch + план/статус для server.hello.
+  // При мастер-флаге 0 → undefined, и server.hello остаётся ровно тремя полями.
+  const productUser = await brain.product?.afterProvision(userId);
 
   const { session, resumed } = registry.createOrResume(userId, sock, hello.resumeSessionId);
 
@@ -918,6 +971,8 @@ async function doHandshake(
     sessionId: session.sessionId,
     protocolVersion: config.protocolVersion,
     resumed,
+    ...(productUser ? { productMode: true, user: productUser } : {}),
+    ...(rotatedToken ? { rotatedToken } : {}),
   });
 
   log.info("handshake завершён", { sessionId: session.sessionId, resumed });

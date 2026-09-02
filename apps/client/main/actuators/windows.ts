@@ -41,6 +41,8 @@ export interface WindowInfo {
   monitorIndex: number;
   /** Человеко-метка монитора («осн. монитор» / «монитор 2») — для сводки модели. */
   monitor: string;
+  /** Физический rect окна (Win32). Нужен window_arrange, чтобы перенос СОХРАНИЛ размер окна. */
+  rect: { x: number; y: number; w: number; h: number };
 }
 
 export interface WindowFocusResult {
@@ -89,6 +91,7 @@ export async function listWindows(): Promise<WindowInfo[]> {
       // При одном мониторе индекс всегда 0 — не зашумляем; при нескольких — реальная привязка.
       monitorIndex: m?.index ?? 0,
       monitor: w.minimized ? "свёрнуто" : multi ? (m?.label ?? "монитор ?") : "осн. монитор",
+      rect: { x: w.x, y: w.y, w: w.w, h: w.h },
     };
   });
 }

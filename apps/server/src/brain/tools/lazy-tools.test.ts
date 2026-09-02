@@ -49,4 +49,11 @@ describe("tool_load — ленивая загрузка (§15)", () => {
       expect(TOOLS_BY_NAME[name], `cold tool ${name} должен существовать`).toBeTruthy();
     }
   });
+
+  it("инструменты, на которые тексты ошибок/карта ссылаются как на ГОРЯЧИЕ, не в COLD (cold-танец = документированный промах)", () => {
+    // fs_read в ошибке на бинарнике велит «смотри через file_view» — в COLD это был бы tool_load-танец.
+    for (const hot of ["file_view", "calendar_read", "mail_read", "watch_create", "app_channels"]) {
+      expect(COLD_TOOL_NAMES.has(hot), `${hot} обязан быть горячим`).toBe(false);
+    }
+  });
 });

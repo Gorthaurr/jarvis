@@ -2,7 +2,7 @@
  * Локальный стор настроек (вкладки «Общее»/«Ключи»). По образцу monitors.ts — persist на диск
  * в userData, без сервера. SRP: только хранение/чтение, ничего про UI и транспорт.
  *
- * Язык и контекст — обычным JSON. API-ключи — ШИФРОВАННО через Electron safeStorage (§12/§13):
+ * Язык, контекст и выбор модели — обычным JSON. API-ключи — ШИФРОВАННО через Electron safeStorage (§12/§13):
  * на диск кладём base64 от safeStorage.encryptString; если ОС-шифрование недоступно — ключи НЕ
  * сохраняем (честно сообщаем вызывающему), чтобы не плодить секреты в plaintext.
  *
@@ -13,17 +13,36 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { app, safeStorage } from "electron";
 import { createLogger } from "@jarvis/shared";
+import type { ModelChoice } from "@jarvis/protocol";
 import type { KeyName, SettingsSnapshot, SettingsPatch, SettingsSaveResult } from "./ipc-contract.js";
 
 const log = createLogger("settings");
 
 const KEY_NAMES: readonly KeyName[] = ["anthropic", "eleven", "deepgram"];
 
+/**
+ * Нормализовать выбор модели (2026-09-02): trim + lower (id каталога строчные, сервер сравнивает без
+ * регистра), пустые слоты выпадают; оба пустые → undefined = «авто». Иначе стор хранил бы «выбор» из
+ * пустых строк, а UI показывал бы его как сделанный.
+ */
+function normalizeModelChoice(raw: ModelChoice): ModelChoice | undefined {
+  const norm = (v: unknown): string | undefined => {
+    const t = typeof v === "string" ? v.trim().toLowerCase() : "";
+    return t ? t : undefined;
+  };
+  const primary = norm(raw.primary);
+  const strong = norm(raw.strong);
+  if (!primary && !strong) return undefined;
+  return { ...(primary ? { primary } : {}), ...(strong ? { strong } : {}) };
+}
+
 interface PersistShape {
   language: string;
   context: string;
   /** name → base64(safeStorage.encryptString(value)). */
   keysEnc: Partial<Record<KeyName, string>>;
+  /** Выбор модели (2026-09-02): plain JSON, не секрет; отсутствует = авто. */
+  models?: ModelChoice;
 }
 
 export class SettingsStore {
@@ -46,6 +65,7 @@ export class SettingsStore {
     return {
       language: this.data.language,
       context: this.data.context,
+      ...(this.data.models ? { models: { ...this.data.models } } : {}),
       keys: {
         anthropic: Boolean(this.data.keysEnc.anthropic),
         eleven: Boolean(this.data.keysEnc.eleven),
@@ -70,6 +90,11 @@ export class SettingsStore {
   save(patch: SettingsPatch): SettingsSaveResult {
     if (typeof patch.language === "string") this.data.language = patch.language;
     if (typeof patch.context === "string") this.data.context = patch.context;
+    if (patch.models && typeof patch.models === "object") {
+      const m = normalizeModelChoice(patch.models);
+      if (m) this.data.models = m;
+      else delete this.data.models; // оба слота пустые = «авто»: поле снимается, а не хранится пустым
+    }
 
     const encAvail = this.encryptionAvailable();
     const keysStored: KeyName[] = [];
@@ -115,6 +140,10 @@ export class SettingsStore {
       const raw = JSON.parse(readFileSync(this.cfgPath, "utf8")) as Partial<PersistShape>;
       if (typeof raw.language === "string") this.data.language = raw.language;
       if (typeof raw.context === "string") this.data.context = raw.context;
+      if (raw.models && typeof raw.models === "object") {
+        const m = normalizeModelChoice(raw.models);
+        if (m) this.data.models = m;
+      }
       if (raw.keysEnc && typeof raw.keysEnc === "object") {
         for (const name of KEY_NAMES) {
           const v = raw.keysEnc[name];

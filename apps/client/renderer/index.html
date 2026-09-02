@@ -133,6 +133,21 @@
               <option value="en">English</option>
             </select>
           </section>
+          <!-- 2026-09-02: пользователь САМ выбирает модель; «Сейчас» — что реально применилось на сервере -->
+          <section class="setgroup">
+            <h3 class="setgroup__title">Модель</h3>
+            <p class="setgroup__hint">Список и доступность зависят от тарифа; что реально применилось — показано ниже.</p>
+            <label class="setgroup__sub" for="modelPrimary">Модель по умолчанию</label>
+            <select id="modelPrimary" class="select-input" aria-label="модель по умолчанию">
+              <option value="">Авто (по умолчанию сервера)</option>
+            </select>
+            <label class="setgroup__sub" for="modelStrong">Сильная модель для сложных задач</label>
+            <select id="modelStrong" class="select-input" aria-label="сильная модель для сложных задач">
+              <option value="">Авто (по умолчанию сервера)</option>
+            </select>
+            <p id="modelEffective" class="setgroup__hint">Сейчас: — / —</p>
+            <p id="modelRejected" class="setgroup__hint setgroup__hint--warn" hidden></p>
+          </section>
           <section class="setgroup">
             <h3 class="setgroup__title">Громкость Джарвиса</h3>
             <p class="setgroup__hint">Громкость голоса Джарвиса при озвучке ответов.</p>
@@ -260,11 +275,15 @@
             <div class="plan">
               <div class="plan__row">
                 <span class="plan__label">Тариф</span>
-                <span id="planName" class="plan__value">Pro</span>
+                <span id="planName" class="plan__value">—</span>
               </div>
               <div class="plan__row">
                 <span class="plan__label">Баланс</span>
                 <span id="planBalance" class="plan__value">—</span>
+              </div>
+              <div id="planNoteRow" class="plan__row plan__row--hidden">
+                <span class="plan__label">Лимит</span>
+                <span id="planNote" class="plan__value"></span>
               </div>
             </div>
             <button id="manageBillingBtn" class="btn btn--ghost btn--wide" type="button">Управление подпиской</button>

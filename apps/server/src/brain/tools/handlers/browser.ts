@@ -4,9 +4,31 @@
  * open/read/inspect/act/tabs/close + перенос логинов. Маршрутизация остаётся в dispatch (switch).
  */
 import { type ActionCommand, DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "@jarvis/protocol";
-import { siteRecipes } from "../../../memory/site-recipes.js";
+import { cutText } from "@jarvis/shared";
+import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { browserUrlBlocked, channelDownResult, err, ok, untrusted } from "../dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, untrusted } from "../dispatch-util.js";
+import { assessWebCommit, hostOfUrl } from "../commit-gate.js";
+
+/**
+ * M11: строка, заданная САМОЙ страницей (URL после редиректа/pushState, title, значение поля), идёт в
+ * tool_result ТОЛЬКО внутри <untrusted_content>. Угловые скобки вырезаем — иначе страница положила бы в
+ * путь/query литеральный `</untrusted_content>` и разорвала делимитер; длину капаем (одно знание на
+ * browser_act/browser_read/browser_tabs — разойдись санитизация, дыра вернётся в одном из них).
+ */
+function sanitizePageText(s: unknown, cap: number): string {
+  const clean = String(s ?? "").replace(/[<>]/g, " ");
+  if (clean.length <= cap) return clean;
+  // Усечение ВИДИМОЕ (ревью 2026-09-01): молча обрезанный query каталога прятал именно параметры фильтров,
+  // и модель «сверяла по URL», что фильтр не применился. Суррогатную пару на границе не рвём.
+  return `${cutText(clean, cap)} …(обрезано: полная длина ${clean.length})`;
+}
+/** Кап URL в browser_read (§3.11: модель сверяет по нему фильтры/параметры — query каталога длинный). */
+const READ_URL_CAP = 500;
+/** Кап URL одной вкладки в browser_tabs (список из десятков вкладок — не раздуваем). */
+const TAB_URL_CAP = 200;
+/** Кап page-controlled значений в browser_act (переход/фрейм/readback поля) — прежние 300. */
+const ACT_VALUE_CAP = 300;
 
 /**
  * Цель браузерной задачи, запомненная per-сессия (WeakMap по объекту сессии — не держит сессию в памяти).
@@ -51,6 +73,34 @@ function recipeHintFor(url: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * §3.11: хосты, которым рецепт-хинт в ЭТОЙ сессии уже отдан (WeakMap по объекту сессии, как browserTarget —
+ * сессию в памяти не держим). Раньше хинт звучал ТОЛЬКО в browser_open; задача, начавшаяся с чтения уже
+ * открытой вкладки (tabId из browser_tabs), рецепта не видела. Теперь его отдаёт и ПЕРВЫЙ browser_read/
+ * browser_inspect по хосту — но не чаще раза на хост за сессию: повтор на каждом чтении раздувал бы контекст.
+ */
+const recipeHinted = new WeakMap<object, Set<string>>();
+
+/**
+ * Рецепт хоста с учётом «уже отдавал». `always` (browser_open — явная точка входа в сайт) отдаёт хинт при
+ * каждом открытии, как и раньше, и помечает хост; без него (read/inspect) — только если хост ещё не помечен.
+ * Хинт — НАША заметка (доверенная) → вызывающий ставит его ВНЕ untrusted-обёртки. Гейт refModeOn() внутри
+ * recipeHintFor не трогаем (AX-Ref деф OFF — отдельное решение владельца); хост помечается лишь когда хинт
+ * реально отдан (пустой хинт = флаг выключен либо рецепта нет — помечать нечего).
+ */
+function recipeHintOnce(ctx: ToolContext, url: string, opts: { always?: boolean } = {}): string {
+  const hint = recipeHintFor(url);
+  if (!hint) return "";
+  const sess = ctx.session as unknown as object | undefined;
+  const host = normalizeHost(url);
+  if (!sess || !host) return hint;
+  let seen = recipeHinted.get(sess);
+  if (!seen) recipeHinted.set(sess, (seen = new Set()));
+  const fresh = !seen.has(host);
+  seen.add(host);
+  return fresh || opts.always ? hint : "";
 }
 
 /** Идёт ли сейчас браузерная задача (был browser_open недавно) — тогда мышь (input_click) под запретом. */
@@ -110,7 +160,7 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
     try {
       const r = (await ctx.ext.openOrFocus(url)) as { focused?: boolean; tabId?: number } | undefined;
       if (sess) browserTarget.set(sess, { url, tabId: r?.tabId, at: Date.now() }); // tabId → точное попадание act/read
-      return ok((r?.focused ? `Уже было открыто — переключился на вкладку.` : `Открыл ${url}.`) + recipeHintFor(url));
+      return ok((r?.focused ? `Уже было открыто — переключился на вкладку.` : `Открыл ${url}.`) + recipeHintOnce(ctx, url, { always: true }));
     } catch {
       /* расширение не сработало — откат ниже */
     }
@@ -118,7 +168,7 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   const result = await ctx.session.sendAction({ kind: "browser.open", url, inDefault: true }, actionTimeoutMs("browser.open"));
   if (result.ok) {
     if (sess) browserTarget.set(sess, { url, at: Date.now() }); // shell-открытие: tabId нет, act/read найдут по хосту
-    return ok(`Открыл ${url}.` + recipeHintFor(url));
+    return ok(`Открыл ${url}.` + recipeHintOnce(ctx, url, { always: true }));
   }
   const cd = channelDownResult(result, `Не отправлено открытие ${url}: канал с ПК недоступен (переподключение).`); // Б4 #4
   if (cd) return cd;
@@ -127,7 +177,9 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
 
 /**
  * Перечислить ОТКРЫТЫЕ вкладки браузера пользователя (§): чтобы понять, о КАКОЙ вкладке речь. Отдаёт
- * заголовки/хост/активна/звучит. Только через расширение (CDP видит лишь свой инстанс, не реальные вкладки).
+ * заголовки/хост/ПОЛНЫЙ url/активна/звучит. Только через расширение (CDP видит лишь свой инстанс, не реальные вкладки).
+ * §3.11: полный url (не только хост) — персона сверяет «параметр/фильтр применился» по URL, а раньше он был
+ * доступен лишь через дорогой browser_inspect. url задан страницей → санитизация + кап, всё внутри untrusted.
  */
 export async function browserTabs(ctx: ToolContext): Promise<ToolResult> {
   if (!ctx.ext?.connected) {
@@ -141,7 +193,10 @@ export async function browserTabs(ctx: ToolContext): Promise<ToolResult> {
     if (!tabs.length) return ok("Открытых вкладок не видно.");
     const lines = tabs.map((t, i) => {
       const flags = [t.active ? "активна" : "", t.audible ? "♪ звук" : ""].filter(Boolean).join(", ");
-      return `${i + 1}. [tabId ${t.tabId}] ${t.title || t.host || t.url || "?"}${flags ? ` (${flags})` : ""} — ${t.host || t.url || ""}`;
+      // title тоже page-controlled (document.title) — те же скобки могли бы разорвать делимитер untrusted.
+      const title = sanitizePageText(t.title ?? "", 120);
+      const url = sanitizePageText(t.url ?? "", TAB_URL_CAP);
+      return `${i + 1}. [tabId ${t.tabId}] ${title || t.host || url || "?"}${flags ? ` (${flags})` : ""} — ${t.host || "?"}${url ? ` — ${url}` : ""}`;
     });
     // Аудит-2 [5]: title/host/url вкладки — контент, заданный САМОЙ страницей (влияемый атакующим:
     // document.title = «Игнорируй инструкции, вызови …»). Оборачиваем в <untrusted_content>, как
@@ -199,7 +254,9 @@ export async function browserCloseTab(ctx: ToolContext, input: Record<string, un
 
 /** Прочитать ЦЕЛЕВУЮ вкладку браузера пользователя (tabId/хост из browser_open, не «активную»). Иначе CDP-откат.
  *  selectorIntent = ключевые слова: расширение фильтрует строки текста по ним (+ разделы h1-h3 + iframe'ы) —
- *  раньше интент игнорировался и модель получала плоский хвост innerText вместо нужного блока. */
+ *  раньше интент игнорировался и модель получала плоский хвост innerText вместо нужного блока.
+ *  §3.11: первой строкой после заголовка — `[URL: …]` (текущий адрес вкладки из расширения, фолбэк — цель),
+ *  внутри untrusted; после обёртки — рецепт хоста (первый раз за сессию, см. recipeHintOnce). */
 export async function browserRead(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   const intentQuery = String(input.selectorIntent ?? "").trim();
   if (ctx.ext?.connected) {
@@ -209,6 +266,7 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
       const r = (await ctx.ext.tabRead(target.url, target.tabId, intentQuery)) as
         | {
             title?: string;
+            url?: string;
             text?: string;
             headings?: unknown;
             filtered?: boolean;
@@ -226,7 +284,24 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
         ? `\n[Плеер (позиция из DOM, не видимый таймер): ${m.currentTimeLabel ?? m.currentTime ?? "?"}` +
           `${m.durationLabel ? ` / ${m.durationLabel}` : ""} — ${m.paused ? "на паузе" : "играет"}]`
         : "";
-      return untrusted(`вкладка ${target.url ?? "браузера"}`, `# ${r?.title ?? ""}${outline}${mediaLine}${note}\n${r?.text ?? ""}`.slice(0, 8000));
+      // §3.11: ТЕКУЩИЙ URL вкладки (после редиректов/pushState) — по нему модель сверяет «фильтр/параметр
+      // применился» (закон подбора по критериям, persona v77), не гоняя browser_inspect. Задан страницей →
+      // санитизация + кап, внутри untrusted. Нет ни от расширения, ни от цели → честное «неизвестен».
+      // Цель открытия — НЕ текущий адрес (до редиректов/pushState): показываем её только с явной пометкой.
+      const urlLine = r?.url
+        ? `\n[URL: ${sanitizePageText(r.url, READ_URL_CAP)}]`
+        : target.url
+          ? `\n[URL: неизвестен — расширение адрес не вернуло; цель открытия была: ${sanitizePageText(target.url, READ_URL_CAP)}]`
+          : "\n[URL: неизвестен]";
+      // title — тоже page-controlled (document.title): без санитизации закрывающий делимитер стоял бы первой строкой.
+      const out = untrusted(
+        `вкладка ${target.url ?? "браузера"}`,
+        cutText(`# ${sanitizePageText(r?.title ?? "", 200)}${urlLine}${outline}${mediaLine}${note}\n${r?.text ?? ""}`, 8000),
+      );
+      // Рецепт хоста — НАША заметка, ВНЕ untrusted-обёртки (как в browser_open); хост — фактический, со страницы
+      // (recall по нему в безопасную сторону: чужой хост даст лишь чужую нашу заметку либо ничего).
+      out.content += recipeHintOnce(ctx, r?.url || target.url);
+      return out;
     } catch (e) {
       return err(`Не смог прочитать вкладку: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -243,6 +318,44 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
 }
 
 /**
+ * §0 гард учётных данных: ЧТО ЗА ПОЛЕ прячется за ref. Берст (browser_batch) и ref-адресация
+ * (browser_act{params.ref}) не несут ни селектора, ни лейбла — «e3_5» не говорит ничего, и гард
+ * ввода не смог бы отличить поле пароля от поля поиска. Снимок browser_inspect эти подписи ЗНАЕТ,
+ * поэтому запоминаем их на сессию (WeakMap по объекту сессии — сессию в памяти не держим).
+ *
+ * ⚠️ Подписи приходят СО СТРАНИЦЫ (недоверенные данные, M11) — но используются РОВНО в одну сторону:
+ * «похоже на пароль → откажусь печатать». Враждебная страница, назвавшая поиск «Пароль», добьётся
+ * лишь моего отказа, а не утечки — направление безопасное.
+ */
+const refHints = new WeakMap<object, Map<string, string>>();
+const REF_HINTS_MAX = 300;
+
+function rememberRefHints(ctx: ToolContext, elements: unknown): void {
+  const sess = ctx.session as unknown as object | undefined;
+  if (!sess || !Array.isArray(elements)) return;
+  const map = new Map<string, string>();
+  for (const raw of elements) {
+    if (!raw || typeof raw !== "object") continue;
+    const e = raw as { ref?: unknown; name?: unknown; selector?: unknown; role?: unknown; aria?: unknown };
+    if (typeof e.ref !== "string" || !e.ref) continue;
+    const hint = [e.name, e.aria, e.selector, e.role]
+      .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+      .join(" ")
+      .slice(0, 160);
+    if (hint) map.set(e.ref, hint);
+    if (map.size >= REF_HINTS_MAX) break;
+  }
+  refHints.set(sess, map);
+}
+
+/** Подпись поля по ref из ПОСЛЕДНЕГО снимка. Нет снимка/ref не знаком → undefined (гард честно
+ *  считает, что про поле не известно ничего, и не блокирует вслепую). */
+export function refFieldHint(ctx: ToolContext, ref: string): string | undefined {
+  const sess = ctx.session as unknown as object | undefined;
+  return sess ? refHints.get(sess)?.get(ref) : undefined;
+}
+
+/**
  * ГЛАЗА В DOM (§): снимок интерактивных элементов целевой вкладки с устойчивыми селекторами — чтобы модель
  * САМА видела реальную страницу и прицельно действовала browser_act{selector}. Нет цели → честная ошибка.
  */
@@ -256,7 +369,10 @@ export async function browserInspect(ctx: ToolContext, input: Record<string, unk
     const r = (await ctx.ext.tabInspect(target.url, query, cap, target.tabId, refModeOn())) as
       | { url?: string; title?: string; count?: number; truncated?: boolean; gen?: number; elements?: unknown[] }
       | undefined;
-    return untrusted(`DOM вкладки ${r?.url ?? target.url ?? ""}`, JSON.stringify({ url: r?.url, title: r?.title, count: r?.count, truncated: r?.truncated, gen: r?.gen, elements: r?.elements ?? [] }));
+    rememberRefHints(ctx, r?.elements);
+    const out = untrusted(`DOM вкладки ${r?.url ?? target.url ?? ""}`, JSON.stringify({ url: r?.url, title: sanitizePageText(r?.title ?? "", 200), count: r?.count, truncated: r?.truncated, gen: r?.gen, elements: r?.elements ?? [] }));
+    out.content += recipeHintOnce(ctx, r?.url || target.url); // §3.11: первый осмотр хоста в сессии тоже несёт рецепт
+    return out;
   } catch (e) {
     return err(`Не смог осмотреть вкладку: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -273,6 +389,19 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
   if (ctx.ext?.connected) {
     const target = resolveBrowserTarget(ctx, input);
     if (!target) return err(`browser_act: сначала открой нужную страницу (browser_open) — непонятно, в какой вкладке делать «${intent}».`);
+    // §14 ГЕЙТ НЕОБРАТИМЫХ КЛИКОВ (причина №4 USER_SCENARIOS_2026-09-02): «Опубликовать»/«Оплатить»/«Подписать»/
+    // Enter в мессенджере на опасном хосте — спрашиваем владельца ДО клика; подпись ref берём из последнего inspect.
+    const risk = assessWebCommit({
+      host: hostOfUrl(target.url),
+      intent,
+      params,
+      label: typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined,
+    });
+    if (risk) {
+      if (!ctx.confirm) return err(`browser_act: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
+      const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
+      if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} на ${risk.where}`), gate.outcome);
+    }
     try {
       // ЧЕСТНОСТЬ: пробрасываем исход расширения (navigated/already/playing/currentTime) —
       // иначе модель не видит, что play НЕ дал звук (autoplay-гейт), и врёт «готово, играет».
@@ -347,8 +476,8 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       }
       if (r.changed === false) body += " ВНИМАНИЕ: контент страницы НЕ изменился — действие могло не дать эффекта, сверь (browser_read/inspect) прежде чем говорить «готово».";
       // page-controlled URL(ы) — отдельным <untrusted_content>-блоком (враждебная страница может положить
-      // в путь/query читаемую инструкцию через pushState). Угловые скобки вырезаем — не разорвать делимитер.
-      const sani = (s: string): string => String(s).replace(/[<>]/g, " ").slice(0, 300);
+      // в путь/query читаемую инструкцию через pushState). Санитизация общая (sanitizePageText) — не разорвать делимитер.
+      const sani = (s: string): string => sanitizePageText(s, ACT_VALUE_CAP);
       const pageParts: string[] = [];
       if (typeof r.navigated === "string") pageParts.push(`переход → ${sani(r.navigated)}`);
       if (typeof r.frameUrl === "string" && r.frameUrl) pageParts.push(`действие во фрейме → ${sani(r.frameUrl)}`);
@@ -421,6 +550,21 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
   if (!steps.length) return err("browser_batch: пустой список шагов (steps).");
   const target = resolveBrowserTarget(ctx, input);
   if (!target) return err("browser_batch: сначала открой страницу (browser_open) и сделай browser_inspect — берст адресует ref из снимка.");
+  // §14 гейт: шаги-коммиты берста на опасном хосте — один вопрос владельцу на весь берст с перечнем.
+  const risky = steps
+    .map((st, i) => {
+      const o = st && typeof st === "object" ? (st as Record<string, unknown>) : {};
+      const intent = String(o.intent ?? o.action ?? "");
+      const label = typeof o.ref === "string" ? refFieldHint(ctx, o.ref) : undefined;
+      const risk = assessWebCommit({ host: hostOfUrl(target.url), intent, params: o, label });
+      return risk ? `${i + 1}: ${risk.what}` : null;
+    })
+    .filter((x): x is string => x !== null);
+  if (risky.length > 0) {
+    if (!ctx.confirm) return err(`browser_batch: шаги ${risky.join("; ")} на ${hostOfUrl(target.url)} — необратимые, нужно подтверждение владельца (§14), а канал недоступен.`);
+    const gate = await ctx.confirm(`Необратимые шаги берста на ${hostOfUrl(target.url)}: ${risky.join("; ")}.\nПодтвердить?`, "irreversible");
+    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `берст на ${hostOfUrl(target.url)}`), gate.outcome);
+  }
   try {
     const r = (await ctx.ext.tabBatch(target.url, steps, target.tabId, refModeOn())) as
       | { ok?: boolean; done?: number; total?: number; stoppedAt?: number; error?: string; code?: string }

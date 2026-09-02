@@ -27,8 +27,14 @@ export async function webFetch(ctx: ToolContext, input: Record<string, unknown>)
   const page = await ctx.web.fetch(url);
   if (!page) return err("Не удалось загрузить страницу.");
   // Схема инструмента (§12) объявляет maxChars — honor'им, если задан.
+  // 🔴 Усечение ПО ПРОСЬБЕ МОДЕЛИ — тоже усечение (адверс-ревью 2026-09-01): срез шёл молча и первой
+  // же выбрасывал метку `[УСЕЧЕНО…]`, которую web.ts дописывает В КОНЕЦ. Модель получала обрезок,
+  // неотличимый от полного текста, и делала выводы о том, чего в документе «нет».
   const max = numField(input, ["maxChars"], 0);
-  const text = max > 0 ? page.text.slice(0, max) : page.text;
+  const text =
+    max > 0 && page.text.length > max
+      ? `${page.text.slice(0, max)}\n\n[УСЕЧЕНО: обрезано до maxChars=${max} по запросу инструмента. Это НЕ весь документ — не делай выводов о том, чего здесь нет.]`
+      : page.text;
   return untrusted(`веб-страница ${url}`, `# ${page.title}\n${text}`);
 }
 
