@@ -63,4 +63,26 @@ describe("renderCapabilityPassport", () => {
     expect(t).toContain("shell-фолбэком");
     expect(t).not.toMatch(/browser_open[^.]*откажут/); // ложное «недоступно» — тоже нечестность
   });
+
+  it("🔴 длинная строка каналов НЕ вытесняет строки «не предлагай» (адверс-ревью 2026-09-01)", () => {
+    // Живой сценарий находки: расширение отвалилось (его строка длинная), плюс реальная строка каналов
+    // ~430 символов — паспорт перевалил за кап, и глобальный slice с ХВОСТА уносил обе строки честности.
+    // Владелец просил портфель, модель обещала Тинькофф, которого нет. Порядок деградации обязан быть
+    // обратным: каналы восстановимы через app_channels, а запрет «не предлагай» — нет.
+    const channels =
+      "Программные каналы (API/CLI/протокол вместо кликов) есть у: Blender, FFmpeg, Git, Steam, Telegram Desktop, " +
+      "OBS Studio, Visual Studio Code, Ollama и ещё 4; встроенных утилит Windows: 7; сетевых сервисов 3 " +
+      "(Московская биржа (ISS), Погода (Open-Meteo), ЦБ РФ: курсы валют); ещё 4 сервисов заработают после " +
+      "разовой настройки владельцем — не обещай их как готовые — детали инструментом app_channels.";
+    const t = renderCapabilityPassport({ ...base, extensionConnected: false, tinkoffToken: false, obsConfigured: false, appChannels: channels });
+    expect(t.length).toBeLessThanOrEqual(1101);
+    expect(t, "потерян запрет предлагать Тинькофф").toContain("не предлагай");
+    expect(t, "потеряна строка про OBS").toContain("obs_request");
+    expect(t, "потеряна строка про веб-поиск").toContain("поиск работает");
+  });
+
+  it("строка каналов помещается целиком, когда место есть", () => {
+    const t = renderCapabilityPassport({ ...base, appChannels: "Программные каналы есть у: Steam — детали инструментом app_channels." });
+    expect(t).toContain("Программные каналы есть у: Steam — детали инструментом app_channels.");
+  });
 });

@@ -10,7 +10,7 @@
  * ФС — отдельный IO-слой.
  */
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export interface BrowserInfo {
@@ -192,7 +192,10 @@ interface ToolSpec {
   name: string;
   /** Имя команды для поиска на PATH (без расширения). */
   cmd?: string;
-  /** Известные пути exe (если не на PATH). */
+  /**
+   * Известные пути exe (если не на PATH). Допускается ОДИН `*`-сегмент — под версионные каталоги
+   * («…\Blender Foundation\*\blender.exe»): хардкод версии протухает при первом же обновлении.
+   */
   paths?: string[];
   surface: string;
 }
@@ -200,13 +203,36 @@ const TOOL_SPECS: readonly ToolSpec[] = [
   { id: "ffmpeg", name: "FFmpeg", cmd: "ffmpeg", surface: "видео/аудио (нарезка, конверт, склейка, субтитры) — через code_run; НАДЁЖНЕЕ монтажа кликами" },
   { id: "tesseract", name: "Tesseract OCR", cmd: "tesseract", surface: "распознать текст с картинки/скрина — через code_run (дешевле зрения для чистого текста)" },
   { id: "yt-dlp", name: "yt-dlp", cmd: "yt-dlp", surface: "скачать видео/аудио с YouTube и сотен сайтов — через code_run" },
-  { id: "git", name: "Git", cmd: "git", surface: "git (клон/коммит/дифф) — через code_run" },
+  { id: "git", name: "Git", cmd: "git", surface: "git (клон/коммит/дифф; поиск по коду — git grep -n) — через code_run с cwd" },
   { id: "gh", name: "GitHub CLI", cmd: "gh", surface: "GitHub: PR/issues/репозитории — через code_run (gh ...)" },
   { id: "docker", name: "Docker", cmd: "docker", surface: "контейнеры/образы — через code_run" },
   { id: "ollama", name: "Ollama", cmd: "ollama", surface: "ЛОКАЛЬНЫЙ LLM ($0): HTTP http://localhost:11434/api или `ollama run` — через code_run" },
-  { id: "blender", name: "Blender", cmd: "blender", surface: "3D headless: `blender -b файл.blend -P скрипт.py` — через code_run" },
+  // 🔴 Blender был НЕВИДИМ (2026-09-01): установщик не кладёт exe на PATH и оставляет пустой
+  // DisplayIcon в реестре — значит ни детект PATH, ни инвентарь установленного его не находили, и
+  // app_channels отвечал «канала нет» про программу, которая на машине ЕСТЬ. Путь версионный
+  // («Blender 5.1»), поэтому glob: хардкод версии протух бы на первом обновлении.
+  {
+    id: "blender",
+    name: "Blender",
+    cmd: "blender",
+    paths: [join(env("ProgramFiles"), "Blender Foundation\\*\\blender.exe")],
+    surface: "3D headless: `blender -b файл.blend --python-exit-code 1 -P скрипт.py` — через code_run; exe обычно НЕ на PATH, зови по полному пути",
+  },
   { id: "dotnet", name: ".NET SDK", cmd: "dotnet", surface: "сборка/запуск .NET — через code_run" },
   { id: "psql", name: "PostgreSQL CLI", cmd: "psql", surface: "SQL к Postgres — через code_run (psql)" },
+  // 🔴 Добавлено адверс-ревью 2026-09-01 (HIGH). Реестр каналов уже нёс рецепты под эти команды, но
+  // клиент их не детектил — а матч рецепта с `cmd` идёт по ДЕТЕКТИРОВАННОМУ списку. Итог был хуже,
+  // чем отсутствие рецепта: app_channels уверенно отвечал «канала нет — остаётся GUI» про питон,
+  // видеокарту и PDF, которые на машине ЕСТЬ, и разворачивал модель в самый дорогой пиксельный путь.
+  { id: "python", name: "Python", cmd: "python", surface: "документы БЕЗ Office (openpyxl/python-docx/python-pptx — единственный путь к .pptx), PDF (PyMuPDF), любые скрипты — через code_run" },
+  { id: "nvidia-smi", name: "NVIDIA GPU", cmd: "nvidia-smi", surface: "температура/загрузка/память видеокарты и что её грузит — через code_run (--query-gpu ... --format=csv); ЧТЕНИЕ надёжно, управление на GeForce почти нет" },
+  { id: "7z", name: "7-Zip", cmd: "7z", surface: "архивы: собрать/распаковать/ПРОВЕРИТЬ целостность (7z t) — через code_run" },
+  { id: "magick", name: "ImageMagick", cmd: "magick", surface: "картинки пакетно: resize/crop/конверт/склейка + identify для сверки размеров — через code_run" },
+  { id: "pandoc", name: "pandoc", cmd: "pandoc", surface: "конверсия документов docx/md/html/odt (честный код возврата, в отличие от soffice) — через code_run" },
+  { id: "pdftotext", name: "poppler (PDF)", cmd: "pdftotext", surface: "текст из PDF (-layout); ПУСТО при непустом файле = скана без текстового слоя → дальше OCR, а не повтор — через code_run" },
+  { id: "qpdf", name: "qpdf", cmd: "qpdf", surface: "PDF: --check (верификатор для любых PDF-операций), --show-npages, склейка/разбор, снять пароль — через code_run" },
+  { id: "ocrmypdf", name: "OCRmyPDF", cmd: "ocrmypdf", surface: "OCR-слой в PDF (-l rus+eng --sidecar) — через code_run; для ЭКРАНА не годится, там screen_read_text" },
+  { id: "es", name: "Everything (поиск файлов)", cmd: "es", surface: "мгновенный поиск файлов по всем NTFS-дискам (на порядки быстрее обхода дерева) — через code_run; 'IPC error' = служба не запущена, это ошибка канала, а не 'не найдено'" },
   { id: "obs", name: "OBS Studio", paths: [join(env("ProgramFiles"), "obs-studio\\bin\\64bit\\obs64.exe")], surface: "ПРОГРАММНО через инструмент obs_request (obs-websocket) — стрим/сцены/настройки, НЕ клики" },
   // OfficeCLI: правка ФАЙЛОВ Office на диске БЕЗ установленного MS Office — основной путь для .pptx
   // (дедик-актуатора нет), headless-фолбэк Word/Excel. Честность (адверс-ревью 2026-07-23):
@@ -224,15 +250,64 @@ export function onPath(cmd: string, pathStr: string, exists: (p: string) => bool
   return dirs.some((d) => cands.some((c) => exists(join(d, c))));
 }
 
+/** Защита от гигантского каталога: разворачиваем glob по первым N записям. */
+const GLOB_SCAN_CAP = 200;
+
+/**
+ * Развернуть путь с ОДНИМ `*`-сегментом до реально существующего файла («…\Blender Foundation\*\
+ * blender.exe» → «…\Blender Foundation\Blender 5.1\blender.exe»). Возвращает найденный путь либо
+ * undefined. ЧИСТАЯ — exists/listDir инжектятся.
+ *
+ * Почему glob: версия живёт в ИМЕНИ каталога, и хардкод «Blender 5.1» протухнет на первом обновлении,
+ * снова сделав программу невидимой — то есть вернёт ровно тот дефект, ради которого это писалось.
+ */
+export function resolveGlobPath(
+  pattern: string,
+  exists: (p: string) => boolean,
+  listDir: (dir: string) => string[],
+): string | undefined {
+  if (!pattern.includes("*")) return exists(pattern) ? pattern : undefined;
+  const parts = pattern.split(/[\\/]/);
+  const idx = parts.findIndex((p) => p.includes("*"));
+  // Поддержан РОВНО один подстановочный сегмент: больше — честно не умеем, молча угадывать нельзя.
+  if (idx <= 0 || parts.slice(idx + 1).some((p) => p.includes("*"))) return undefined;
+  const parent = parts.slice(0, idx).join("\\");
+  const rest = parts.slice(idx + 1);
+  const seg = parts[idx]!;
+  const re = new RegExp(`^${seg.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`, "i");
+  for (const entry of listDir(parent).slice(0, GLOB_SCAN_CAP)) {
+    if (!re.test(entry)) continue;
+    const full = [parent, entry, ...rest].join("\\");
+    if (exists(full)) return full;
+  }
+  return undefined;
+}
+
+/** Список имён в каталоге; недоступный каталог — пустой список (детект не должен падать). */
+function safeListDir(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
 /** Детект автоматизируемых инструментов (CLI на PATH / известные exe). exists/pathStr инжектятся для теста. */
 export function detectAutomationTools(
   exists: (p: string) => boolean = existsSync,
   pathStr: string = process.env.PATH ?? "",
+  listDir: (dir: string) => string[] = safeListDir,
 ): ToolCap[] {
   const found: ToolCap[] = [];
   for (const t of TOOL_SPECS) {
-    const ok = (t.cmd && onPath(t.cmd, pathStr, exists)) || (t.paths?.some((p) => p && exists(p)) ?? false);
-    if (ok) found.push({ id: t.id, name: t.name, surface: t.surface });
+    if (t.cmd && onPath(t.cmd, pathStr, exists)) {
+      found.push({ id: t.id, name: t.name, surface: t.surface });
+      continue;
+    }
+    // Нашли по известному пути, а НЕ на PATH — значит голая команда в code_run не запустится.
+    // Отдаём модели фактический путь: иначе surface обещает то, чего сделать нельзя (закон честности).
+    const hit = t.paths?.map((p) => resolveGlobPath(p, exists, listDir)).find(Boolean);
+    if (hit) found.push({ id: t.id, name: t.name, surface: `${t.surface}; полный путь: ${hit}` });
   }
   return found;
 }
@@ -415,4 +490,168 @@ export function formatProfileSummary(p: SystemProfile): string {
     if (hw) summary += `\n${hw}`;
   }
   return summary;
+}
+
+// ── РЕАЛЬНЫЙ ИНВЕНТАРЬ УСТАНОВЛЕННОГО (реестр программных каналов, 2026-09-01) ──────────────
+
+/**
+ * 🔴 Зачем (форензика логов): список приложений был ЗАХАРДКОЖЕН — 9 путей (APP_SPECS), из них на
+ * машине нашлось 3. Всё остальное для Джарвиса не существовало, и он ходил кликами там, где у
+ * программы есть команда или протокол. Живая проверка ЭТОЙ машины: реально установлено 71
+ * приложение и зарегистрировано 96 URI-схем.
+ *
+ * Здесь — ФАКТЫ о машине (что стоит, какие протоколы зарегистрированы). ЗНАНИЕ о том, как этим
+ * управлять программно, живёт на сервере (`brain/app-channels.ts`) и правится без пересборки клиента.
+ */
+export interface InstalledAppInfo {
+  name: string;
+  /** Имя exe без пути, нижний регистр — ключ сопоставления с рецептом. */
+  exe?: string;
+  /** Зарегистрированная URI-схема без двоеточия (tg, spotify, steam…). */
+  uri?: string;
+}
+
+/** Мусор в списке установленного: обновления, рантаймы, драйверы — управлять там нечем. */
+const INSTALL_JUNK_RE =
+  /(redistributable|runtime|driver|update for|hotfix|security update|language pack|\bsdk\b|microsoft visual c\+\+|\.net framework|software development kit)/i;
+
+/** Кап списка: он идёт в client.env (не в промпт), но и там не должен быть безразмерным. */
+const INSTALLED_CAP = 400;
+/**
+ * Бюджет под URI-схемы. На живой машине их 222 — без отдельного лимита они съедали ВЕСЬ кап и
+ * приложения не доезжали вовсе (обратный перекос к прежнему, где схемы не доезжали). Рецепты
+ * матчатся и по exe (приложения), и по протоколу — нужны обе половины.
+ */
+const SCHEME_CAP = 250;
+
+/** Схемы, которые не несут информации о приложении. */
+const GENERIC_SCHEMES = new Set(["http", "https", "mailto", "file", "ftp", "about", "javascript"]);
+
+/**
+ * PS-инвентарь → JSON. Идёт через runPsJson (-EncodedCommand, base64 UTF-16LE), поэтому проблем с
+ * экранированием и кодировкой нет. ASCII-only по правилу проекта.
+ */
+const INVENTORY_PS = String.raw`
+$ErrorActionPreference='SilentlyContinue'
+$apps=@()
+$keys=@(
+ 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+ 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+ 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')
+foreach($k in $keys){
+  foreach($p in (Get-ItemProperty $k)){
+    if(-not $p.DisplayName){continue}
+    if($p.SystemComponent -eq 1){continue}
+    $icon=''
+    if($p.DisplayIcon){ $icon=($p.DisplayIcon -split ',')[0] }
+    $apps += [pscustomobject]@{ name=[string]$p.DisplayName; icon=[string]$icon }
+  }
+}
+$uris=@()
+# ⚠️ ЗАМЕРЕНО НА ЭТОЙ МАШИНЕ: перебор HKCR провайдером PowerShell (Get-ChildItem Registry::…) —
+# 46 СЕКУНД на 6344 ключа, инвентарь не укладывался ни в какой разумный таймаут. Прямой .NET-API
+# отдаёт те же имена за 39мс, а проверка 726 кандидатов на 'URL Protocol' — ещё за 41мс.
+$root=[Microsoft.Win32.Registry]::ClassesRoot
+foreach($n in $root.GetSubKeyNames()){
+  if($n -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]{1,31}$'){continue}
+  if($n.Contains('.')){continue}
+  $k=$root.OpenSubKey($n)
+  if(-not $k){continue}
+  if($k.GetValue('URL Protocol') -eq $null){continue}
+  $c=$root.OpenSubKey($n + '\shell\open\command')
+  $cmd=''
+  if($c){ $cmd=[string]$c.GetValue('') }
+  $uris += [pscustomobject]@{ scheme=[string]$n; cmd=$cmd }
+}
+[pscustomobject]@{ apps=$apps; uris=$uris } | ConvertTo-Json -Depth 3 -Compress
+`;
+
+/** Сырой ответ PS-инвентаря. */
+interface RawInventory {
+  apps?: Array<{ name?: string; icon?: string }>;
+  uris?: Array<{ scheme?: string; cmd?: string }>;
+}
+
+/**
+ * Имя exe без пути, нижним регистром (в реестре пути бывают в кавычках и с аргументами).
+ *
+ * ⚠️ Пустая строка — ЧЕСТНЫЙ ответ «бинарь неизвестен». DisplayIcon сплошь и рядом указывает не на
+ * приложение: у Git это `.ico`, у Word — `osetup.dll`, у Google Play Games — `uninstaller.exe`.
+ * Неверный ключ сопоставления хуже отсутствующего: он привязал бы рецепт к чужой программе, а
+ * «uninstaller.exe» — ровно тот класс путаницы, из-за которого Джарвис уже запускал деинсталлятор.
+ * Такие записи матчатся по имени и протоколу.
+ */
+export function exeLeaf(raw: string): string {
+  return exeLeafFrom(raw).leaf;
+}
+
+/** Служебные бинари, которые НЕЛЬЗЯ считать «приложением» (мы уже запускали деинсталлятор по ошибке). */
+const SERVICE_BINARY = /(^|[-_.])(unins\w*|uninstall\w*|setup|installer|maintenancetool|vc_redist)\.exe$/i;
+
+/**
+ * Полный путь и листовое имя бинаря из строки реестра. ЧИСТАЯ функция.
+ *
+ * ⚠️ Адверс-ревью 2026-09-01: прежняя версия резала аргументы по «пробел + дефис/слэш», а у
+ * подавляющего большинства обработчиков протоколов аргумент — плейсхолдер `"%1"` БЕЗ ключа
+ * (`"C:\…\App.exe" "%1"`). Хвост оставался приклеенным, строка не оканчивалась на .exe, и бинарь
+ * терялся — на этой машине так выпадало больше половины URI-схем. Теперь не «режем аргументы», а
+ * ИЩЕМ первый токен, оканчивающийся на .exe.
+ */
+export function exeLeafFrom(raw: string): { path: string; leaf: string } {
+  const cleaned = String(raw || "")
+    .replace(/%[0-9A-Za-z*]/g, " ") // плейсхолдеры %1, %V, %*
+    .replace(/"/g, " ")
+    .trim();
+  const m = /^(.*?\.exe)(?=$|\s)/i.exec(cleaned) ?? /([^\s]*\.exe)/i.exec(cleaned);
+  const full = (m?.[1] ?? "").trim();
+  if (!full) return { path: "", leaf: "" };
+  const leaf = (full.split(/[\\/]/).pop() ?? full).trim().toLowerCase();
+  if (!leaf.endsWith(".exe") || SERVICE_BINARY.test(leaf)) return { path: "", leaf: "" };
+  return { path: full.toLowerCase(), leaf };
+}
+
+/**
+ * Свести инвентарь в список приложений. ЧИСТАЯ функция — тестируется без PowerShell.
+ * URI-схема привязывается к приложению по exe: рецепт матчится и по протоколу, и по бинарю.
+ */
+export function buildInstalled(raw: RawInventory): InstalledAppInfo[] {
+  // ПРОТОКОЛЫ ИДУТ ПЕРВЫМИ (адверс-ревью): раньше цикл по приложениям делал ранний `return` при
+  // достижении капа, и на машине со 120+ программами ВСЕ протокольные каналы просто не доезжали —
+  // хотя именно они и есть каналы (ms-settings:, tg:, steam:). Их единицы, приложения добираются потом.
+  const out: InstalledAppInfo[] = [];
+  const schemeByPath = new Map<string, string>();
+  const seenScheme = new Set<string>();
+  for (const u of raw.uris ?? []) {
+    const scheme = (u.scheme ?? "").trim().toLowerCase();
+    if (!scheme || GENERIC_SCHEMES.has(scheme) || seenScheme.has(scheme)) continue;
+    seenScheme.add(scheme);
+    const { path, leaf } = exeLeafFrom(u.cmd ?? "");
+    // Привязка схемы к приложению — по ПОЛНОМУ пути, а не по листу: launcher.exe/update.exe/app.exe
+    // встречаются у разных программ, и по листу чужой протокол приклеивался к чужой программе.
+    if (path && !schemeByPath.has(path)) schemeByPath.set(path, scheme);
+    // ⚠️ Схема БЕЗ команды тоже канал: у UWP-обработчиков (ms-settings, ms-photos) shell\open\command
+    // пуст, а browser_open{'ms-settings:sound'} исполняется шеллом. Раньше такие выбрасывались —
+    // и рецепт «Windows: настройки» не мог сматчиться НИ НА ОДНОЙ машине.
+    out.push({ name: `${scheme}:`, ...(leaf ? { exe: leaf } : {}), uri: scheme });
+    if (out.length >= SCHEME_CAP) break;
+  }
+
+  const seenName = new Set<string>();
+  for (const a of raw.apps ?? []) {
+    const name = (a.name ?? "").trim();
+    if (!name || INSTALL_JUNK_RE.test(name) || seenName.has(name)) continue;
+    seenName.add(name);
+    const { path, leaf } = exeLeafFrom(a.icon ?? "");
+    const uri = path ? schemeByPath.get(path) : undefined;
+    out.push({ name, ...(leaf ? { exe: leaf } : {}), ...(uri ? { uri } : {}) });
+    if (out.length >= INSTALLED_CAP) break; // именно break: протоколы уже добавлены выше
+  }
+  return out;
+}
+
+/** Перечислить установленное (реестр Windows). Пусто при любом сбое — честная деградация. */
+export async function detectInstalledApps(): Promise<InstalledAppInfo[]> {
+  if (process.platform !== "win32") return [];
+  const raw = await runPsJson<RawInventory>(INVENTORY_PS, 20000);
+  return raw ? buildInstalled(raw) : [];
 }

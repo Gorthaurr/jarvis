@@ -188,3 +188,52 @@ describe("self-guard — рельсы самомодификации", () => {
     expect(isAncestorOfSelf("C:/totally/unrelated/dir")).toBe(false);
   });
 });
+
+// § ключи подписи: на машине владельца лежит квалифицированный сертификат физлица с приватным ключом
+// (УЦ «Сертум-Про», СНИЛС/ИНН в субъекте) и установлен КриптоПро CSP. Утечь такой ключ в контекст
+// модели или снести его нельзя: восстановлению он не подлежит, а подпись им юридически значима.
+describe("self-guard — контейнеры ключей Windows/КриптоПро", () => {
+  it("хранилища CAPI/CNG (%APPDATA%|%ProgramData%\Microsoft\Crypto) — ни читать, ни писать", () => {
+    // Имена ключевых блобов — «<хэш>_<GUID>» БЕЗ расширения: под правило «*.key» они не подпадают,
+    // до этого рубежа fs_read выгрузил бы их целиком (пути взяты с реальной машины владельца).
+    for (const s of [
+      "C:/Users/anton/AppData/Roaming/Microsoft/Crypto/Keys/de7cf8a7901d2ad13e5c67c29e5d1662_d7de515f-a2ae-4a55-acc8-62d0ad953a19",
+      "C:/Users/anton/AppData/Roaming/Microsoft/Crypto/RSA/S-1-5-21-458190833-3589952250-1045343621-1001/0a27d063501fc7dbac9620af9c5859c4_d7de515f",
+      "C:/ProgramData/Microsoft/Crypto/RSA/MachineKeys/f9416dcf7e0e0f1ec2b7b1d5d1a3f2ce_9b6b",
+      "C:/ProgramData/Microsoft/Crypto/SystemKeys/syskey01",
+      "C:/Users/anton/AppData/Roaming/Microsoft/Crypto", // сам каталог как конечный путь (fs_delete)
+    ]) {
+      expect(isSecretPath(s), s).toBe(true);
+      expect(isSecretPathFast(s), s).toBe(true); // тот же вердикт в рекурсивном обходе (fs_search/tree-гард)
+      expect(() => assertReadable(s)).toThrow(/секрет/i);
+      expect(() => assertWritable(s)).toThrow();
+    }
+  });
+
+  it("контейнеры КриптоПро в каталогах данных — защищены даже без файлов *.key внутри", () => {
+    for (const s of [
+      "C:/Users/anton/AppData/Local/Crypto Pro/anton.000", // папка-контейнер HDIMAGE-ридера
+      "C:/ProgramData/Crypto Pro/Crypto/veselkov.000/primary.key",
+      "C:/Users/anton/AppData/Roaming/Crypto Pro/settings.bin",
+    ]) {
+      expect(isSecretPath(s), s).toBe(true);
+      expect(() => assertWritable(s)).toThrow();
+    }
+  });
+
+  it("границы денилиста: дистрибутив КриптоПро и обычный код про криптографию — НЕ секреты", () => {
+    // Блок на «Program Files (x86)/Crypto Pro» сделал бы ложным ответ «установлен ли КриптоПро»,
+    // а ключей там нет — только бинари CSP.
+    expect(isSecretPath("C:/Program Files (x86)/Crypto Pro/CSP/cpcsp.dll")).toBe(false);
+    expect(isSecretPath("C:/proj/src/crypto/signing-notes.md")).toBe(false);
+    expect(isSecretPath("C:/proj/microsoft-crypto-readme.txt")).toBe(false);
+    expect(isSecretPath("C:/Users/anton/Documents/crypto pro instrukciya.docx")).toBe(false);
+  });
+
+  it("сообщение отказа не врёт про «.env», когда речь о контейнере подписи (§1)", () => {
+    // Прежний текст утверждал «это .env с ключами» про любой секрет — для контейнера подписи это ложь.
+    expect(() => assertReadable("C:/Users/anton/AppData/Roaming/Microsoft/Crypto/Keys/blob_guid")).toThrow(
+      /контейнер подписи/i,
+    );
+  });
+});

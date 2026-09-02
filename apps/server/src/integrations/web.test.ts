@@ -341,3 +341,81 @@ describe("WebProvider.fetch — redirect-цепочка (SSRF до запрос�
     expect(mock).toHaveBeenCalledTimes(1);
   });
 });
+
+// Кодировка ответа (живой дефект): тело декодировалось ЖЁСТКО как utf8 → cp1251 (ЦБ РФ и множество
+// РФ-сайтов) приезжал мусором «036 AUD 1 ??????? 62,2019»: название нечитаемо, номинал не отличить от
+// курса — молчаливая ошибка в 100 раз. Фикстура — РЕАЛЬНЫЕ БАЙТЫ cp1251 (строка в тесте всегда utf8 и
+// дефект бы не воспроизвела).
+describe("WebProvider.fetch — кодировка тела (cp1251 из пролога/заголовка)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const provider = () => new WebProvider(undefined);
+  // Байты cp1251 для «Австралийский доллар» (кириллица в cp1251 — один байт на символ).
+  const NAME_CP1251 = Buffer.from([
+    0xc0, 0xe2, 0xf1, 0xf2, 0xf0, 0xe0, 0xeb, 0xe8, 0xe9, 0xf1, 0xea, 0xe8, 0xe9, 0x20, 0xe4, 0xee, 0xeb, 0xeb, 0xe0, 0xf0,
+  ]);
+  const cbrXmlBytes = (prolog: string): Buffer =>
+    Buffer.concat([
+      Buffer.from(
+        `${prolog}<ValCurs Date="01.09.2026"><Valute ID="R01010"><NumCode>036</NumCode><CharCode>AUD</CharCode>` +
+          "<Nominal>1</Nominal><Name>",
+        "latin1",
+      ),
+      NAME_CP1251,
+      Buffer.from("</Name><Value>62,2019</Value></Valute></ValCurs>", "latin1"),
+    ]);
+
+  it("XML-пролог encoding=windows-1251 (charset в заголовке НЕТ) → название читается, а не «???»", async () => {
+    const body = cbrXmlBytes('<?xml version="1.0" encoding="windows-1251"?>');
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(body, { status: 200, headers: { "content-type": "application/xml" } })));
+    const page = await provider().fetch("https://www.cbr.ru/scripts/XML_daily.asp");
+    expect(page?.text).toContain("Австралийский доллар");
+    expect(page?.text).not.toContain("\uFFFD"); // ни одного «нечитаемого» символа
+  });
+
+  it("charset из Content-Type главнее (тело без пролога) → кириллица целая", async () => {
+    const body = Buffer.concat([Buffer.from("<html><body><p>", "latin1"), NAME_CP1251, Buffer.from("</p></body></html>", "latin1")]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(new Response(body, { status: 200, headers: { "content-type": "text/html; charset=windows-1251" } })),
+    );
+    const page = await provider().fetch("https://ru.example/page");
+    expect(page?.text).toContain("Австралийский доллар");
+  });
+
+  it("НЕИЗВЕСТНАЯ метка кодировки → честный откат в utf8 (не падаем и не теряем страницу)", async () => {
+    const body = Buffer.from("<html><body><p>Курс валют</p></body></html>", "utf8");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValueOnce(new Response(body, { status: 200, headers: { "content-type": "text/html; charset=x-unknown-42" } })),
+    );
+    const page = await provider().fetch("https://ru.example/unknown-charset");
+    expect(page?.text).toContain("Курс валют");
+  });
+});
+
+// JSON — ДАННЫЕ, а не разметка: readability-извлечение вырезало бы «теги» (`<` внутри строк) и
+// переписывало сущности (`&amp;`) ВНУТРИ значений, ломая документ молча; а усечение до 8000 символов
+// выдавало обрывок за целый документ («такого поля нет» вместо «я не дочитал»).
+describe("WebProvider.fetch — application/json отдаётся как есть + честное усечение", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const provider = () => new WebProvider(undefined);
+  const jsonResp = (body: string) =>
+    vi.fn().mockResolvedValueOnce(new Response(Buffer.from(body, "utf8"), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }));
+
+  it("тело JSON не проходит через extractReadable/decodeEntities — байт-в-байт как отдал сервер", async () => {
+    const body = '{\n  "note": "R&amp;D <b>отчёт</b>",\n  "rate": 62.2019\n}';
+    vi.stubGlobal("fetch", jsonResp(body));
+    const page = await provider().fetch("https://api.example/rates.json");
+    expect(page?.text).toBe(body); // сущности целы, «теги» не вырезаны, пробелы не схлопнуты
+    expect(page?.title).toBe(""); // заголовка у JSON нет — не выдумываем
+  });
+
+  it("длинный JSON усечён С ПОМЕТКОЙ (а не молча) — видно, что документ неполный", async () => {
+    const body = `{"data":"${"x".repeat(9000)}"}`;
+    vi.stubGlobal("fetch", jsonResp(body));
+    const page = await provider().fetch("https://api.example/big.json");
+    expect(page?.text.slice(0, 8000)).toBe(body.slice(0, 8000)); // начало отдано как есть
+    expect(page?.text).toContain("УСЕЧЕНО");
+    expect(page?.text).toContain(`из ${body.length}`); // честное «сколько было на самом деле»
+  });
+});

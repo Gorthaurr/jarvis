@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { metrics } from "../../../obs/metrics.js";
 import type { ToolContext } from "../dispatch.js";
-import { knowledgeConsult, webSearch } from "./info.js";
+import { knowledgeConsult, webFetch, webSearch } from "./info.js";
 
 describe("info-хендлеры — сигнал деградации (пункт-6)", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -45,5 +45,26 @@ describe("info-хендлеры — сигнал деградации (пунк�
     } as unknown as ToolContext;
     await knowledgeConsult(ctx, { domain: "trading", query: "risk" });
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("web_fetch — усечение по maxChars не выдаёт обрезок за весь документ", () => {
+  // 🔴 Адверс-ревью 2026-09-01: шапка web.ts обещает «усечение всегда помечается явно», а метку
+  // `[УСЕЧЕНО…]` web.ts дописывает В КОНЕЦ текста — срез по maxChars выбрасывал её ПЕРВОЙ. Модель
+  // получала молча обрезанную страницу и делала выводы о том, чего в ней «нет».
+  const ctxWith = (text: string) =>
+    ({ userId: "u1", web: { fetch: async () => ({ url: "https://x", title: "T", text }) } }) as unknown as ToolContext;
+
+  it("текст длиннее maxChars → в ответе есть явная метка усечения", async () => {
+    const r = await webFetch(ctxWith("a".repeat(5000)), { url: "https://x", maxChars: 100 });
+    expect(r.isError).toBeFalsy();
+    expect(String(r.content)).toContain("УСЕЧЕНО");
+    expect(String(r.content)).toContain("maxChars=100");
+  });
+
+  it("текст короче maxChars → метки НЕТ (не пугаем усечением, которого не было)", async () => {
+    const r = await webFetch(ctxWith("короткая страница"), { url: "https://x", maxChars: 100 });
+    expect(String(r.content)).not.toContain("УСЕЧЕНО");
+    expect(String(r.content)).toContain("короткая страница");
   });
 });

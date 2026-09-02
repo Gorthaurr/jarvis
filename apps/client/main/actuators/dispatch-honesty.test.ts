@@ -37,6 +37,7 @@ const st = vi.hoisted(() => ({
   listWindows: async (): Promise<Array<{ title: string; process: string }>> => [],
   ground: async (_q: unknown): Promise<{ handle: number }> => ({ handle: 42 }),
   capture: (): Promise<unknown> => Promise.resolve({ image: "b64", width: 100, height: 100 }),
+  view: async (_path: string, _opts: unknown): Promise<unknown> => ({ image: "ZmlsZQ==", mediaType: "image/png", width: 1, height: 1, format: "png", bytes: 4, resized: false }),
   sidecarReady: true,
   sidecarRequest: async (): Promise<unknown> => ({ text: "", lines: [] }),
 }));
@@ -72,11 +73,13 @@ vi.mock("./screen.js", () => ({
   getLastCaptureMapping: () => null,
   probeScreen: async () => ({ hash: "0" }),
 }));
+// §3.9 зрение на файл: лист мокается — проверяем ПРОВОДКУ dispatch (успех отдаёт данные как есть, провал → ошибка).
+vi.mock("./file-view.js", () => ({ viewFile: (p: string, o: unknown) => st.view(p, o) }));
 vi.mock("./sidecar-client.js", () => ({
   sidecar: () => ({ ready: st.sidecarReady, request: () => st.sidecarRequest() }),
 }));
 // Наблюдение после действия (fused observe) в этих сценариях не участвует — глушим, чтобы не лезло в UIA.
-vi.mock("./observe.js", () => ({ observeAfterAction: async () => undefined }));
+vi.mock("./observe.js", () => ({ observeAfterAction: async () => undefined, captureUiFingerprint: async () => undefined }));
 // messaging тянет @jarvis/userbots (gramjs/vk-io) — тяжёлый импорт, не нужный ни одному сценарию.
 vi.mock("./messaging.js", () => ({ sendMessage: async () => ({ messageId: "1" }), configureSenders: () => undefined }));
 
@@ -93,6 +96,7 @@ beforeEach(() => {
   st.listWindows = async () => [];
   st.ground = async () => ({ handle: 42 });
   st.capture = () => Promise.resolve({ image: "b64", width: 100, height: 100 });
+  st.view = async () => ({ image: "ZmlsZQ==", mediaType: "image/png", width: 1, height: 1, format: "png", bytes: 4, resized: false });
   st.sidecarReady = true;
   st.sidecarRequest = async () => ({ text: "", lines: [] });
 });
@@ -149,6 +153,27 @@ describe("dispatch() — провал актуатора никогда не с�
     const r = await run({ kind: "window.focus", query: "Discord" });
     expect(r.ok).toBe(false);
     expect(r.error?.message).toContain("сайдкар не запущен");
+  });
+
+  it("fs.view: успех актуатора → ok, data с картинкой доезжает как есть (проводка §3.9 живая)", async () => {
+    st.view = async (p, o) => ({ image: "UE5H", mediaType: "image/jpeg", width: 10, height: 5, format: "jpeg", bytes: 3, resized: false, path: p, opts: o });
+    const r = await run({ kind: "fs.view", path: "C:\\tmp\\a.jpg", page: 2, maxSide: 800 });
+    expect(r.ok).toBe(true);
+    const d = r.data as { image: string; mediaType: string; opts: { page?: number; maxSide?: number } };
+    expect(d.image).toBe("UE5H");
+    expect(d.mediaType).toBe("image/jpeg");
+    expect(d.opts).toEqual({ page: 2, maxSide: 800 }); // параметры команды доходят до актуатора
+  });
+
+  it("fs.view: актуатор бросил (не декодировалось/нечем отрендерить/секрет) → error.runtime с причиной, не ok с пустой картинкой", async () => {
+    st.view = async () => {
+      throw new Error("страницу PDF отрендерить нечем: python не найден на PATH");
+    };
+    const r = await run({ kind: "fs.view", path: "C:\\tmp\\a.pdf" });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("runtime");
+    expect(r.error?.message).toContain("отрендерить нечем");
+    expect(r.data).toBeUndefined();
   });
 
   it("window.focus: окно найдено, но фокус не перешёл (focused:false) → ошибка, не ok", async () => {

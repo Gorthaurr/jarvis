@@ -12,6 +12,12 @@
  *  - Капнут по размеру (какой бы список MCP ни вырос) — паспорт не должен разъедать окно.
  */
 export interface CapabilityInput {
+  /**
+   * Реестр программных каналов: сколько установленных приложений умеют API/CLI/протокол вместо
+   * кликов. В паспорт идёт ОДНА строка (сам каталог — инструментом app_channels, §15): знание
+   * должно быть под рукой, но контекст оно раздувать не должно.
+   */
+  appChannels?: string;
   /** WS расширения Chrome жив прямо сейчас. */
   extensionConnected: boolean;
   /** MCP-серверы: server/state/tools из McpManager.status(). */
@@ -22,6 +28,8 @@ export interface CapabilityInput {
   tinkoffToken: boolean;
   /** OBS obs-websocket сконфигурирован (host/password в env). */
   obsConfigured: boolean;
+  /** Исходящая почта настроена (MAIL_SMTP_HOST/MAIL_USER/MAIL_PASSWORD в .env) — mail_send рабочий. */
+  mailConfigured?: boolean;
   /** Killswitch: причина остановки автономии, null = работает. */
   autonomyFrozenReason: string | null;
   /**
@@ -76,11 +84,27 @@ export function renderCapabilityPassport(c: CapabilityInput): string {
   if (down.length > 0) lines.push(`- MCP НЕ поднялись: ${capList(down.map((s) => s.server))} — их mcp__*-инструменты недоступны.`);
   lines.push(c.braveKey ? "- Веб-поиск: Brave (+DDG-фолбэк)." : "- Веб-поиск: keyless DuckDuckGo (Brave-ключа нет; поиск работает).");
   if (!c.tinkoffToken) lines.push("- Тинькофф: токена нет — tinkoff_portfolio и market «tinkoff» недоступны (не предлагай).");
+  if (c.mailConfigured === false) lines.push("- Почта: ОТПРАВКА не настроена (нет MAIL_SMTP_HOST/MAIL_USER/MAIL_PASSWORD — пароль приложения заводит владелец в .env); mail_send честно откажет, code_run smtplib — не обход. Чтение вкладки почты (mail_read) — отдельно, через расширение.");
+  else if (c.mailConfigured === true) lines.push("- Почта: отправка настроена — mail_send (SMTP + сверка IMAP), с подтверждением адресата.");
   // OBS: env ЧУЖОГО процесса (актуатор живёт в клиенте и умеет дефолт ws://127.0.0.1:4455) — сервер
   // НЕ утверждает «недоступен» (контроль-ревью: ложное «недоступно» — тоже нечестность).
   if (!c.obsConfigured)
     lines.push("- OBS: ключей в env сервера нет — доступность НЕ проверена; при просьбе пробуй obs_request (откажет честно, если OBS не запущен).");
-  const text = lines.join("\n");
+  const base = lines.join("\n");
+  // 🔴 ПРОГРАММНЫЕ КАНАЛЫ — ПОСЛЕДНЕЙ строкой и ПО ОСТАТОЧНОМУ БЮДЖЕТУ (адверс-ревью 2026-09-01, HIGH).
+  // Строка каналов переменной длины (на машине владельца ~430 симв.) и своего капа не имела, поэтому
+  // глобальный slice с хвоста — тот самый, что комментарий ниже считал «практически недостижимым», —
+  // реально срабатывал при отключённом расширении и уносил строки ЧЕСТНОСТИ: «Тинькофф: токена нет —
+  // не предлагай» и «OBS: доступность НЕ проверена». Владелец просил портфель, модель обещала канал,
+  // которого нет. Порядок деградации теперь правильный: сперва режется самое восстановимое — а каналы
+  // восстановимы всегда, они и так лишь указатель на инструмент app_channels.
+  const POINTER = "- Программные каналы у части программ есть — спроси app_channels.";
+  if (c.appChannels) {
+    const budget = MAX_CHARS - base.length - 3; // «\n- »
+    if (budget >= c.appChannels.length) return `${base}\n- ${c.appChannels}`;
+    if (budget >= POINTER.length - 2) return `${base}\n- ${c.appChannels.slice(0, budget - 1)}…`;
+    if (MAX_CHARS - base.length >= POINTER.length + 1) return `${base}\n${POINTER}`;
+  }
   // Страховочный глобальный кап (после пер-списочных практически недостижим); усечение видно честно.
-  return text.length > MAX_CHARS ? `${text.slice(0, MAX_CHARS)}…` : text;
+  return base.length > MAX_CHARS ? `${base.slice(0, MAX_CHARS)}…` : base;
 }

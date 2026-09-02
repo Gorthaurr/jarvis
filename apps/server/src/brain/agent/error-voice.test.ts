@@ -34,6 +34,10 @@ describe("toolEffect — классификация для verify-петли", (
       expect(toolEffect(t)).toBe("neutral");
     }
   });
+  it("§3.9: file_view — ЧТЕНИЕ файла с диска: neutral (не «дело сделано»), НЕ verify (экран им не сверить), не blind", () => {
+    expect(toolEffect("file_view")).toBe("neutral");
+    expect(isBlindMutate("file_view")).toBe(false);
+  });
   it("H3: MCP-инструменты — читающее имя → neutral, действие → mutate (консервативно)", () => {
     expect(toolEffect("mcp__github__list_issues")).toBe("neutral");
     expect(toolEffect("mcp__github__get_file_contents")).toBe("neutral");

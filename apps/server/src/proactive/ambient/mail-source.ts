@@ -75,6 +75,41 @@ export function looksLikeBulk(item: MailItem): boolean {
   return /(no-?reply|noreply|newsletter|рассылк|подписк|промо|скидк|акци|distribution|mailer|notification|уведомлен)/.test(s);
 }
 
+/** СТАТУСНЫЙ глагол доставки/отправления — «что-то произошло с моей посылкой», а не «купите». */
+const DELIVERY_STATUS_RE =
+  /(доставлен|доставлено|доставили|вручен|выдан|получен|отправлен|отправлено|отправили|передан курьер|курьер (?:уже |в пути|приедет|подъедет)|в пути|прибыл|прибыло|поступил|готов[оа]? к (?:выдаче|получению)|можно забрать|ожидает в пункте|shipped|delivered|out for delivery|arriv(?:ed|ing)|dispatched|picked up)/;
+
+/**
+ * ИДЕНТИФИКАТОР конкретной посылки/заказа: «заказ №12345», «order #98765».
+ *
+ * 🔴 Сигил (№/#/nº/номер) ОБЯЗАТЕЛЕН (адверс-ревью 2026-09-01): без него «Скидка на заказ 3000
+ * рублей» читалось как номер заказа и промо уезжало в озвучку. У настоящего письма о заказе номер
+ * почти всегда с сигилом, а без сигила его подхватит связка «статус + объект» ниже.
+ */
+const ORDER_ID_RE = /(?:заказ\w*|отправлени\w*|посылк\w*|order|shipment)\s*(?:№|#|nº|no\.?|номер)\s*\d{3,}/;
+const TRACK_ID_RE = /(?:тре[кй]\w*|трек-?номер|track(?:ing)?(?:[ -]?(?:number|no|code|id))?)\s*[№#:]?\s*[a-z0-9]{6,}|\b[a-z]{2}\d{9}[a-z]{2}\b/;
+
+/** ОБЪЕКТ доставки: о ЧЁМ статус. Без него статусный глагол — обычная рекламная риторика. */
+const PARCEL_OBJECT_RE =
+  /(заказ|посылк|отправлени|доставк|бандерол|груз|товар|курьер|order|parcel|shipment|package|delivery|трек)/;
+
+/**
+ * ПЕРСОНАЛЬНОЕ письмо о судьбе заказа/посылки — по СМЫСЛУ, а не по адресу отправителя.
+ *
+ * 🔴 Живой дефект: «Ваш заказ доставлен» приходит с no-reply@ozon.ru и словом «Уведомление» в теме —
+ * `looksLikeBulk` роняло его до 0.25 при пороге озвучки 0.5. То есть ЕДИНСТВЕННЫЙ канал, способный
+ * сообщить о доставке без открытой вкладки, давил ровно те письма, ради которых он и нужен.
+ * Разрез именно по смыслу (статусный глагол ЛИБО номер заказа/трека), а не отменой bulk: «Бесплатная
+ * доставка от 1000 ₽» и «Скидка на доставку» остаются внизу — там нет ни статуса, ни идентификатора.
+ */
+export function looksLikeTransactional(item: MailItem): boolean {
+  const s = `${item.from} ${item.subject}`.toLowerCase();
+  // Статусный глагол САМ ПО СЕБЕ ничего не разрезает (адверс-ревью 2026-09-01): «Заявка отправлена»,
+  // «игры уже в пути», «комментарий получен», «Новый сезон прибыл!» — это рассылки, и они уезжали в
+  // озвучку 0.6. Нужен ещё ОБЪЕКТ доставки — тогда речь о судьбе посылки, а не о распродаже.
+  return (DELIVERY_STATUS_RE.test(s) && PARCEL_OBJECT_RE.test(s)) || ORDER_ID_RE.test(s) || TRACK_ID_RE.test(s);
+}
+
 /** Чистая функция: письмо → ambient-сигнал (или null, если сказать нечего). */
 export function mailSignal(item: MailItem, userId: string, now: number, important: string[]): AmbientSignal | null {
   const from = (item.from || "").trim();
@@ -82,7 +117,9 @@ export function mailSignal(item: MailItem, userId: string, now: number, importan
   if (!from && !subject) return null;
   const isImportant = important.some((c) => c && `${from} ${subject}`.toLowerCase().includes(c.toLowerCase()));
   // Рассылка — ниже дефолтного порога 0.5 (движок её не озвучит); важный отправитель перебивает.
-  const salience = isImportant ? 0.85 : looksLikeBulk({ from, subject }) ? 0.25 : 0.6;
+  // Письмо о СУДЬБЕ ЗАКАЗА (доставлен/отправлен/трек) тоже перебивает bulk: оно приходит с того же
+  // no-reply, что и промо, но это персональное событие владельца — ради него источник и существует.
+  const salience = isImportant ? 0.85 : looksLikeTransactional({ from, subject }) ? 0.6 : looksLikeBulk({ from, subject }) ? 0.25 : 0.6;
   const who = from || "неизвестный отправитель";
   const what = subject ? ` — «${subject.slice(0, 80)}»` : "";
   return {

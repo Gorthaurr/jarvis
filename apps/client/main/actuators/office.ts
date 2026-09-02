@@ -1,8 +1,17 @@
 /**
  * Office-актуатор (§6): живые Word/Excel через COM-автоматизацию.
  *
- * В отличие от code.run (CLM блокирует New-Object COM), это первоклассный путь к
- * приложениям Office. Скрипты PowerShell — ФИКСИРОВАННЫЕ константы; данные (путь,
+ * ⚠️ Прежняя редакция этой шапки утверждала, что в code.run «CLM блокирует New-Object COM».
+ * Это НЕПРАВДА, проверено прогоном 2026-09-01 тем же способом, каким запускает раннер
+ * (`powershell -NoProfile -NonInteractive -Command …`): LanguageMode = FullLanguage, а
+ * `New-Object -ComObject Excel.Application`/`Word.Application` создаются штатно (16.0). Ложная
+ * причина в декларации хуже отсутствия причины: она учит, что файловый путь через code_run
+ * невозможен, хотя это рабочий фолбэк (о нём же говорит шапка code-runner.ts — «COM через
+ * python/node/powershell FullLanguage»). НАСТОЯЩАЯ ценность актуатора не в обходе запрета, а в
+ * готовом гардированном пути: фиксированный скрипт (анти-инъекция), headless, таймаут с kill,
+ * гарантированный Quit/ReleaseComObject и проверка путей через self-guard.
+ *
+ * Скрипты PowerShell — ФИКСИРОВАННЫЕ константы; данные (путь,
  * значения) передаются через temp-JSON (`$env:JARVIS_OFFICE_ARGS`) и читаются
  * `ConvertFrom-Json` — НЕ интерполируются в тело скрипта (анти-инъекция, ср. apps.focus).
  *

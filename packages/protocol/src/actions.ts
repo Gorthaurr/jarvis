@@ -68,6 +68,10 @@ export type WaitCondition =
   // («map.game_state»), equals/contains — критерий. Generic-механизм, НЕ хардкод игры: любая
   // программа, умеющая пушить JSON на http://127.0.0.1:<порт>/<source>, становится наблюдаемой.
   | { kind: "gsi"; source?: string; path: string; equals?: string; contains?: string; gone?: boolean }
+  // Сценарии 2026-09-02 (CAPABILITY_GAPS 3.14): «работа кончилась» = файл появился и ДОПИСАН (stableMs — размер
+  // и mtime не меняются заданное время, minBytes — не пустой) / процесс завершился (gone:true по pid или имени).
+  | { kind: "file"; path: string; gone?: boolean; minBytes?: number; stableMs?: number }
+  | { kind: "process"; pid?: number; name?: string; gone?: boolean }
   // fix 2026-07-15: значение из DOM активной вкладки браузера пользователя (через расширение). Главный
   // кейс — «видео дошло до N секунд»: prop:"currentTime" op:">=" value:1560. ОЦЕНИВАЕТСЯ НА СЕРВЕРЕ (ext-мост),
   // а не на клиенте (клиент до расширения не достаёт) — потому OCR-костыля таймера больше не нужно. Дефолт
@@ -160,6 +164,25 @@ type ActionCommandKind =
   // §Волна2 (2.4): фокус окна по hwnd (из window.list) или подстроке заголовка/имени процесса —
   // SetForegroundWindow с ЧЕСТНЫМ readback (focused=false → фокус реально не взят).
   | { kind: "window.focus"; hwnd?: number; query?: string }
+  // Переставить окно: свернуть/развернуть/восстановить/ПЕРЕНЕСТИ на монитор. Смотреть, на каком
+  // мониторе окно, Джарвис умел (window.list), а двигать — нет: «открой на втором мониторе»
+  // выполнялось наугад (живой провал 2026-09-01). monitor — индекс из monitor_list/window_list.
+  | {
+      kind: "window.arrange";
+      hwnd?: number;
+      query?: string;
+      op: "minimize" | "maximize" | "restore" | "move";
+      monitor?: number;
+      maximizeAfterMove?: boolean;
+    }
+  // Кто СЕЙЧАС звучит: сессии вывода Core Audio (WASAPI) с процессом, состоянием, мьютом,
+  // громкостью и пиком. Живой провал 2026-09-01: на «что это за звук / выруби его» у Джарвиса
+  // была только ОБЩАЯ громкость — он не мог ни назвать источник, ни заглушить его точечно.
+  | { kind: "audio.sessions" }
+  // Заглушить/вернуть/подкрутить КОНКРЕТНОЕ приложение (по pid из audio.sessions или имени
+  // процесса). Обратимо и точечно: не трогает общий звук и не закрывает окно. Результат несёт
+  // ОБРАТНОЕ ЧТЕНИЕ состояния сессии — «сделал» подтверждается фактом, а не кодом возврата.
+  | { kind: "audio.set"; pid?: number; process?: string; mute?: boolean; level?: number }
   | { kind: "app.launch"; app: string }
   | { kind: "app.focus"; app: string }
   // Закрыть приложение ПО ПРОЦЕССУ (§6). graceful (CloseMainWindow, как клик по крестику) по
@@ -174,7 +197,10 @@ type ActionCommandKind =
       params?: Record<string, unknown>; // text/selector/dy в зависимости от intent
     }
   | { kind: "browser.read"; selectorIntent: string } // извлечь читаемый контент страницы
-  | { kind: "code.run"; lang: CodeLang; code: string } // ограничения §6 обязательны
+  // cwd — репозиторий для git/npm/тестов (иначе временная папка); timeoutMs — окно ЭТОГО запуска (кламп до 180 с);
+  // background — фоновое задание: ответ сразу с jobId, исход по job.status (сценарии 2026-09-02, причина №2).
+  | { kind: "code.run"; lang: CodeLang; code: string; cwd?: string; timeoutMs?: number; background?: boolean } // ограничения §6 обязательны
+  | { kind: "job.status"; jobId: string; kill?: boolean } // статус/остановка фонового задания code.run{background}
   | {
       kind: "skill.execute";
       skillId: string;
@@ -202,12 +228,13 @@ type ActionCommandKind =
   | { kind: "jbrowser.open"; url: string } // открыть URL в браузере Джарвиса (невидимо) → читаемый контент
   | { kind: "jbrowser.read" } // прочитать текущую страницу браузера Джарвиса
   | { kind: "jbrowser.inspect"; query?: string; cap?: number } // инвентарь интерактивных элементов (глаза на любой сайт)
-  | { kind: "jbrowser.act"; intent: "click" | "type" | "scroll" | "key"; params?: Record<string, unknown> }
+  | { kind: "jbrowser.act"; intent: "click" | "type" | "scroll" | "key" | "upload"; params?: Record<string, unknown> } // upload: {path, selector?} → DOM.setFileInputFiles
   | { kind: "jbrowser.login"; url: string } // открыть страницу ВИДИМО для входа (тот же профиль) → дальше невидимо
   | { kind: "jbrowser.import_cookies"; cookies: Array<Record<string, unknown>> } // §перенос логинов: куки из расширения → браузер Джарвиса (CDP setCookie)
   | { kind: "order.place"; vendor: string; items: Record<string, unknown>[]; total: number } // confirm + spend cap + idempotency
   // ── Файловая система (§6): прямое управление файлами на машине пользователя ──
-  | { kind: "fs.read"; path: string; maxBytes?: number } // прочитать текстовый файл
+  // Прочитать текстовый файл целиком ИЛИ ОКНОМ строк (причина №6 USER_SCENARIOS_2026-09-02): offset+lines / tail.
+  | { kind: "fs.read"; path: string; maxBytes?: number; offset?: number; lines?: number; tail?: number }
   | { kind: "fs.write"; path: string; content: string; createDirs?: boolean } // создать/перезаписать (правка файла)
   | { kind: "fs.edit"; path: string; old: string; new: string; replaceAll?: boolean } // точечная правка: заменить фрагмент (без перезаписи всего файла)
   | { kind: "fs.append"; path: string; content: string } // дописать в конец
@@ -215,7 +242,11 @@ type ActionCommandKind =
   | { kind: "fs.delete"; path: string; recursive?: boolean } // удалить файл/каталог — ТРЕБУЕТ confirm (§4)
   | { kind: "fs.move"; from: string; to: string } // переместить/переименовать
   | { kind: "fs.mkdir"; path: string } // создать каталог (рекурсивно)
-  | { kind: "fs.search"; root: string; query: string; inContent?: boolean; maxResults?: number } // поиск по имени/содержимому
+  // Поиск по имени/содержимому; ignore — имена каталогов, которые НЕ обходить (нет поля → служебные по умолчанию: node_modules/.git/dist…; [] → обойти всё).
+  | { kind: "fs.search"; root: string; query: string; inContent?: boolean; maxResults?: number; ignore?: string[] }
+  // Зрение на файл (§3.9): картинка/страница PDF с диска → base64-изображение для vision (НЕ текст).
+  // page — 1-based страница PDF (деф 1); maxSide — длинная сторона результата (деф 1568, как screen_capture).
+  | { kind: "fs.view"; path: string; page?: number; maxSide?: number }
   // ── Системное управление (§6): питание, блокировка, медиа, громкость, буфер ──
   | { kind: "system.lock" } // заблокировать рабочую станцию (безопасно/обратимо)
   | { kind: "system.power"; op: PowerOp } // sleep/shutdown/restart/logoff — необратимые → confirm (§4)

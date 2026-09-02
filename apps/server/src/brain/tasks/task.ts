@@ -366,6 +366,12 @@ export function stepLabelFor(toolName: string, input: Record<string, unknown>): 
     }
     case "screen_capture":
       return "Смотрю на экран";
+    case "file_view":
+      return "Смотрю файл";
+    case "job_status":
+      return "Проверяю фоновое задание";
+    case "mail_send":
+      return "Отправляю письмо"; // §3.9 зрение на файл: без метки страница PDF шла бы как «Работаю…»
     case "screen_read_text":
       return "Читаю текст с экрана";
     case "browser_read":

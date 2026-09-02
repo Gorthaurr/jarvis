@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ToolContext } from "../dispatch.js";
-import { watchCreate } from "./watch.js";
+import { watchCreate, watchList } from "./watch.js";
 
 type AddInput = Record<string, unknown>;
 const okAdd = () => vi.fn((_input: AddInput) => ({ ok: true, watch: { id: "w1", what: "x", condition: "y", intervalMs: 10_000, continuous: false } }));
@@ -130,5 +130,43 @@ describe("watchCreate — confirm на постановке action", () => {
     const res2 = await watchCreate(allow, { ...base, action: "напиши Кате" });
     expect(res2.isError).toBeFalsy();
     expect((add2.mock.calls[0]![0] as { action?: string }).action).toBe("напиши Кате");
+  });
+});
+
+describe("watchList — «слежу» ≠ «вижу»", () => {
+  const HOUR = 3600_000;
+  const listCtx = (items: unknown[]) => ({ watch: { list: () => items } as unknown, sessionId: "s1", userId: "u1" }) as unknown as ToolContext;
+
+  it("ослепшее наблюдение помечено давностью последней удачной проверки", () => {
+    const now = Date.now();
+    const res = watchList(
+      listCtx([
+        // Проверки не проходят 30 часов (порог max(6ч, 20×1ч)=20ч) — владелец обязан это видеть.
+        { id: "w1", what: "заказ", condition: "доставлен", intervalMs: HOUR, continuous: true, createdAt: now - 40 * HOUR, lastOkAt: now - 30 * HOUR },
+        { id: "w2", what: "сборка", condition: "упала", intervalMs: HOUR, continuous: true, createdAt: now - 40 * HOUR, lastOkAt: now - 60_000 },
+      ]),
+    );
+    expect(res.content).toMatch(/заказ.*ВНИМАНИЕ.*30 ч/);
+    // Здоровое наблюдение не оговаривается: пометка стоит ровно в строке про заказ.
+    const buildLine = String(res.content).split("\n").find((l) => l.includes("сборка")) ?? "";
+    expect(buildLine).not.toContain("ВНИМАНИЕ");
+  });
+
+  it("нет lastOkAt → говорим про ЗНАНИЕ («не записано»), а не выдумываем историю проверок", () => {
+    // Запись прошлых волн: поля lastOkAt не существовало, но наблюдение исправно проверялось
+    // (lastCheckAt/lastValue на месте). Утверждать «ни одной удачной проверки с постановки» —
+    // выдумка о собственной истории, ровно противоположная правде.
+    const now = Date.now();
+    const res = watchList(
+      listCtx([
+        {
+          id: "w1", what: "заказ", condition: "доставлен", intervalMs: HOUR, continuous: false,
+          createdAt: now - 25 * HOUR, lastCheckAt: now - HOUR, lastValue: "в пути",
+        },
+      ]),
+    );
+    expect(res.content).toContain("ВНИМАНИЕ"); // о слепоте молчать нельзя
+    expect(res.content).not.toMatch(/ни одной удачной проверки/i);
+    expect(res.content).toMatch(/удачных проверок не записано/);
   });
 });

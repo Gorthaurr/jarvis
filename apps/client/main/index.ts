@@ -31,7 +31,7 @@ import { identityStore } from "./identity-store.js";
 import { AudioCoordinator } from "./audio/index.js";
 import { sidecar } from "./actuators/sidecar-client.js";
 import { browserController } from "./actuators/browser-cdp.js";
-import { buildSystemProfile, formatProfileSummary } from "./sensors/system-profiler.js";
+import { buildSystemProfile, detectInstalledApps, formatProfileSummary } from "./sensors/system-profiler.js";
 import { captureAmbient } from "./sensors/system-snapshot.js";
 import { Sensors } from "./sensors/index.js";
 import { runSkill } from "./skill-runner/index.js";
@@ -537,6 +537,7 @@ let envSummary: string | undefined;
 // (строку summary там не парсим — хрупко).
 let envApps: string[] = [];
 let envGames: string[] = [];
+let envInstalled: Array<{ name: string; exe?: string; uri?: string; cli?: boolean }> = [];
 let envBuiltAt = 0;
 const ENV_TTL_MS = 6 * 3_600_000;
 async function sendEnvProfile(): Promise<void> {
@@ -546,10 +547,17 @@ async function sendEnvProfile(): Promise<void> {
       envSummary = formatProfileSummary(profile);
       envApps = profile.apps.map((a) => a.name);
       envGames = [...(profile.games ?? [])];
+      // Реестр программных каналов: РЕАЛЬНО установленное с машины (реестр Windows), а не 9 хардкодов.
+      // Сопоставление с рецептами — на сервере; сюда идут только факты. Тот же TTL, что у профиля.
+      envInstalled = await detectInstalledApps();
+      // CLI-команды, найденные на PATH (detectAutomationTools), — тоже канал: рецепты матчатся по
+      // имени команды. Без этого треть курируемых рецептов (git/ffmpeg/ollama/blender) была
+      // недостижима — поле cli объявлено в протоколе, но его никто не заполнял (адверс-ревью).
+      for (const t of profile.tools) envInstalled.push({ name: t.id, cli: true });
       envBuiltAt = Date.now();
       log.info("окружение определено (авто)", { summary: envSummary });
     }
-    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames);
+    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled);
   } catch (e) {
     log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
   }

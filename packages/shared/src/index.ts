@@ -97,6 +97,18 @@ export function envInt(name: string, fallback: number): number {
   return Number.isNaN(n) ? fallback : n;
 }
 
+/**
+ * Обрезать строку до `max` код-юнитов, НЕ разрывая суррогатную пару: одинокий high-surrogate на конце —
+ * невалидный Unicode в JSON запроса к модели (ревью 2026-09-01: капы 8000/500/200 резали эмодзи пополам).
+ */
+export function cutText(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let cut = s.slice(0, max);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+  return cut;
+}
+
 export function envOptional(name: string): string | undefined {
   const v = process.env[name];
   return v === undefined || v === "" ? undefined : v;

@@ -78,7 +78,8 @@ import { DEV_USER, resolveAndProvision } from "./identity.js";
 import { isLoopbackHost, resolveBindHost } from "./bind.js";
 import { buildGreeting } from "../proactive/greeting.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
-import { ExtensionBridge, type ExtSocket } from "./extension-bridge.js";
+import { ExtensionBridge } from "./extension-bridge.js";
+import { registerWsRoutes } from "./ws-routes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
 import { PreHandshakeBuffer } from "./pre-handshake-buffer.js";
@@ -339,34 +340,14 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // Регистрация плагина WebSocket до объявления маршрутов.
   void app.register(fastifyWebsocket);
 
+  // §sec: маршруты + гард происхождения живут в ws-routes.ts (см. его шапку про CSWSH).
+  // Гард на /ws закрывает вектор «страница владельца управляет Джарвисом»; на /ext он был с H13.
   void app.register(async (instance) => {
-    instance.get("/ws", { websocket: true }, (connection) => {
-      // @fastify/websocket v11: первый аргумент — это сам WebSocket (ws.WebSocket).
-      const socket = connection as unknown as RawWs;
-      onConnection(socket, config, registry, providers, brain, log);
-    });
-    // Канал расширения (Chrome). Своя WS, отдельно от клиентского /ws (другой протокол).
-    instance.get("/ext", { websocket: true }, (connection, request) => {
-      const ws = connection as unknown as RawWs;
-      // §sec (H13): /ext = «руки браузера» (telegram.send, чтение залогиненных вкладок). Раньше
-      // принимали ЛЮБОЕ соединение → вредоносная веб-страница открывала ws://…/ext и перехватывала
-      // канал. Теперь пускаем ТОЛЬКО расширение (Origin chrome-extension://) ИЛИ локальный клиент без
-      // Origin (тесты/нативный). Веб-страница (http/https Origin) → отклоняем.
-      const origin = String((request as { headers?: Record<string, unknown> })?.headers?.origin ?? "").toLowerCase();
-      if (origin && !origin.startsWith("chrome-extension://")) {
-        log.warn("§sec: /ext соединение отклонено по Origin (не расширение)", { origin });
-        try {
-          ws.close();
-        } catch {
-          /* уже закрыт */
-        }
-        return;
-      }
-      const sock: ExtSocket = { send: (d) => ws.send(d), close: () => ws.close() };
-      extBridge.attach(sock);
-      ws.on("message", (raw: unknown) => extBridge.handleMessage(rawToText(raw)));
-      ws.on("close", () => extBridge.detach(sock));
-      ws.on("error", () => extBridge.detach(sock));
+    registerWsRoutes(instance, {
+      onClient: (socket) => onConnection(socket as unknown as RawWs, config, registry, providers, brain, log),
+      ext: extBridge,
+      rawToText,
+      log,
     });
   });
 

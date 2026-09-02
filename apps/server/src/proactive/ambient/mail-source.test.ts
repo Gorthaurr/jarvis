@@ -3,7 +3,7 @@
  * нет») и то, что рассылки не будят владельца, а важные отправители — будят.
  */
 import { describe, expect, it, vi } from "vitest";
-import { createMailSource, looksLikeBulk, mailSignal } from "./mail-source.js";
+import { createMailSource, looksLikeBulk, looksLikeTransactional, mailSignal } from "./mail-source.js";
 
 const NOW = new Date(2026, 6, 29, 12, 0, 0).getTime();
 
@@ -190,5 +190,53 @@ describe("mailSignal / looksLikeBulk", () => {
   it("распознаём массовые рассылки", () => {
     expect(looksLikeBulk({ from: "newsletter@x", subject: "Дайджест" })).toBe(true);
     expect(looksLikeBulk({ from: "Мама", subject: "Позвони" })).toBe(false);
+  });
+});
+
+describe("почта о ЗАКАЗЕ не глушится как рассылка (живой дефект: «Ваш заказ доставлен» от no-reply)", () => {
+  const sal = (from: string, subject: string) => mailSignal({ from, subject }, "u1", NOW, [])!.salience;
+
+  it("статус доставки с no-reply — ВЫШЕ порога озвучки (0.5), хотя это формально bulk", () => {
+    // Именно этот класс писем — единственный канал узнать о доставке без открытой вкладки.
+    expect(looksLikeBulk({ from: "no-reply@ozon.ru", subject: "Уведомление: ваш заказ доставлен" })).toBe(true);
+    expect(sal("no-reply@ozon.ru", "Уведомление: ваш заказ доставлен")).toBeGreaterThan(0.5);
+    expect(sal("noreply@wildberries.ru", "Заказ №4820193 готов к выдаче")).toBeGreaterThan(0.5);
+    expect(sal("noreply@cdek.ru", "Посылка в пути, трек RA123456785RU")).toBeGreaterThan(0.5);
+    expect(sal("notification@post.ru", "Отправление прибыло в пункт выдачи")).toBeGreaterThan(0.5);
+  });
+
+  it("ОБРАТНАЯ сторона: чистое промо остаётся внизу — «доставка» без статуса и номера не поднимает", () => {
+    expect(sal("no-reply@shop.ru", "Скидки недели — бесплатная доставка от 1000 ₽")).toBeLessThan(0.5);
+    expect(sal("newsletter@shop.ru", "Промо: акция на доставку цветов")).toBeLessThan(0.5);
+    expect(sal("no-reply@x.ru", "Подпишитесь на рассылку")).toBeLessThan(0.5);
+    expect(looksLikeTransactional({ from: "no-reply@shop.ru", subject: "Бесплатная доставка от 1000 ₽" })).toBe(false);
+  });
+
+  it("🔴 статусный глагол БЕЗ объекта доставки — это промо, а не посылка (адверс-ревью 2026-09-01)", () => {
+    // «отправлен/получен/прибыл/в пути» — рекламная риторика ничуть не меньше, чем логистическая.
+    // Раньше каждая такая рассылка поднималась 0.25 → 0.6 и озвучивалась: канал зашумлялся ровно
+    // тем, что looksLikeBulk и был призван глушить, а настоящая доставка тонула вместе с промо.
+    expect(sal("newsletter@shop.ru", "Скидка 50%! Заявка отправлена — ждём вас")).toBeLessThan(0.5);
+    expect(sal("newsletter@shop.ru", "Осенняя распродажа: игры уже в пути к вам")).toBeLessThan(0.5);
+    expect(sal("noreply@habr.com", "Уведомление: ваш комментарий получен")).toBeLessThan(0.5);
+    expect(sal("newsletter@shop.ru", "Новый сезон прибыл!")).toBeLessThan(0.5);
+    // «заказ 3000 рублей» — сумма, а не номер заказа: идентификатор требует сигила (№/#/номер).
+    expect(sal("promo@shop.ru", "Скидка на заказ 3000 рублей — только сегодня")).toBeLessThan(0.5);
+  });
+
+  it("ветка НОМЕРА ЗАКАЗА самостоятельна (без статусного глагола) — иначе половина разреза мертва", () => {
+    // Мутационная проверка ревью показала: обе id-ветки не охранялись НИЧЕМ (снятие их не роняло тесты).
+    expect(looksLikeTransactional({ from: "noreply@shop.ru", subject: "Заказ №4820193" })).toBe(true);
+    expect(looksLikeTransactional({ from: "noreply@shop.ru", subject: "Order #98765 update" })).toBe(true);
+  });
+
+  it("ветка ТРЕК-НОМЕРА самостоятельна (без статусного глагола)", () => {
+    expect(looksLikeTransactional({ from: "noreply@post.ru", subject: "Трек-номер RA123456785RU" })).toBe(true);
+    expect(looksLikeTransactional({ from: "noreply@post.ru", subject: "Ваше RA123456785RU" })).toBe(true);
+  });
+
+  it("обычное личное письмо и важный отправитель не задеты", () => {
+    expect(sal("Бухгалтерия", "Акт за июль")).toBeGreaterThan(0.5);
+    expect(mailSignal({ from: "noreply@bank.ru", subject: "Уведомление о платеже" }, "u1", NOW, ["bank.ru"])!.salience).toBeGreaterThan(0.8);
   });
 });

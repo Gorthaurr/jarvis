@@ -20,6 +20,7 @@
  * Модуль ЧИСТЫЙ (без IO): стор — checkpoint-store.ts, врезка — agent/index.ts.
  */
 import { foldText } from "@jarvis/shared";
+import { classifyImageBlocks } from "./image-marks.js";
 import type { LlmMessage } from "../../integrations/llm.js";
 import { CANCEL_PHRASES, CANCEL_WORDS } from "../tasks/control.js";
 import { OUTBOUND_SEND_TOOLS, toolEffect } from "./error-voice.js";
@@ -299,9 +300,19 @@ function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
-  for (const b of content as Array<{ type?: string; text?: string }>) {
+  const blocks = content as Array<{ type: string; text?: string }>;
+  // Класс картинки — по маркерам того же tool_result (image-marks): страница документа ≠ скриншот,
+  // иначе продолжение читало «скриншот» и шло сверять экран вместо повторного file_view.
+  const cls = classifyImageBlocks(blocks);
+  const imageLabel =
+    cls === "doc"
+      ? "[страница документа/картинка файла — в журнал не сохраняется; повторный file_view вернёт её]"
+      : cls === "screenshot"
+        ? "[скриншот — в журнал не сохраняется]"
+        : "[картинка — в журнал не сохраняется]";
+  for (const b of blocks) {
     if (b?.type === "text" && typeof b.text === "string") parts.push(b.text);
-    else if (b?.type === "image") parts.push("[скриншот — в журнал не сохраняется]");
+    else if (b?.type === "image") parts.push(imageLabel);
   }
   return parts.join("\n");
 }

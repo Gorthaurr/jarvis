@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -717,5 +718,120 @@ describe("F4: отпечаток одобренной операции у watch-
     svc.registerRunner("s2", "u1", run);
     expect(run).not.toHaveBeenCalled();
     expect(r.watch.status).toBe("suspended");
+  });
+});
+
+describe("WatchService — СЛЕПОТА наблюдения не молчит (транзиент 12 часов подряд)", () => {
+  const HOUR = 3600_000;
+  // Транзиентная ошибка (Chrome закрыт на ночь / нет живой сессии) сознательно НЕ копится к dead-watch,
+  // и раньше она вообще НИЧЕГО не порождала: consecutiveFailures не рос, владельцу не говорили ни слова.
+  const blindChecker = async (): Promise<CheckResult> => ({ met: false, summary: "", error: "нет вкладки", transient: true });
+
+  it("ровно ОДНО честное «не могу наблюдать» — не раньше порога и не каждый тик", async () => {
+    let clock = 1_000_000;
+    const speak = vi.fn();
+    const svc = new WatchService(blindChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 1000 });
+    svc.registerSpeaker("s1", "u1", speak);
+    svc.add({ sessionId: "s1", userId: "u1", what: "заказ на Озоне", condition: "доставлен", intervalMs: HOUR, continuous: true });
+
+    // До порога (max(6ч, 20×1ч) = 20ч) — молчим: короткий обрыв связи это не «ослеп».
+    for (let i = 0; i < 20; i += 1) {
+      await svc.tickNow();
+      clock += HOUR;
+    }
+    expect(speak).not.toHaveBeenCalled();
+
+    await svc.tickNow(); // 20 часов без единой удачной проверки → порог пройден
+    expect(speak).toHaveBeenCalledTimes(1);
+    const said = String(speak.mock.calls[0]?.[0] ?? "");
+    expect(said).toContain("Не могу наблюдать");
+    expect(said).toContain("заказ на Озоне");
+
+    // Дальше молчим: доложили один раз, спамить каждый час нельзя.
+    for (let i = 0; i < 10; i += 1) {
+      clock += HOUR;
+      await svc.tickNow();
+    }
+    expect(speak).toHaveBeenCalledTimes(1);
+  });
+
+  it("удачная проверка = снова зрячий: следующая слепота докладывается заново", async () => {
+    let clock = 0;
+    const speak = vi.fn();
+    let blind = true;
+    const checker = async (): Promise<CheckResult> =>
+      blind ? { met: false, summary: "", error: "нет вкладки", transient: true } : { met: false, summary: "" };
+    const svc = new WatchService(checker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 1000 });
+    svc.registerSpeaker("s1", "u1", speak);
+    svc.add({ sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен", intervalMs: HOUR, continuous: true });
+
+    for (let i = 0; i <= 20; i += 1) {
+      await svc.tickNow();
+      clock += HOUR;
+    }
+    expect(speak).toHaveBeenCalledTimes(1); // первый доклад о слепоте
+
+    blind = false; // вкладку открыли — проверка прошла
+    await svc.tickNow();
+    clock += HOUR;
+    blind = true; // и снова ослепли — но отсчёт пошёл ЗАНОВО от удачной проверки
+    await svc.tickNow();
+    clock += HOUR;
+    expect(speak).toHaveBeenCalledTimes(1); // час без связи после восстановления — это ещё не слепота
+    for (let i = 0; i <= 20; i += 1) {
+      await svc.tickNow();
+      clock += HOUR;
+    }
+    expect(speak).toHaveBeenCalledTimes(2); // новый период слепоты — новое честное слово
+  });
+
+  it("ЗАПИСЬ ПРОШЛЫХ ВОЛН (нет lastOkAt, но проверки шли): не выдумываем «ни одна проверка не прошла»", async () => {
+    // Живой сценарий миграции: поле lastOkAt появилось позже самих наблюдений, значит у КАЖДОЙ уже
+    // стоявшей записи его нет — а первый же транзиентный тик после деплоя делал вердикт «с постановки
+    // НИ ОДНА проверка не прошла». Это утверждение о собственной истории, которого код не знает и
+    // которое противоположно правде (в watches.json остались lastCheckAt и lastValue).
+    const dir = tempDir();
+    mkdirSync(dir, { recursive: true });
+    const created = 1_000_000;
+    writeFileSync(
+      join(dir, "watches.json"),
+      JSON.stringify([
+        {
+          id: "w1", sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен",
+          intervalMs: HOUR, continuous: true, status: "active", createdAt: created,
+          lastCheckAt: created + 71 * HOUR, lastValue: "в пути",
+        },
+      ]),
+    );
+    let clock = created + 72 * HOUR;
+    const speak = vi.fn();
+    const store = new WatchStore(dir);
+    await store.load();
+    const svc = new WatchService(blindChecker, store, { now: () => clock, minIntervalMs: 1000 });
+    svc.registerSpeaker("s1", "u1", speak);
+
+    await svc.tickNow();
+    const said = String(speak.mock.calls[0]?.[0] ?? "");
+    expect(said).toContain("Не могу наблюдать"); // о слепоте молчать нельзя — она реальна
+    expect(said).not.toMatch(/ни одна проверка не прошла/i); // …но выдумывать историю нельзя тоже
+    expect(said).toContain("удачных проверок у меня не записано"); // говорим про ЗНАНИЕ, а не про факт
+    clock += HOUR;
+  });
+
+  it("доклад идёт дисциплиной доставки волны D: очередь не приняла → ждёт в pendingNotify, не теряется", async () => {
+    let clock = 0;
+    // Очередь озвучки полна (retriable-реплика честно отвергнута) — «отдал» ≠ «прозвучало».
+    const speak = vi.fn(() => false);
+    const svc = new WatchService(blindChecker, new WatchStore(tempDir()), { now: () => clock, minIntervalMs: 1000 });
+    svc.registerSpeaker("s1", "u1", speak);
+    const r = svc.add({ sessionId: "s1", userId: "u1", what: "заказ", condition: "доставлен", intervalMs: HOUR, continuous: true });
+    if (!r.ok) throw new Error("add failed");
+
+    for (let i = 0; i <= 20; i += 1) {
+      await svc.tickNow();
+      clock += HOUR;
+    }
+    expect(speak).toHaveBeenCalled();
+    expect(r.watch.pendingNotify).toContain("Не могу наблюдать"); // не выброшено молча
   });
 });

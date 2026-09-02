@@ -31,6 +31,12 @@ export interface ScreenShot {
    * в АБСОЛЮТНЫЕ экранные DIP (boundsX + x/scale) и кликнуть space:"screen", не завися от lastMapping.
    */
   mapping?: CaptureMapping;
+  /**
+   * ЗУМ-стадия: система координат КРОПА (возвращается только при rect). Экранные DIP считаются как
+   * `originX + x / scale`, где x — координата на этой картинке. Без этого лупа была тупиком: увидеть
+   * мелкий элемент крупно можно было, а кликнуть по увиденному — нет (lastMapping кроп не трогает).
+   */
+  crop?: { originX: number; originY: number; scale: number };
 }
 
 /** Маппинг последнего захвата: image-координаты → логические (DIP) virtual-desktop координаты для клика. */
@@ -178,7 +184,10 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
     const cw = Math.max(1, Math.min(thumbnailSize.width - cx, iw));
     const ch = Math.max(1, Math.min(thumbnailSize.height - cy, ih));
     let img = src.thumbnail.crop({ x: cx, y: cy, width: cw, height: ch });
-    const extra = opts.scale !== undefined ? Math.max(0.25, Math.min(2, opts.scale)) : 1;
+    // Кламп увеличения: картинка, вышедшая за MAX_EDGE, будет молча уменьшена на стороне модели —
+    // и заявленный масштаб перестанет описывать то, что она видит (адверс-ревью). Держим в пределах.
+    const extraRaw = opts.scale !== undefined ? Math.max(0.25, Math.min(2, opts.scale)) : 1;
+    const extra = Math.min(extraRaw, MAX_EDGE / Math.max(cw, ch));
     if (extra !== 1) {
       img = img.resize({ width: Math.max(1, Math.round(cw * extra)), height: Math.max(1, Math.round(ch * extra)) });
     }
@@ -186,7 +195,25 @@ export async function captureScreen(which?: string | number, opts?: CaptureOpts)
     if (png.length === 0) throw new Error("пустой кадр кропа экрана");
     const size = img.getSize();
     log.info("screen.capture (crop)", { display: display.id, w: size.width, h: size.height, bytes: png.length });
-    return { image: png.toString("base64"), mediaType: "image/png", width: size.width, height: size.height };
+    // 🔴 ЗУМ-СТАДИЯ (исследование грундинга 2026-09-01): сужение области поиска даёт ×2.5 к точности
+    // попадания (ScreenSpot-Pro: цель занимает 0.07% кадра). Но раньше кроп был ТУПИКОМ: lastMapping
+    // он осознанно не трогает, а своей системы координат не отдавал — по увиденному в лупе нельзя было
+    // кликнуть, и «посмотри крупнее» вело в никуда. Теперь возвращаем происхождение кропа и его
+    // масштаб: screenX = originX + x/scale (x — координата НА ЭТОЙ картинке).
+    // Масштаб выводим из ФАКТИЧЕСКОГО размера картинки, а не из задуманного увеличения: так формула
+    // пересчёта координат остаётся верной при любом клампе/округлении resize.
+    const cropScale = cw > 0 ? scale * (size.width / cw) : scale * extra;
+    return {
+      image: png.toString("base64"),
+      mediaType: "image/png",
+      width: size.width,
+      height: size.height,
+      crop: {
+        originX: display.bounds.x + cx / scale,
+        originY: display.bounds.y + cy / scale,
+        scale: cropScale,
+      },
+    };
   }
 
   const png = src.thumbnail.toPNG();

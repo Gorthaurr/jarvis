@@ -70,3 +70,61 @@ describe("lintCode (§4 критичные рельсы; реальное упр
     expect(lintCode("python", "skill_node = run_skill('node-task')").ok).toBe(true);
   });
 });
+
+describe("lintCode — подпись и почта (рубежи, объявленные прозой, теперь код)", () => {
+  it("РЕЛЬС — подпись документов БЛОКируется (63-ФЗ: необратимо и юридически значимо)", () => {
+    // На машине владельца есть квалифицированный сертификат физлица с приватным ключом и КриптоПро CSP:
+    // при закешированном PIN подпись поставится БЕЗ диалога, то есть незаметно.
+    const cases: Array<[Parameters<typeof lintCode>[0], string]> = [
+      ["powershell", "Set-AuthenticodeSignature -FilePath .\\dogovor.pdf -Certificate $c"],
+      ["powershell", "set-authenticodesignature $f $c"], // регистр PowerShell не важен
+      ["powershell", "& 'C:\\Program Files (x86)\\Crypto Pro\\CSP\\csptest.exe' -sfsign -sign -in d.pdf"],
+      ["powershell", "cryptcp.exe -sign -dn 'Веселков' dogovor.pdf dogovor.pdf.sig"],
+      ["python", "import subprocess; subprocess.run(['cryptcp', '-signf', 'akt.pdf'])"], // python шеллит на CLI
+      ["node", "require('child_process').execSync('csptest -keyset -sign')"],
+      ["powershell", "$c = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($p)"],
+    ];
+    for (const [lang, code] of cases) {
+      const r = lintCode(lang, code);
+      expect(r.ok, `${lang}: ${code}`).toBe(false);
+      expect(r.violations[0]?.rule).toBe("sign");
+      // Отказ ЧЕСТНЫЙ: объясняет необратимость и юридическую значимость, а не «нельзя и всё».
+      expect(r.violations[0]?.message).toMatch(/63-ФЗ/);
+      expect(r.violations[0]?.message).toMatch(/НЕОБРАТИМОЕ/);
+    }
+  });
+
+  it("ПРОВЕРКА подписи и соседние слова НЕ блокируются (гард не съедает легитимное)", () => {
+    // Get-AuthenticodeSignature только ЧИТАЕТ подпись — блокировать её было бы ложным запретом.
+    expect(lintCode("powershell", "Get-AuthenticodeSignature C:/app/setup.exe").ok).toBe(true);
+    expect(lintCode("powershell", "Get-ChildItem Cert:\\CurrentUser\\My | Select-Object Subject").ok).toBe(true);
+    expect(lintCode("python", "signature = compute_hmac(payload)").ok).toBe(true);
+    expect(lintCode("python", "from cryptography.hazmat.primitives import hashes").ok).toBe(true); // «crypto…» ≠ cryptcp
+  });
+
+  it("РЕЛЬС — отправка почты из code.run требует подтверждения владельца (§3), но не блок", () => {
+    const cases: Array<[Parameters<typeof lintCode>[0], string]> = [
+      ["python", "import smtplib\ns = smtplib.SMTP('smtp.mail.ru', 587)"],
+      ["python", "from smtplib import SMTP_SSL\nSMTP_SSL('smtp.mail.ru', 465).send_message(m)"],
+      ["powershell", "Send-MailMessage -To 'kate@example.com' -Subject 'hi' -SmtpServer smtp.mail.ru"],
+      ["node", "require('child_process').execSync(\"python -c 'import smtplib'\")"], // язык не спасает от гарда
+    ];
+    for (const [lang, code] of cases) {
+      const r = lintCode(lang, code);
+      expect(r.ok, `${lang}: ${code}`).toBe(true); // владелец вправе попросить письмо
+      expect(r.requiresConfirm, `${lang}: ${code}`).toBe(true);
+      // Владелец должен видеть, ЗА ЧТО его спрашивают: в модалку влезают лишь первые 160 символов кода.
+      expect(r.confirmReasons.join(" ")).toMatch(/письм/i);
+    }
+    // Работа с почтой БЕЗ отправки (чтение ящика) подтверждения не требует.
+    expect(lintCode("python", "import imaplib; imaplib.IMAP4_SSL('imap.mail.ru').login(u, p)").requiresConfirm).toBe(false);
+    // Соседние слова не ловятся: гард не должен спрашивать про SMTP-настройки в конфиге.
+    expect(lintCode("python", "cfg = {'smtp_host': 'smtp.mail.ru'}").requiresConfirm).toBe(false);
+  });
+
+  it("confirmReasons пуст, когда подтверждение не нужно (модалка не выдумывает причину)", () => {
+    const clean = lintCode("python", "print(2 + 2)");
+    expect(clean.requiresConfirm).toBe(false);
+    expect(clean.confirmReasons).toEqual([]);
+  });
+});

@@ -45,6 +45,22 @@ describe("protectedHits — автономия не снимает собств�
     expect(protectedHits([p])).toHaveLength(1);
   });
 
+  /**
+   * 🔴 Предохранители, которых в списке ДОЛГО НЕ БЫЛО, хотя каждый из них — рельс, а не «важный код»:
+   * снявшая его правка снимает ограничение разом, а сама выглядит безобидной. Проверяем ПОВЕДЕНИЕМ
+   * (через protectedHits), а не `PROTECTED_PATHS.includes` — гард обязан узнать путь так же, как он
+   * увидит его из `git status`. Пропажа записи роняет ровно один кейс с именем файла в отчёте.
+   */
+  it.each([
+    ["apps/server/src/brain/tools/dispatch.ts", "§14-гейт confirm на необратимые действия"],
+    ["apps/server/src/brain/code-guard.ts", "рельсы §4 исполняемого кода (песочницы у code.run нет)"],
+    ["apps/client/main/actuators/code-runner.ts", "вырезание секретов из env дочернего процесса"],
+    ["apps/server/src/brain/tools/dynamic.ts", "саморасширение: новый инструмент не в обход гардов"],
+    ["apps/server/src/brain/trading/tinkoff.ts", "торговый контур, деньги обратно не откатываются"],
+  ])("под рельсами: %s (%s)", (path) => {
+    expect(protectedHits([path])).toEqual([path]);
+  });
+
   it("список рельсов не пуст и покрывает четыре класса ограничителей", () => {
     expect(PROTECTED_PATHS.length).toBeGreaterThanOrEqual(10);
     expect(PROTECTED_PATHS.some((p) => p.includes("consent"))).toBe(true);

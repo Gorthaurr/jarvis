@@ -91,6 +91,8 @@ import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
 import type { VoiceProfileStore } from "../voice/speaker/store.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { ExtensionBridge } from "./extension-bridge.js";
+import { channelSummary, matchChannels } from "../brain/app-channels.js";
+import { hotPromotionsFor } from "../brain/tools/hot-promotions.js";
 import type { Session } from "./session.js";
 import { handleControlUtterance, handleTaskControl, handleTakeover } from "./task-control.js";
 import { feedEnroll, sendVoiceList, startVoiceEnroll } from "./voice-enroll.js";
@@ -421,11 +423,13 @@ export function makeSessionContext(
         mcpServers: brain.mcp?.status() ?? [],
         braveKey: Boolean(process.env.BRAVE_SEARCH_API_KEY),
         tinkoffToken: Boolean(process.env.TINKOFF_INVEST_TOKEN),
+        mailConfigured: Boolean(process.env.MAIL_SMTP_HOST && process.env.MAIL_USER && process.env.MAIL_PASSWORD),
         obsConfigured: Boolean(process.env.OBS_WEBSOCKET_PASSWORD || process.env.OBS_WEBSOCKET_HOST),
         autonomyFrozenReason: autonomyFreeze().info()?.reason ?? null,
         // Почему лёг резерв на подписке (протухшая авторизация/исчерпанный лимит) — знание на каждый
         // ход: иначе владелец слышит «связь прервалась» и не догадывается, что нужно переавторизоваться.
         subscriptionFailure: lastSubscriptionFailure(),
+        appChannels: channelSummary(agentDeps.appChannels ?? []),
       }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
@@ -885,10 +889,19 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
         if (Array.isArray(payload.apps)) ctx.envLexicon.apps = payload.apps.map(String);
         if (Array.isArray(payload.games)) ctx.envLexicon.games = payload.games.map(String);
       }
+      // Реестр программных каналов: сопоставляем установленное с таблицей рецептов. Держим на сессии
+      // (в промпт идёт только счётчик в паспорте; детали — инструментом app_channels по требованию).
+      if (Array.isArray(payload.installed)) {
+        ctx.agentDeps.appChannels = matchChannels(payload.installed);
+      }
       log.info("client.env: профиль окружения получен", {
         len: summary?.length ?? 0,
         apps: payload.apps?.length ?? 0,
         games: payload.games?.length ?? 0,
+        installed: payload.installed?.length ?? 0,
+        channels: ctx.agentDeps.appChannels?.length ?? 0,
+        // Причина №5: какие холодные инструменты на этой сессии греются по факту установленного (живой смоук по логу).
+        promoted: [...hotPromotionsFor(ctx.agentDeps.appChannels)],
       });
       break;
     }

@@ -44,9 +44,29 @@ export const PROTECTED_PATHS = [
   // цикл применит себя сам, не спросив владельца (ревью волны I, HIGH).
   "apps/server/src/brain/tools/handlers/self.ts",
   "apps/server/src/gateway/session.ts",
+  // Здесь стоит САМ §14-гейт: перед fs_delete/system_power и мутирующим MCP-инструментом dispatch
+  // зовёт ctx.confirm, а без канала подтверждения честно отказывает (fail-closed). Правка одной
+  // строки здесь снимает вопрос владельцу разом со ВСЕХ необратимых действий — рельс, а не код.
+  "apps/server/src/brain/tools/dispatch.ts",
   "apps/server/src/brain/messaging/outbound.ts",
   "apps/server/src/brain/orders/order-guard.ts",
   "apps/server/src/brain/tools/dispatch-util.ts",
+  // Рельсы §4 у code.run: самозащита (не убивать свои процессы), питание только через system_power,
+  // необратимая потеря данных → confirm. Песочницы у code.run нет ОСОЗНАННО, поэтому этот линт —
+  // единственный ограничитель на пути произвольного кода; снявшая его правка снимает всё сразу.
+  "apps/server/src/brain/code-guard.ts",
+  // Вырезание секретов из env дочернего процесса (*KEY/SECRET/TOKEN/PASSWORD/CREDENTIAL). Убери
+  // фильтр — и любой скрипт code_run получает ключи владельца целиком, тихо и без следов в диффе
+  // логики. Ограничитель живёт на клиенте, но снять его можно серверной самоправкой — значит в список.
+  "apps/client/main/actuators/code-runner.ts",
+  // Саморасширение tool_create: самописный инструмент исполняется через тот же гардированный
+  // code.run (lintCode при создании и запуске). Правка здесь даёт способ завести инструмент В ОБХОД
+  // предохранителей — то есть снять рельсы, не трогая сами рельсы.
+  "apps/server/src/brain/tools/dynamic.ts",
+  // Торговый контур: единственное место, где Джарвис ходит в брокера токеном владельца. Контур
+  // read-only ПО КОДУ, а не по политике — автономная правка, добавляющая ордерный запрос, двигала бы
+  // чужие деньги без §14. Деньги обратно не откатываются, поэтому запрет здесь превентивный.
+  "apps/server/src/brain/trading/tinkoff.ts",
   "apps/server/src/brain/agent/error-voice.ts",
   "apps/server/src/gateway/bind.ts",
   "apps/client/main/actuators/self-guard.ts",

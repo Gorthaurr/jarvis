@@ -112,10 +112,27 @@ const NEUTRAL_TOOLS = new Set([
   // перемен (НЕ verify: хеш не доказывает исход — план §4.2); wait_for — ожидание (его met:true за
   // сверку зачитывает agent-петля по data.met, не статический класс — см. dispatch/observed).
   "window_list", "screen_probe", "wait_for",
+  // Сценарии 2026-09-02: статус фонового задания — чтение, не дело («посмотрел статус и сдался» ≠ успех).
+  "job_status",
+  // Пер-процессный звук: audio_sessions — ЧТЕНИЕ («кто звучит»), мир не меняет. Как mutate оно
+  // взводило бы anyMutateSucceeded → «посмотрел, кто шумит, и сдался» проходило бы успехом задачи
+  // «выруби звук». Сам мьют (audio_set) остаётся mutate и в BLIND_MUTATE НЕ входит: он возвращает
+  // ПЕРЕЧИТАННОЕ состояние сессии, то есть сверяет себя сам — лишний verify-нудж был бы наказанием
+  // за дешёвый честный путь (тот же довод, что у ui_ground).
+  "audio_sessions",
+  // Реестр программных каналов: app_channels — ЧТЕНИЕ справочника, app_channel_forget — durable-конфиг.
+  // Как mutate они взводили anyMutateSucceeded и ГАСИЛИ masked-failure с анти-капитуляцией в начале
+  // почти каждой десктопной задачи (инструмент горячий и по описанию зовётся ПЕРВЫМ) — «посмотрел, что
+  // есть API, и сдался» проходило бы успехом. app_channel_learn остаётся mutate: он исполняет пробу и пишет стор.
+  "app_channels", "app_channel_forget",
   // Волна I (самоулучшение): чтение СВОЕГО кода и своей телеметрии — восприятие, не дело. Как mutate
   // они взводили бы anyMutateSucceeded → «полистал свой код и сдался» проходило бы успехом задачи
   // «почини себя». Сама правка (self_patch) остаётся mutate — она действительно меняет мир.
   "self_weaknesses", "self_code_search", "self_code_read",
+  // §3.9 зрение на файл: file_view — ЧТЕНИЕ файла с диска (картинка/страница PDF), не сверка GUI
+  // (в VERIFY он не входит: экран он не видит, verify-долг слепого действия им не снять) и не дело.
+  // Как mutate он взводил бы anyMutateSucceeded → «посмотрел файл и сдался» проходило бы успехом.
+  "file_view",
 ]);
 
 // H3: у MCP-инструментов (mcp__server__tool) эффект не известен заранее. Читающее ИМЯ (get/list/
@@ -138,8 +155,15 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
 // (регион/нет элемента/потерян фокус) и вернуть ok; app_focus (AppActivate) хрупкий. После такого
 // действия перед «готово» ОБЯЗАТЕЛЬНА сверка глазами (browser_read/inspect/screen_capture).
 // Прочие mutate (code_run → stdout/exit, fs_* → запись, office_* → COM-результат, system_volume →
-// readback, app_launch → проверка процесса, *_open → открытая вкладка) САМОПОДТВЕРЖДАЮТСЯ своим
+// readback, app_launch → см. ниже, *_open → открытая вкладка) САМОПОДТВЕРЖДАЮТСЯ своим
 // tool_result — внешняя визуальная сверка им не нужна (иначе спамим экран-чтением на каждый код-ран).
+// 🔴 app_launch (пересмотрено 2026-09-01, дефект «steam://rungameid/<мусор> всегда Готово»): он ОСТАЁТСЯ
+// самоподтверждающимся, потому что клиентский резолвер теперь сверяет исход РЕАЛЬНО — живой процесс
+// (exe) либо процесс игры/RunningAppID Steam (URI), иначе честная ошибка. Единственная ветка без
+// способа сверки — чужой URI-обработчик (ms-settings:, tg:) и стаб-лончер UWP: она приезжает с
+// confirmed:false и note «факт запуска не подтверждён» ПРЯМО в tool_result, то есть модель видит
+// неопределённость и сверяет её сама. Заводить app_launch в BLIND_MUTATE не стали осознанно: это
+// требовало бы визуального раунда после КАЖДОГО запуска (блокнот/дискорд) ради редкой ветки.
 // ui_ground здесь НЕ значится — это чтение (см. NEUTRAL_TOOLS выше).
 const BLIND_MUTATE_TOOLS = new Set([
   "input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke",
@@ -191,7 +215,7 @@ export function claimsObservedResult(text: string): boolean {
  * потребителя: анти-masked-failure в петле и журнал чекпойнта — разойдись они, журнал объявил бы
  * неподтверждённую отправку совершённой (финальный контроль волны C, HIGH).
  */
-export const OUTBOUND_SEND_TOOLS = new Set(["telegram_send", "telegram_send_voice", "message_send", "order_place"]);
+export const OUTBOUND_SEND_TOOLS = new Set(["telegram_send", "telegram_send_voice", "message_send", "order_place", "mail_send"]);
 
 /** Грубая классификация по тексту ошибки (для будущих специализированных фраз/телеметрии). */
 export function classifyFailure(detail?: string): FailureClass {
