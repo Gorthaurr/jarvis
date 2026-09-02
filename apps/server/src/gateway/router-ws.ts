@@ -45,7 +45,7 @@ import { renderCapabilityPassport } from "../brain/capabilities.js";
 import { lastSubscriptionFailure } from "../integrations/subscription-llm.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
-import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed, setLastSelfReviewed } from "../brain/profile.js";
+import { getProfile, readEvictedFacts, readFactMeta, removeFactExact, setLanguage, setContext, setLastBriefed, setLastSelfReviewed, setModelChoice } from "../brain/profile.js";
 import { readConsolidationRuns } from "../proactive/consolidation-journal.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { buildBriefing, shouldBrief } from "../proactive/briefing.js";
@@ -57,6 +57,7 @@ import { parseCalendarChips } from "../proactive/ambient/calendar-parse.js";
 import type { CalendarReadResult } from "../proactive/ambient/calendar-source.js";
 import { isDevSession } from "./dev-session.js";
 import { DEFAULT_LIMITS, type SpendGuard, type SpendGuards } from "../billing/index.js";
+import type { ProductRuntime, ThresholdNotify } from "../product/gateway-hooks.js";
 import { setCredential } from "../db/credentials.js";
 import type { ILlmProvider } from "../integrations/llm.js";
 import type { EpisodicMemory } from "../memory/episodic.js";
@@ -122,6 +123,11 @@ export interface BrainProviders {
   web: IWebProvider;
   /** §6B/B5: реестр SpendGuard по userId (per-tenant траты + живой persist usage_quota). */
   spend: SpendGuards;
+  /**
+   * ПРОДУКТОВЫЙ КАРКАС (2026-09-02): идентичность/квоты/ledger/выбор модели. Опционален (тесты без него);
+   * при мастер-флаге 0 все продуктовые точки отдают undefined — поведение прежнее.
+   */
+  product?: ProductRuntime;
   models: Record<Exclude<Tier, "tier0">, string>;
   /** «Эффорт» рассуждения (thinking) по тиру (§7). */
   tierThinking: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
@@ -178,6 +184,8 @@ export interface SessionContext {
   voice: VoicePipeline;
   /** Зависимости agent-loop (§7, §8). */
   agentDeps: AgentDeps;
+  /** Продуктовый рантайм (квоты/выбор модели/usage) — undefined в тестах без gateway; при флаге 0 — инертен. */
+  product?: ProductRuntime;
   /** Последний полученный ClientContext — вход для proactive (§9). */
   lastContext?: ClientContext;
   /** §Волна2 (2.6): структурные списки из client.env — источник лексикона STT-нормализатора. */
@@ -231,10 +239,21 @@ async function synthTtsToBase64(tts: ITtsProvider, text: string): Promise<string
  * §6B/B5: отправить клиенту снимок расхода/лимитов (вкладка «Оплата»). Read-only — сервер считает,
  * клиент отображает. План — производная (нет платёжной системы, §0-p5): потолок выше дефолтного → «Pro».
  */
-function sendUsage(session: Session, spend: SpendGuard): void {
+function sendUsage(session: Session, spend: SpendGuard, product?: ProductRuntime): void {
   const s = spend.snapshot();
-  const plan = s.cap > DEFAULT_LIMITS.spendCap ? "Pro" : "Базовый";
-  session.send("usage.info", { plan, ...s });
+  const legacy = (): void => {
+    // Имя плана — производная от потолка ТОЛЬКО в дев-режиме (платёжной системы там нет). В продуктовом
+    // режиме это выдумка: пользователю на «Демо» показывали «Pro» (живой прогон 2026-09-02) — честнее
+    // сказать, что тариф прочитать не удалось.
+    const plan = product?.policy.quotas ? "тариф временно недоступен" : s.cap > DEFAULT_LIMITS.spendCap ? "Pro" : "Базовый";
+    session.send("usage.info", { plan, ...s });
+  };
+  // ПРОДУКТОВЫЙ РЕЖИМ (квоты плана): кредиты/план/статус/пороги из QuotaResolver; при флаге 0 — прежний снимок.
+  if (!product?.policy.quotas) return legacy();
+  void product
+    .usageInfoFor(session.userId)
+    .then((u) => (u ? session.send("usage.info", u) : legacy()))
+    .catch(() => legacy());
 }
 
 /** Сколько записей каждого слоя отдаём в UI (владельцу нужен обзор, не выгрузка всей БД). */
@@ -375,9 +394,18 @@ export function makeSessionContext(
     responseCache: brain.responseCache, // §15 семантический кэш ответов (lookup до LLM / store после)
     embedder: brain.embedder, // §20 Волна 1: семантический слой дубль-гейта (e5-косинус к целям задач)
     web: brain.web,
-    models: brain.models,
+    // ВЫБОР МОДЕЛИ ПОЛЬЗОВАТЕЛЕМ (2026-09-02): его выбор из профиля поверх лестницы тиров (синхронно, без
+    // фильтра плана — пустой выбор = дефолт байт-в-байт); фильтр плана уточняется асинхронно ниже.
+    // ПРИ КВОТАХ первый ход идёт на ДЕФОЛТАХ: выбор пользователя применяется ПОСЛЕ фильтра плана (modelsFor
+    // ниже) — иначе одна дорогая реплика на модели вне allowlist плана (ревью 2026-09-02).
+    models: brain.product && !brain.product.policy.quotas ? brain.product.modelsSync(session.userId) : brain.models,
     tierThinking: brain.tierThinking,
     spend: brain.spend.forUser(session.userId), // §6B/B5: гвард ЭТОГО юзера (траты не мешаются, persist живой)
+    // ПРОДУКТОВЫЙ РЕЖИМ: честный терминал квоты тарифа и ledger-приёмник расхода (undefined при флаге 0).
+    quotaExhaustedText: brain.product?.quotaExhaustedText(),
+    // Продуктовый режим: инструменты самоосмотра/самоправки арендатору не отдаются (гейт в dispatch).
+    productMode: brain.product?.policy.enabled === true,
+    usageSink: brain.product?.usageSinkFor(session.userId),
     userId: session.userId,
     // Персистентный профиль (§8/§11, §6B/B3 — раздел этого userId): имя/факты в персону, чтобы
     // Джарвис ПОМНИЛ пользователя. Загружен в handshake (loadProfile) ДО makeSessionContext.
@@ -562,7 +590,9 @@ export function makeSessionContext(
    * молчим вовсе — предлагать себя чинить, когда владелец всё остановил, неуместно.
    */
   const flushSelfReview = async (): Promise<void> => {
-    if (devSession || selfReviewTried || selfReviewInFlight) return;
+    // Продуктовый режим: самоосмотр — доклад ВЛАДЕЛЬЦУ машины о её же телеметрии (счётчики общие по
+    // серверу). Арендатору он не адресован и его данными не является (живой прогон 2026-09-02).
+    if (devSession || brain.product?.policy.enabled || selfReviewTried || selfReviewInFlight) return;
     if (autonomyFreeze().isFrozen()) return;
     const everyDays = Math.max(1, Number(process.env.JARVIS_SELF_REVIEW_DAYS ?? 3) || 3);
     if (!shouldSelfReview({ lastReviewedAt: getProfile(session.userId).lastSelfReviewedAt, everyDays, enabled: true }, Date.now())) {
@@ -790,12 +820,43 @@ export function makeSessionContext(
   // владельца 2026-07-25). Канал — тот же task.status, что у §20-задач: панель уже умеет его рисовать.
   brain.activities?.registerStatus(session.sessionId, session.userId, (payload) => session.send("task.status", payload));
   // §6B/B5: начальный снимок расхода/лимитов для вкладки «Оплата» (read-only; per-user SpendGuard).
-  sendUsage(session, brain.spend.forUser(session.userId));
+  sendUsage(session, brain.spend.forUser(session.userId), brain.product);
+  let thresholdNotify: ThresholdNotify | undefined;
+  if (brain.product) {
+    const product = brain.product;
+    // Выбор модели: каталог + фильтр плана → клиенту (селект в «Общем»); уточнить модели петли по плану.
+    void product
+      .modelsFor(session.userId)
+      .then(async (r) => {
+        agentDeps.models = r.models;
+        session.send("models.catalog", await product.modelsCatalogFor(session.userId));
+      })
+      .catch((e) => {
+        // Фильтр плана недоступен (БД): петля на ДЕФОЛТАХ, панели — честный каталог с пометкой unavailable.
+        log.warn("models.catalog: фильтр плана недоступен, применены дефолты", e instanceof Error ? e.message : String(e));
+        session.send("models.catalog", product.modelsCatalogFallback(session.userId));
+      });
+    // Пороги квоты тарифа (80/100%): свежий usage.info + ОДНО голосовое предупреждение (retriable — не теряется).
+    // НЕ в dev-сессии (правило проекта: текст-драйвер не потребляет накопленное владельцем — иначе единственное
+    // голосовое предупреждение уходило бы в смоук). Уведомитель возвращает, ПРИНЯТА ли реплика; отписка —
+    // в detachSpeakers, иначе после reconnect говорил бы мёртвый пайплайн.
+    if (!devSession) {
+      thresholdNotify = (kind, usage, onOutcome) => {
+        session.send("usage.info", usage);
+        const pct = usage.softPct ?? 80;
+        const line = kind === "soft" ? `Израсходовано ${pct} процентов кредитов тарифа, сэр.` : "Кредиты тарифа исчерпаны, сэр — продлите план или добавьте свой ключ.";
+        // onOutcome: реплика выброшена (TTL/«стоп»/смерть сессии) → durable-отметка откатывается, предупредим снова.
+        return voice.speakQueued(verbalize(line), true, { retriable: true, onOutcome });
+      };
+      product.attachThreshold(session.userId, session.sessionId, thresholdNotify, (u) => session.send("usage.info", u));
+    }
+  }
   // Отписать каналы проактивной озвучки ЭТОГО соединения (голосовой пайплайн умирает). Проактивные
   // события в grace-окне уйдут в pending и догонят владельца на reconnect (flushPending по userId).
   const detachSpeakers = (): void => {
     brain.reminders?.unregisterSpeaker(session.sessionId); // §9: больше не доставляем сюда
     brain.watch?.unregisterSpeaker(session.sessionId); // §долгие-задачи: больше не доставляем сюда
+    if (thresholdNotify) brain.product?.detachThreshold(session.userId, session.sessionId); // продукт: пороги квоты
     brain.watch?.unregisterActions(session.sessionId); // §Волна3 (3.4): канал предикат-проверок этой сессии мёртв
     brain.watch?.unregisterRunner(session.sessionId); // P0 «watch действует»: запускатель этой сессии мёртв
     brain.ambient?.unregisterSpeaker(session.sessionId); // §проактив-всё: больше не доставляем сюда
@@ -824,6 +885,7 @@ export function makeSessionContext(
     heartbeat,
     voice,
     agentDeps,
+    product: brain.product,
     envLexicon, // §Волна2 (2.6): client.env-хендлер мутирует списки → лексикон нормализатора живой
     disposeAgent,
     onOwnerPresent, // доклад о сбоях + сводка дня — на первой реплике владельца (любой канал, см. выше)
@@ -938,6 +1000,19 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const s = env.payload as ClientSettings;
       if (typeof s.language === "string") void setLanguage(ctx.session.userId, s.language);
       if (typeof s.context === "string") void setContext(ctx.session.userId, s.context);
+      // ВЫБОР МОДЕЛИ (2026-09-02): персист в профиль → пересчёт моделей петли (с фильтром плана при квотах)
+      // → ответ models.catalog с тем, что реально применилось и что отклонено (не молча).
+      if (s.models && typeof s.models === "object" && ctx.product) {
+        const product = ctx.product;
+        void setModelChoice(ctx.session.userId, s.models)
+          .then(async () => {
+            const r = await product.modelsFor(ctx.session.userId);
+            ctx.agentDeps.models = r.models;
+            if (r.collapsed) log.warn("выбор модели: дефолт и эскалация — одна модель, каскад §7 не сработает", { userId: ctx.session.userId });
+            ctx.session.send("models.catalog", await product.modelsCatalogFor(ctx.session.userId));
+          })
+          .catch((e) => log.warn("client.settings.models: не применилось", e instanceof Error ? e.message : String(e)));
+      }
       ctx.agentDeps.userContext = {
         ...ctx.agentDeps.userContext,
         ...(typeof s.context === "string" ? { context: s.context } : {}),
@@ -948,7 +1023,7 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     }
     case "client.usage.request": {
       // §6B/B5: клиент (вкладка «Оплата») просит свежий снимок расхода/лимитов.
-      sendUsage(ctx.session, ctx.agentDeps.spend);
+      sendUsage(ctx.session, ctx.agentDeps.spend, ctx.product);
       break;
     }
     case "memory.request": {

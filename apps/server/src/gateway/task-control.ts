@@ -140,6 +140,11 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
 
   // «стоп» — оборвать TTS (§20), задачу не трогаем (различие «заткнись» vs «отмени»).
   if (decision.kind === "stop_tts") {
+    // 🔴 Обрывать НЕЧЕГО — значит это не «замолчи», а обычная реплика («тише» о громкости музыки).
+    // Живой прогон 2026-09-02: в тишине «тише» и «сделай тише» не делали ВООБЩЕ ничего (ни действия, ни
+    // ответа), а синонимы «потише»/«убавь громкость» работали — необъяснимая капризность. Пропускаем
+    // такую реплику дальше в роутер, где она честно отработает как команда громкости.
+    if (ctx.voice.state !== "speaking" && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false;
     ctx.voice.onVadEvent("barge_in");
     ctx.voice.clearPendingSpeech(); // пользователь хочет тишины — не озвучивать отложенные фоновые итоги
     ctx.session.send("client.state", { state: "idle" });

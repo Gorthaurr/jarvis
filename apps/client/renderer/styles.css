@@ -1067,6 +1067,13 @@ body {
   line-height: 1.45;
   color: var(--text-mute);
 }
+.setgroup__hint--warn { color: var(--danger); }
+/* подпись над селектом внутри группы (секция «Модель»: два селекта в одной группе) */
+.setgroup__sub {
+  margin: 4px 0 -6px;
+  font-size: var(--fs-hint);
+  color: var(--text-mute);
+}
 
 /* ── оплата / тариф ── */
 .plan {
@@ -1090,6 +1097,8 @@ body {
   font-variant-numeric: tabular-nums;
 }
 #planName { color: var(--accent); }
+.plan__row--hidden { display: none; }
+.plan__value--warn { color: var(--danger); }
 
 /* ── список устройств ── */
 .device-list {

@@ -100,6 +100,9 @@ export interface ConfirmOutcome {
   approvalId?: string;
 }
 
+/** Инструменты волны I: только для владельца машины (см. ToolContext.productMode). */
+const SELF_TOOLS: ReadonlySet<string> = new Set(["self_weaknesses", "self_code_search", "self_code_read", "self_patch"]);
+
 export interface ToolContext {
   session: ActuatorSink;
   web: IWebProvider;
@@ -121,6 +124,13 @@ export interface ToolContext {
   ) => Promise<ConfirmOutcome>;
   /** Волна H: деп хука противоречий памяти (нет → memory_write пишет как раньше, без пометок). */
   contradiction?: ContradictionDeps;
+  /**
+   * Продуктовый режим (арендатор, а не владелец машины). Инструменты САМОосмотра и САМОправки
+   * (self_*) — про исходники и телеметрию МАШИНЫ ВЛАДЕЛЬЦА, они не про пользователя и не для него.
+   * Живой прогон 2026-09-02: второму тенанту проактивно доложили статистику сбоев ПО ВСЕМУ серверу
+   * («24 из 34 ходов не дошли до модели») и предложили «почини себя».
+   */
+  productMode?: boolean;
   /** Реестр самописных инструментов (§8+ саморасширение). */
   dynamicTools?: DynamicToolStore;
   /** §15 ленивая загрузка: набор подгруженных холодных инструментов (tool_load его мутирует). */
@@ -344,6 +354,11 @@ async function dispatchToolCore(
   ctx: ToolContext,
 ): Promise<ToolResult> {
   // Server-side инструменты мозга (§12, §8).
+  // Волна I (самоулучшение) в ПРОДУКТОВОМ режиме недоступна: self_* читают телеметрию и исходники МАШИНЫ
+  // ВЛАДЕЛЬЦА, а self_patch их ещё и правит. Арендатору это не принадлежит (живой прогон 2026-09-02:
+  // новому пользователю доложили статистику сбоев по всему серверу и предложили «почини себя»).
+  if (ctx.productMode && SELF_TOOLS.has(name))
+    return err("самодиагностика и самоправка доступны только владельцу этой машины — в облачном режиме они выключены");
   switch (name) {
     case "app_channel_learn":
       return appChannelLearn(ctx, input);
@@ -418,7 +433,8 @@ async function dispatchToolCore(
       return consentList(ctx);
     case "consent_revoke":
       return consentRevoke(ctx, input);
-    // Волна I (самоулучшение): свой код, свои слабости, своя правка под рельсами.
+    // Волна I (самоулучшение): свой код, свои слабости, своя правка под рельсами (в продуктовом режиме
+    // отключены гейтом SELF_TOOLS выше — это инструменты владельца машины, не арендатора).
     case "self_weaknesses":
       return selfWeaknesses(ctx, input);
     case "self_code_search":

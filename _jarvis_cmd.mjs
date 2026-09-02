@@ -21,7 +21,9 @@ const sendNext = () => {
 
 ws.onopen = () => {
   log("WS open → hello");
-  send("client.hello", { token: "dev", clientVersion: "cmd-test", protocolVersion: 1 });
+  // Продуктовый режим (2026-09-02): токен тестового пользователя из JARVIS_CLIENT_TOKEN (то же имя, что у
+  // Electron-клиента); дефолт "dev" — поведение драйвера при мастер-флаге 0 не меняется.
+  send("client.hello", { token: process.env.JARVIS_CLIENT_TOKEN || "dev", clientVersion: "cmd-test", protocolVersion: 1 });
 };
 ws.onerror = (e) => log("WS error", e.message || e);
 ws.onclose = () => log("WS closed");

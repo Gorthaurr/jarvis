@@ -6,6 +6,7 @@
  * сервер при этом поднимается и обслуживает gateway.
  */
 import { PROTOCOL_VERSION } from "@jarvis/protocol";
+import { type ProductPolicy, resolveProductFlags } from "./product/policy.js";
 import {
   DEFAULT_MODELS,
   DEFAULT_TIER_THINKING,
@@ -66,9 +67,28 @@ export interface ServerConfig {
   /** §6B/безопасность: явное разрешение не-loopback bind. Дефолт false — иначе listen-гард
    *  принудит 127.0.0.1 (LAN-сосед не должен самопровижнить любой userId, пока auth дремлет). */
   readonly allowRemote: boolean;
+  /**
+   * JARVIS_TRUST_PROXY: число = сколько хопов X-Forwarded-For доверять (1 — один прокси), строка = адреса/CIDR
+   * прокси; false = не читать XFF. `true` (все хопы) ОСОЗНАННО не поддерживается: клиент подделал бы
+   * «X-Forwarded-For: 127.0.0.1» и получил loopback-привилегии (контроль-ревью 2026-09-02).
+   */
+  readonly trustProxy: false | number | string;
+  /**
+   * ПРОДУКТОВЫЙ КАРКАС (2026-09-02): мастер-переключатель JARVIS_PRODUCT_MODE + подфлаги. Выключен =
+   * ровно сегодняшнее поведение (product/policy.ts PRODUCT_OFF). Подсистемы читают ЭТО, не env.
+   */
+  readonly product: ProductPolicy;
 }
 
 /** Собрать конфиг из process.env один раз на старте. */
+/** JARVIS_TRUST_PROXY → опция Fastify: "" → false; "N" → N хопов; иначе список адресов/CIDR. */
+export function parseTrustProxy(raw: string): false | number | string {
+  const v = raw.trim();
+  if (!v) return false;
+  if (/^\d+$/.test(v)) return Number(v);
+  return v;
+}
+
 export function loadConfig(): ServerConfig {
   return {
     port: envInt("PORT", 8787),
@@ -121,6 +141,8 @@ export function loadConfig(): ServerConfig {
 
     authStrict: envBool("JARVIS_AUTH_STRICT"),
     allowRemote: envBool("JARVIS_ALLOW_REMOTE"),
+    trustProxy: parseTrustProxy(env("JARVIS_TRUST_PROXY", "")),
+    product: resolveProductFlags(),
   };
 }
 

@@ -121,12 +121,15 @@ export class AnthropicLlmProvider implements ILlmProvider {
     let lastErr: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
       try {
-        return await this.callReal(req);
+        const ok = await this.callReal(req);
+        lastApiFailure_ = undefined; // канал жив — прежняя причина протухла немедленно
+        return ok;
       } catch (e) {
         lastErr = e;
         // Детерминированную 4xx (invalid_request: протёкший sampling-параметр/неверный model id и т.п.)
         // ретраить бессмысленно — повторится идентично. Падаем в стаб СРАЗУ (голос: быстро падать).
         if (!isRetryable(e)) {
+          rememberApiFailure(e); // причину назовём пользователю вместо «связь прервалась»
           log.error("LLM-вызов не удался (неретраябельно) — стаб", {
             status: (e as { status?: number })?.status,
             error: e instanceof Error ? e.message : String(e),
@@ -141,6 +144,7 @@ export class AnthropicLlmProvider implements ILlmProvider {
         }
       }
     }
+    rememberApiFailure(lastErr);
     log.error("LLM недоступен после ретраев — стаб", {
       error: lastErr instanceof Error ? lastErr.message : String(lastErr),
     });
@@ -415,11 +419,66 @@ export function parseResponse(resp: RawResponse): LlmResponse {
   };
 }
 
+/**
+ * Причина последнего отказа API — чтобы НАЗВАТЬ её пользователю. Живой прогон 2026-09-02: на исчерпанном
+ * балансе ключа человек слышал «Связь с сервером прервалась», хотя связь была в порядке. Неверно названная
+ * причина — та же неправда, что ложное «Готово»: владелец пойдёт чинить сеть вместо баланса.
+ */
+export type ApiFailureKind = "credits" | "auth" | "rate_limit" | "overloaded" | "other";
+export interface ApiFailure {
+  kind: ApiFailureKind;
+  /** Что сказать ВЛАДЕЛЬЦУ/пользователю голосом — коротко и по делу. */
+  human: string;
+  at: number;
+}
+
+/** Причина считается актуальной полчаса: разовая 429 не должна неделю числиться «каналом не отвечает». */
+const API_FAILURE_TTL_MS = 30 * 60_000;
+let lastApiFailure_: ApiFailure | undefined;
+
+/** Классификация текста ошибки API (чистая функция — зеркало classifySubscriptionError). */
+export function classifyApiError(text: string, status?: number): ApiFailure {
+  const t = String(text ?? "");
+  const at = Date.now();
+  if (/credit balance is too low|insufficient.{0,20}credit|billing/i.test(t)) {
+    return { kind: "credits", human: "у сервиса кончился баланс доступа к модели — я не смог к ней обратиться", at };
+  }
+  if (status === 401 || status === 403 || /invalid x-api-key|authentication|unauthorized|permission/i.test(t)) {
+    return { kind: "auth", human: "ключ доступа к модели не принят — обращение не прошло", at };
+  }
+  if (status === 429 || /rate.?limit|too many requests/i.test(t)) {
+    return { kind: "rate_limit", human: "модель сейчас ограничивает частоту запросов — повторите через минуту", at };
+  }
+  if (status === 529 || /overloaded/i.test(t)) {
+    return { kind: "overloaded", human: "модель сейчас перегружена — повторите чуть позже", at };
+  }
+  return { kind: "other", human: "связь с сервером прервалась", at };
+}
+
+/** Последняя АКТУАЛЬНАЯ причина отказа API (протухшая исчезает — мы про «сейчас» не знаем). */
+export function lastApiFailure(): ApiFailure | undefined {
+  if (lastApiFailure_ && Date.now() - lastApiFailure_.at <= API_FAILURE_TTL_MS) return lastApiFailure_;
+  return undefined;
+}
+
+function rememberApiFailure(e: unknown): void {
+  const status = (e as { status?: number })?.status;
+  const text = e instanceof Error ? e.message : String(e);
+  lastApiFailure_ = classifyApiError(text, typeof status === "number" ? status : undefined);
+}
+
+/** Фраза для владельца о последнем отказе модели: названа ПРИЧИНА, а не «связь прервалась» вслепую. */
+export function llmFailureLine(): string {
+  const f = lastApiFailure();
+  return f ? `${f.human[0]!.toUpperCase()}${f.human.slice(1)}, сэр.` : "Связь с сервером прервалась, сэр. Повторите, пожалуйста.";
+}
+
 /** Стаб без сети (нет ключа / шлюз недоступен): короткое произносимое сообщение, без tool-use. */
 function stub(_req: LlmRequest): LlmResponse {
   return {
-    // Уходит в TTS → чисто и в характере, без debug-префикса и эха запроса.
-    text: "Связь с сервером прервалась, сэр. Повторите, пожалуйста.",
+    // Уходит в TTS → чисто и в характере, без debug-префикса и эха запроса. Причина названа честно,
+    // если она известна (кончился баланс / ключ не принят / перегруз), иначе — прежняя общая фраза.
+    text: llmFailureLine(),
     toolUses: [],
     stopReason: "stub",
     usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },

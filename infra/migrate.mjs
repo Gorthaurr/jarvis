@@ -41,6 +41,31 @@ const DATABASE_URL =
 
 const MIGRATIONS_DIR = resolve(__dirname, 'migrations');
 
+// ПРОДУКТОВЫЙ КАРКАС (2026-09-02): миграции 01xx лежат ОТДЕЛЬНО (migrations-product/) и применяются
+// только по явной просьбе — `--product` или JARVIS_PRODUCT_MODE=1. Дефолтный `pnpm db:migrate` их не
+// трогает: при мастер-флаге 0 боевая БД владельца не меняется (правило «0 = сегодняшнее поведение»).
+const PRODUCT_MIGRATIONS =
+    process.argv.includes('--product') ||
+    /^(1|true|yes|on)$/i.test((process.env['JARVIS_PRODUCT_MODE'] ?? '').trim());
+const PRODUCT_MIGRATIONS_DIR = resolve(__dirname, 'migrations-product');
+
+/** Все файлы миграций в порядке применения: базовые 00xx, затем продуктовые 01xx (если включены). */
+async function listMigrationFiles() {
+    const dirs = [MIGRATIONS_DIR, ...(PRODUCT_MIGRATIONS ? [PRODUCT_MIGRATIONS_DIR] : [])];
+    const out = [];
+    for (const dir of dirs) {
+        let entries;
+        try {
+            entries = await readdir(dir);
+        } catch (err) {
+            console.error(`[migrate] Не удалось прочитать директорию миграций ${dir}: ${err.message}`);
+            process.exit(1);
+        }
+        for (const f of entries.filter((f) => f.endsWith('.sql')).sort()) out.push({ name: f, path: join(dir, f) });
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Ленивая загрузка драйвера 'pg' (нужен только для нативного/удалённого Postgres;
 // для встроенного PGlite — не требуется).
@@ -109,17 +134,9 @@ async function main() {
         );
         const appliedSet = new Set(applied.map((r) => r.name));
 
-        // Читаем все .sql файлы из директории миграций, сортируем по имени
-        let files;
-        try {
-            const entries = await readdir(MIGRATIONS_DIR);
-            files = entries
-                .filter((f) => f.endsWith('.sql'))
-                .sort(); // лексикографический порядок = 0001, 0002, ...
-        } catch (err) {
-            console.error(`[migrate] Не удалось прочитать директорию миграций: ${err.message}`);
-            process.exit(1);
-        }
+        // Все .sql файлы (базовые + продуктовые при --product), в порядке имени внутри каталога
+        const files = await listMigrationFiles();
+        if (PRODUCT_MIGRATIONS) console.log(`[migrate] + продуктовые миграции: ${PRODUCT_MIGRATIONS_DIR}`);
 
         if (files.length === 0) {
             console.log('[migrate] Миграций не найдено.');
@@ -129,14 +146,13 @@ async function main() {
         let applied_count = 0;
         let skipped_count = 0;
 
-        for (const file of files) {
+        for (const { name: file, path: filePath } of files) {
             if (appliedSet.has(file)) {
                 console.log(`[migrate] Пропуск (уже применена): ${file}`);
                 skipped_count++;
                 continue;
             }
 
-            const filePath = join(MIGRATIONS_DIR, file);
             const sql = await readFile(filePath, 'utf-8');
 
             console.log(`[migrate] Применяем: ${file} ...`);
@@ -192,18 +208,18 @@ async function migratePglite(dataDir) {
     const { rows: applied } = await db.query('SELECT name FROM _migrations ORDER BY name');
     const appliedSet = new Set(applied.map((r) => r.name));
 
-    const entries = await readdir(MIGRATIONS_DIR);
-    const files = entries.filter((f) => f.endsWith('.sql')).sort();
+    const files = await listMigrationFiles();
+    if (PRODUCT_MIGRATIONS) console.log(`[migrate] + продуктовые миграции: ${PRODUCT_MIGRATIONS_DIR}`);
 
     let applied_count = 0;
     let skipped_count = 0;
-    for (const file of files) {
+    for (const { name: file, path: filePath } of files) {
         if (appliedSet.has(file)) {
             console.log(`[migrate] Пропуск (уже применена): ${file}`);
             skipped_count++;
             continue;
         }
-        const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf-8');
+        const sql = await readFile(filePath, 'utf-8');
         console.log(`[migrate] Применяем (PGlite): ${file} ...`);
         const t0 = Date.now();
 

@@ -55,7 +55,7 @@ describe("tier0 app.launch не нашёл цель → ход уходит мо
     const llm = new MockLlmProvider([{ text: "модель не должна вызываться" }]);
     const reply = await handleUserText(s, "открой тикетов", deps(llm));
     expect(llm.requests).toHaveLength(0);
-    expect(reply.voice).toMatch(/тикетов/u);
+    expect(reply.voice).toMatch(/тикетов/iu); // варианты фразы провала: «Тикетов открыть не удалось» / «Не смог запустить тикетов»
     expect(reply.voice).toMatch(/не дождался/u);
   });
 });

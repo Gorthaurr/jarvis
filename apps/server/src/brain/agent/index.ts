@@ -13,6 +13,7 @@
  * если сложность всплыла в петле — это место для филлера «секунду» и продолжения на
  * старшем тире (// TODO: динамическая эскалация).
  */
+import { llmFailureLine } from "../../integrations/anthropic.js";
 import type { ActionCommand, ActionKind, SkillStep, TaskStatus } from "@jarvis/protocol";
 import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, actionTimeoutMs, newId } from "@jarvis/protocol";
 import { type AsyncMutex, type Logger, type Semaphore, type ThinkingEffort, type Tier, createLogger, envInt, foldText, sleep } from "@jarvis/shared";
@@ -232,6 +233,23 @@ const maskObservationsOn = (): boolean => process.env.JARVIS_MASK_OBSERVATIONS !
 
 
 /** Зависимости агента (инъекция для тестируемости и разделения слоёв). */
+/** Событие расхода одного вызова LLM для ledger продукта (см. AgentDeps.usageSink). */
+export interface UsageSinkEvent {
+  taskId: string;
+  /** Раунд петли (у префилла/рефлексии — undefined). */
+  round?: number;
+  model: string;
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number };
+  /** Стоимость по obs/pricing в USD (0 у хода по подписке). */
+  costUsd: number;
+  kind: "turn" | "prefill" | "reflect";
+  channel: "api" | "subscription";
+  /** Ответ — аварийный стаб без вызова API: расхода нет, строку ledger не писать. */
+  stubbed?: boolean;
+  /** Размер промпта (watermark прошлого usage) — оценка стоимости, если стрим оборвался до usage-события. */
+  promptTokensEstimate?: number;
+}
+
 export interface AgentDeps {
   memory: WorkingMemory;
   llm: ILlmProvider;
@@ -242,6 +260,20 @@ export interface AgentDeps {
   /** «Эффорт» рассуждения (thinking) по тиру (§7). Нет → без thinking. */
   tierThinking?: Record<Exclude<Tier, "tier0">, ThinkingEffort>;
   spend: SpendGuard;
+  /**
+   * ПРОДУКТОВЫЙ РЕЖИМ (2026-09-02): честный текст терминала при исчерпании квоты ТАРИФА (spend_cap из
+   * плана) — «кредиты исчерпаны, продлите/добавьте ключ», а не «достигнут лимит» владельца. Отсутствует
+   * при мастер-флаге 0 → прежняя формулировка байт-в-байт.
+   */
+  quotaExhaustedText?: string;
+  /** Продуктовый режим: self_*-инструменты (телеметрия и исходники машины владельца) арендатору закрыты. */
+  productMode?: boolean;
+  /**
+   * ПРОДУКТОВЫЙ РЕЖИМ: приёмник расхода per вызов LLM (ledger в микро-долларах). Зовётся на КАЖДОМ платном
+   * вызове петли (раунд, префилл, рефлексия самообучения) — ровно там, где `spend.recordUsage`. При
+   * мастер-флаге 0 отсутствует → ни одной новой записи.
+   */
+  usageSink?: (e: UsageSinkEvent) => void;
   userId: string;
   /** §15 семантический кэш чисто-вербальных ответов (опц.) — пропуск LLM на близком фактическом повторе. */
   responseCache?: SemanticResponseCache;
@@ -1490,6 +1522,7 @@ async function runAgentLoop(
           approved: r.approved,
           ...(r.revision !== undefined ? { revision: r.revision } : {}),
         })),
+    productMode: deps.productMode, // self_* — инструменты владельца машины, не арендатора
     dynamicTools: deps.dynamicTools,
     skills: deps.skills,
     market: deps.market, // §трейдинг: рыночные данные + анализ (только чтение)
@@ -1547,6 +1580,7 @@ async function runAgentLoop(
   })();
   let cancelled = false;
   let limited = false;
+  let limitedReason: string | undefined; // причина предохранителя (spend_cap → продуктовый текст квоты)
   let timedOut = false;
   let earlyWrap = false; // подвид timedOut: свернулись ЗАРАНЕЕ (остаток < среднего раунда), потолок не превышен
   let channelLost = false; // Б4 (г): канал ПК не вернулся за окно ожидания → задача честно прервана обрывом
@@ -1677,6 +1711,10 @@ async function runAgentLoop(
   let contextNudged = false;
   let contextWrap = false;
   let lastPromptTokens = 0; // размер ПОСЛЕДНЕГО отправленного промпта (input+cache_read+cache_creation)
+  // Фактически НАЧИСЛЕННЫЕ деньги задачи: ход по подписке оплачен помесячно и стоит $0 (см. ниже), а
+  // пересчёт по прайсу модели завышал /cogs и metrics.jsonl в разы — дашборд юнит-экономики врал владельцу
+  // ровно там, где по нему считают цену продукта (живой прогон 2026-09-02).
+  let taskChargedUsd = 0;
   // Аудит контекста 2026-07-20 (PROACTIVE-гард): оценка токенов tool_result'ов ТЕКУЩЕГО раунда, которые
   // попадут в СЛЕДУЮЩИЙ промпт, но ещё НЕ учтены в lastPromptTokens (тот — из usage прошлого ответа, до
   // добавления результатов). Раньше гард сверял ТОЛЬКО lastPromptTokens прошлого раунда → один раунд с
@@ -1791,7 +1829,10 @@ async function runAgentLoop(
     return Number.isFinite(n) && n >= 0 ? n : 4000;
   })();
   let ackTimer: NodeJS.Timeout | undefined;
-  if (!sink && deps.speakResult && taskAckMs > 0) {
+  // Разговорный ход (вопрос/смолток) ack НЕ получает — «вопрос ≠ задача, нет карточки/ack» (карта проекта).
+  // Живой прогон 2026-09-02: в текстовом канале «сколько будет два плюс два» отвечало «Занимаюсь, сэр» и лишь
+  // потом ответ — болтливость на пустом месте.
+  if (!sink && !isConversational && deps.speakResult && taskAckMs > 0) {
     ackTimer = setTimeout(() => {
       if (task.cancel.cancelled || task.state !== "running" || spokeAny || deps.isClosed?.()) return;
       spokeAny = true; // прозвучала фраза → сбойный терминал строит «…продолжение», не противоречит
@@ -2036,6 +2077,7 @@ async function runAgentLoop(
             onUsage: (u) => {
               deps.spend.recordStep(taskId);
               deps.spend.recordUsage(taskId, u.inputTokens + u.outputTokens, costUsd(deps.models.sonnet, u));
+              deps.usageSink?.({ taskId, model: deps.models.sonnet, usage: u, costUsd: costUsd(deps.models.sonnet, u), kind: "prefill", channel: "api" });
             },
           },
           text,
@@ -2302,6 +2344,7 @@ async function runAgentLoop(
     if (!guard.allowed) {
       log.warn("предохранитель остановил петлю", { reason: guard.reason });
       limited = true;
+      limitedReason = guard.reason;
       break;
     }
 
@@ -2465,7 +2508,12 @@ async function runAgentLoop(
     // потолок SpendGuard и заблокировали бы работу. Токены учитываем (это реальный расход лимита
     // подписки и полезная телеметрия), деньги — нет.
     const turnCostUsd = resp.channel === "subscription" ? 0 : costUsd(model, resp.usage);
+    taskChargedUsd += turnCostUsd; // фактически начисленные деньги задачи — для /cogs (см. metrics.record ниже)
     deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, turnCostUsd);
+    deps.usageSink?.({
+      taskId, round, model, usage: resp.usage, costUsd: turnCostUsd, kind: "turn", channel: resp.channel === "subscription" ? "subscription" : "api",
+      stubbed: resp.stopReason === "stub", promptTokensEstimate: lastPromptTokens,
+    });
     cacheReadTokens += resp.usage.cacheReadTokens;
     cacheCreationTokens += resp.usage.cacheCreationTokens;
     // Телеметрия: вход/выход за ход (cache_* копятся отдельно выше) + число вызовов инструментов.
@@ -3348,7 +3396,7 @@ async function runAgentLoop(
     outputTokens: outputTokensTotal,
     cacheReadTokens,
     cacheCreationTokens,
-    costUsd: Number(estimateCostUsd(taskUsage, model).toFixed(6)),
+    costUsd: Number(taskChargedUsd.toFixed(6)), // ровно то, что начислено (подписка = $0), не пересчёт по прайсу
     ok: taskOk,
   });
 
@@ -3419,6 +3467,13 @@ async function runAgentLoop(
   if (limited) {
     tasks.fail(taskId, "достигнут лимит на задачу (spend cap §14)");
     if (shown) emitTaskStatus(session, task);
+    // Продуктовый режим: потолок — квота ТАРИФА → говорим про кредиты (продлить/свой ключ), не «лимит».
+    const quotaText = limitedReason === "spend_cap" ? deps.quotaExhaustedText : undefined;
+    if (quotaText) return terminal(verbalize(spokeAny ? `…дальше остановился. ${quotaText}` : quotaText));
+    // Аварийный стоп администратора — НЕ лимит задачи: назвать неверную причину значит отправить человека
+    // покупать кредиты вместо разговора с администратором (живой прогон 2026-09-02).
+    if (limitedReason === "kill_switch")
+      return terminal(verbalize(spokeAny ? "…дальше остановился: работа приостановлена администратором." : "Работа приостановлена администратором, сэр — это не мой лимит."));
     return terminal(verbalize(spokeAny ? "…дальше остановился — достигнут лимит." : "Остановился — достигнут лимит на задачу."));
   }
   // Б4 (г): канал с ПК не вернулся за окно ожидания — задача прервана обрывом связи (НЕ провал модели,
@@ -3501,9 +3556,9 @@ async function runAgentLoop(
     // тот текст, что прозвучал (не перезаписываем другой фразой). terminal() при streamedFinal в sink
     // повторно не отдаёт — двойного голоса нет.
     if (stubSpokenText) return terminal(stubSpokenText);
-    return terminal(verbalize(spokeAny
-      ? "…и тут связь с сервером прервалась, сэр. Повторите чуть позже."
-      : "Связь с сервером прервалась, сэр. Повторите, пожалуйста."));
+    // Причина названа честно (кончился баланс ключа / ключ не принят / перегруз), а не «связь прервалась»
+    // вслепую: живой прогон 2026-09-02 показал, что пользователь шёл чинить сеть при исчерпанном балансе.
+    return terminal(verbalize(spokeAny ? `…и тут не получилось: ${llmFailureLine()}` : llmFailureLine()));
   }
   // H4: топтание на одном действии без результата — честный провал, а не «Готово».
   if (runawayStuck) {
@@ -3798,6 +3853,7 @@ async function selfLearnSkill(args: {
       });
       deps.spend.recordStep(reflectId);
       deps.spend.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(model, resp.usage));
+      deps.usageSink?.({ taskId: reflectId, model, usage: resp.usage, costUsd: costUsd(model, resp.usage), kind: "reflect", channel: resp.channel === "subscription" ? "subscription" : "api" });
 
       if (resp.toolUses.length === 0) return null; // модель решила не сохранять — это нормально
 

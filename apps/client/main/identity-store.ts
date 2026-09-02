@@ -43,8 +43,9 @@ export class IdentityStore {
    * Стабильный per-install UUID — или undefined, если опт-ин (JARVIS_CLIENT_IDENTITY) выключен.
    * При включённом: читает с диска, иначе генерит + персистит. Никогда не бросает.
    */
-  getOrCreateInstallId(): string | undefined {
-    if (!envBool("JARVIS_CLIENT_IDENTITY")) return undefined;
+  getOrCreateInstallId(opts?: { force?: boolean }): string | undefined {
+    // force — продуктовый device-токен привязан к установке: installId нужен без опт-ина.
+    if (!opts?.force && !envBool("JARVIS_CLIENT_IDENTITY")) return undefined;
     if (this.cached) return this.cached;
 
     try {

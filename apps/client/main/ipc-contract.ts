@@ -22,6 +22,8 @@ import type {
   ChatMessage,
   MemoryState,
   UsageInfo,
+  ModelChoice,
+  ModelsCatalog,
 } from "@jarvis/protocol";
 
 /** Имена IPC-каналов. renderer -> main (invoke/send) и main -> renderer (события). */
@@ -70,6 +72,7 @@ export const IPC = {
   monitorInfo: "jarvis:monitorInfo", // §6 список мониторов + текущая настройка (для UI)
   usage: "jarvis:usage", // §6B/B5 расход/лимиты периода → вкладка «Оплата»
   memory: "jarvis:memory", // волна E снимок памяти о владельце → вкладка «Память»
+  modelsCatalog: "jarvis:modelsCatalog", // 2026-09-02 каталог моделей + что применилось → селекты «Модель» («Общее»)
 } as const;
 
 /** Состояние записи навыка демонстрацией — для индикатора в UI (§8). */
@@ -116,6 +119,8 @@ export interface SettingsSnapshot {
   language: string;
   context: string;
   keys: Record<KeyName, boolean>;
+  /** Выбор модели (2026-09-02): отсутствует/пусто = авто. Не секрет — хранится plain JSON. */
+  models?: ModelChoice;
 }
 
 /** Патч из UI: пустой/отсутствующий ключ = «оставить прежний» (поле ключа в UI всегда пустое). */
@@ -123,6 +128,8 @@ export interface SettingsPatch {
   language?: string;
   context?: string;
   keys?: Partial<Record<KeyName, string>>;
+  /** Выбор модели: пустые слоты = «авто» (очистка); отсутствующее поле = оставить прежний выбор. */
+  models?: ModelChoice;
 }
 
 /** Честный отчёт о сохранении настроек (без ложного успеха). */
@@ -216,4 +223,6 @@ export interface JarvisBridge {
   onUsage(cb: (u: UsageInfo) => void): () => void;
   /** Волна E: снимок памяти о владельце (вкладка «Память»). */
   onMemory(cb: (m: MemoryState) => void): () => void;
+  /** 2026-09-02: каталог моделей + выбор/применилось/отклонено (ответ сервера) — селекты «Модель» в «Общее». */
+  onModelsCatalog(cb: (m: ModelsCatalog) => void): () => void;
 }

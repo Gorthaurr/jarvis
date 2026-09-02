@@ -55,8 +55,14 @@ interface TaskMeter {
   tokens: number;
 }
 
+/** Порог квоты, пересечённый при записи расхода: 80% (soft) / 100% (hard). */
+export type ThresholdKind = "soft" | "hard";
+
 export class SpendGuard {
-  private readonly limits: SpendLimits;
+  private limits: SpendLimits;
+  /** Доля потолка, на которой срабатывает soft-порог (продуктовые квоты; деф 80%). */
+  private softPct = 80;
+  private thresholdCbs: Array<(kind: ThresholdKind, pct: number) => void> = [];
   /** Суммарные траты за период (in-memory зеркало usage_quota). */
   private spent = 0;
   /** Глобальный стоп: ни один платный вызов не проходит (§14). */
@@ -110,15 +116,21 @@ export class SpendGuard {
    * не долетел до БД или гонка чтения) — прочитали бы stale и обнулили только что учтённый расход,
    * обходя spend cap. Берём max(живое, из БД) — гидрация двигает счётчик только ВПЕРЁД.
    */
-  async hydrate(): Promise<void> {
+  async hydrate(opts?: { source?: "estimate" | "ledger" }): Promise<void> {
     if (!this.userId) return;
-    this.periodKey = this.currentPeriod(); // гидрируем именно текущий период
+    // Смена месяца между reconnect'ами: прямое присваивание periodKey оставляло spent ПРОШЛОГО периода в новом
+    // (контроль-ревью 2026-09-02: пользователь начинал месяц с исчерпанной квотой) — сначала rollover.
+    this.rolloverIfNeeded();
+    // Продукт: источник — точный ledger (cost_micro, целые µ$). cost_estimate (NUMERIC 12,2) округляет КАЖДЫЙ
+    // раунд до цента и на мелких ходах систематически завышает (100 × $0.006 → $1.00 вместо $0.60).
+    const ledger = opts?.source === "ledger";
     try {
       const res = await query(
-        "select cost_estimate from usage_quota where user_id = $1 and period = $2",
+        ledger ? "select cost_micro from usage_quota where user_id = $1 and period = $2" : "select cost_estimate from usage_quota where user_id = $1 and period = $2",
         [this.userId, this.currentPeriod()],
       );
-      const prior = res?.rows?.[0] ? Number(res.rows[0].cost_estimate) : 0;
+      const raw = res?.rows?.[0] ? Number(ledger ? res.rows[0].cost_micro : res.rows[0].cost_estimate) : 0;
+      const prior = ledger ? raw / 1e6 : raw;
       if (Number.isFinite(prior) && prior > 0 && prior > this.spent) {
         this.spent = prior;
         log.info("SpendGuard: траты периода восстановлены из usage_quota", { spent: this.spent, period: this.currentPeriod() });
@@ -126,6 +138,41 @@ export class SpendGuard {
     } catch (e) {
       log.debug("SpendGuard.hydrate пропущен", e instanceof Error ? e.message : String(e));
     }
+  }
+
+  /**
+   * ПРОДУКТОВЫЙ РЕЖИМ (2026-09-02): лимиты из плана пользователя (QuotaResolver) вместо платформенного
+   * дефолта. Не-конечные значения игнорируются (та же санитизация, что в конструкторе). При мастер-флаге 0
+   * никто это не зовёт — лимиты остаются как сегодня.
+   */
+  setLimits(patch: Partial<SpendLimits> & { softPct?: number }): void {
+    const next = { ...this.limits };
+    if (Number.isFinite(patch.spendCap)) next.spendCap = patch.spendCap as number;
+    if (Number.isFinite(patch.maxStepsPerTask)) next.maxStepsPerTask = patch.maxStepsPerTask as number;
+    if (Number.isFinite(patch.maxTokensPerTask)) next.maxTokensPerTask = patch.maxTokensPerTask as number;
+    if (Number.isFinite(patch.softPct) && (patch.softPct as number) > 0 && (patch.softPct as number) < 100) this.softPct = patch.softPct as number;
+    this.limits = next;
+  }
+
+  /** Текущие лимиты (read-only снимок). */
+  getLimits(): SpendLimits {
+    return { ...this.limits };
+  }
+
+  /**
+   * Подписка на пересечение порогов (soft = softPct, hard = 100% потолка). Срабатывает ОДИН раз на
+   * пересечение в пределах процесса (durable-«уже предупреждали» держит вызывающий — usage_quota.warned_*).
+   */
+  onThreshold(cb: (kind: ThresholdKind, pct: number) => void): () => void {
+    this.thresholdCbs.push(cb);
+    return () => {
+      this.thresholdCbs = this.thresholdCbs.filter((c) => c !== cb);
+    };
+  }
+
+  /** Доля потолка, израсходованная за период (0..∞, %). */
+  get spentPct(): number {
+    return this.limits.spendCap > 0 ? (this.spent / this.limits.spendCap) * 100 : 0;
   }
 
   /** Активировать аварийный стоп (§14): дальнейшие платные операции запрещены. */
@@ -186,10 +233,27 @@ export class SpendGuard {
     const c = Number.isFinite(cost) ? Math.max(0, cost) : 0;
     const meter = this.meter(taskId);
     meter.tokens += t;
+    const before = this.spentPct;
     this.spent += c;
+    const after = this.spentPct;
     // Персистентность usage_quota — best-effort (§14); промис ловим в drain().
     this.lastPersist = this.persistUsage(t, c);
     void this.lastPersist;
+    // Пороги квоты (продуктовые предупреждения): пересечение softPct/100% — ровно на той записи, где случилось.
+    if (this.thresholdCbs.length > 0 && c > 0) {
+      if (before < this.softPct && after >= this.softPct) this.fireThreshold("soft", after);
+      if (before < 100 && after >= 100) this.fireThreshold("hard", after);
+    }
+  }
+
+  private fireThreshold(kind: ThresholdKind, pct: number): void {
+    for (const cb of this.thresholdCbs) {
+      try {
+        cb(kind, pct);
+      } catch (e) {
+        log.warn("SpendGuard.onThreshold: коллбэк упал", e instanceof Error ? e.message : String(e));
+      }
+    }
   }
 
   /** Дождаться завершения последнего best-effort персиста (graceful shutdown / тесты). */
@@ -282,8 +346,13 @@ export class SpendGuards {
   }
 
   /** Гидрировать траты текущего периода пользователя из usage_quota (звать в handshake до первого check). */
-  async hydrate(userId: string): Promise<void> {
-    await this.forUser(userId).hydrate();
+  async hydrate(userId: string, opts?: { source?: "estimate" | "ledger" }): Promise<void> {
+    await this.forUser(userId).hydrate(opts);
+  }
+
+  /** Продуктовый режим: лимиты пользователя из плана (QuotaResolver). При мастер-флаге 0 не зовётся. */
+  setLimitsFor(userId: string, patch: Partial<SpendLimits> & { softPct?: number }): void {
+    this.forUser(userId).setLimits(patch);
   }
 
   /** Дождаться best-effort персиста всех гвардов (graceful shutdown). */

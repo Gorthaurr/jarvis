@@ -28,6 +28,22 @@ import { monitors } from "./monitors.js";
 import { startGsiListener } from "./sensors/gsi-listener.js";
 import { settingsStore } from "./settings-store.js";
 import { identityStore } from "./identity-store.js";
+import { deviceTokenStore } from "./device-token-store.js";
+
+/** env-токен jdt_ + сохранённый наследник ротации → наследник; иначе env, иначе стор. */
+function pickClientToken(envToken: string, stored: string | undefined): string {
+  if (envToken.startsWith("jdt_") && stored) return stored;
+  return envToken || stored || "";
+}
+
+/** Заголовки карточек для кодов ошибок протокола, после которых транспорт не реконнектится. */
+const PROTOCOL_ERROR_TITLES: Record<string, string> = {
+  version_mismatch: "Требуется обновление",
+  login_required: "Нужен вход",
+  device_revoked: "Устройство отозвано",
+  subscription_required: "Нужна подписка",
+  account_blocked: "Аккаунт заблокирован",
+};
 import { AudioCoordinator } from "./audio/index.js";
 import { sidecar } from "./actuators/sidecar-client.js";
 import { browserController } from "./actuators/browser-cdp.js";
@@ -109,12 +125,18 @@ function sendSkillState(s: SkillRecState): void {
 
 /** Конфиг подключения из env (см. .env.example). На M0 — дефолты localhost:8787. */
 function transportConfig() {
+  // Продукт: env-токен jdt_ мог быть ротирован сервером — персистнутый наследник (safeStorage) главнее, иначе
+  // через час старый токен даёт login_required; без env — стор, потом per-install UUID, потом dev-token.
+  const token = pickClientToken(readEnv("JARVIS_CLIENT_TOKEN", ""), deviceTokenStore.get()) || identityStore.getOrCreateInstallId() || "dev-token";
   return {
     host: readEnv("HOST", "127.0.0.1"),
     port: envInt("PORT", 8787),
     // §6B/B2: приоритет — явный JARVIS_CLIENT_TOKEN (континьюити power-юзера) → per-install UUID
     // (опт-ин JARVIS_CLIENT_IDENTITY) → дефолт 'dev-token' (→ DEV_USER, существующая установка цела).
-    token: readEnv("JARVIS_CLIENT_TOKEN", "") || identityStore.getOrCreateInstallId() || "dev-token",
+    token,
+    // Привязка device-токена к установке: с jdt_ installId уходит ВСЕГДА (сервер требует его у привязанного
+    // токена; опт-ин JARVIS_CLIENT_IDENTITY для этого не нужен). С dev-token — как раньше.
+    installId: token.startsWith("jdt_") ? identityStore.getOrCreateInstallId({ force: true }) : identityStore.getOrCreateInstallId(),
     clientVersion: app.getVersion?.() ?? "0.1.0",
   };
 }
@@ -250,7 +272,10 @@ function startTransport(): void {
     void sendAmbient(); // §контекст: живой снимок «что открыто и где» сразу на (ре)коннекте
     // §15: досылаем сохранённые язык/контекст серверу (робастно к оффлайн-сейву/реконнекту).
     const snap = settingsStore.snapshot();
-    transport?.sendSettings({ language: snap.language, context: snap.context });
+    // 2026-09-02: выбор модели — тем же сообщением; сервер отвечает models.catalog с тем, что применилось.
+    // На (ре)коннекте шлём ТОЛЬКО явный локальный выбор: {} = «сбросить» и уходит лишь с кнопки «Сохранить»
+    // (ревью: иначе реконнект молча стирал выбор, сделанный с другого устройства/через API).
+    transport?.sendSettings({ language: snap.language, context: snap.context, ...(snap.models ? { models: snap.models } : {}) });
   });
   transport.on("link", (l) => {
     linkOnline = l.online;
@@ -268,6 +293,7 @@ function startTransport(): void {
   transport.on("transcript", (t) => win?.webContents.send(IPC.transcript, t));
   transport.on("chat", (m) => win?.webContents.send(IPC.chat, m)); // §22 чат-история
   transport.on("usage", (u) => win?.webContents.send(IPC.usage, u)); // §6B/B5 расход/лимиты → вкладка «Оплата»
+  transport.on("modelsCatalog", (m) => win?.webContents.send(IPC.modelsCatalog, m)); // 2026-09-02 каталог моделей → селекты «Модель»
   transport.on("memory", (m) => win?.webContents.send(IPC.memory, m)); // волна E: снимок памяти → вкладка «Память»
   transport.on("nudge", (n) => win?.webContents.send(IPC.nudge, n));
   transport.on("confirmRequest", (r) => win?.webContents.send(IPC.confirmRequest, r));
@@ -285,10 +311,20 @@ function startTransport(): void {
     restoreMicMute("voice-enroll-done"); // адверс-ревью [2]: запись кончилась → возвращаем волю владельца
   });
   transport.on("voiceList", (l) => win?.webContents.send(IPC.voiceVoices, l));
+  // Продукт: ротированный device-токен — в шифрованный стор (иначе после рестарта клиент предъявил бы старый,
+  // а тот доживает лишь час → повторный вход).
+  transport.on("tokenRotated", (raw) => {
+    if (!deviceTokenStore.set(raw)) log.warn("device-токен ротирован сервером, но не сохранён локально — после рестарта клиента понадобится вход");
+  });
+  let lastProtocolErrorCode: string | undefined;
   transport.on("protocolError", (e) => {
-    // version_mismatch -> «требуется обновление»: показываем карточкой в renderer (§5).
+    // version_mismatch -> «требуется обновление»: карточкой в renderer (§5). Продуктовые коды (нужен вход /
+    // устройство отозвано / нужна подписка) — транспорт на них не реконнектится, карточка ОДНА на код.
+    if (e.code === "device_revoked") deviceTokenStore.clear(); // отозванный токен предъявлять больше незачем
+    if (e.code === lastProtocolErrorCode && PROTOCOL_ERROR_TITLES[e.code]) return;
+    lastProtocolErrorCode = e.code;
     win?.webContents.send(IPC.display, {
-      title: e.code === "version_mismatch" ? "Требуется обновление" : "Ошибка",
+      title: PROTOCOL_ERROR_TITLES[e.code] ?? "Ошибка",
       markdown: e.message,
     });
     setState("idle");
@@ -514,7 +550,9 @@ function registerIpc(): void {
     const out: ClientSettings = {};
     if (typeof patch.language === "string") out.language = patch.language;
     if (typeof patch.context === "string") out.context = patch.context;
-    if (out.language !== undefined || out.context !== undefined) transport?.sendSettings(out);
+    // 2026-09-02: выбор модели — в НОРМАЛИЗОВАННОМ виде из стора ({} = авто → сервер снимает выбор).
+    if (patch.models && typeof patch.models === "object") out.models = settingsStore.snapshot().models ?? {};
+    if (out.language !== undefined || out.context !== undefined || out.models !== undefined) transport?.sendSettings(out);
     // §6B/B4: ключи из UI → серверу (шифрует в user_credentials). KeyName → каноническое имя сервиса.
     // Локально ключи тоже остаются (safeStorage); сервер хранит per-user зашифрованно для hosted-режима.
     const SERVICE: Record<string, string> = { anthropic: "anthropic", eleven: "elevenlabs", deepgram: "deepgram" };
