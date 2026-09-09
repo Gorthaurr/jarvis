@@ -86,7 +86,9 @@ export interface ClientStateMsg {
 }
 
 export interface VadEvent {
-  state: "speech_start" | "speech_end" | "barge_in";
+  /** wake_local (W1): клиент услышал «Джарвис» ЛОКАЛЬНО (sherpa KWS) — следующая реплика адресована,
+   *  даже если облачный STT само слово ослышался; за событием идёт пре-ролл кадров с самим словом. */
+  state: "speech_start" | "speech_end" | "barge_in" | "wake_local";
 }
 
 /** Текстовый ввод — dev-заглушка до голоса (M0, §17). В проде вход — STT-транскрипт. */

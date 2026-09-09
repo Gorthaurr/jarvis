@@ -154,23 +154,17 @@ export class EnergyVad implements IVad {
 }
 
 /**
- * Фабрика VAD: пытается поднять Silero (onnx), иначе энергетический.
- * onnx — опционально (динамический импорт через переменную), чтобы не быть жёсткой
- * зависимостью сборки.
+ * Фабрика VAD: W1 — Silero VAD через sherpa (`hearing/sherpa-hearing.ts`), иначе энергетический.
+ * Слух грузится один раз на клиент (KWS + VAD вместе); сюда — для тестов/изолированного использования.
  */
 export async function createVad(useSilero = false): Promise<IVad> {
   if (!useSilero) return new EnergyVad();
   try {
-    const spec = "onnxruntime-node";
-    const ort = (await import(spec).catch(() => null)) as { InferenceSession?: unknown } | null;
-    if (!ort?.InferenceSession) {
-      log.warn("onnxruntime-node недоступен — энергетический VAD");
-      return new EnergyVad();
-    }
-    // TODO(M1): инференс Silero VAD.
-    log.info("onnxruntime доступен; Silero VAD — TODO(M1)");
-    return new EnergyVad();
-  } catch {
-    return new EnergyVad();
+    const { createSherpaHearing } = await import("../hearing/sherpa-hearing.js");
+    const h = await createSherpaHearing();
+    if (h) return h.vad;
+  } catch (e) {
+    log.warn("Silero VAD не поднялся — энергетический VAD", e instanceof Error ? e.message : String(e));
   }
+  return new EnergyVad();
 }

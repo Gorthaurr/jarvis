@@ -1,11 +1,10 @@
 /**
  * Wake word — детектор фразы «Джарвис» (§1, §3, §18).
  *
- * Активирует голосовой стрим: до срабатывания аудио НЕ уходит на сервер
- * (§0.6 privacy-инвариант). Штатно — openWakeWord/Porcupine через onnxruntime-node
- * (модель «hey_jarvis» / кастомная RU «Джарвис» — валидация на M1, §18).
- * onnxruntime подключается ОПЦИОНАЛЬНО (динамический импорт): если рантайма/модели
- * нет — используется MockWakeWord (dev: активация push-to-talk через UI).
+ * Активирует голосовой стрим: до срабатывания аудио НЕ уходит на сервер (§0.6 privacy-инвариант).
+ * W1 (2026-09-09): штатная реализация — sherpa-onnx KeywordSpotter (`hearing/sherpa-hearing.ts`),
+ * работает на устройстве, ~1–2 мс на кадр. Нет пакета/моделей → MockWakeWord (ready=false):
+ * гейт открыт постоянно, «Джарвис» ловится по тексту облачного STT (прежний режим).
  */
 import { type Logger, createLogger } from "@jarvis/shared";
 
@@ -14,8 +13,10 @@ const log: Logger = createLogger("wakeword");
 export interface IWakeWord {
   /** Прогнать кадр PCM16. Вернуть true при детекте wake word. */
   process(pcm: Int16Array): boolean;
-  /** Готова ли реальная модель (false → нужен push-to-talk fallback). */
+  /** Готова ли реальная модель (false → нужен push-to-talk fallback / wake по тексту облака). */
   readonly ready: boolean;
+  /** Сбросить контекст детектора (после срабатывания/закрытия гейта). */
+  reset?(): void;
 }
 
 /**
@@ -29,33 +30,15 @@ export class MockWakeWord implements IWakeWord {
   }
 }
 
-/**
- * Реальный wake word поверх onnxruntime-node. Загрузка отложенная и мягкая:
- * при отсутствии пакета/модели возвращаем MockWakeWord, не роняя клиент.
- * // TODO(M1): валидация RU-произношения «Джарвис» (§18) — может потребоваться
- *   кастомная модель (openWakeWord тренируется на синтетике; Porcupine — консоль).
- */
-export async function createWakeWord(modelPath?: string): Promise<IWakeWord> {
-  if (!modelPath) {
-    log.warn("модель wake word не задана — push-to-talk режим (MockWakeWord)");
-    return new MockWakeWord();
-  }
+/** Реальный wake word (sherpa) — либо Mock, если слух не поднялся. Мягко, без падения клиента. */
+export async function createWakeWord(): Promise<IWakeWord> {
   try {
-    // Динамический импорт через переменную: TS/esbuild не резолвят статически,
-    // onnxruntime-node остаётся опциональной runtime-зависимостью.
-    const spec = "onnxruntime-node";
-    const ort = (await import(spec).catch(() => null)) as {
-      InferenceSession?: { create(p: string): Promise<unknown> };
-    } | null;
-    if (!ort?.InferenceSession) {
-      log.warn("onnxruntime-node недоступен — MockWakeWord");
-      return new MockWakeWord();
-    }
-    // TODO(M1): реальная инференс-петля openWakeWord (мел-спектр → модель → порог).
-    log.info("onnxruntime доступен; инференс wake word — TODO(M1)");
-    return new MockWakeWord();
+    const { createSherpaHearing } = await import("../hearing/sherpa-hearing.js");
+    const h = await createSherpaHearing();
+    if (h) return h.wake;
   } catch (e) {
     log.warn("ошибка инициализации wake word — MockWakeWord", e instanceof Error ? e.message : String(e));
-    return new MockWakeWord();
   }
+  log.warn("локальный wake недоступен — wake по тексту облака (MockWakeWord)");
+  return new MockWakeWord();
 }

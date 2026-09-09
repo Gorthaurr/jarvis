@@ -223,6 +223,9 @@ export interface VoicePipelineDeps {
  */
 export type SpeechOrigin = "user-turn" | "proactive";
 
+/** W1: сколько после локального wake клиента реплика считается адресованной без «Джарвис» в тексте. */
+const LOCAL_WAKE_WINDOW_MS = 8_000;
+
 export class VoicePipeline {
   private ctx: VoiceContext = initialContext();
   private sttStream: SttStream | null = null;
@@ -305,6 +308,8 @@ export class VoicePipeline {
   private lastSpeechOrigin: SpeechOrigin = "user-turn";
   /** W0 «вырубись/тишина»: до этого момента проактив не звучит, окно разговора закрыто. */
   private quietUntil = 0;
+  /** W1: до этого момента следующая реплика считается адресованной — клиент услышал «Джарвис» локально. */
+  private localWakeUntil = 0;
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCmd = ""; // анти-дубль: последняя обработанная команда + время
   private lastCmdAt = 0;
@@ -422,18 +427,22 @@ export class VoicePipeline {
    *   (к его приходу this.turnSeq мог уже уйти вперёд); спекулятивный путь берёт текущий.
    */
   private gateWake(raw: string, turnSeq = this.turnSeq): string {
-    // §3 верификация диктора: ход признан «не своим» (музыка/чужой) — игнорируем СПЕКУЛЯТИВНУЮ
-    // реплику. Поздний реальный финал режется отдельно — постримным флагом streamSpeakerRejected
-    // в onPartial (этот глобальный флаг к приходу финала мог сброситься ensureStt следующего цикла).
-    if (this.speakerRejected) {
-      this.log.info("реплика отклонена верификацией диктора (не свой голос) — игнор");
-      return "";
-    }
     // §Волна2 (2.6): нормализуем доменную латиницу STT ДО wake-гейта/анти-дубля/роутера — одна точка
     // кроет оба входа (спекулятивный эндпоинт и поздний финал); анти-дубль дальше сравнивает уже
     // нормализованные формы (консистентно). Wake-матч цел: latinToCyrillic('jarvis')='джарвис'.
     const normalized = this.deps.normalizeTranscript?.(raw) ?? raw;
     const t = normalized.trim();
+    // §3 верификация диктора: ход признан «не своим» (музыка/чужой) — игнорируем СПЕКУЛЯТИВНУЮ
+    // реплику. Поздний реальный финал режется отдельно — постримным флагом streamSpeakerRejected
+    // в onPartial (этот глобальный флаг к приходу финала мог сброситься ensureStt следующего цикла).
+    // W1 МЯГКИЙ ГЕЙТ: биометрия ложно отклоняла владельца (скоры 0.03–0.7 при пороге 0.35 — гейт
+    // держали выключенным). Теперь «чужой» режет ТОЛЬКО реплики из окна разговора (без обращения):
+    // явное «Джарвис» (в тексте или локальным wake) проходит всегда — цена ложного отклонения = одно
+    // лишнее «Джарвис», а не оглохший ассистент. Строгий режим: JARVIS_SPEAKER_GATE_MODE=strict.
+    if (this.speakerRejected && !this.softAcceptDespiteSpeaker(t)) {
+      this.log.info("реплика отклонена верификацией диктора (не свой голос, без обращения) — игнор");
+      return "";
+    }
     if (!this.requireWake || t.length === 0) {
       this.lastAcceptViaWake = true; // без wake-гейта канал = явное обращение (§P0: жесты не режем)
       return t;
@@ -445,8 +454,18 @@ export class VoicePipeline {
       this.awake = true;
       this.lastAcceptViaWake = true; // §P0: явное обращение — ходу положены слепые жесты
       this.pendingSecondChance = null; // штатное обращение перекрывает висящий переспрос
+      this.localWakeUntil = 0;
       const c = stripWake(t);
       cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
+    } else if (this.localWakeActive()) {
+      // W1: клиент услышал «Джарвис» ЛОКАЛЬНО (sherpa KWS), а облачный STT само слово ослышался или
+      // отрезал — реплика всё равно адресована. Одноразово: следующая без обращения пойдёт окном.
+      this.awake = true;
+      this.lastAcceptViaWake = true;
+      this.pendingSecondChance = null;
+      this.localWakeUntil = 0;
+      this.log.info("wake: обращение подтверждено локальным детектором клиента", { text: t.slice(0, 40) });
+      cmd = t;
     } else if (this.pendingSecondChance && isSecondChanceConfirm(t)) {
       // Б5 second-chance, шаг 2 (ревью 2026-07-10): на «Вы мне, сэр?» пришло ЯВНОЕ короткое «да/тебе»
       // (≤2 токенов из узкого словаря — «да, объективно» НЕ проходит) → исполняем СОХРАНЁННУЮ
@@ -593,6 +612,24 @@ export class VoicePipeline {
   /** W0: действует ли сейчас режим тишины (для гейтов снаружи). */
   isQuiet(): boolean {
     return this.now() < this.quietUntil;
+  }
+
+  /** W1: окно после локального wake клиента ещё открыто (реплика без «Джарвис» в тексте адресована). */
+  private localWakeActive(): boolean {
+    return this.localWakeUntil > 0 && this.now() < this.localWakeUntil;
+  }
+
+  /**
+   * W1 мягкий гейт диктора: «чужой» по биометрии, но ЯВНОЕ обращение (в тексте или локальным wake) —
+   * принимаем. В strict-режиме (JARVIS_SPEAKER_GATE_MODE=strict) — нет.
+   */
+  private softAcceptDespiteSpeaker(text: string): boolean {
+    if (process.env.JARVIS_SPEAKER_GATE_MODE === "strict") return false;
+    if (isWakeAddressed(text) || this.localWakeActive()) {
+      this.log.info("верификация диктора: не свой голос, но явное обращение — принимаю (мягкий гейт)");
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -861,7 +898,16 @@ export class VoicePipeline {
   }
 
   /** VAD-событие от клиента. */
-  onVadEvent(state: "speech_start" | "speech_end" | "barge_in"): void {
+  onVadEvent(state: "speech_start" | "speech_end" | "barge_in" | "wake_local"): void {
+    if (state === "wake_local") {
+      // W1: локальный детектор клиента услышал «Джарвис». Окно «эта реплика адресована» — короткое:
+      // хватает на пре-ролл + саму команду; протухает само, если владелец замолчал.
+      this.localWakeUntil = this.now() + LOCAL_WAKE_WINDOW_MS;
+      this.awake = true;
+      this.lastActiveAt = this.now();
+      this.log.info("wake: локальный детектор клиента — окно адресации открыто", { ms: LOCAL_WAKE_WINDOW_MS });
+      return;
+    }
     if (state === "speech_start") {
       this.userSpeaking = true; // пользователь заговорил — не лезем фоном
       this.turn.onSpeechStart();
@@ -1065,8 +1111,8 @@ export class VoicePipeline {
       }
       // §3: ход уже признан «не своим» — режем и спекулятивный (через speakerRejected), и ПОЗДНИЙ
       // реальный финал (через streamSpeakerRejected — глобальный флаг к этому моменту мог сброситься).
-      if (streamSpeakerRejected) {
-        this.log.info("реплика отклонена верификацией диктора (поздний финал, не свой голос) — игнор");
+      if (streamSpeakerRejected && !this.softAcceptDespiteSpeaker((this.deps.normalizeTranscript?.(p.text) ?? p.text).trim())) {
+        this.log.info("реплика отклонена верификацией диктора (поздний финал, не свой голос, без обращения) — игнор");
         this.dispatch({ type: "transcript_final", text: "" });
         return;
       }

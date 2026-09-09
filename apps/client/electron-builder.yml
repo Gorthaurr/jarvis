@@ -10,6 +10,9 @@ files:
   - dist/**/*
   - package.json
   - node_modules/ws/**/*
+  # W1: локальный слух (sherpa-onnx: KWS «Джарвис» + Silero VAD). Модели — не в пакете, в ~/.jarvis/models.
+  - node_modules/sherpa-onnx-node/**/*
+  - node_modules/sherpa-onnx-win-x64/**/*
 # Сайдкар Windows (UIA/SendInput, §3) — собирается в apps/sidecar-win (C#, .NET).
 # Кладём готовый exe рядом с ресурсами приложения. На M0 это стаб-плейсхолдер:
 # актуаторы input/ground обращаются к нему по IPC (// TODO(M3)).

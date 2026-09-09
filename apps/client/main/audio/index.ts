@@ -94,13 +94,27 @@ const BARGE_REFRACTORY_MS = 500;
 // обычная прослушка осталась бы выключенной. Реплика редко звучит дольше полутора минут.
 const MAX_PLAYBACK_TAIL_MS = 90_000;
 
+/**
+ * W1: пре-ролл — кольцо последних кадров, пока гейт закрыт. Локальный wake срабатывает ~150 мс ПОСЛЕ
+ * слова, и без пре-ролла облачный STT не услышал бы само «Джарвис» (и текстовый гейт сервера тоже).
+ * 75 кадров × 20 мс = 1,5 с — хватает на «Джарвис» + начало команды.
+ */
+const PREROLL_FRAMES = 75;
+
 export class AudioCoordinator {
-  private readonly wakeword: IWakeWord;
-  private readonly vad: IVad;
+  private wakeword: IWakeWord;
+  private vad: IVad;
   private readonly log: Logger;
   private readonly now: () => number;
   private gateOpen = false;
   private serverSpeaking = false;
+  /** W1: честный mute — кадры не обрабатываются ВООБЩЕ (в т.ч. локальным wake). */
+  private muted = false;
+  /** W1: гейт удерживается открытым (запись голосового отпечатка) — idle сервера его не закрывает. */
+  private holdOpen = false;
+  private lastServerState: ClientState = "idle";
+  /** W1: пре-ролл кадров при закрытом гейте (см. PREROLL_FRAMES). */
+  private preroll: Int16Array[] = [];
   /** §10 идёт ли СЕЙЧАС реальное воспроизведение TTS в renderer (хвост очереди после конца синтеза). */
   private playbackActive = false;
   private playbackActiveSince = 0;
@@ -131,18 +145,56 @@ export class AudioCoordinator {
     return this.gateOpen;
   }
 
-  /** Push-to-talk / явная активация (когда реальный wake word недоступен, §18). */
-  activate(): void {
-    if (!this.gateOpen) this.openGate("manual");
+  /**
+   * Push-to-talk / явная активация (когда реальный wake word недоступен, §18). `hold` — удерживать гейт
+   * открытым несмотря на idle сервера (запись голосового отпечатка идёт вне хода); снять — release().
+   */
+  activate(opts: { hold?: boolean } = {}): void {
+    this.muted = false;
+    if (opts.hold) this.holdOpen = true;
+    if (!this.gateOpen) this.openGate(opts.hold ? "manual-hold" : "manual");
+  }
+
+  /** W1: снять удержание (конец записи голоса); при idle сервера и локальном wake гейт закрывается. */
+  release(): void {
+    this.holdOpen = false;
+    if (this.lastServerState === "idle" && this.localWakeAvailable() && !this.muted) this.closeGate("release-idle");
+  }
+
+  /** Локальный (акустический) wake доступен → гейт можно держать закрытым между ходами (§0.6). */
+  localWakeAvailable(): boolean {
+    return this.wakeword.ready;
+  }
+
+  /**
+   * W1: подменить движки слуха (sherpa грузится асинхронно после boot). Если локальный wake появился,
+   * а сервер простаивает — закрываем гейт: с этого момента звук уходит в облако только после «Джарвис».
+   */
+  setEngines(engines: { wake?: IWakeWord; vad?: IVad }): void {
+    if (engines.wake) this.wakeword = engines.wake;
+    if (engines.vad) this.vad = engines.vad;
+    if (this.localWakeAvailable() && this.gateOpen && this.lastServerState === "idle" && !this.holdOpen) {
+      this.closeGate("local-wake-ready");
+    }
+    this.log.info("движки слуха", { wakeReady: this.wakeword.ready, vad: this.vad.constructor.name });
   }
 
   /** Принять кадр PCM16 из renderer. */
   ingest(pcm: Int16Array): void {
+    if (this.muted) return; // честный mute: ни в облако, ни в локальный wake
     if (!this.gateOpen) {
-      // Гейт закрыт: аудио на сервер НЕ уходит (§0.6). Только wake word локально.
+      // Гейт закрыт: аудио на сервер НЕ уходит (§0.6). Только wake word локально + пре-ролл в памяти.
+      this.preroll.push(Int16Array.from(pcm));
+      if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift();
       if (this.wakeword.ready && this.wakeword.process(pcm)) {
         this.openGate("wakeword");
-        this.streamFrame(pcm);
+        // Серверу: «обращение услышано локально» — следующая реплика принимается без «Джарвис» в тексте
+        // (STT может ослышаться), затем пре-ролл (само слово «Джарвис» + начало команды), затем живой поток.
+        this.deps.sendVad("wake_local");
+        const frames = this.preroll;
+        this.preroll = [];
+        for (const f of frames) this.streamFrame(f);
+        (this.wakeword as { reset?: () => void }).reset?.();
       }
       return;
     }
@@ -151,6 +203,7 @@ export class AudioCoordinator {
 
   /** Сервер сообщил своё состояние (client.state): отслеживаем speaking. */
   setServerState(state: ClientState): void {
+    this.lastServerState = state;
     const wasSpeaking = this.serverSpeaking;
     this.serverSpeaking = state === "speaking";
     // Засекаем момент старта речи для anti-echo grace (§10) — только на фронте idle→speaking.
@@ -177,17 +230,21 @@ export class AudioCoordinator {
         tailPlaying: this.playbackActive,
       });
     }
-    // §3 ambient: НЕ закрываем гейт на idle. Раньше после первой реплики сервер
-    // уходил в idle → гейт закрывался НАВСЕГДА (wake word — заглушка, открыть
-    // некому) → Джарвис «глох» после первого ответа. Слушаем постоянно с момента
-    // активации; приватность — только через явный mute() (§0.6).
+    // W1: ЕСТЬ локальный wake → на idle сервера гейт ЗАКРЫВАЕТСЯ: между ходами звук в облако не идёт,
+    // «Джарвис» ловится на устройстве и открывает гейт с пре-роллом (§0.6 наконец по построению).
+    // Без локального wake — прежнее поведение: НЕ закрываем на idle (иначе, как в §3 ambient, гейт
+    // закрылся бы НАВСЕГДА — открыть некому — и Джарвис «глох» после первого ответа).
+    if (state === "idle" && this.localWakeAvailable() && !this.holdOpen && !this.muted) this.closeGate("idle-local-wake");
   }
 
   /** Принудительно закрыть микрофон (честный mute, §0.6). */
   mute(): void {
+    this.muted = true;
+    this.holdOpen = false;
+    this.preroll = [];
     this.playbackActive = false; // звук гасится вместе с mute → снимаем barge-окно
     this.resetBargeSustain(); // окно закрыто — счётчик устойчивости не должен пережить разрыв (ревью #close)
-    this.closeGate();
+    this.closeGate("mute");
   }
 
   /**
@@ -310,10 +367,12 @@ export class AudioCoordinator {
     this.deps.onMicState?.(true);
   }
 
-  private closeGate(): void {
+  private closeGate(reason = "close"): void {
     if (!this.gateOpen) return;
     this.gateOpen = false;
-    this.log.info("гейт микрофона ЗАКРЫТ");
+    this.preroll = [];
+    (this.wakeword as { reset?: () => void }).reset?.(); // хвост прошлого хода не должен «будить» сам себя
+    this.log.info("гейт микрофона ЗАКРЫТ", { reason, localWake: this.localWakeAvailable() });
     this.deps.onMicState?.(false);
   }
 }

@@ -38,7 +38,7 @@ async function run() {
     outfile: resolve(outdir, "main/index.cjs"),
     platform: "node",
     format: "cjs",
-    external: ["electron", "ws"],
+    external: ["electron", "ws", "sherpa-onnx-node"],
   });
 
   // preload: запускается в привилегированном контексте до renderer. Тоже .cjs (CJS).

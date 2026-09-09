@@ -44,6 +44,9 @@ importers:
       '@jarvis/userbots':
         specifier: workspace:*
         version: link:../../packages/userbots
+      sherpa-onnx-node:
+        specifier: 1.13.3
+        version: 1.13.3
       ws:
         specifier: ^8.18.0
         version: 8.21.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)

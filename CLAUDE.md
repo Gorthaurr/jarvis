@@ -3497,3 +3497,28 @@ Electron-клиента; живой смоук в игре — за владел
   WARN с ID при каждом подключении. `.env`: `JARVIS_EXT_ID`, `JARVIS_SELF_REVIEW=0`, `JARVIS_AUTO_PREDICT=0`.
 Не сделано в W0 (следующие волны): акустический wake/VAD (W1), оплата API и каскад по цене (W2), рефакторинг
 петли (W3), примитив `act()` (W4). Правила процесса — §8 ревью: feature freeze до W2, ≤2 раунда ревью.
+
+## ВОЛНА W1 «СЛУХ» (2026-09-09, ветка `feat/w0-2026-09-09`)
+- **Локальный wake «Джарвис» + Silero VAD на клиенте** — `apps/client/main/hearing/sherpa-hearing.ts`
+  (sherpa-onnx-node В ПРОЦЕССЕ Electron main; проверено пробой: грузится, KWS+VAD ≤7 мс на кадр).
+  KWS — английская open-vocabulary модель zipformer gigaspeech 3.3M; ключевые слова — BPE-написания того,
+  как она «слышит» русское «Джарвис» (`~/.jarvis/models/kws/jarvis-keywords.txt`: jarvis/javis/jarvice/
+  jadavice/javas/jervis/djarvis/jottovis; формат строки `токены :boost #threshold @метка`). Корпус
+  `apps/client/test-audio/*.wav` (TTS-голоса filipp/alena/zahar/jane) — первый акустический E2E проекта:
+  4/4 позитива, 0/2 негатива (`hearing/sherpa-hearing.test.ts`, skip без моделей).
+  🔴 ГРАБЛИ: модели ТОЛЬКО в ASCII-пути (`~/.jarvis/models`, как speaker-embedding у сервера) — sherpa не
+  читает кириллицу; sherpa-onnx-node и onnxruntime-node в одном процессе конфликтуют → на клиенте только
+  sherpa (VAD тоже его); модуль external в esbuild (`scripts/build.mjs`) и в `electron-builder.yml`;
+  `reset()` детектора = НОВЫЙ стрим (kws.reset оставляет левый контекст энкодера — второе «Джарвис» на
+  хвосте прошлого хода ловилось нестабильно). Ставить модели: `node apps/client/scripts/fetch-hearing-models.mjs`.
+- **Гейт микрофона закрыт между ходами** (`audio/index.ts`): при `wakeword.ready` idle сервера закрывает
+  гейт; «Джарвис» локально → `audio.vad{wake_local}` + ПРЕ-РОЛЛ 1,5 с (кольцо кадров — само слово и начало
+  команды) + живой поток. `activate({hold})`/`release()` — запись голосового отпечатка держит гейт;
+  `mute()` — кадры не доходят даже до локального детектора. Без моделей — прежнее поведение (открыт всегда).
+- **Сервер** (`voice/pipeline.ts`): `onVadEvent("wake_local")` открывает окно адресации 8 с
+  (`LOCAL_WAKE_WINDOW_MS`) — следующая реплика принимается без «Джарвис» в тексте (STT мог ослышаться).
+- **Гейт диктора — МЯГКИЙ** (`JARVIS_SPEAKER_GATE=1`, `JARVIS_SPEAKER_GATE_MODE=soft`): «чужой» по
+  биометрии режется ТОЛЬКО без обращения; явное «Джарвис» (текст или локальный wake) проходит всегда.
+  Цена ложного отклонения владельца — одно лишнее «Джарвис», а не оглохший ассистент. `strict` — как раньше.
+- НЕ сделано из W1: AEC с loopback-референсом (внешний звук: ТВ/Discord) — L, требует живого микрофона;
+  локальный faster-whisper как резервный STT. Оба — следующей волной слуха.

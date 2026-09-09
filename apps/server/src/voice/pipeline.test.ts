@@ -1150,3 +1150,109 @@ describe("VoicePipeline — earcon раздумья на sync-first (§P1, фо�
     }
   });
 });
+
+describe("W1 (2026-09-09): локальный wake клиента и мягкий гейт диктора", () => {
+  const PROFILE: VoiceProfile = { name: "Антон", data: new Uint8Array([1]), createdAt: 0 };
+
+  function setupWake(conversationWindowMs = 1_000) {
+    let clock = 0;
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs,
+      followupMs: 1_000_000,
+      now: () => clock,
+    });
+    const say = async (text: string) => {
+      pipe.onWake();
+      const before = onUserTurn.mock.calls.length;
+      stt.last!.emit({ text, final: true });
+      await flush();
+      if (onUserTurn.mock.calls.length > before && tts.last) {
+        tts.last.push(0, true);
+        tts.last.finish();
+        await flush();
+      }
+    };
+    return { pipe, onUserTurn, say, advance: (ms: number) => { clock += ms; } };
+  }
+
+  it("wake_local от клиента: реплика БЕЗ «Джарвис» в тексте принимается как обращение (STT ослышался слово)", async () => {
+    const { pipe, onUserTurn, say } = setupWake();
+    pipe.onVadEvent("wake_local");
+    await say("открой блокнот"); // облако не расслышало «Джарвис» — локальный детектор его слышал
+    expect(onUserTurn).toHaveBeenLastCalledWith("открой блокнот", expect.objectContaining({ viaWake: true }));
+  });
+
+  it("окно локального wake протухает: спустя 9 с реплика без обращения — игнор", async () => {
+    const { pipe, onUserTurn, say, advance } = setupWake(1_000);
+    pipe.onVadEvent("wake_local");
+    advance(9_000);
+    await say("открой блокнот");
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  function setupSpeaker(score: number) {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const verifier = new MockSpeakerVerifier({ ready: true, threshold: 0.5, match: () => ({ name: "Антон", score }) });
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      turnDetector: alwaysEndpointTurn(),
+      speaker: { verifier, profiles: () => [PROFILE] },
+    });
+    const turn = async (text: string) => {
+      pipe.onWake();
+      stt.last!.emit({ text, final: false });
+      pipe.onAudioFrame(new Int16Array([10, 20, 30, 40]).buffer);
+      pipe.onVadEvent("speech_end");
+      await flush();
+      await flush();
+    };
+    return { onUserTurn, turn, pipe };
+  }
+
+  it("мягкий гейт: ЧУЖОЙ по биометрии, но с явным «Джарвис» — принимается (ложное отклонение владельца стоит одно слово)", async () => {
+    const { onUserTurn, turn } = setupSpeaker(0.2);
+    await turn("Джарвис, какая погода");
+    expect(onUserTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("мягкий гейт: ЧУЖОЙ без обращения — по-прежнему игнор (ТВ в окне разговора не проходит)", async () => {
+    const { onUserTurn, turn } = setupSpeaker(0.2);
+    await turn("какая погода");
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("мягкий гейт: ЧУЖОЙ по биометрии, но клиент услышал «Джарвис» локально — принимается", async () => {
+    const { onUserTurn, turn, pipe } = setupSpeaker(0.2);
+    pipe.onVadEvent("wake_local");
+    await turn("какая погода");
+    expect(onUserTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("strict-режим (JARVIS_SPEAKER_GATE_MODE=strict): чужой с «Джарвис» — игнор, как раньше", async () => {
+    const prev = process.env.JARVIS_SPEAKER_GATE_MODE;
+    process.env.JARVIS_SPEAKER_GATE_MODE = "strict";
+    try {
+      const { onUserTurn, turn } = setupSpeaker(0.2);
+      await turn("Джарвис, какая погода");
+      expect(onUserTurn).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SPEAKER_GATE_MODE;
+      else process.env.JARVIS_SPEAKER_GATE_MODE = prev;
+    }
+  });
+});

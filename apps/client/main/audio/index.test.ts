@@ -241,3 +241,80 @@ describe("AudioCoordinator (§3, §0.6)", () => {
     expect(sendFrame).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("W1 (2026-09-09): локальный wake — гейт закрыт между ходами, пре-ролл, честный mute", () => {
+  /** Wake-детектор, который срабатывает на N-м кадре. */
+  function wakeOnFrame(n: number): IWakeWord & { calls: number } {
+    const w = {
+      ready: true,
+      calls: 0,
+      process: (_p: Int16Array) => {
+        w.calls += 1;
+        return w.calls === n;
+      },
+    };
+    return w;
+  }
+
+  it("до wake кадры в облако НЕ уходят; на wake: audio.vad wake_local + пре-ролл (включая кадры ДО слова) + живой поток", () => {
+    const wake = wakeOnFrame(3);
+    const { ac, sendFrame, sendVad, onMicState } = setup(wake);
+    ac.ingest(loud());
+    ac.ingest(loud());
+    expect(sendFrame).not.toHaveBeenCalled();
+    ac.ingest(loud()); // 3-й кадр — детект
+    expect(sendVad).toHaveBeenCalledWith("wake_local");
+    expect(sendFrame).toHaveBeenCalledTimes(3); // пре-ролл: все три кадра, в т.ч. два ДО срабатывания
+    expect(onMicState).toHaveBeenLastCalledWith(true);
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(4); // дальше — живой поток
+  });
+
+  it("idle сервера ЗАКРЫВАЕТ гейт, когда есть локальный wake (§0.6 по построению); без него — нет (прежнее поведение)", () => {
+    const local = setup(wakeOnFrame(999));
+    local.ac.activate();
+    local.ac.setServerState("idle");
+    local.ac.ingest(loud());
+    expect(local.sendFrame).not.toHaveBeenCalled(); // гейт закрыт — только локальный детектор
+    expect(local.onMicState).toHaveBeenLastCalledWith(false);
+
+    const cloud = setup(); // MockWakeWord (ready=false)
+    cloud.ac.activate();
+    cloud.ac.setServerState("idle");
+    cloud.ac.ingest(loud());
+    expect(cloud.sendFrame).toHaveBeenCalledTimes(1); // как раньше: слушает постоянно
+  });
+
+  it("mute: кадры не доходят даже до локального детектора; activate снимает mute", () => {
+    const wake = wakeOnFrame(1);
+    const { ac, sendFrame } = setup(wake);
+    ac.mute();
+    ac.ingest(loud());
+    expect(wake.calls).toBe(0);
+    expect(sendFrame).not.toHaveBeenCalled();
+    ac.activate();
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("activate({hold}) держит гейт на idle (запись голоса); release() закрывает", () => {
+    const { ac, sendFrame } = setup(wakeOnFrame(999));
+    ac.activate({ hold: true });
+    ac.setServerState("idle");
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1); // удержание — гейт открыт
+    ac.release();
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1); // закрылся
+  });
+
+  it("setEngines: локальный wake появился при простое сервера → открытый гейт закрывается", () => {
+    const { ac, sendFrame } = setup();
+    ac.activate();
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1);
+    ac.setEngines({ wake: wakeOnFrame(999) });
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1); // больше не стримит
+  });
+});

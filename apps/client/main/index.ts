@@ -24,6 +24,7 @@ import { dispatch, ownerPresenceNow } from "./actuators/index.js";
 import { noteOwnerInput } from "./actuators/input-mark.js";
 import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
 import { guardedDispatch } from "./actuators/commit-guard.js";
+import { createSherpaHearing } from "./hearing/sherpa-hearing.js";
 import { setActBridge } from "./actuators/code-runner.js";
 import * as tier0 from "./tier0/index.js";
 import { monitors } from "./monitors.js";
@@ -112,6 +113,8 @@ function restoreMicMute(reason: string): void {
   if (micKillSwitch && audio) {
     audio.mute();
     log.info("§0.6 гейт микрофона закрыт обратно (mic-kill-switch владельца)", { reason });
+  } else {
+    audio?.release(); // W1: снять удержание записи — при локальном wake гейт вернётся к «закрыт до „Джарвис“»
   }
 }
 /** 16×16 иконка трея (синий орб) — data-URL, без файловых зависимостей (работает и в dev, и в упаковке). */
@@ -257,6 +260,15 @@ function startTransport(): void {
     onMicState: (open) => win?.webContents.send(IPC.micState, open),
     onBargeIn: () => win?.webContents.send(IPC.bargeIn),
   });
+  // W1: локальный слух (sherpa KWS «Джарвис» + Silero VAD) грузится асинхронно; нет моделей/пакета →
+  // остаёмся на заглушках (гейт открыт постоянно, wake по тексту облака), клиент не падает.
+  if (process.env.JARVIS_LOCAL_WAKE !== "0") {
+    void createSherpaHearing({ onWake: (keyword) => log.info("локальный wake «Джарвис»", { keyword }) })
+      .then((h) => {
+        if (h) audio?.setEngines({ wake: h.wake, vad: h.vad });
+      })
+      .catch((e) => log.warn("слух: ошибка инициализации", { error: e instanceof Error ? e.message : String(e) }));
+  }
 
   // speak.chunk (TTS) → renderer для воспроизведения; client.state → орб + аудио-гейт.
   transport.on("speak", (c) => {
@@ -523,7 +535,7 @@ function registerIpc(): void {
   // иначе UI («Микрофон выключен») врал бы, а кадры уходили в облако навсегда.
   ipcMain.on(IPC.voiceEnrollStart, (_e, name: string) => {
     voiceEnrollInFlight = true;
-    audio?.activate();
+    audio?.activate({ hold: true }); // W1: запись идёт вне хода — idle сервера гейт не закрывает
     transport?.sendVoiceEnrollStart(name);
   });
   ipcMain.on(IPC.voiceEnrollCancel, () => {
