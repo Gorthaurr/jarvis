@@ -398,3 +398,28 @@ describe("W2: SubscriptionSession (мост хендлер ↔ результа�
     expect(onClose).toMatch(/не вернула/);
   });
 });
+
+describe("W2: устойчивость моста к схеме tool() SDK", () => {
+  it("хендлер получил СРЕЗАННЫЕ аргументы (модель положила поля наверх, z.object их отсёк) → результат находится по имени, действие не повторяется", async () => {
+    const sdk = realisticSdk();
+    sdk.handlerDelayMs = 3000; // штатный вызов хендлера поддельным CLI откладываем — зовём его сами
+    const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+    await p.complete(BASE);
+    // Эмулируем CLI: хендлер вызван с пустыми args (поля отсечены валидацией), а не с {app:"notepad"}
+    const tool = ((sdk.queries[0]?.options.mcpServers as Record<string, { tools: FakeTool[] }>).jarvis as { tools: FakeTool[] }).tools[0] as FakeTool;
+    const early = tool.handler({});
+    const second = p.complete(continued());
+    const r = await early;
+    expect(r.content[0]).toEqual({ type: "text", text: "ok, окно 42" }); // нашёлся по имени, не по аргументам
+    p.release("task-1");
+    await second.catch(() => undefined); // сессия закрыта нами — ход честно не состоялся
+  });
+
+  it("схема инструмента: args НЕОБЯЗАТЕЛЕН (обязательный отсекал бы хендлер и вёл к двойному действию)", async () => {
+    const shapes: unknown[] = [];
+    const sdk = { ...realisticSdk(), tool: (name: string, _d: string, shape: unknown, handler: FakeTool["handler"]) => (shapes.push(shape), { name, handler }) } as FakeSdk;
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    const shape = shapes[0] as { args: { isOptional: () => boolean } };
+    expect(shape.args.isOptional()).toBe(true);
+  });
+});

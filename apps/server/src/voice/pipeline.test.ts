@@ -1256,3 +1256,35 @@ describe("W1 (2026-09-09): локальный wake клиента и мягки�
     }
   });
 });
+
+describe("W2: первая фраза разговора сразу — пайплайн озвучивает и преамбулу, и финал, ничего дважды", () => {
+  it("sentence(преамбула) → sentence(финал) → done(финал): в синтез ушли ровно две фразы", async () => {
+    // Так ведёт себя петля на разговорном ходе с инструментом: преамбулу стримит step-0 (eager),
+    // финал после инструмента терминал отдаёт через sink.sentence, done несёт полный текст финала.
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn: vi.fn(async () => ({ voice: "фолбэк" })),
+      onUserTurnStream: async (_t, sink) => {
+        sink.sentence("Сейчас проверю погоду.");
+        await flush();
+        sink.sentence("В Москве плюс пять.");
+        sink.done("В Москве плюс пять.");
+      },
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      followupMs: 50,
+    });
+    pipe.onWake();
+    stt.last!.emit({ text: "какая погода в москве", final: true });
+    for (let i = 0; i < 4 && tts.texts.length < 2; i++) {
+      await flush();
+      tts.last?.push(0, true);
+      tts.last?.finish();
+      await flush();
+    }
+    expect(tts.texts).toEqual(["Сейчас проверю погоду.", "В Москве плюс пять."]);
+  });
+});
