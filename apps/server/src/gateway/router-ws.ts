@@ -605,6 +605,8 @@ export function makeSessionContext(
     // серверу). Арендатору он не адресован и его данными не является (живой прогон 2026-09-02).
     if (devSession || brain.product?.policy.enabled || selfReviewTried || selfReviewInFlight) return;
     if (autonomyFreeze().isFrozen()) return;
+    // W0: явный выключатель — самоосмотр первой репликой владелец не просил (JARVIS_SELF_REVIEW=0).
+    if (process.env.JARVIS_SELF_REVIEW === "0") return;
     const everyDays = Math.max(1, Number(process.env.JARVIS_SELF_REVIEW_DAYS ?? 3) || 3);
     if (!shouldSelfReview({ lastReviewedAt: getProfile(session.userId).lastSelfReviewedAt, everyDays, enabled: true }, Date.now())) {
       selfReviewTried = true;

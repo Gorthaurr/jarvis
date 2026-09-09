@@ -13,7 +13,12 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-export type RiskCategory = "bank" | "payment" | "edo" | "gov" | "market" | "social" | "messenger";
+import { type RiskCategory, riskyProcessCategory } from "@jarvis/shared";
+
+export type { RiskCategory };
+// W0: список процессов и riskyProcessCategory переехали в @jarvis/shared/commit-risk — их же читает
+// клиентский рубеж (SDK-мост, реплей навыка). Реэкспорт — для прежних потребителей.
+export { riskyProcessCategory };
 
 const CATEGORY_HUMAN: Record<RiskCategory, string> = {
   bank: "банк",
@@ -45,15 +50,6 @@ const RISKY_HOSTS: ReadonlyArray<readonly [string, RiskCategory]> = [
   ["outlook.live.com", "messenger"], ["outlook.office.com", "messenger"], ["max.ru", "messenger"],
 ];
 
-/** Процессы настольных программ (имя без .exe, регистр не важен) → категория. */
-const RISKY_PROCESSES: ReadonlyArray<readonly [RegExp, RiskCategory, string]> = [
-  [/^1cv8/i, "edo", "1С"],
-  [/sbbol|ibank|bankclient|client-?bank|interbank|isfront|bss\b/i, "bank", "банк-клиент"],
-  [/cryptopro|cryptoarm|vipnet|signtool/i, "edo", "подпись"],
-  [/^(telegram|discord|whatsapp|viber|slack|teams|zoom|max)$/i, "messenger", "мессенджер"],
-  [/^(outlook|thunderbird|thebat)/i, "messenger", "почта"],
-];
-
 /**
  * Глаголы коммита — «опубликовать/отправить/оплатить/подтвердить/провести/подписать/купить/оформить/перевести»
  * и их английские пары. Ловит и «подписаться» (лишний вопрос на YouTube — безопасная сторона).
@@ -77,13 +73,6 @@ export function riskyHostCategory(host: string): RiskCategory | null {
   for (const [suffix, cat] of RISKY_HOSTS) {
     if (h === suffix || h.endsWith(`.${suffix}`)) return cat;
   }
-  return null;
-}
-
-export function riskyProcessCategory(processName: string): { category: RiskCategory; human: string } | null {
-  const p = processName.trim().replace(/\.exe$/iu, "");
-  if (!p) return null;
-  for (const [re, category, human] of RISKY_PROCESSES) if (re.test(p)) return { category, human };
   return null;
 }
 

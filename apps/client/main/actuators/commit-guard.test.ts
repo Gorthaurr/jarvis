@@ -1,0 +1,67 @@
+/**
+ * W0: клиентский §14-рубеж на путях, минующих серверный dispatchTool (SDK-мост, реплей навыка).
+ * Реверт-проверка: сними вызов assessClientCommit в guardedDispatch — «Enter в Telegram через мост»
+ * упадёт (dispatch будет вызван).
+ */
+import { describe, expect, it, vi } from "vitest";
+import type { ActionCommand, ActionResult } from "@jarvis/protocol";
+import { assertReplayCommitAllowed, assessClientCommit, guardedDispatch } from "./commit-guard.js";
+
+const ok = (commandId: string): ActionResult => ({ commandId, ok: true, durationMs: 1 });
+
+describe("assessClientCommit — чистая политика", () => {
+  it("Enter / Ctrl+Enter в мессенджере или банке — отказ", () => {
+    for (const proc of ["Telegram.exe", "discord", "WhatsApp", "1cv8", "sbbol"]) {
+      expect(assessClientCommit({ kind: "input.key", combo: "Enter" }, proc, "bridge"), proc).not.toBeNull();
+      expect(assessClientCommit({ kind: "input.key", combo: "ctrl+enter" }, proc, "replay"), proc).not.toBeNull();
+    }
+  });
+
+  it("Enter в обычной программе, не-Enter в мессенджере, отпускание клавиши, другие команды — пропуск", () => {
+    expect(assessClientCommit({ kind: "input.key", combo: "Enter" }, "notepad", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "input.key", combo: "Enter" }, "chrome", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "input.key", combo: "ctrl+s" }, "Telegram", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "input.key", combo: "Enter", mode: "up" }, "Telegram", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "input.type", text: "привет" }, "Telegram", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "input.key", combo: "Enter" }, null, "bridge")).toBeNull(); // передний план неизвестен
+  });
+
+  it("текст отказа называет процесс и штатный путь (input_key с подтверждением)", () => {
+    const d = assessClientCommit({ kind: "input.key", combo: "Enter" }, "Telegram", "bridge")!;
+    expect(d.message).toContain("Telegram");
+    expect(d.message).toContain("input_key");
+  });
+});
+
+describe("guardedDispatch — обёртка SDK-моста", () => {
+  it("Enter при Telegram на переднем плане → отказ БЕЗ вызова dispatch", async () => {
+    const dispatch = vi.fn(async (id: string, _c: ActionCommand) => ok(id));
+    const g = guardedDispatch(dispatch, async () => "Telegram");
+    const r = await g("c1", { kind: "input.key", combo: "Enter" });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("denied");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("Enter в блокноте и любые другие команды проходят в dispatch как есть", async () => {
+    const dispatch = vi.fn(async (id: string, _c: ActionCommand) => ok(id));
+    const g = guardedDispatch(dispatch, async () => "notepad");
+    await g("c1", { kind: "input.key", combo: "Enter" });
+    await g("c2", { kind: "input.type", text: "x" });
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+
+  it("передний план неизвестен (сайдкар лёг) → пропуск, как у серверного гейта", async () => {
+    const dispatch = vi.fn(async (id: string, _c: ActionCommand) => ok(id));
+    const g = guardedDispatch(dispatch, async () => null);
+    await g("c1", { kind: "input.key", combo: "Enter" });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("assertReplayCommitAllowed — реплей навыка", () => {
+  it("бросает на Enter в Discord и молчит на Enter в блокноте", async () => {
+    await expect(assertReplayCommitAllowed("Enter", undefined, async () => "Discord")).rejects.toThrow(/§14/u);
+    await expect(assertReplayCommitAllowed("Enter", undefined, async () => "notepad")).resolves.toBeUndefined();
+  });
+});

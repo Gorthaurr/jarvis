@@ -156,3 +156,16 @@ describe("isAllowedWsOrigin", () => {
     }
   });
 });
+
+describe("W0 (2026-09-09): пиннинг ID расширения на /ext", () => {
+  it("isAllowedWsOrigin: с JARVIS_EXT_ID пускает ТОЛЬКО это расширение; без — любое chrome-extension (как раньше)", () => {
+    const mine = "chrome-extension://iejhkmcmpbjlajkoecaoolegicbnkfhj";
+    const other = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    expect(isAllowedWsOrigin(mine, "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(true);
+    expect(isAllowedWsOrigin(mine.toUpperCase(), "ext", "IEJHKMCMPBJLAJKOECAOOLEGICBNKFHJ")).toBe(true);
+    expect(isAllowedWsOrigin(other, "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(false);
+    expect(isAllowedWsOrigin(other, "ext")).toBe(true); // не пиннено — прежнее правило
+    expect(isAllowedWsOrigin(other, "ext", "   ")).toBe(true); // пустой пин = не пиннено
+    expect(isAllowedWsOrigin("", "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(true); // нативный клиент без Origin
+  });
+});

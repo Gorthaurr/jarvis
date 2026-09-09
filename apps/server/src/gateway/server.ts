@@ -380,6 +380,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       ext: extBridge,
       rawToText,
       log,
+      pinnedExtId: process.env.JARVIS_EXT_ID, // W0: только своё расширение на /ext
     });
   });
 

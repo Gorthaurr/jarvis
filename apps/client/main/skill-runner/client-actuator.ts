@@ -9,6 +9,7 @@ import type { SkillStep } from "@jarvis/protocol";
 import { REPLAY_TYPE_MAX_CHARS, type UiPattern } from "@jarvis/protocol";
 import { createLogger, sleep } from "@jarvis/shared";
 import * as apps from "../actuators/apps.js";
+import { assertReplayCommitAllowed } from "../actuators/commit-guard.js";
 import * as ground from "../actuators/ground.js";
 import * as input from "../actuators/input.js";
 import type { SkillActuator } from "./index.js";
@@ -85,7 +86,12 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         case "input.key":
           // Контроль-7 (runner-4): mode/scancode шага доезжают до pressKey — иначе «up» исполнялся как press (лишний тап
           // при игровом удержании), а исключение stepGatedUnderVeil для up было мёртвым.
-          await input.pressKey(str(p.combo), p.mode === "down" || p.mode === "up" ? p.mode : undefined, p.scancode === true);
+          {
+            const mode = p.mode === "down" || p.mode === "up" ? p.mode : undefined;
+            // W0 §14: Enter в мессенджере/банке/1С из реплея — необратимая отправка мимо подтверждения владельца.
+            await assertReplayCommitAllowed(str(p.combo), mode);
+            await input.pressKey(str(p.combo), mode, p.scancode === true);
+          }
           return;
         case "input.click":
           if (!step.target) throw new Error("input.click без target");

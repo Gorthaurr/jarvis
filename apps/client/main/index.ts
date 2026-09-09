@@ -23,6 +23,7 @@ import { Transport } from "./transport/index.js";
 import { dispatch, ownerPresenceNow } from "./actuators/index.js";
 import { noteOwnerInput } from "./actuators/input-mark.js";
 import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
+import { guardedDispatch } from "./actuators/commit-guard.js";
 import { setActBridge } from "./actuators/code-runner.js";
 import * as tier0 from "./tier0/index.js";
 import { monitors } from "./monitors.js";
@@ -836,7 +837,8 @@ function bootstrap(): void {
   // jarvis SDK (среда исполнения «1 раунд = вся задача»): поднимаем loopback-мост актуаторов и отдаём
   // его code-runner'у, чтобы python-скрипт модели драйвил актуаторы ОДНИМ скриптом (jarvis.*), не бегая
   // в LLM между шагами. Сбой не критичен (обычный code_run/актуаторы работают) — jarvis-скрипт честно упадёт.
-  void startActBridge(dispatch)
+  // W0: рискованный коммит (Enter в мессенджере/банке/1С) с моста — честный отказ, не исполнение (см. commit-guard).
+  void startActBridge(guardedDispatch(dispatch))
     .then((bridge) => {
       actBridge = bridge;
       setActBridge({ port: bridge.port, token: bridge.token });
