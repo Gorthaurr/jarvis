@@ -758,8 +758,10 @@ export function makeSessionContext(
   // Волна 1 (эпизод 2026-07-10): мгновенная слышимая ПРИЁМКА фоновой задачи — короткий earcon-тон,
   // не фраза. Убирает сам триггер повторов команды («8с тишины → не услышал → повторил → две петли»).
   agentDeps.taskAccepted = () => voice.playTaskAckEarcon();
-  agentDeps.speakResult = (reply) => {
-    voice.speakQueued(reply.voice);
+  agentDeps.speakResult = (reply, opts) => {
+    // W0: итог ЗАДАЧИ ВЛАДЕЛЬЦА открывает окно разговора (он ждёт ответа); машинный реэнтри
+    // (поручение наблюдения) — проактив, окна не открывает.
+    voice.speakQueued(reply.voice, false, { origin: opts?.origin ?? "user-turn" });
     // §22: итог фоновой задачи — ТАКЖE в чат-историю (раньше уходил только голосом → в текст-канале
     // результат web/MCP/задач не появлялся; печатающий/в mute пользователь его не видел).
     if (reply.voice.trim()) session.send("chat", { role: "assistant", text: reply.voice });
@@ -808,7 +810,8 @@ export function makeSessionContext(
     // живой речи и не съедает висящее уточнение консьержа.
     void handleUserText(session, goal, agentDeps, undefined, { origin: "watch-action" })
       .then((reply) => {
-        if (reply.voice.trim() || reply.display) agentDeps.speakResult?.(reply);
+        // W0: итог машинного реэнтри — проактив (владелец не ждёт ответа), окно разговора не открываем.
+        if (reply.voice.trim() || reply.display) agentDeps.speakResult?.(reply, { origin: "proactive" });
       })
       .catch((e: unknown) => log.error("watch-action: ошибка исполнения поручения", e instanceof Error ? e.message : String(e)));
   });

@@ -93,3 +93,40 @@ describe("classifyTaskControl (§20)", () => {
     expect(classifyTaskControl("Что делаешь?").kind).toBe("status");
   });
 });
+
+describe("W0 рефлекс kill/silence (2026-09-09, лог «Джарвис, вырубись» ×3 → три LLM-задачи)", () => {
+  it("возвратные формы и «X себя» — kill, а не cancel/stop_tts и не контент", () => {
+    for (const phrase of [
+      "вырубись",
+      "Джарвис, вырубись,.",
+      "выключись",
+      "отключись нахуй",
+      "заглохни",
+      "выруби себя",
+      "выключи себя",
+      "выруби клот и себя, нахуй.",
+      "Себя нахуй выруби просто урод ты.",
+      "закрой себя",
+    ]) {
+      expect(classifyTaskControl(phrase), phrase).toMatchObject({ kind: "kill", confidence: "high" });
+    }
+  });
+
+  it("глагол выключения с ДРУГИМ объектом — не kill (это команда программе, идёт в роутер)", () => {
+    expect(classifyTaskControl("выруби музыку").kind).toBe("none");
+    expect(classifyTaskControl("выключи компьютер").kind).toBe("none");
+    expect(classifyTaskControl("отключи вайфай").kind).toBe("none");
+    expect(classifyTaskControl("закрой браузер").kind).toBe("none");
+  });
+
+  it("короткое «тишина/молчи» — silence; длинная фраза с этим словом — обычная реплика", () => {
+    expect(classifyTaskControl("тишина").kind).toBe("silence");
+    expect(classifyTaskControl("Джарвис, тишина").kind).toBe("silence");
+    expect(classifyTaskControl("полная тишина").kind).toBe("silence");
+    expect(classifyTaskControl("в комнате наступила полная тишина и покой").kind).toBe("none");
+  });
+
+  it("kill берёт верх над cancel-словом в той же фразе («прекрати и вырубись» — это про самого Джарвиса)", () => {
+    expect(classifyTaskControl("прекрати и вырубись").kind).toBe("kill");
+  });
+});

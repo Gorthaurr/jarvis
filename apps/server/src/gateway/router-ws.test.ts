@@ -23,7 +23,7 @@ function fakeCtx(tasks: TaskManager) {
   const speakQueued = vi.fn();
   const ctx = {
     session: { sessionId: "s1", userId: "u1", send },
-    voice: { onVadEvent, clearPendingSpeech: vi.fn(), speakQueued },
+    voice: { onVadEvent, clearPendingSpeech: vi.fn(), speakQueued, quiet: vi.fn(), speak: vi.fn() },
     agentDeps: { tasks },
   } as unknown as SessionContext;
   return { ctx, sent, onVadEvent, speakQueued };
@@ -277,5 +277,65 @@ describe("killswitch автономии (волна E)", () => {
     expect(handleControlUtterance(ctx, "останови музыку")).toBe(false);
     expect(freeze.isFrozen()).toBe(false);
     setAutonomyFreezeForTests(undefined);
+  });
+});
+
+describe("W0 рефлекс «вырубись»/«тишина» (2026-09-09)", () => {
+  function voiceOf(ctx: SessionContext) {
+    return (ctx as unknown as { voice: { quiet: ReturnType<typeof vi.fn>; speak: ReturnType<typeof vi.fn>; clearPendingSpeech: ReturnType<typeof vi.fn> } }).voice;
+  }
+
+  it("«Джарвис, вырубись» при активной задаче: всё отменено, синтез оборван, проактив придержан, ack ОДНИМ словом мимо очереди", () => {
+    // Лог 2026-09-03 21:53: та же реплика уходила в модель как задача и полторы минуты «закрывала окна».
+    // Реверт: убери kill-ветку в task-control.ts — тест упадёт (реплика уйдёт в агент).
+    const tasks = new TaskManager();
+    const a = tasks.create({ userId: "u1", sessionId: "s1", goal: "первая" });
+    const b = tasks.create({ userId: "u1", sessionId: "s1", goal: "вторая" });
+    const { ctx, sent, onVadEvent, speakQueued } = fakeCtx(tasks);
+    expect(handleControlUtterance(ctx, "вырубись,.", "voice")).toBe(true);
+    expect(tasks.get(a.taskId)?.state).toBe("cancelled");
+    expect(tasks.get(b.taskId)?.state).toBe("cancelled");
+    expect(onVadEvent).toHaveBeenCalledWith("barge_in");
+    const voice = voiceOf(ctx);
+    expect(voice.clearPendingSpeech).toHaveBeenCalled();
+    expect(voice.quiet).toHaveBeenCalledWith(60_000);
+    expect(voice.speak).toHaveBeenCalledTimes(1);
+    expect(String(voice.speak.mock.calls[0]?.[0])).toContain("Остановил");
+    expect(speakQueued).not.toHaveBeenCalled(); // мимо очереди — она придержана quiet()
+    expect(sent.filter((e) => e.type === "task.status" && e.payload.state === "cancelled")).toHaveLength(2);
+  });
+
+  it("«выключись» БЕЗ активных задач всё равно перехватывается (в модель не уходит) и отвечает «Молчу»", () => {
+    const tasks = new TaskManager();
+    const { ctx } = fakeCtx(tasks);
+    expect(handleControlUtterance(ctx, "выключись", "voice")).toBe(true);
+    expect(String(voiceOf(ctx).speak.mock.calls[0]?.[0])).toContain("Молчу");
+  });
+
+  it("«тишина» — молча: quiet на 10 минут, ни одного слова в ответ", () => {
+    const tasks = new TaskManager();
+    tasks.create({ userId: "u1", sessionId: "s1", goal: "долгая" });
+    const { ctx, speakQueued } = fakeCtx(tasks);
+    expect(handleControlUtterance(ctx, "тишина", "voice")).toBe(true);
+    const voice = voiceOf(ctx);
+    expect(voice.quiet).toHaveBeenCalledWith(10 * 60_000);
+    expect(voice.speak).not.toHaveBeenCalled();
+    expect(speakQueued).not.toHaveBeenCalled();
+  });
+
+  it("«выруби музыку» — НЕ рефлекс: уходит дальше как команда программе", () => {
+    const tasks = new TaskManager();
+    const { ctx } = fakeCtx(tasks);
+    expect(handleControlUtterance(ctx, "выруби музыку", "voice")).toBe(false);
+    expect(voiceOf(ctx).quiet).not.toHaveBeenCalled();
+  });
+
+  it("из текст-канала ack идёт в чат, а не голосом (§22 text-silent)", () => {
+    const tasks = new TaskManager();
+    tasks.create({ userId: "u1", sessionId: "s1", goal: "g" });
+    const { ctx, sent } = fakeCtx(tasks);
+    expect(handleControlUtterance(ctx, "вырубись", "text")).toBe(true);
+    expect(voiceOf(ctx).speak).not.toHaveBeenCalled();
+    expect(sent.some((e) => e.type === "chat" && String(e.payload.text).includes("Остановил"))).toBe(true);
   });
 });

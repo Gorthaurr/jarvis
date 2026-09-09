@@ -82,7 +82,10 @@ class CtrlTtsStream implements TtsStream {
 class CtrlTtsProvider implements ITtsProvider {
   readonly live = false;
   last: CtrlTtsStream | null = null;
-  synthesize(): TtsStream {
+  /** Что реально ушло в синтез (W0-тесты: «принято в очередь» ≠ «звучит»). */
+  texts: string[] = [];
+  synthesize(text: string): TtsStream {
+    this.texts.push(text);
     this.last = new CtrlTtsStream();
     return this.last;
   }
@@ -384,7 +387,7 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
         await flush();
       }
     };
-    return { pipe, stt, onUserTurn, advance, say };
+    return { pipe, stt, tts, onUserTurn, advance, say };
   }
 
   it("без обращения «Джарвис» до пробуждения — игнор (агент не зовётся)", async () => {
@@ -420,6 +423,69 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
     advance(2_000); // > окна, активности не было
     await say("ещё раз"); // без «Джарвис» → игнор
     expect(onUserTurn).toHaveBeenCalledTimes(calls);
+  });
+
+  // ── W0 (2026-09-09): проактивная речь НЕ открывает окно разговора ──────────────────────────────
+  // Живой лог 2026-09-06 15:50:41→42: «онбординг: приветствие произнесено» → следующая фраза
+  // ТЕЛЕВИЗОРА («Обратите внимание на формулировку Путина…») ушла в модель как задача, и ещё пять
+  // за минуту. Реверт: верни безусловное awake=true в startTts/armFollowup — тесты упадут.
+
+  /** Докрутить последний TTS-стрим до конца (speak_done для drive-речи). */
+  async function finishTts(tts: CtrlTtsProvider) {
+    tts.last!.push(0, true);
+    tts.last!.finish();
+    await flush();
+  }
+
+  it("W0: приветствие/проактив через speak() НЕ открывает окно — следующая реплика без «Джарвис» игнорируется", async () => {
+    const { pipe, tts, onUserTurn, say } = setup(10_000);
+    pipe.speak("Доброе утро, сэр.");
+    await finishTts(tts);
+    await say("обратите внимание на формулировку"); // ТВ говорит сразу после приветствия
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("W0: напоминание/брифинг через speakQueued (дефолт proactive) НЕ открывает окно", async () => {
+    const { pipe, tts, onUserTurn, say } = setup(10_000);
+    expect(pipe.speakQueued("Через двадцать минут созвон, сэр.", true)).toBe(true);
+    await finishTts(tts);
+    await say("нет, сценарий"); // разговор с человеком в комнате
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("W0: итог ЗАДАЧИ ВЛАДЕЛЬЦА (origin user-turn) окно открывает — он ждёт ответа", async () => {
+    const { pipe, tts, onUserTurn, say } = setup(10_000);
+    expect(pipe.speakQueued("Отправил Кате, сэр.", false, { origin: "user-turn" })).toBe(true);
+    await finishTts(tts);
+    await say("спасибо, а теперь открой почту");
+    expect(onUserTurn).toHaveBeenLastCalledWith("спасибо, а теперь открой почту", expect.anything());
+  });
+
+  it("W0: проактив ПОСРЕДИ открытого окна его не продлевает", async () => {
+    const { pipe, tts, onUserTurn, advance, say } = setup(1_000);
+    await say("Джарвис, привет"); // окно открыто, t=0
+    advance(800);
+    pipe.speak("Напоминаю: таблетки."); // проактив на t=800 — окно НЕ сдвигается
+    await finishTts(tts);
+    advance(400); // t=1200: >1000 от реплики владельца
+    const calls = onUserTurn.mock.calls.length;
+    await say("и что дальше");
+    expect(onUserTurn).toHaveBeenCalledTimes(calls); // окно истекло, проактив его не продлил
+  });
+
+  it("W0 quiet(): окно закрывается сразу, очередь озвучки придержана до истечения срока", async () => {
+    const { pipe, tts, onUserTurn, advance, say } = setup(10_000);
+    await say("Джарвис, привет"); // окно открыто
+    pipe.quiet(5_000);
+    const calls = onUserTurn.mock.calls.length;
+    await say("а теперь открой блокнот"); // без «Джарвис» — окно закрыто
+    expect(onUserTurn).toHaveBeenCalledTimes(calls);
+    const before = tts.texts.length;
+    expect(pipe.speakQueued("Напоминание: созвон.", true)).toBe(true); // принято, но не звучит
+    expect(tts.texts.length).toBe(before);
+    advance(5_001);
+    pipe.drainPending(); // срок вышел — дренаж (в бою его дёргает таймер quiet)
+    expect(tts.texts.length).toBe(before + 1);
   });
 
   // Акустика «строгий wake в шуме» (#1/#2): фон/видео/второй голос затапливали пайплайн через катящееся

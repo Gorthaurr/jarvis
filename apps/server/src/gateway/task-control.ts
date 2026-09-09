@@ -20,6 +20,10 @@ import type { Session } from "./session.js";
 
 const log: Logger = createLogger("task-control");
 
+/** W0: после «вырубись» проактив придержан на минуту; после «тишина» — на 10 минут (до явного «Джарвис» — раньше). */
+const KILL_QUIET_MS = 60_000;
+const SILENCE_QUIET_MS = 10 * 60_000;
+
 /**
  * Откуда пришла команда управления: голосом (handleControlUtterance по голосовому вводу), из текст-канала
  * (dev.text / вкладка «Чат», §22) или из UI (task.control — кнопка на карточке задачи).
@@ -144,6 +148,34 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
 
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;
+
+  // 🔴 W0 РЕФЛЕКС «вырубись»/«тишина» (2026-09-09): всё останавливается ЗДЕСЬ, за миллисекунды и без
+  // модели. Живой лог 2026-09-03: «Джарвис, вырубись» ×3 → три LLM-задачи по 10 с/раунд, window_list,
+  // input_key, code_run, app_close — полторы минуты попыток «что-то закрыть» вместо тишины.
+  // Перехватываем ВСЕГДА (даже если нечего останавливать): падение в модель тут — худший исход.
+  if (decision.kind === "kill" || decision.kind === "silence") {
+    const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId);
+    for (const t of cancelled) emitTaskStatus(ctx.session, t);
+    ctx.voice.onVadEvent("barge_in"); // рубит идущий синтез и отменяет ход в раздумье
+    ctx.voice.clearPendingSpeech(); // отложенные итоги — не нужны
+    ctx.voice.quiet(decision.kind === "silence" ? SILENCE_QUIET_MS : KILL_QUIET_MS); // окно закрыто, проактив придержан
+    ctx.session.send("client.state", { state: "idle" });
+    log.warn("W0 рефлекс: владелец велел остановиться и замолчать", {
+      kind: decision.kind,
+      source,
+      cancelled: cancelled.map((t) => t.taskId),
+      reason: decision.reason,
+    });
+    // Ack — ОДНО слово и МИМО очереди (она придержана quiet): владелец должен знать, что услышан.
+    // На «тишина» молчим совсем — он просил именно этого.
+    if (decision.kind === "kill") {
+      const ack = cancelled.length > 1 ? "Остановил всё." : cancelled.length === 1 ? "Остановил." : "Молчу.";
+      ctx.session.send("transcript", { text: ack, final: true });
+      if (source === "voice") ctx.voice.speak(verbalize(ack));
+      else ctx.session.send("chat", { role: "assistant", text: ack });
+    }
+    return true;
+  }
 
   // «стоп» — оборвать TTS (§20), задачу не трогаем (различие «заткнись» vs «отмени»).
   if (decision.kind === "stop_tts") {

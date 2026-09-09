@@ -384,7 +384,7 @@ export interface AgentDeps {
    * задачи исполняются в фоне (не блокируя разговор), а итог проговаривается сюда.
    * Без него (тесты/dev.text) — синхронное поведение.
    */
-  speakResult?: (reply: AgentReply) => void;
+  speakResult?: (reply: AgentReply, opts?: { origin?: "user-turn" | "proactive" }) => void;
   /**
    * Аренда физического ввода на сессию (§20): команды, трогающие мышь/клаву/фокус
    * (вкл. tier0 «открой X»), сериализуются через неё, а независимые задачи бегут
@@ -869,7 +869,7 @@ export async function handleUserText(
       spend: deps.spend,
       // verbalize — как у всех проактивных каналов (числа словами, латиница в фонетику): без него
       // «Поставил напоминание через 20 ч» звучало бы сырой строкой (ревью волны D).
-      onCreated: (line) => deps.speakResult?.({ voice: verbalize(line) }),
+      onCreated: (line) => deps.speakResult?.({ voice: verbalize(line) }, { origin: "proactive" }), // W0: рефлекс — проактив
     });
   }
 
