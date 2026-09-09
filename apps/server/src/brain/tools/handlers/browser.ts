@@ -7,7 +7,7 @@ import { type ActionCommand, DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "
 import { cutText } from "@jarvis/shared";
 import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, untrusted } from "../dispatch-util.js";
+import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
 import { assessWebCommit, hostOfUrl } from "../commit-gate.js";
 
 /**
@@ -156,6 +156,19 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   if (!url) return err("browser_open: пустой url");
   if (browserUrlBlocked(url)) return err("browser_open: адрес заблокирован (внутренняя сеть/loopback/метаданные или небезопасная схема).");
   const sess = ctx.session as unknown as object | undefined;
+  // Контроль-9 (browser-open-ext-bypasses-veil): гейт вуали стоит ДО выбора канала. Контроль-7/8 закрыли только
+  // ветку `sendAction` (расширение НЕ подключено); при подключённом расширении `openOrFocus` зовёт
+  // `chrome.windows.update{focused:true, drawAttention:true}` — окно браузера встаёт поверх окна рисования и
+  // забирает клавиатуру: Esc владельца уходит в Chrome, и рамку штатно не снять до таймаута вуали.
+  if (ctx.veilDrawing?.() === true) {
+    const odDraw = overlayDeniedResult(
+      { ok: false, error: { code: "overlay_drawing" } },
+      `Не открыл ${url}: поверх экрана вуаль режима выделения — окно браузера встало бы на передний план и отобрало ` +
+        `клавиатуру у окна рисования (владелец не смог бы закрыть рамку по Esc). Это состояние системы, не провал: ` +
+        `дождись закрытия оверлея и повтори.`,
+    );
+    if (odDraw) return odDraw;
+  }
   if (ctx.ext?.connected) {
     try {
       const r = (await ctx.ext.openOrFocus(url)) as { focused?: boolean; tabId?: number } | undefined;
@@ -172,6 +185,16 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   }
   const cd = channelDownResult(result, `Не отправлено открытие ${url}: канал с ПК недоступен (переподключение).`); // Б4 #4
   if (cd) return cd;
+  // Контроль-8 (browser-open-overlay-code): контроль-7 научил КЛИЕНТ гейтить browser.open вуалью, но этот
+  // hand-rolled путь (расширение не подключено — штатное состояние) отдавал простой err: петля считала раунд
+  // провалом МОДЕЛИ, два таких раунда эскалировали на Opus «от состояния системы», а честное «поверх экрана
+  // оверлей» ловилось анти-капитуляцией. Тот же хелпер, что у generic-пути/навыков/кода.
+  const od = overlayDeniedResult(
+    result,
+    `Не открыл ${url}: поверх экрана вуаль режима выделения — окно браузера встало бы на передний план и отобрало ` +
+      `клавиатуру у окна рисования. Это состояние системы, не провал: дождись закрытия оверлея и повтори.`,
+  );
+  if (od) return od;
   return err(`Не вышло открыть ${url}: ${result.error?.message ?? result.error?.code ?? "ошибка"}`);
 }
 

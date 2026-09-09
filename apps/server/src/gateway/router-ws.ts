@@ -20,6 +20,7 @@ import {
   type ClientContext,
   type ClientEnv,
   type ClientSystem,
+  type ClientSelection,
   type ClientKeys,
   type ClientSettings,
   type ClientStateMsg,
@@ -42,6 +43,7 @@ import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { autonomyFreeze } from "../autonomy/freeze.js";
 import { renderCapabilityPassport } from "../brain/capabilities.js";
+import { SelectionSlot, sanitizeSelection } from "../brain/agent/selection-context.js";
 import { lastSubscriptionFailure } from "../integrations/subscription-llm.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
@@ -389,6 +391,9 @@ export function makeSessionContext(
   let closed = false;
   const agentDeps: AgentDeps = {
     memory,
+    // §режим выделения: слот сидируется ЗДЕСЬ (один экземпляр на сессию), а не при первом client.selection —
+    // иначе петля, запущенная до первого выделения (или пережившая resume), держала бы deps без слота.
+    selection: session.scoped("selection", () => new SelectionSlot()),
     llm: brain.llm,
     episodic: brain.episodic,
     responseCache: brain.responseCache, // §15 семантический кэш ответов (lookup до LLM / store после)
@@ -457,7 +462,13 @@ export function makeSessionContext(
         // Почему лёг резерв на подписке (протухшая авторизация/исчерпанный лимит) — знание на каждый
         // ход: иначе владелец слышит «связь прервалась» и не догадывается, что нужно переавторизоваться.
         subscriptionFailure: lastSubscriptionFailure(),
+        // Состояние ОСНОВНОГО канала (2026-09-02): при исчерпанном балансе/непринятом ключе он
+        // выключается насовсем (не «пауза и снова стучимся»), и работа идёт по подписке — медленнее
+        // и без prompt-кеша. Модель обязана это знать: иначе обещает прежнюю скорость и не понимает,
+        // почему длинные GUI-задачи не укладываются в потолок.
+        llmChannel: brain.llm.channelStatus?.(),
         appChannels: channelSummary(agentDeps.appChannels ?? []),
+        selectionHotkey: agentDeps.selectionHotkey,
       }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
@@ -945,6 +956,8 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const payload = env.payload as ClientEnv;
       const summary = payload.summary;
       ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, environment: summary };
+      // §режим выделения: какая клавиша РЕАЛЬНО зарегистрирована — в паспорт возможностей, не литералом в персоне.
+      if (payload.selectionHotkey !== undefined) ctx.agentDeps.selectionHotkey = payload.selectionHotkey;
       // §Волна2 (2.6): структурные списки → лексикон STT-нормализатора (мутируем объект-держатель,
       // который замкнут в источниках TranscriptNormalizer этой сессии).
       if (ctx.envLexicon) {
@@ -992,6 +1005,29 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const nowEmpty = !combined.trim();
       if (wasEmpty !== nowEmpty) log.info("client.system: live-контекст " + (nowEmpty ? "ПРОПАЛ (пустые снимки)" : "появился"), { len: combined.length });
       ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, systemContext: combined };
+      break;
+    }
+    case "client.selection": {
+      // §режим выделения (2026-09-03): владелец обвёл кусок экрана рамкой (или снял её). Кладём в
+      // контекст хода — Джарвис КАЖДЫЙ ход знает, есть ли указатель «вот тут», без tool-call.
+      // Момент фиксируем ПО СВОИМ часам: возраст указания должен быть честным независимо от часов ПК.
+      // Санируем: это НАШ доверенный статус в промпте, значит граница «данные/инструкции» — здесь.
+      // Слот живёт в session.scoped: реконнект пересоздаёт agentDeps, а идущая петля читает живое состояние.
+      const payload = env.payload as ClientSelection;
+      const sel = payload.selection === null ? null : sanitizeSelection(payload.selection);
+      if (payload.selection !== null && !sel) {
+        log.warn("client.selection: отброшен как не похожий на выделение (мусорные поля)");
+        break;
+      }
+      const slot = ctx.session.scoped("selection", () => new SelectionSlot()); // тот же экземпляр, что в agentDeps
+      // Контроль-9 (browser-open-ext-bypasses-veil): фаза рисования — отдельный факт от самого выделения (рамки ещё
+      // нет, а вуаль уже ловит мышь). Серверные пути мимо клиентского гейта (browser_open через расширение) судят по ней.
+      if (typeof payload.drawing === "boolean") slot.setDrawing(payload.drawing);
+      const before = slot.key();
+      slot.set(sel, payload.ageMs, Date.now());
+      if (slot.key() !== before) {
+        log.info(sel ? "client.selection: владелец показывает на область" : "client.selection: выделение снято", sel ? { w: sel.w, h: sel.h, monitor: sel.monitorIndex } : {});
+      }
       break;
     }
     case "client.settings": {

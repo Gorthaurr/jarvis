@@ -79,12 +79,46 @@ export interface SubscriptionFailure {
 let lastFailure: SubscriptionFailure | undefined;
 
 /** Классификация текста ошибки SDK (чистая функция). */
+/**
+ * «Ответ» модели — на самом деле ЭХО ошибки канала? (живой случай 2026-09-02, 10:11: SDK отдал
+ * «You've hit your session limit · resets 2:20pm» и как assistant-текст, и как текст исключения;
+ * ветка «частичный ответ» приняла это за работу модели, и владелец услышал сырую английскую ошибку
+ * голосом дворецкого при ok:true в метриках).
+ *
+ * Судим ПО СОВПАДЕНИЮ с текстом ошибки, а не по словарю признаков: словарь ловил бы и законный
+ * ответ на вопрос «что значит фраза You've hit your session limit» — то есть ложно проваливал бы
+ * нормальный ход. Сравнение включающее: SDK оборачивает уведомление своим префиксом
+ * («Claude Code returned an error result: …»), поэтому текст ответа оказывается ПОДСТРОКОЙ ошибки.
+ * Чистая функция (экспорт — для тестов).
+ */
+export function isErrorEcho(answer: string, errorText: string): boolean {
+  const norm = (s: string) =>
+    String(s ?? "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+  const a = norm(answer);
+  const e = norm(errorText);
+  if (!a || !e) return false;
+  if (a === e) return true;
+  // КОРОТКИЙ ответ подстрокой не судим: «да» лежит внутри «неверные данные», и законный односложный
+  // ответ модели был бы выброшен как эхо (ложный провал состоявшегося хода — та же нечестность
+  // наизнанку). Настоящее уведомление канала длинное; порог отсекает случайные вхождения.
+  if (a.length < MIN_ECHO_CHARS) return false;
+  return e.includes(a) || a.includes(e);
+}
+
+/** Минимальная длина «ответа», при которой вхождение в текст ошибки — улика, а не совпадение. */
+const MIN_ECHO_CHARS = 16;
+
 export function classifySubscriptionError(text: string): SubscriptionFailure {
   const t = String(text ?? "");
   if (/authenticate|oauth|session expired|not logged in|unauthorized/i.test(t)) {
     return { kind: "auth", human: "подписка не авторизована (сессия истекла) — нужно выполнить `claude setup-token` и обновить CLAUDE_CODE_OAUTH_TOKEN", at: Date.now() };
   }
-  if (/out of usage credits|usage limit|credit balance|quota/i.test(t)) {
+  // `session limit` — формулировка Claude Code при исчерпании окна подписки («You've hit your
+  // session limit · resets 2:20pm»); раньше падала в «other» и доходила до владельца сырой строкой.
+  if (/out of usage credits|usage limit|session limit|credit balance|quota/i.test(t)) {
     return { kind: "credits", human: "лимит подписки исчерпан — до сброса окна резерв недоступен", at: Date.now() };
   }
   if (/rate.?limit|429|too many requests/i.test(t)) {
@@ -135,6 +169,21 @@ function subscriptionModel(): string {
   return raw || "opus";
 }
 
+/** Алиасы SDK → канонический id каталога (для ЧЕСТНОЙ отметки «кто на самом деле ответил»). */
+const SUBSCRIPTION_MODEL_IDS: Record<string, string> = { opus: "claude-opus-5", fable: "claude-fable-5" };
+
+/**
+ * Какая модель РЕАЛЬНО отвечает по подписке — канонический id, а не алиас и не модель тира.
+ * 🔴 До 2026-09-02 метрики и логи писали модель ТИРА основного канала (`claude-opus-4-8`), хотя ход
+ * шёл по подписке на Opus 5: владелец спросил «там точно Opus 5?» — и ответить по логу было нельзя.
+ * Модель тира на выбор модели резерва не влияет вообще (у SDK свой параметр), поэтому отметка обязана
+ * приходить отсюда. Незнакомое значение env отдаём как есть — не выдумываем id.
+ */
+export function subscriptionModelId(): string {
+  const raw = subscriptionModel();
+  return SUBSCRIPTION_MODEL_IDS[raw.toLowerCase()] ?? raw;
+}
+
 /**
  * Рабочий каталог CLI-подпроцесса: ПУСТОЙ и не-git. Держим его в data/, а не во временной папке ОС:
  * так он переживает перезапуски (кеш CLI не сбрасывается каждым стартом) и попадает под те же
@@ -166,20 +215,24 @@ function applySandboxEnv(env: Record<string, string | undefined>): void {
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
- * Эффорт резерва — ПО ТИРУ ХОДА (скорость vs качество, замерено живьём 2026-08-31).
+ * Эффорт резерва — **MAX на КАЖДОМ ходе** (решение владельца, подтверждено 2026-09-02: «от подписки
+ * моей должно быть opus 5 на максимальном эффорте»).
  *
- * Замер показал: латентность резерва почти НЕ зависит от эффорта и модели (5.2-5.9с полного ответа,
- * первый токен 3.2-4.7с) — она упирается в оверхед SDK (CLI-подпроцесс), а не в генерацию. Значит
- * держать `max` на КАЖДОМ ходе смысла нет: разговорные реплики от этого не ускорятся, но и качество
- * им не нужно. Поэтому: обычные ходы (haiku/sonnet) — `low` (голосу важен первый токен), а тир
- * `fable` (эскалация §7, трейдинг, сложное рассуждение) — `max`: туда ход попадает, когда качество
- * реально решает. Переопределяется `JARVIS_SUBSCRIPTION_EFFORT` (один на всё) — если владелец
- * захочет фиксированный уровень.
+ * 🔴 ИСТОРИЯ РАСХОЖДЕНИЯ (почему это здесь написано): 2026-08-31 замер показал, что латентность
+ * резерва почти не зависит от эффорта (её держит оверхед CLI-подпроцесса), и отсюда был сделан
+ * ВЫВОД СВЕРХ ЗАМЕРА — «значит обычным ходам качество не нужно», эффорт свели к `low` для всего,
+ * кроме тира `fable`. Замеряли СКОРОСТЬ, а решили про КАЧЕСТВО. Цена ошибки видна в логе 2026-09-02
+ * 15:49: вопрос «какой билд на Эмбере» ушёл разговорным тиром → Opus 5 на `low`, ноль инструментов,
+ * ответ по памяти — и владелец получил устаревшую сборку. При этом `.env.example` и шапка карты всё
+ * это время обещали «деф max»: код разошёлся и с решением владельца, и с собственной документацией.
+ *
+ * Латентность от этого не страдает (тот же замер), лимит подписки общий с Claude Code владельца —
+ * это его осознанный размен. `JARVIS_SUBSCRIPTION_EFFORT` по-прежнему перекрывает (low|…|max).
  */
-function subscriptionEffort(tier?: string): string {
+function subscriptionEffort(_tier?: string): string {
   const raw = process.env.JARVIS_SUBSCRIPTION_EFFORT?.trim().toLowerCase();
   if (raw && EFFORTS.includes(raw)) return raw;
-  return tier === "fable" ? "max" : "low";
+  return "max";
 }
 
 /**
@@ -473,13 +526,26 @@ export class SubscriptionLlmProvider implements ILlmProvider {
 
     let text = "";
     let streamed = "";
-    let usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     let errorText: string | undefined;
 
     // Зрение: есть картинки → streaming-input (блоки Messages API), иначе — обычный текстовый промпт.
     const transcript = serializeHistory(req);
     const images = collectImages(req);
     const prompt = images.length > 0 ? userMessageStream(transcript, images) : transcript;
+
+    // 🔴 РАЗМЕР ПРОМПТА СЧИТАЕМ ДО ЦИКЛА (адверс-разбор 2026-09-02, HIGH). Раньше `usage`
+    // присваивался ТОЛЬКО в ветке `type==="result"`, а на раунде с инструментом мы выходим из потока
+    // РАНЬШЕ (`break` — вызов исполняет НАШ agent-loop). Итог: 74 из 97 раундов дня ушли в телеметрию
+    // с нулями, и вместе с ними ослепли ДВА механизма: SpendGuard (учёт токенов) и, что важнее, гард
+    // контекст-окна — `lastPromptTokens` обнулялся каждым tool-раундом, то есть на длинной GUI-задаче
+    // (ровно эпизод с Дотой) защита от переполнения контекста была МЕРТВА.
+    // Ломать `break` нельзя: досмотрев поток до `result`, SDK успеет вызвать наш MCP-хендлер, а он
+    // кладёт вызов с НОВЫМ id — `dedupeById` не схлопнет его с настоящим, и agent-loop исполнил бы
+    // одно и то же действие ДВАЖДЫ (два клика, в худшем случае две отправки). Поэтому вход считаем
+    // сами (мы знаем, что отправили), а выход берём из usage ассистентского сообщения.
+    const sp = options.systemPrompt;
+    const promptTokens = Math.ceil(((Array.isArray(sp) ? sp.join("\n\n") : String(sp ?? "")).length + transcript.length) / 2.5);
+    let usage = { inputTokens: promptTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
     // 🔴 ГЛАВНЫЙ путь отказа — БРОШЕННОЕ исключение (ревью волны I): когда CLI выходит с ошибкой
     // (протухшая авторизация — самый частый случай), `sdk.query` бросает, а не отдаёт result-сообщение.
@@ -498,6 +564,11 @@ export class SubscriptionLlmProvider implements ILlmProvider {
         continue;
       }
       if (type === "assistant") {
+        // Выход берём ЗДЕСЬ: на раунде с инструментом до `result` мы не доходим (см. промпт-токены
+        // выше). У SDKAssistantMessage поле message — обычный BetaMessage со своим usage.
+        const au = (msg.message as { usage?: Record<string, unknown> } | undefined)?.usage;
+        const out = Number(au?.output_tokens);
+        if (Number.isFinite(out) && out > 0) usage.outputTokens = out;
         const content = (msg.message as { content?: unknown })?.content;
         text += extractText(content);
         const uses = extractToolUses(content);
@@ -543,20 +614,24 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       // Ничего не получили — это отказ канала, и владелец должен услышать ЕГО причину. Если же
       // модель успела дать текст или запросить инструмент, работу не выбрасываем: обрыв на хвосте
       // потока не повод превращать состоявшийся ход в стаб.
-      if (captured.length === 0 && !text && !streamed) {
-        const raw = e instanceof Error ? e.message : String(e);
+      const raw = e instanceof Error ? e.message : String(e);
+      // 🔴 ЖИВОЙ БАГ (лог 2026-09-02, 10:11): у SDK текст самой ошибки приходит и как «ответ
+      // ассистента». Тогда `text` непуст, ветка «частичный ответ» считала ход СОСТОЯВШИМСЯ, и
+      // владельцу озвучили сырое английское «You've hit your session limit · resets 2:20pm»
+      // голосом дворецкого, а ход записали УСПЕШНЫМ (ok:true в метриках). Эхо ошибки — это не
+      // работа модели: ход провален, причина называется по-русски (см. withKnownReason).
+      if (captured.length === 0 && ((!text && !streamed) || isErrorEcho(text || streamed, raw))) {
         lastFailure = classifySubscriptionError(raw);
-        log.warn("резерв недоступен (исключение SDK)", { kind: lastFailure.kind, human: lastFailure.human });
+        log.warn("резерв недоступен (исключение SDK)", { kind: lastFailure.kind, human: lastFailure.human, эхоОшибки: Boolean(text || streamed) });
         throw new Error(`подписка: ${lastFailure.human}`);
       }
-      log.warn("резерв: поток оборвался после частичного ответа — отдаю, что получил", {
-        error: e instanceof Error ? e.message : String(e),
-      });
+      log.warn("резерв: поток оборвался после частичного ответа — отдаю, что получил", { error: raw });
     }
 
     // Ошибку поднимаем, только если ход ничего не дал: пришедший текст/вызов инструмента — уже
     // результат, и превращать его в стаб (потеря работы модели) было бы ложным провалом.
-    if (errorText && captured.length === 0 && !text && !streamed) {
+    // Исключение — то же эхо: «ответ», совпадающий с текстом ошибки, результатом не является.
+    if (errorText && captured.length === 0 && ((!text && !streamed) || isErrorEcho(text || streamed, errorText))) {
       lastFailure = classifySubscriptionError(errorText);
       log.warn("резерв недоступен", { kind: lastFailure.kind, human: lastFailure.human });
       throw new Error(`подписка: ${lastFailure.human}`);
@@ -574,6 +649,9 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       usage,
       stubbed: false,
       channel: "subscription", // расход считается лимитами подписки, а не долларами API
+      // Кто РЕАЛЬНО ответил: модель тира основного канала тут ни при чём (у SDK свой параметр), а
+      // метрики/логи писали именно её — по ним нельзя было ответить «там точно Opus 5?».
+      modelUsed: subscriptionModelId(),
     };
   }
 }

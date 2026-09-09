@@ -124,6 +124,12 @@ export interface DigestOptions {
    * необратимое (та же логика, что у confirmedSends/declinedCalls: сигнал честности обязан дойти).
    */
   uncertainCalls?: ReadonlySet<string>;
+  /**
+   * Контроль-6 (C5R-4): вызовы навыка/берста, остановленные вуалью ПОСЛЕ k исполненных шагов и/или с ушедшим
+   * действием шага k+1. Формально ошибка, по смыслу — частично сделано: «ОШИБКА» в «СДЕЛАНО» читалось бы
+   * продолжением как «не сделано» и повторяло бы напечатанное и Enter.
+   */
+  partialCalls?: ReadonlyMap<string, { k: number; injected: boolean }>;
 }
 
 /** Дефолтный потолок журнала (символов) — общий для сборки и для склейки цепочки продолжений. */
@@ -180,6 +186,23 @@ const DONE_MAX_LINES = 60;
  */
 const BULK_MUTATE_TOOLS = new Set(["input_click", "input_key", "input_type", "input_mouse", "input_batch", "browser_act", "browser_batch", "ui_invoke", "app_focus", "window_focus"]);
 
+/**
+ * Контроль-8 (partial-marks-collapsed): метки, МЕНЯЮЩИЕ решение продолжения, схлопывать в счётчик нельзя. Раньше
+ * `capDoneLines` резал строки по ИМЕНИ инструмента, и в длинной GUI-задаче отклонённый §14-гейтом коммит
+ * («НЕ ВЫПОЛНЕНО») и остановленный вуалью берст («ЧАСТИЧНО … действие шага 4 УШЛО») исчезали под строкой
+ * «ui_invoke ×12 (механика интерфейса)» — под заголовком «действия, менявшие мир». Продолжение читало счётчик как
+ * «совершено» и пропускало НЕсделанную публикацию/оплату, рапортуя успех. Ровно там, где секция объявлена
+ * несокращаемой, гасились сигналы честности.
+ */
+/**
+ * Контроль-9 (done-section-collapses-error-marks): ДЕНИЛИСТ меток был неполон ПО ПОСТРОЕНИЮ — «ОШИБКА» и «без
+ * результата (оборвалось)» в него не входили, и непрошедший берст схлопывался в «input_batch ×3 (механика
+ * интерфейса)» под заголовком «действия, менявшие мир»: продолжение читало счётчик как «совершено» и пропускало
+ * НЕсделанное. Разрешительный список: в счётчик уходит ТОЛЬКО строка, чей хвост ровно «— ok»; любая новая метка
+ * `outcomeMark` автоматически остаётся в секции.
+ */
+const COLLAPSIBLE_OK_RE = /—\s*ok$/u;
+
 /** Пометка о том, что часть необратимых действий в секцию не поместилась (молчать нельзя). */
 const DONE_TRUNCATED = (n: number): string =>
   `- [ещё ${n} более ранних необратимых действий не поместились — считай, что они СОВЕРШЕНЫ, и сверяй перед повтором]`;
@@ -194,7 +217,7 @@ function capDoneLines(done: readonly string[]): string[] {
   const kept: string[] = [];
   for (const line of done) {
     const tool = /^-\s*([\w.]+)\(/u.exec(line)?.[1] ?? "";
-    if (BULK_MUTATE_TOOLS.has(tool)) {
+    if (BULK_MUTATE_TOOLS.has(tool) && COLLAPSIBLE_OK_RE.test(line)) {
       bulkCount.set(tool, (bulkCount.get(tool) ?? 0) + 1);
       continue;
     }
@@ -269,8 +292,15 @@ function outcomeMark(
   confirmedSends?: ReadonlySet<string>,
   declinedCalls?: ReadonlySet<string>,
   uncertainCalls?: ReadonlySet<string>,
+  partialCalls?: ReadonlyMap<string, { k: number; injected: boolean }>,
 ): string {
   if (e.ok === undefined) return "без результата (оборвалось)";
+  // Контроль-6 (C5R-4): частично исполненный реплей/берст — ДО ветки ошибки (иначе «ОШИБКА» = «повтори всё»).
+  const part = partialCalls?.get(e.id);
+  if (part) {
+    const done = part.k > 0 ? `шаги 1..${part.k} УЖЕ ВЫПОЛНЕНЫ (не откатываются)` : "ни один шаг не завершён";
+    return `ЧАСТИЧНО — ${done}${part.injected ? `; действие шага ${part.k + 1} УШЛО, исход неизвестен — СВЕРЬ перед повтором` : "; дальше — нет"}`;
+  }
   // 🔴 ИСХОД НЕИЗВЕСТЕН (2026-08-31): формально ошибка, но по смыслу — «могло и получиться». Для
   // журнала это КРИТИЧНО: «ОШИБКА» читается продолжением как «не сделано», и оно повторит отправку,
   // которая, возможно, уже ушла человеку. Проверяем ДО ветки ошибки.
@@ -424,7 +454,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     else {
       const cap = i >= detailFrom ? detailCap : briefCap;
       const res = e.result ? ` → ${squeeze(e.result, cap)}` : "";
-      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls)}${res}`);
+      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls, opts.partialCalls)}${res}`);
     }
   }
 
@@ -437,17 +467,29 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
   for (const e of entries) {
     // Реплей макроса — совершённые мутации без tool_use: место им именно в несокращаемой секции.
     if (e.kind === "macro") {
-      const line = `- ${neutralizeWrapperTags(squeeze(e.text, 200))}`;
+      // Контроль-4: в «СДЕЛАНО» — только реплей, который что-то СДЕЛАЛ («ОТРАБОТАЛ» целиком или «УЖЕ
+      // ВЫПОЛНЕНЫ» первые шаги). Провальная врезка (лёг об вуаль / упал на первом шаге) остаётся в подробной
+      // части: под заголовком «действия, менявшие мир» ей делать нечего — не сделано ничего.
+      if (!/ОТРАБОТАЛ|УЖЕ ВЫПОЛНЕНЫ|УЖЕ УШЛО/u.test(e.text)) continue;
+      // Контроль-5 (V4-3): хвост «Шаги 1..k УЖЕ ВЫПОЛНЕНЫ» стоит в КОНЦЕ врезки, а squeeze режет хвост — в
+      // несокращаемой секции оставалось «НЕ выполнился», и «доделай» повторяло k сделанных шагов. Существо печатаем явно.
+      const tails = [...e.text.matchAll(/(?:Шаги 1\.\.\d+ УЖЕ ВЫПОЛНЕНЫ|Действие шага \d+ УЖЕ УШЛО)[^.]*\./gu)].map((m) => m[0]);
+      const line = `- ${neutralizeWrapperTags(tails.length > 0 ? `${squeeze(e.text, 110)} — ${tails.join(" ")}` : squeeze(e.text, 200))}`;
       if (!done.includes(line)) done.push(line);
       continue;
     }
-    if (e.kind !== "call" || effect(e.tool) !== "mutate") continue;
+    // Контроль-9 (partial-neutral-not-in-done-section): в несокращаемую секцию идёт не только `mutate`, но и любой
+    // вызов, о котором петля знает ЧАСТИЧНОЕ исполнение или НЕОПРЕДЕЛЁННЫЙ исход. `job_status` нейтрален, а
+    // рассказывает он про ушедшие действия фонового скрипта: метка «ЧАСТИЧНО — шаги 1..2 УЖЕ ВЫПОЛНЕНЫ» жила
+    // только в подробной части, которую `truncateFront` режет с начала, и «доделай» повторяло эти действия.
+    if (e.kind !== "call") continue;
+    if (effect(e.tool) !== "mutate" && !opts.partialCalls?.has(e.id) && !opts.uncertainCalls?.has(e.id)) continue;
     // 🔴 Нейтрализация ОБЯЗАТЕЛЬНА и здесь (контрольное ревью-2, HIGH): input мутирующего вызова —
     // текст, который мог прийти со страницы («скопируй это и запиши в файл»). Без неё `</untrusted_content>`
     // в первой же строке журнала ЗАКРЫВАЛ нашу обёртку, и весь остаток (дампы страниц прошлого захода
     // + подставленная директива) читался моделью как ДОВЕРЕННЫЙ текст.
     const safeInput = neutralizeWrapperTags(squeeze(e.input, 90));
-    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls)}`;
+    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls, opts.partialCalls)}`;
     if (!done.includes(line)) done.push(line);
   }
   const doneCapped = capDoneLines(done);

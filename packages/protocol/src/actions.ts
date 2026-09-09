@@ -218,6 +218,13 @@ type ActionCommandKind =
   // §Волна2 (2.3): клиентское ОЖИДАНИЕ события без LLM-поллинга — один tool-вызов вместо N vision-раундов.
   | { kind: "wait.for"; condition: WaitCondition; timeoutMs?: number; pollMs?: number }
   | { kind: "context.read"; scope: "selection" | "active_window" | "screen" } // дейксис, §19
+  // §РЕЖИМ ВЫДЕЛЕНИЯ (2026-09-03): владелец обводит рамкой кусок экрана и говорит «вот тут недочёт».
+  // op: "start" — показать оверлей и дать обвести область (waitMs>0 — дождаться исхода и вернуть его);
+  // "view" — снять СВЕЖИЙ кадр выделенной области (память о ней картинкой не считается, потому кадр
+  // всегда новый); "clear" — снять рамку. Выделения нет → ЧЕСТНАЯ ошибка, а не пустой/старый кадр.
+  // force — ЯВНАЯ воля владельца (хоткей, голосовая команда): рисовать всегда, даже если область обведена
+  // секунды назад; без force (модельный start) свежая область отдаётся как есть — гонка «сказал и обвёл».
+  | { kind: "screen.selection"; op: "start" | "view" | "clear"; waitMs?: number; scale?: number; force?: boolean }
   | { kind: "demo.record"; op: "start" | "stop" } // обучение демонстрацией, §8
   | { kind: "message.send"; channel: MessageChannel; to: string; body: string } // ТРЕБУЕТ confirm + cadence guard
   // НЕВИДИМО через выделенный Chrome+CDP (НЕ MTProto/userbot — см. message.send). preferredTitle/hintPeerId —

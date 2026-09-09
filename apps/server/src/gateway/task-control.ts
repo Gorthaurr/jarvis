@@ -9,6 +9,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
 import { isOfferDeclined, resumeOfferWindowMs } from "../brain/agent/checkpoint.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
+import { matchSelectionIntent } from "../brain/router/index.js";
 import { irreversibleDone, looksLikeMisfire, misfireAck } from "../brain/tasks/misfire.js";
 import { stripWakeAndFiller } from "../brain/router/index.js";
 import { statusReport } from "../brain/tasks/narrate.js";
@@ -134,6 +135,12 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     });
     return true;
   }
+
+  // 🔴 §режим выделения: «убери/сними/ОТМЕНИ выделение» — команда снять рамку, а не «прерви задачу».
+  // Слово «отмени» ниже классифицируется как cancel и при активной задаче СЪЕЛО БЫ реплику, оборвав
+  // работу вместо снятия рамки. Пропускаем её дальше (tier0-интент selection исполнит) — тот же приём,
+  // что у killswitch выше: узкая якорная форма перехватывается ДО общего классификатора.
+  if (matchSelectionIntent(stripWakeAndFiller(text))) return false;
 
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;

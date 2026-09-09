@@ -21,7 +21,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { CodeLang } from "@jarvis/protocol";
@@ -48,6 +48,8 @@ export interface CodeRunResult {
   truncated: boolean;
   /** Убит по wall-clock: exitCode -1 всегда (taskkill даёт процессу код 1 — без флага таймаут был неотличим от падения скрипта). */
   timedOut?: boolean;
+  /** Контроль-7 (sdk-4): ХВОСТ stdout (последние TAIL_CHARS), когда голова усечена капом — «последнее, что сделал скрипт». */
+  stdoutTail?: string;
 }
 
 export interface CodeRunOpts {
@@ -130,6 +132,15 @@ async function resolveCwd(cwd?: string): Promise<{ cwd: string; temp: boolean }>
  */
 async function prepareEnv(lang: CodeLang): Promise<{ env: NodeJS.ProcessEnv; sdkDir?: string }> {
   const env: NodeJS.ProcessEnv = { ...runnerEnv() };
+  if (lang === "python") {
+    // Контроль-7 (sdk-1): на Windows python пишет в pipe в кодировке консоли (cp1251) — причина остановки вуалью и любой
+    // кириллический вывод приезжали моджибейком (тест SDK маскировал это, выставляя переменную сам).
+    // ⚠️ Контроль-8 (pythonutf8-scope): ТОЛЬКО кодировка ПОТОКОВ. `PYTHONUTF8=1` (UTF-8 Mode) шире задачи: он меняет
+    // локальную кодировку по умолчанию, и `open(path)` над cp1251-файлом русской Windows-программы или
+    // `subprocess.run(text=True)` над утилитой с выводом в cp866 начинали БРОСАТЬ UnicodeDecodeError — скрипт падал,
+    // а петля читала это провалом МОДЕЛИ (растит серию ошибок, кормит §7-эскалацию), хотя причина — среда.
+    env.PYTHONIOENCODING ??= "utf-8";
+  }
   if (!(actBridge && lang === "python")) return { env };
   env.JARVIS_ACT_URL = `http://127.0.0.1:${actBridge.port}/act`;
   env.JARVIS_ACT_TOKEN = actBridge.token;
@@ -161,6 +172,7 @@ export async function run(lang: CodeLang, code: string, opts: CodeRunOpts = {}):
       });
       let stdout = "";
       let stderr = "";
+      let stdoutTail = ""; // контроль-7 (sdk-4): хвост stdout живёт отдельно — cap «головой» терял финальные print'ы
       let truncated = false;
       const cap = (cur: string, add: string): string => {
         if (cur.length >= MAX_OUTPUT) {
@@ -180,7 +192,8 @@ export async function run(lang: CodeLang, code: string, opts: CodeRunOpts = {}):
         settled = true;
         clearTimeout(timer);
         if (hardTimer) clearTimeout(hardTimer);
-        resolve(timedOut ? { ...r, exitCode: -1, timedOut: true } : r);
+        const withTail = truncated && stdout.length >= MAX_OUTPUT ? { ...r, stdoutTail } : r;
+        resolve(timedOut ? { ...withTail, exitCode: -1, timedOut: true } : withTail);
       };
       const timer = setTimeout(() => {
         truncated = true;
@@ -197,8 +210,19 @@ export async function run(lang: CodeLang, code: string, opts: CodeRunOpts = {}):
 
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (d: string) => (stdout = cap(stdout, d)));
-      child.stderr.on("data", (d: string) => (stderr = cap(stderr, d)));
+      // stderr держим ХВОСТОМ (контроль-6): traceback и маркер вуали печатаются последними — cap «головой» терял их
+      // на болтливом скрипте, и остановка вуалью читалась обычным падением.
+      const capTail = (cur: string, add: string): string => {
+        const joined = cur + add;
+        if (joined.length <= MAX_OUTPUT) return joined;
+        truncated = true;
+        return joined.slice(-MAX_OUTPUT);
+      };
+      child.stdout.on("data", (d: string) => {
+        stdout = cap(stdout, d);
+        stdoutTail = (stdoutTail + d).slice(-TAIL_CHARS);
+      });
+      child.stderr.on("data", (d: string) => (stderr = capTail(stderr, d)));
       child.on("error", (e) => {
         if (settled) return;
         settled = true;
@@ -239,6 +263,13 @@ export interface CodeJobStatus {
   /** Хвост stdout/stderr (последние TAIL_CHARS символов из файлов лога). */
   stdoutTail: string;
   stderrTail: string;
+  /**
+   * Контроль-9 (job-caught-marker-lost-in-tail): строка-маркер `[overlay_drawing] …`, найденная во ВСЁМ stderr.log,
+   * а не в последних TAIL_CHARS. Скрипт, перехвативший отказ вуали и напечатавший после этого больше 4000 символов,
+   * выходил кодом 0 с маркером ЗА окном хвоста — сервер читал такое задание чистым успехом и снимал неопределённость
+   * запуска, хотя заявленные GUI-действия не выполнились.
+   */
+  overlayMarker?: string;
   logDir: string;
   killed: boolean;
   /** Сбой запуска (интерпретатор не найден и т.п.). */
@@ -260,6 +291,8 @@ interface Job {
   killed: boolean;
   error?: string;
   watchdog?: ReturnType<typeof setTimeout>;
+  /** Контроль-9: найденный (или заведомо отсутствующий — пустая строка) маркер вуали; считается один раз. */
+  overlayMarker?: string;
 }
 
 const jobs = new Map<string, Job>();
@@ -270,6 +303,8 @@ const JOB_MAX_MS = 24 * 60 * 60 * 1000;
 /** Завершённое задание помним 6 ч (итог можно спросить позже), затем чистим логи. */
 const JOB_RETENTION_MS = 6 * 60 * 60 * 1000;
 const TAIL_CHARS = 4_000;
+/** Сколько байт stderr сканируем в поиске маркера вуали (он печатается в момент raise — то есть в начале шума). */
+const MARKER_SCAN_BYTES = 4 * 1024 * 1024;
 
 export async function startJob(lang: CodeLang, code: string, opts: CodeRunOpts = {}): Promise<CodeJobStart> {
   sweepJobs();
@@ -328,11 +363,13 @@ export async function jobStatus(jobId: string, kill = false): Promise<CodeJobSta
     const s = raw.toString("utf8");
     return s.length > TAIL_CHARS ? `…${s.slice(-TAIL_CHARS)}` : s;
   };
+  const marker = await overlayMarkerOf(job);
   return {
     jobId,
     lang: job.lang,
     cwd: job.cwd,
     running: !job.done,
+    ...(marker ? { overlayMarker: marker } : {}),
     ...(job.done ? { exitCode: job.exitCode ?? -1 } : {}),
     elapsedMs: (job.endedAt ?? Date.now()) - job.startedAt,
     stdoutTail: await tail("stdout.log"),
@@ -341,6 +378,44 @@ export async function jobStatus(jobId: string, kill = false): Promise<CodeJobSta
     killed: job.killed,
     ...(job.error ? { error: job.error } : {}),
   };
+}
+
+/**
+ * Контроль-9: маркер отказа вуали — ОДИН раз на задание, поиском по ВСЕМУ файлу stderr (усечённый хвост его терял).
+ * Результат кешируется на записи задания: файл не перечитывается на каждый опрос. Очень большой лог читаем головой
+ * (маркер печатается в момент raise, то есть раньше последующего шума).
+ */
+async function overlayMarkerOf(job: Job): Promise<string | undefined> {
+  if (job.overlayMarker !== undefined) return job.overlayMarker || undefined;
+  if (!job.done) return undefined; // пока идёт — маркер может ещё появиться, не кешируем
+  const path = join(job.logDir, "stderr.log");
+  let text = "";
+  try {
+    const size = (await stat(path)).size;
+    if (size <= MARKER_SCAN_BYTES) text = (await readFile(path)).toString("utf8");
+    else {
+      // Контроль-10: сканируем ХВОСТ, а не голову — операционно значим ПОСЛЕДНИЙ отказ (тот, что и остановил
+      // скрипт); голова содержала бы первый перехваченный отказ с done=0 и врала бы про уже сделанное.
+      const fh = await open(path, "r");
+      try {
+        const buf = Buffer.alloc(MARKER_SCAN_BYTES);
+        const { bytesRead } = await fh.read(buf, 0, MARKER_SCAN_BYTES, size - MARKER_SCAN_BYTES);
+        text = buf.subarray(0, bytesRead).toString("utf8");
+      } finally {
+        await fh.close();
+      }
+    }
+  } catch {
+    job.overlayMarker = "";
+    return undefined;
+  }
+  // 🔴 Контроль-10 (job-marker-first-not-last): маркер печатается на КАЖДЫЙ отказ вуали (конструктор JarvisVeilExit),
+  // и скрипт с бытовым `except:` печатает их несколько. Первый несёт `done=0 injected=0` — по нему сервер говорил
+  // «уйти ничего не успело, запускай ЦЕЛИКОМ» поверх уже совершённых необратимых действий. Берём ПОСЛЕДНИЙ (так же,
+  // как `overlayDrawingFromCodeRun` выбирает последнюю строку в хвосте stderr).
+  const all = [...text.matchAll(/\[overlay_drawing\][^\n]*/gu)];
+  job.overlayMarker = all.length > 0 ? (all[all.length - 1]?.[0] ?? "") : "";
+  return job.overlayMarker || undefined;
 }
 
 /** Идущие/завершённые задания (для паспорта/тестов). */

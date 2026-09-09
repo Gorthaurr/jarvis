@@ -26,6 +26,10 @@ import * as codeRunner from "./code-runner.js";
 import * as fs from "./fs.js";
 import { viewFile } from "./file-view.js";
 import { type CaptureRect, captureScreen, getLastCaptureMapping, probeScreen } from "./screen.js";
+import { selectionClear, selectionStart, selectionView } from "./selection.js";
+import { selectionStore } from "../selection/store.js";
+import { OVERLAY_EXIT_CODE, focusStealsUnderVeil, isVeilGatedInput, overlayDrawingFromCodeRun, veilRelevant } from "../selection/veil-policy.js";
+import { DrawingOverlayError } from "./input.js";
 import { screenOcr, waitFor } from "./sensors-cheap.js";
 import { captureUiFingerprint, observeAfterAction } from "./observe.js";
 import * as system from "./system.js";
@@ -35,7 +39,8 @@ import { outcomeToActionResult, runSkill } from "../skill-runner/index.js";
 import { createClientActuator } from "../skill-runner/client-actuator.js";
 import * as messaging from "./messaging.js";
 import { jarvisBrowser } from "./jarvis-browser.js";
-import { isUserActive } from "./user-presence.js";
+import { lastJarvisInput, lastOwnerInput } from "./input-mark.js";
+import { isUserActive, ownerPresence } from "./user-presence.js";
 import { monitors } from "../monitors.js";
 
 const log = createLogger("actuators");
@@ -64,7 +69,10 @@ const SKILL_REPLAY_BUDGET_MS = (() => {
 /** Ввод САМОГО Джарвиса (SendInput) тоже сбрасывает системный idle — не считаем его «активностью юзера». */
 const JARVIS_INPUT_TOLERANCE_MS = 900;
 /** Когда Джарвис последний раз сам инжектил ввод (для отсечки собственного ввода из детекта активности). */
-let lastJarvisInputAt = 0;
+// Реестр собственного ввода переехал в input-mark.ts (адверс-ревью 2026-09-02): отметка ставится
+// ТАМ, ГДЕ ВВОД ИНЖЕКТИТСЯ, — иначе мимо неё шли реплей навыка, медиа-клавиши и tier0-громкость.
+/** Последний ввод, признанный ВЛАДЕЛЬЦЕВЫМ (не нашим) — для честного присутствия в снимке ПК. */
+let lastUserInputAt = 0;
 /** Команды, которые ФИЗИЧЕСКИ инжектят ввод в сессию пользователя (в отличие от UIA-invoke/CDP). */
 const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key", "input.mouse"]);
 /**
@@ -79,6 +87,25 @@ const OBSERVING_KINDS = new Set<ActionCommand["kind"]>([
   "ui.invoke",
   "skill.execute",
 ]);
+
+/**
+ * Куда МЫ СОБИРАЕМСЯ ткнуть — известно ДО действия и только для координатных целей. Нужно снимку
+ * «до» на UIA-слепом окне (игра/canvas): OCR сравнивается по ОДНОЙ И ТОЙ ЖЕ области, иначе сравнение
+ * бессмысленно. Цель по тексту/роли резолвится уже в момент клика — там точки заранее нет, и
+ * наблюдение честно останется без дельты (слабым), а не выдаст окрестность за сверку исхода.
+ */
+export function plannedClickPoint(cmd: ActionCommand): { x: number; y: number } | undefined {
+  const toScreen = (x: number, y: number, space?: "screen"): { x: number; y: number } => {
+    if (space === "screen") return { x, y };
+    const m = getLastCaptureMapping();
+    return m ? { x: m.boundsX + x / m.scale, y: m.boundsY + y / m.scale } : { x, y };
+  };
+  if (cmd.kind === "input.click" && cmd.target.by === "coords") return toScreen(cmd.target.x, cmd.target.y, cmd.target.space);
+  if (cmd.kind === "input.mouse" && cmd.op === "drag" && cmd.toX !== undefined && cmd.toY !== undefined) {
+    return toScreen(cmd.toX, cmd.toY, cmd.space);
+  }
+  return undefined;
+}
 
 /**
  * Будет ли после этой команды снято fused-наблюдение. ЧИСТАЯ функция — ОДИН источник правды для
@@ -125,11 +152,33 @@ export function userActiveNow(): boolean {
   }
   return isUserActive({
     idleMs,
-    lastJarvisInputAt,
+    lastJarvisInputAt: lastJarvisInput(),
     now: Date.now(),
     thresholdMs: USER_ACTIVE_THRESHOLD_MS,
     toleranceMs: JARVIS_INPUT_TOLERANCE_MS,
   });
+}
+
+/**
+ * Присутствие ВЛАДЕЛЬЦА для снимка ПК (§Б3): «за ПК» / «отошёл» / «не знаю». В отличие от
+ * `userActiveNow()` (гейт ввода, окно 4с) здесь окно минутное — снимок отвечает на вопрос «человек
+ * рядом», а не «прямо сейчас держит мышь». Собственный ввод Джарвиса вычитается: без этого снимок
+ * утверждал «владелец за ПК» на КАЖДОЙ GUI-задаче, и модель объясняла этим свои провалы.
+ */
+export function ownerPresenceNow(): { state: "at_pc" | "away" | "unknown"; idleMin: number } {
+  let idleMs: number;
+  try {
+    idleMs = Math.round(powerMonitor.getSystemIdleTime() * 1000);
+  } catch {
+    return { state: "unknown", idleMin: 0 }; // нет сигнала — молчим, а не выдумываем присутствие
+  }
+  // Граунд-трус сайдкара (он отфильтровал нашу синтетику по dwExtraInfo) главнее эвристики по
+  // глобальному простою: последний ЖИВОЙ ввод владельца известен точно, а не выведен вычитанием.
+  const truth = lastOwnerInput();
+  if (truth > lastUserInputAt) lastUserInputAt = truth;
+  const r = ownerPresence({ idleMs, lastJarvisInputAt: lastJarvisInput(), lastUserInputAt, now: Date.now(), toleranceMs: JARVIS_INPUT_TOLERANCE_MS });
+  lastUserInputAt = r.lastUserInputAt;
+  return { state: r.state, idleMin: Math.round(r.idleMs / 60_000) };
 }
 
 /** Собрать успешный результат с замером длительности. */
@@ -156,11 +205,60 @@ function notImplemented(commandId: string, startedAt: number, milestone: string)
  * Исполнить команду. commandId приходит из envelope.id (см. transport).
  * Любое исключение из актуатора маппится в error.runtime — наружу не утекает.
  */
+// Политика вуали (что гейтить / что помечать / как читать код вуали из скрипта) — ОДИН чистый модуль
+// `selection/veil-policy.ts` на dispatch, точку инжекции и code.run (контроль-5, ACT-6).
+
 export async function dispatch(commandId: string, cmd: ActionCommand): Promise<ActionResult> {
+  // Контроль-4: вуаль судится по ОКНУ команды, а не по состоянию в момент возврата — захват длится сотни мс,
+  // и если владелец отпустил мышь до возврата, затемнённый кадр с подсказкой уезжал без пометки.
+  const veiledBefore = selectionStore.drawing;
+  const t0 = Date.now();
+  const result = await dispatchInner(commandId, cmd);
+  const veiledWindow = veiledBefore || selectionStore.drawing || selectionStore.drawingEndedAfter(t0);
+  // Контроль-5 (ACT-1): wait.for живёт до минуты — вуаль судится ПО РЕШАЮЩЕМУ ОПРОСУ (sensors-cheap ставит
+  // data.veiled), а не по окну всей команды: честное met:true на чистом экране после закрытия вуали не выбрасывается.
+  // Контроль-6 (C5R-8): skill.execute живёт до 90 с — то же: по окну САМОГО наблюдения (data.veiled ставит case ниже).
+  const veiled = cmd.kind === "wait.for" || cmd.kind === "skill.execute" ? (result.data as { veiled?: boolean } | undefined)?.veiled === true : veiledWindow;
+  // §режим выделения (контроль-ревью 2026-09-05): пока вуаль на экране, сенсоры видят ЕЁ — честно помечаем
+  // результат, чтобы затемнённый кадр и подсказка оверлея не читались как состояние приложений.
+  // Признак — только overlayDrawing; текст пометки формулирует сервер (V5-5: две редакции одного статуса — путаница).
+  if (result.ok && veiled && result.data && typeof result.data === "object" && veilRelevant(cmd, result.data)) {
+    const data: Record<string, unknown> = { ...(result.data as Record<string, unknown>), overlayDrawing: true };
+    // Ожидание, ослепшее вуалью, не вправе отвечать «достоверно не наступило/наступило» (watch-предикат читает unknown).
+    if (cmd.kind === "wait.for") data.unknown = true;
+    return { ...result, data };
+  }
+  return result;
+}
+
+async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<ActionResult> {
   const startedAt = Date.now();
   log.info(`dispatch ${cmd.kind} (commandId=${commandId})`);
 
   try {
+    // 🔴 §режим выделения (2026-09-03): пока владелец ОБВОДИТ область, поверх экрана лежит окно-оверлей,
+    // которое ловит мышь. Физический клик агента в этот момент попал бы В ОВЕРЛЕЙ, а актуатор вернул бы
+    // ok — ложный успех ровно того класса, который проект не прощает («нажал» в пустоту и отчитался).
+    // Гейтим ФИЗИЧЕСКИЙ ввод (мышь/клавиатура) и называем ПРАВДИВУЮ причину: ввод занят владельцем, а не
+    // «вы за компьютером» (выдуманная причина — отдельный класс дефектов, разбор «Доты» 2026-09-02).
+    // Фаза висящей рамки НЕ гейтится: она click-through и ввод не перехватывает.
+    // Ранний честный отказ здесь; ЗАЩИТА В ГЛУБИНУ — в самой точке инжекции (input.ts): реплей навыка,
+    // input_batch и SDK-мост зовут input.* мимо dispatch (адверс-ревью 2026-09-05, тот же класс, что H5).
+    // Ранний отказ — только для ЯВНО физического ввода: бесшумную ступень input.click (UIA invoke по
+    // handle/role, мышь не трогает) гейтить нельзя — её же советует текст отказа. Физический фолбэк
+    // бесшумного клика поймает гейт в input.ts.
+    // Контроль-5: условие гейта — из veil-policy (общее с точкой инжекции: input.key{mode:"up"} проходит, фокус окна — нет).
+    const drawBlock = isVeilGatedInput(cmd) ? selectionStore.physicalInputBlockReason() : null;
+    if (drawBlock) {
+      log.info(`physical-input «${cmd.kind}» отклонён: открыт оверлей режима выделения`);
+      // Контроль-3: код ОДИН на оба рубежа (здесь и в точке инжекции) — сервер узнаёт вуаль только по
+      // `overlay_drawing`; прежний «denied» уходил в петлю обычным провалом и кормил §7-эскалацию.
+      const drawMsg = focusStealsUnderVeil(cmd.kind)
+        ? `${drawBlock} Смена фокуса окна отобрала бы клавиатуру у окна рисования — Esc владельца ушёл бы в чужое приложение.`
+        : drawBlock;
+      return errResult(commandId, startedAt, "overlay_drawing", drawMsg);
+    }
+
     // §: НЕ МЕШАТЬ активному пользователю — но ТОЛЬКО когда действие ПРОАКТИВНОЕ (Джарвис сам затеял).
     // ЗАПРОШЕННЫЙ физ-ввод (юзер сам попросил настроить/кликнуть) НЕ блокируем: он в курсе, мешать нечему
     // (фикс «дал сложную задачу — а он отказался: вы активны в браузере»). Глушим лишь `proactive===true`.
@@ -191,7 +289,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
     // пара «screen_capture → input_click» самая частая во всей истории). Снимаем ТОЛЬКО для
     // действий, которые потом наблюдают: лишний опрос UIA на каждую команду не нужен.
     // Не вышло (сайдкар лежит/долго) → undefined: наблюдение честно вернётся в прежний режим.
-    const beforeUi = needsBeforeSnapshot(cmd) ? await captureUiFingerprint() : undefined;
+    const beforeUi = needsBeforeSnapshot(cmd) ? await captureUiFingerprint(plannedClickPoint(cmd)) : undefined;
 
     switch (cmd.kind) {
       // ── РЕАЛЬНО в M0 ──────────────────────────────────────────
@@ -254,13 +352,13 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       // ── Синтетический ввод (§Волна2 2.1: fused act+observe — наблюдение в ТОМ ЖЕ результате) ──
       case "input.type": {
         await input.typeText(cmd.text);
-        lastJarvisInputAt = Date.now(); // наш ввод сбросит системный idle — пометим, чтобы не счесть «юзер активен»
+
         const observation = await observeAfterAction({ settleMs: 150, before: beforeUi });
         return okResult(commandId, startedAt, observation ? { observation } : undefined);
       }
       case "input.key": {
         await input.pressKey(cmd.combo, cmd.mode, cmd.scancode);
-        lastJarvisInputAt = Date.now();
+
         // Игровое удержание (down/up) — середина жеста, наблюдение неуместно (см. Волна2 2.1).
         const observation = cmd.mode === "down" || cmd.mode === "up" ? undefined : await observeAfterAction({ settleMs: 250, before: beforeUi });
         return okResult(commandId, startedAt, observation ? { observation } : undefined);
@@ -273,7 +371,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           button: cmd.button,
           count: cmd.count,
         });
-        lastJarvisInputAt = Date.now();
+
         // §Волна2 (2.1): наблюдение после клика — a11y-выжимка / OCR региона вокруг точки.
         const observation = await observeAfterAction({
           settleMs: 400,
@@ -285,7 +383,7 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       case "input.mouse": {
         // §Волна2 (2.4): полная мышь — hover/удержание/колесо/перетаскивание (DnD, контекст-меню, игры).
         await input.mouse(cmd);
-        lastJarvisInputAt = Date.now();
+
         // Наблюдение — для завершённых жестов (drag/wheel/up); move/down — середина жеста.
         const wantsObserve = willObserve(cmd);
         // Точка для OCR-региона — конец drag в экранных DIP (координаты команды — vision-координаты
@@ -331,13 +429,13 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
           sidecarErr = e instanceof Error ? e.message : String(e);
         }
         if (r?.focused) {
-          lastJarvisInputAt = Date.now();
+
           return okResult(commandId, startedAt, r);
         }
         if (cmd.query) {
           const legacy = await apps.focusApp(cmd.query);
           if (legacy.focused) {
-            lastJarvisInputAt = Date.now();
+
             return okResult(commandId, startedAt, { focused: true, hwnd: r?.hwnd ?? 0, title: r?.title ?? cmd.query, via: "AppActivate" });
           }
         }
@@ -411,6 +509,19 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         // Раньше всегда okResult → модель видела «успех» и врала «готово, результат N», а exitCode/stderr
         // прятались в JSON. Теперь провал явный: модель видит ошибку и заходит иначе.
         if (r.exitCode !== 0) {
+          // Контроль-4: SDK-мост (jarvis.py) помечает отказ вуали маркером в тексте исключения — иначе третий
+          // документированный путь ввода (code_run + jarvis.click) снова кормил §7-эскалацию как провал модели.
+          // Контроль-5 (ACT-4): признак структурный — выделенный exit-код jarvis.py (excepthook), не маркер где-то в stderr.
+          const veilStop = overlayDrawingFromCodeRun({ ...r, lang: cmd.lang });
+          if (veilStop) {
+            // Контроль-6 (V5-2): что скрипт УСПЕЛ до остановки — stepIndex (как у реплея) + хвост stdout: иначе
+            // сделанные N кликов/Enter уезжали как «действие не выполнено», и «повтори» дублировало их.
+            const doneNote = veilStop.done > 0 ? ` Успешно ушедших действий до остановки: ${veilStop.done} — они НЕ откатываются.` : "";
+            const injNote = veilStop.injected ? " Последнее действие УШЛО, его исход не подтверждён." : "";
+            const tail = (r.stdoutTail ?? r.stdout).slice(-300); // контроль-7 (sdk-4): настоящий хвост, не хвост головы
+            const out = errResult(commandId, startedAt, "overlay_drawing", `скрипт остановлен: ${veilStop.reason}${doneNote}${injNote}${tail ? ` | stdout${r.truncated ? " (усечён)" : ""}: ${tail}` : ""}`);
+            return { ...out, ...(veilStop.done > 0 ? { stepIndex: veilStop.done } : {}), ...(veilStop.injected ? { stepActionInjected: true } : {}) };
+          }
           return errResult(
             commandId,
             startedAt,
@@ -419,10 +530,61 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
               `stderr: ${(r.stderr || "").slice(0, 500) || "(пусто)"}${r.stdout ? ` | stdout: ${r.stdout.slice(0, 300)}` : ""}`,
           );
         }
+        // Контроль-7 (sdk-3): exit 0, но в stderr наш маркер — скрипт ПЕРЕХВАТИЛ отказ вуали (голый except/BaseException) и
+        // продолжил; чистый ok был бы ложным успехом при известном клиенту отказе. Не ошибка (скрипт мог сделать иное),
+        // но исход НЕ ПОДТВЕРЖДЁН — сервер ставит uncertain.
+        if (cmd.lang === "python" && (r.stderr || "").includes("[overlay_drawing]")) {
+          const caught = overlayDrawingFromCodeRun({ ...r, exitCode: OVERLAY_EXIT_CODE, lang: cmd.lang });
+          return okResult(commandId, startedAt, {
+            ...r,
+            overlayCaught: true,
+            overlayReason: caught?.reason ?? "поверх экрана вуаль режима выделения",
+            note: "скрипт перехватил отказ вуали режима выделения и продолжил — часть действий НЕ выполнена; исход НЕ подтверждён, сверь состояние",
+          });
+        }
         return okResult(commandId, startedAt, r);
       }
-      case "job.status":
-        return okResult(commandId, startedAt, await codeRunner.jobStatus(cmd.jobId, cmd.kill === true));
+      case "job.status": {
+        const js = await codeRunner.jobStatus(cmd.jobId, cmd.kill === true);
+        const exitCode = js.exitCode;
+        const finished = !js.running && typeof exitCode === "number";
+        // Контроль-6 (C5R-7): фоновый python с SDK, легший об вуаль, — тот же признак, что у синхронного code.run
+        // (признак у одного потребителя из двух = дефект). Поле НЕ overlayDrawing: это не «снято под вуалью» сейчас.
+        // Контроль-9 (job-caught-marker-lost-in-tail): маркер берём из ПОЛНОГО stderr (js.overlayMarker), хвост — лишь фолбэк.
+        const veilStderr = js.overlayMarker ?? js.stderrTail;
+        const v = typeof exitCode === "number" && !js.running ? overlayDrawingFromCodeRun({ exitCode, stderr: veilStderr, lang: js.lang }) : null;
+        if (v) {
+          return okResult(commandId, startedAt, {
+            ...js,
+            overlayStopped: true,
+            overlayReason: v.reason,
+            overlayDone: v.done,
+            // Контроль-8 (job-status-injected): «действие УЖЕ УШЛО» — тот же признак, что у синхронного пути; без него
+            // сервер печатал «дальше — нет», и продолжение повторяло ушедший Enter.
+            ...(v.injected ? { overlayInjected: true } : {}),
+            // Контроль-9 (job-veil-done0-injected-contradiction): при `done=0 && injected` (вуаль поймала САМОЕ ПЕРВОЕ
+            // действие в момент инжекции) прежний текст утверждал «уйти ничего не успело» рядом с признаком
+            // overlayInjected — и это прямо санкционировало дубль необратимого действия при перезапуске.
+            note: v.injected
+              ? `задание ОСТАНОВЛЕНО вуалью режима выделения; действие последнего шага УЖЕ УШЛО в GUI — исход НЕ подтверждён${v.done > 0 ? `, а сделанное до него (${v.done}) не откатывается` : ""}`
+              : v.done > 0
+                ? `задание ОСТАНОВЛЕНО вуалью режима выделения (состояние системы, не ошибка скрипта); сделанное до остановки (${v.done}) не откатывается`
+                : "задание ОСТАНОВЛЕНО вуалью режима выделения ДО первого действия — уйти ничего не успело",
+          });
+        }
+        // Контроль-8 (background-caught-exit0): скрипт ПЕРЕХВАТИЛ отказ вуали (голый except ловит SystemExit) и вышел
+        // кодом 0 — зеркало синхронного пути (иначе «exitCode: 0» читается успехом при невыполненных действиях).
+        if (finished && exitCode === 0 && js.lang === "python" && (veilStderr || "").includes("[overlay_drawing]")) {
+          const caught = overlayDrawingFromCodeRun({ exitCode: OVERLAY_EXIT_CODE, stderr: veilStderr, lang: js.lang });
+          return okResult(commandId, startedAt, {
+            ...js,
+            overlayCaught: true,
+            overlayReason: caught?.reason ?? "поверх экрана вуаль режима выделения",
+            note: "скрипт перехватил отказ вуали режима выделения и продолжил — часть действий НЕ выполнена; исход НЕ подтверждён, сверь состояние",
+          });
+        }
+        return okResult(commandId, startedAt, js);
+      }
 
       // ── skill-runner (tier-0.5, §8): локальное исполнение шагов без LLM ──
       case "skill.execute": {
@@ -450,8 +612,12 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
         // §Волна2 (2.1/2.2): успешный реплей/берст — приложить наблюдение итогового состояния
         // (fused observe): сервер увидит реальный экран в том же tool_result.
         if (skillRes.ok) {
+          // Контроль-6 (C5R-8): вуаль судится по окну НАБЛЮДЕНИЯ, а не всего реплея (до 90 с) — как WaitOutcome.veiled.
+          const tObs = Date.now();
           const observation = await observeAfterAction({ settleMs: 400, before: beforeUi });
-          if (observation) skillRes.data = { observation };
+          if (observation) {
+            skillRes.data = { observation, ...(selectionStore.drawing || selectionStore.drawingEndedAfter(tObs) ? { veiled: true } : {}) };
+          }
         }
         return skillRes;
       }
@@ -480,6 +646,14 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       case "screen.probe": {
         // §Волна2 (2.3): $0-проба «изменилось ли» — перцептивный хеш региона (НЕ доказательство успеха).
         return okResult(commandId, startedAt, await probeScreen(cmd.monitor, cmd.rect as CaptureRect | undefined));
+      }
+      case "screen.selection": {
+        // §режим выделения (2026-09-03): владелец обвёл кусок экрана и говорит о нём «вот тут».
+        // view отдаёт СВЕЖИЙ кадр области (не память о ней); нет выделения → честная ошибка из актуатора.
+        if (cmd.op === "start") return okResult(commandId, startedAt, await selectionStart(cmd.waitMs, { force: cmd.force === true }));
+        // force у clear = голосовая команда владельца (tier0): закрытие вуали — его рука, не «система».
+        if (cmd.op === "clear") return okResult(commandId, startedAt, selectionClear({ byOwner: cmd.force === true }));
+        return okResult(commandId, startedAt, await selectionView(cmd.scale));
       }
       case "wait.for": {
         // §Волна2 (2.3): клиентское ожидание события (UIA/окно/OCR-текст/звук) — без LLM-поллинга.
@@ -608,6 +782,11 @@ export async function dispatch(commandId: string, cmd: ActionCommand): Promise<A
       }
     }
   } catch (e) {
+    // §режим выделения: гейт точки инжекции бросил — это состояние системы (вуаль), не сбой актуатора.
+    if (e instanceof DrawingOverlayError) {
+      // Контроль-6 (C5R-2): «ушло, исход не подтверждён» — отдельный признак (сервер: overlayActionInjected).
+      return { ...errResult(commandId, startedAt, "overlay_drawing", e.message), ...(e.injected ? { stepActionInjected: true } : {}) };
+    }
     const message = e instanceof Error ? e.message : String(e);
     log.error(`actuator ${cmd.kind} упал: ${message}`);
     // NotImplementedError из стабов — это тоже runtime-ошибка наружу (честно).

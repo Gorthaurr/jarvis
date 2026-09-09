@@ -10,6 +10,7 @@
  *
  * Список РАСШИРЯЕМ: добавляйте записи в TIER0_RULES.
  */
+import { noteJarvisInput } from "../actuators/input-mark.js";
 import type { ActionCommand } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
 import { spawn } from "node:child_process";
@@ -53,6 +54,7 @@ function sendMediaKey(key: "[char]173" | "[char]174" | "[char]175"): () => Promi
   // 173 = Mute, 174 = Volume Down, 175 = Volume Up (VK codes как символы для SendKeys-обёртки).
   return () =>
     new Promise<void>((resolve, reject) => {
+      noteJarvisInput(); // наш ввод — иначе присутствие владельца считалось бы по нашему же нажатию
       const ps = `(New-Object -ComObject WScript.Shell).SendKeys([char]${key.replace(/\D/g, "")})`;
       const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
         windowsHide: true,

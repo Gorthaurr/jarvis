@@ -13,18 +13,23 @@
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
  */
-import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, powerMonitor, session } from "electron";
+import { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeImage, powerMonitor, screen, session } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
 import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep, ClientSettings } from "@jarvis/protocol";
 
 import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
-import { dispatch } from "./actuators/index.js";
+import { dispatch, ownerPresenceNow } from "./actuators/index.js";
+import { noteOwnerInput } from "./actuators/input-mark.js";
 import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
 import { setActBridge } from "./actuators/code-runner.js";
 import * as tier0 from "./tier0/index.js";
 import { monitors } from "./monitors.js";
+import { selectionStore } from "./selection/store.js";
+import { type SelectionWiring, wireSelection } from "./selection/wiring.js";
+import { selectionOverlay } from "./selection/overlay.js";
+import { selectionClear, selectionStart } from "./actuators/selection.js";
 import { startGsiListener } from "./sensors/gsi-listener.js";
 import { settingsStore } from "./settings-store.js";
 import { identityStore } from "./identity-store.js";
@@ -270,6 +275,7 @@ function startTransport(): void {
     if (sensors) transport?.sendContext(sensors.snapshot()); // §9: свежий контекст занятости на (ре)коннекте
     void sendEnvProfile(); // §9: отдать агенту авто-профиль окружения (браузер/приложения)
     void sendAmbient(); // §контекст: живой снимок «что открыто и где» сразу на (ре)коннекте
+    selectionOnConnected?.(); // §выделение: рамка пережила обрыв — сервер должен знать о ней (с её возрастом)
     // §15: досылаем сохранённые язык/контекст серверу (робастно к оффлайн-сейву/реконнекту).
     const snap = settingsStore.snapshot();
     // 2026-09-02: выбор модели — тем же сообщением; сервер отвечает models.catalog с тем, что применилось.
@@ -578,6 +584,49 @@ let envGames: string[] = [];
 let envInstalled: Array<{ name: string; exe?: string; uri?: string; cli?: boolean }> = [];
 let envBuiltAt = 0;
 const ENV_TTL_MS = 6 * 3_600_000;
+/**
+ * §РЕЖИМ ВЫДЕЛЕНИЯ (2026-09-03): владелец обводит кусок экрана и говорит о нём «вот тут недочёт».
+ *
+ * Здесь три проводки: (1) результат окна-оверлея → координатор выделения; (2) любое изменение
+ * области → сервер (client.selection), чтобы Джарвис КАЖДЫЙ ход знал, на что показывают, без
+ * tool-call; (3) глобальная клавиша — обвести можно и молча, руками, в том числе поверх игры.
+ *
+ * Клавиша настраивается JARVIS_SELECTION_HOTKEY (пусто = не регистрировать вовсе). Занята другой
+ * программой → ЧЕСТНЫЙ WARN: молча «зарегистрированный» и не работающий хоткей — обещание, которого
+ * нет (голосовая команда при этом работает).
+ */
+function setupSelection(): void {
+  // Логика — в selection/wiring.ts (тестируется на подделках); здесь только Electron-примитивы.
+  const wiring = wireSelection({
+    store: selectionStore,
+    overlay: selectionOverlay,
+    sendSelection: (sel, ageMs, drawing) => transport?.sendSelection(sel, ageMs, drawing),
+    displays: () => screen.getAllDisplays().map((d) => d.bounds),
+    onDisplaysChanged: (cb) => {
+      screen.on("display-added", () => cb("display-added"));
+      screen.on("display-removed", () => cb("display-removed"));
+      screen.on("display-metrics-changed", () => cb("display-metrics-changed"));
+    },
+    onOverlayDone: (cb) => ipcMain.on("selection:done", (e, rect: { x: number; y: number; w: number; h: number } | null) => cb(e.sender.id, rect)),
+    registerHotkey: (accel, cb) => globalShortcut.register(accel, cb),
+    // force: клавиша — явная воля владельца рисовать (в т.ч. перерисовать только что обведённое).
+    start: () => selectionStart(0, { force: true }),
+    clear: (o) => selectionClear(o),
+    hotkey: readEnv("JARVIS_SELECTION_HOTKEY", "Control+Alt+X"),
+    onConnected: (cb) => {
+      selectionOnConnected = cb;
+    },
+  });
+  selectionHotkeyActive = wiring.hotkey;
+  selectionWiring = wiring;
+}
+
+/** Зарегистрированная клавиша «обвести область» (null = нет) — уходит серверу в client.env для паспорта. */
+let selectionHotkeyActive: string | null = null;
+let selectionWiring: SelectionWiring | null = null;
+/** Колбэк проводки выделения на (ре)коннект — зовётся из обработчика transport "connected". */
+let selectionOnConnected: (() => void) | null = null;
+
 async function sendEnvProfile(): Promise<void> {
   try {
     if (envSummary === undefined || Date.now() - envBuiltAt > ENV_TTL_MS) {
@@ -595,7 +644,7 @@ async function sendEnvProfile(): Promise<void> {
       envBuiltAt = Date.now();
       log.info("окружение определено (авто)", { summary: envSummary });
     }
-    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled);
+    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled, selectionHotkeyActive);
   } catch (e) {
     log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
   }
@@ -614,10 +663,14 @@ async function sendAmbient(): Promise<void> {
     // через denied:USER_BUSY) и в сенсоры §9 (гейт проактива «не мешать в игре» оживает).
     sensors?.setActiveApp(foreground?.process ?? "unknown");
     sensors?.setFullscreen(Boolean(foreground?.fullscreen));
-    const idleSec = powerMonitor.getSystemIdleTime();
-    const presence =
-      `Пользователь: ${idleSec < 60 ? "за ПК" : `отошёл (~${Math.round(idleSec / 60)} мин)`}` +
-      `${foreground?.fullscreen ? `; полноэкранно: ${foreground.process}` : ""}.`;
+    // 🔴 Присутствие считаем БЕЗ собственного ввода Джарвиса (разбор «Доты» 2026-09-02): сырой
+    // системный idle сбрасывается нашим же SendInput, и на каждой GUI-задаче снимок утверждал
+    // «владелец за ПК», даже если его нет в комнате. Не знаем — так и пишем: выдуманное присутствие
+    // модель использует как объяснение своих провалов («ввод не отдают — вы за компьютером»).
+    const p = ownerPresenceNow();
+    const presenceWord =
+      p.state === "at_pc" ? "за ПК" : p.state === "away" ? `отошёл (~${p.idleMin} мин)` : "не знаю (последний ввод — мой)";
+    const presence = `Пользователь: ${presenceWord}${foreground?.fullscreen ? `; полноэкранно: ${foreground.process}` : ""}.`;
     const combined = [summary, presence].filter((s) => s && s.trim()).join(" ");
     if (summary) {
       emptyAmbientStreak = 0;
@@ -644,6 +697,9 @@ const TAKEOVER_IDLE_MS = 1500;
 let userActive = false;
 let userIdleTimer: ReturnType<typeof setTimeout> | undefined;
 function noteUserInput(): void {
+  // 🔴 Достоверное присутствие владельца (ревью 2026-09-02): сайдкар уже отличил живой ввод от нашей
+  // синтетики — сигнал иммунен к маскировке нашими же кликами, в отличие от глобального idle.
+  noteOwnerInput();
   if (!userActive) {
     userActive = true;
     transport?.sendTakeover(true); // пользователь взял управление → агент уступает
@@ -776,6 +832,7 @@ function bootstrap(): void {
   applyAutostart();
   startTransport();
   startSidecar();
+  setupSelection(); // §режим выделения: горячая клавиша, приём рамки из оверлея, отправка её серверу
   // jarvis SDK (среда исполнения «1 раунд = вся задача»): поднимаем loopback-мост актуаторов и отдаём
   // его code-runner'у, чтобы python-скрипт модели драйвил актуаторы ОДНИМ скриптом (jarvis.*), не бегая
   // в LLM между шагами. Сбой не критичен (обычный code_run/актуаторы работают) — jarvis-скрипт честно упадёт.
@@ -798,6 +855,8 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true; // штатный quit (вкл. системный shutdown) не должен блокироваться close-to-tray
+  globalShortcut.unregisterAll(); // §выделение: отдаём горячую клавишу системе
+  selectionOverlay.hideAll("quit"); // прозрачные окна поверх экрана не переживают приложение
   transport?.stop();
   sidecar().stop();
   void actBridge?.stop(); // jarvis SDK: гасим loopback-мост актуаторов

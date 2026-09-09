@@ -66,6 +66,18 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
   `app.whenReady().then(...)`, результат писать в файл (не в stdout) и `app.exit(0)`; запуск `npx electron _probe/x.cjs`.
   Так `file_view` прогнан на реальных PDF/PNG/JPG с рабочего стола (PDF через python+PyMuPDF за 255 мс) без
   рестарта живого клиента владельца. Пробу удалять после прогона.
+- **Пробы с ОКНАМИ (оверлей режима выделения, 2026-09-05)** — тот же esbuild-бандл, но с граблями, каждая стоила
+  прогона: (1) класть бандл в `apps/client/dist/main/` — модуль окна грузит `../preload/*.cjs` и `../renderer/*.html`
+  относительно `__dirname`; (2) запускать с `--user-data-dir=<scratchpad>` — иначе конфликт с профилем Chromium
+  живого клиента; (3) зарегистрировать `app.on("window-all-closed", () => {})` — иначе Electron штатно выходит
+  (exit 0, без ошибки) в момент, когда фаза рисования закрывает свои окна, и проба обрывается «ни на чём»;
+  (4) IPC из окна (`ipcMain.on("selection:done", …)`) проводить самому — в бою это делает `setupSelection()` в
+  `main/index.ts`, в пробе его нет, и промис выделения висел бы вечно; (5) протяжку мышью синтезировать через
+  `webContents.executeJavaScript` (dispatchEvent MouseEvent на window) — руки владельца не нужны; (6) читать
+  stdout через PowerShell `| Out-File`, а НЕ `| Select-Object -First N` (тот закрывает трубу, и Electron гибнет
+  на первой же строке); (7) heredoc в Bash спотыкается о TS-шаблоны с бэктиками — пробу и python-патчи писать
+  Write-инструментом в scratchpad. Итог пробы: координаты рамки в экранных DIP на втором мониторе верны, кроп
+  области без рамки, `setContentProtection` на прозрачном окне рамку из захвата НЕ убирает (см. CLAUDE.md).
 - **Индекс Windows** — прямой ADO-запрос из PowerShell (`Search.CollatorDSO`), см. рецепт в `app-channels.ts`.
 - ⚠️ Bash-команда длиннее ~30 КБ падает `ENAMETOOLONG` до исполнения — большие правки писать файлами (Write) и
   python-скриптами в scratchpad, вызывать короткой командой.

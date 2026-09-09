@@ -8,6 +8,7 @@
  * Блокировка/сон — безопасны и обратимы (без confirm). Выключение/перезагрузка/выход —
  * необратимы, требуют user.confirm на сервере (§4).
  */
+import { noteJarvisInput } from "./input-mark.js";
 import { spawn } from "node:child_process";
 import type { ActionCommand } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
@@ -51,6 +52,9 @@ export interface SystemPlan {
 
 /** Скрипт PowerShell, шлющий media/volume-клавишу через keybd_event (VK фиксирован). */
 function keyScript(vk: number): string {
+  // Медиа/громкость — тоже НАШ ввод: без отметки снимок ПК считал бы владельца присутствующим
+  // (адверс-ревью 2026-09-02, HIGH: реестр собственного ввода был неполон).
+  noteJarvisInput();
   return (
     "$s=Add-Type -Name Kbd -Namespace JarvisWin -PassThru -MemberDefinition " +
     "'[DllImport(\"user32.dll\")] public static extern void keybd_event(byte k,byte sc,uint f,System.UIntPtr e);';" +

@@ -603,6 +603,7 @@ export class VoicePipeline {
       }
       const dropped = this.pendingSpeech.splice(victim, 1)[0];
       dropped?.onOutcome?.(false);
+      if (dropped && !dropped.retriable) this.droppedSilently += 1;
       this.log.warn("очередь озвучки переполнена — старая реплика отброшена", { chars: dropped?.text.length ?? 0 });
     }
     this.pendingSpeech.push({
@@ -661,6 +662,50 @@ export class VoicePipeline {
     this.deps.onMouthToEar?.(ms, snap.seq);
   }
 
+  /**
+   * 🔴 СКОЛЬКО ИТОГОВ ВЛАДЕЛЕЦ ТАК И НЕ УСЛЫШАЛ (лог 2026-09-02: за день 21 реплика — 9 из них за
+   * десять минут, когда параллельно шли шесть задач). Механика отбрасывания правильная (протухший
+   * итог произносить вредно, очередь конечна), но потеря была МОЛЧАЛИВОЙ: в комментарии написано
+   * «текст ход уже отдал в чат», а владелец в полноэкранной игре чата не видит — для него Джарвис
+   * просто промолчал. Отсюда его же формулировка: «я не слышу, что ты говоришь».
+   * Поэтому копим счётчик и ОДИН раз честно предупреждаем следующей произносимой репликой.
+   */
+  private droppedSilently = 0;
+  private lastDropNoticeAt = 0;
+
+  /** Приставка к следующей реплике о непроговорённых итогах (пусто — сообщать нечего/рано). */
+  private dropNotice(): string {
+    if (this.droppedSilently <= 0) return "";
+    const t = this.now();
+    // Не мантра: не чаще раза в минуту, иначе шторм задач превратит предупреждение в шум.
+    if (t - this.lastDropNoticeAt < 60_000) return "";
+    const n = this.droppedSilently;
+    this.droppedSilently = 0;
+    this.lastDropNoticeAt = t;
+    return n === 1
+      ? "Сэр, один итог я не успел проговорить — он в чате. "
+      : `Сэр, ${n} итога я не успел проговорить — они в чате. `;
+  }
+
+  /**
+   * Кого произносим следующим. Срочное (напоминания-будильники) — строго по очереди, FIFO.
+   * 🔴 Для НЕсрочных итогов порядок обратный — СВЕЖИЙ ВПЕРЁД (лог 2026-09-02: шторм из шести задач,
+   * девять реплик потеряно за десять минут). Причина: FIFO сначала произносит самый СТАРЫЙ итог, и
+   * пока он звучит, свежие протухают по TTL — владелец слышит ответ на вопрос, о котором забыл, и НЕ
+   * слышит ответ на тот, что задал только что. Это ровно та логика, по которой протухшее вообще не
+   * произносится: «контекст ушёл — говорить вредно». Ничего не теряется дополнительно: тот же TTL,
+   * тот же кап, изменился только порядок выдачи.
+   */
+  private nextToSpeak(): number {
+    const urgent = this.pendingSpeech.findIndex((p) => p.urgent);
+    if (urgent >= 0) return urgent;
+    let best = 0;
+    for (let i = 1; i < this.pendingSpeech.length; i++) {
+      if (this.pendingSpeech[i]!.at > this.pendingSpeech[best]!.at) best = i;
+    }
+    return best;
+  }
+
   private maybeDrainSpeech(): void {
     if (this.pendingSpeech.length === 0) return;
     // СРОК ГОДНОСТИ (ревью 2026-07-24, живая жалоба «договаривает спустя минуты 2 сразу всё скопом»):
@@ -675,7 +720,12 @@ export class VoicePipeline {
       });
       // Источник обязан узнать, что реплика НЕ прозвучала: durable-запись он пометил доставленной
       // только на onOutcome(true), поэтому здесь она вернётся в «ждёт доставки» (контроль-9).
-      for (const p of this.pendingSpeech) if (!fresh.includes(p)) p.onOutcome?.(false);
+      for (const p of this.pendingSpeech) {
+        if (fresh.includes(p)) continue;
+        p.onOutcome?.(false);
+        // Повторяемые (напоминания/наблюдения) вернутся сами — про них предупреждать не надо.
+        if (!p.retriable) this.droppedSilently += 1;
+      }
       this.pendingSpeech = fresh;
       if (this.pendingSpeech.length === 0) return;
     }
@@ -691,14 +741,14 @@ export class VoicePipeline {
     // §9 «не мешать»: пользователь занят (звонок/полный экран/блокировка) → отдаём только СРОЧНОЕ
     // (напоминания-будильники), несрочное (итоги фоновых задач) держим до освобождения.
     const busy = this.deps.isUserBusy?.() ?? false;
-    const idx = busy ? this.pendingSpeech.findIndex((p) => p.urgent) : 0;
+    const idx = busy ? this.pendingSpeech.findIndex((p) => p.urgent) : this.nextToSpeak();
     if (idx < 0) return; // занят, срочного нет — держим, отдадим по drainPending при освобождении
     const [next] = this.pendingSpeech.splice(idx, 1);
     // Фоновый итог/проактивная реплика — НЕ ответ текущего пользовательского хода: m2eSeq=undefined
     // (не тегаем turn-seq), иначе её ack замкнулся бы на висящий снапшот хода = ложные «минуты» (fix
     // мис-атрибуции). Собственный ответ хода тегается только в runAgent/runAgentStreaming/playFiller.
     // Колбэк исхода отдаём ВНУТРЬ синтеза: «взяли из очереди» ещё не «прозвучало» (контроль-11).
-    if (next) this.startTts(next.text, this.gen, true, undefined, next.onOutcome);
+    if (next) this.startTts(`${this.dropNotice()}${next.text}`, this.gen, true, undefined, next.onOutcome);
   }
 
   /**

@@ -66,6 +66,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "code.run",
       "skill.execute",
       "screen.capture",
+      "screen.selection", // §режим выделения: область, на которую показывает владелец
       "context.read",
       "demo.record",
       "message.send",

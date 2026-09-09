@@ -1,6 +1,6 @@
 // Волна G: резервный провайдер на подписке (Agent SDK) — маппинг нашего контракта на SDK.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { SubscriptionLlmProvider, _resetSubscriptionFailureForTest, classifySubscriptionError, lastSubscriptionFailure, type SdkModule, serializeHistory } from "./subscription-llm.js";
+import { SubscriptionLlmProvider, _resetSubscriptionFailureForTest, classifySubscriptionError, isErrorEcho, lastSubscriptionFailure, subscriptionModelId, type SdkModule, serializeHistory } from "./subscription-llm.js";
 import type { LlmRequest } from "./llm.js";
 
 const BASE: LlmRequest = {
@@ -94,6 +94,29 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(r.usage.cacheCreationTokens).toBe(0);
     expect(r.usage.inputTokens).toBeGreaterThan(0); // наша оценка по системному промпту + транскрипту
     expect(r.channel).toBe("subscription"); // канал → петля не начислит долларовую стоимость
+  });
+
+  /**
+   * 🔴 Адверс-разбор 2026-09-02 (HIGH): на раунде с инструментом мы выходим из потока ДО `result`,
+   * а usage присваивался только там → 74 из 97 раундов дня ушли в телеметрию с нулями. Вместе с ними
+   * слепли SpendGuard и гард контекст-окна (`lastPromptTokens` обнулялся каждым tool-раундом — на
+   * длинной GUI-задаче защита от переполнения контекста была мертва). Тест падает при возврате нулей.
+   */
+  it("раунд с ИНСТРУМЕНТОМ отдаёт ненулевой usage (иначе слепнут SpendGuard и гард контекста)", async () => {
+    const sdk = fakeSdk([
+      {
+        type: "assistant",
+        message: {
+          usage: { output_tokens: 42 },
+          content: [{ type: "tool_use", id: "t1", name: "mcp__jarvis__app_launch", input: { args: { app: "notepad" } } }],
+        },
+      },
+      // `result` СОЗНАТЕЛЬНО не отдаём: в бою до него не доходим — break исполняет вызов у нас.
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(r.stopReason).toBe("tool_use");
+    expect(r.usage.outputTokens).toBe(42);
+    expect(r.usage.inputTokens).toBeGreaterThan(0); // размер промпта известен ДО цикла — мы его и отправили
   });
 
   it("tool_use перехватывается и отдаётся НАМ (исполняет agent-loop, не SDK)", async () => {
@@ -209,12 +232,18 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
   });
 
-  // СКОРОСТЬ (замер 2026-08-31): обычные ходы идут на low, и пер-раундовая политика §2.7 работает —
-  // механические раунды не платят за размышление, голосу важен первый токен.
-  it("на обычном тире политика §2.7 уважается: off → disabled", async () => {
-    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
-    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, tier: "sonnet", thinking: "off" });
-    expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
+  // На ПОНИЖЕННОМ эффорте (владелец явно попросил экономить) пер-раундовая политика §2.7 работает:
+  // механические раунды не платят за размышление. На боевом дефолте (max) размышление не глушится —
+  // см. соседний тест: «max без thinking» противоречиво.
+  it("на пониженном эффорте политика §2.7 уважается: off → disabled", async () => {
+    process.env.JARVIS_SUBSCRIPTION_EFFORT = "low";
+    try {
+      const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+      await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, tier: "sonnet", thinking: "off" });
+      expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
+    } finally {
+      delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
+    }
   });
 
   it("потолок вывода уходит в env подпроцесса (per-call параметра у SDK нет)", async () => {
@@ -224,18 +253,43 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("1500");
   });
 
-  // Решение владельца: резерв — на СИЛЬНОЙ модели и МАКСИМАЛЬНОМ эффорте (последний шанс сделать
-  // ход правильно; лимиты подписки уже оплачены). Живым зондом подтверждено: fable/opus доступны.
-  it("модель всегда сильная (opus-5), а эффорт — ПО ТИРУ: обычный ход low, эскалация max", async () => {
+  /**
+   * 🔴 РЕШЕНИЕ ВЛАДЕЛЬЦА (подтверждено 2026-09-02: «от подписки моей должно быть opus 5 на
+   * максимальном эффорте»): сильная модель и МАКСИМАЛЬНЫЙ эффорт на ЛЮБОМ тире. Прежняя политика
+   * «по тиру» (обычный ход low) выводилась из замера СКОРОСТИ, а решала про КАЧЕСТВО — и в живом
+   * логе дала ответ по памяти вместо проверки. Тест падает, если политика вернётся к low.
+   */
+  it("модель всегда сильная (opus-5), эффорт — max на ЛЮБОМ тире", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
     await p.complete({ ...BASE, tier: "haiku" });
     expect(sdk.lastOptions?.model).toBe("opus");
-    expect(sdk.lastOptions?.effort).toBe("low"); // голосу важна скорость первого токена
+    expect(sdk.lastOptions?.effort).toBe("max");
     await p.complete({ ...BASE, tier: "sonnet" });
-    expect(sdk.lastOptions?.effort).toBe("low");
+    expect(sdk.lastOptions?.effort).toBe("max");
     await p.complete({ ...BASE, tier: "fable" });
-    expect(sdk.lastOptions?.effort).toBe("max"); // сюда ход попадает, когда качество решает
+    expect(sdk.lastOptions?.effort).toBe("max");
+  });
+
+  /**
+   * Метрики и лог обязаны называть модель, которая РЕАЛЬНО ответила. На подписке это Opus 5, а
+   * `req.model` — модель тира основного канала (`claude-opus-4-8`), которую никто не вызывал.
+   * Владелец спросил «там точно Opus 5?» — и по логу ответить было нельзя.
+   */
+  it("ответ помечен РЕАЛЬНОЙ моделью резерва, а не моделью тира", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, model: "claude-opus-4-8" });
+    expect(r.modelUsed).toBe("claude-opus-5"); // алиас SDK «opus» развёрнут в канонический id
+    expect(subscriptionModelId()).toBe("claude-opus-5");
+  });
+
+  it("непонятное значение env отдаём как есть — id не выдумываем", () => {
+    process.env.JARVIS_SUBSCRIPTION_MODEL = "claude-неизвестная-9";
+    try {
+      expect(subscriptionModelId()).toBe("claude-неизвестная-9");
+    } finally {
+      delete process.env.JARVIS_SUBSCRIPTION_MODEL;
+    }
   });
 
   it("модель и эффорт переопределяются env", async () => {
@@ -252,13 +306,13 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     }
   });
 
-  it("мусорный эффорт из env игнорируется — работает политика по тиру, а не мусор в SDK", async () => {
+  it("мусорный эффорт из env игнорируется — работает боевой дефолт, а не мусор в SDK", async () => {
     process.env.JARVIS_SUBSCRIPTION_EFFORT = "ультра";
     try {
       const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
       const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
       await p.complete({ ...BASE, tier: "sonnet" });
-      expect(sdk.lastOptions?.effort).toBe("low");
+      expect(sdk.lastOptions?.effort).toBe("max");
       await p.complete({ ...BASE, tier: "fable" });
       expect(sdk.lastOptions?.effort).toBe("max");
     } finally {
@@ -387,5 +441,79 @@ describe("изоляция CLI-подпроцесса (экономия лими
     await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, systemDynamic: "СЕЙЧАС" });
     expect(typeof sdk.lastOptions?.systemPrompt).toBe("string");
     expect(String(sdk.lastOptions?.systemPrompt)).toContain("ПЕРСОНА");
+  });
+});
+
+/**
+ * 🔴 ЖИВОЙ БАГ 2026-09-02, 10:11 (лог): подписка упёрлась в лимит окна, SDK отдал уведомление и как
+ * assistant-текст, и как текст исключения. Ветка «частичный ответ» приняла эхо за работу модели →
+ * владельцу озвучили сырое английское «You've hit your session limit · resets 2:20pm» голосом
+ * дворецкого, а ход записали УСПЕШНЫМ. Эхо ошибки — не ответ: ход обязан быть провальным.
+ */
+describe("эхо ошибки канала не выдаём за ответ модели", () => {
+  const LIMIT = "You've hit your session limit · resets 2:20pm (Europe/Moscow)";
+
+  /** SDK, который отдаёт сообщения, а затем БРОСАЕТ (как настоящий CLI при отказе). */
+  function throwingSdk(messages: Array<Record<string, unknown>>, error: string): SdkModule {
+    return {
+      query() {
+        return (async function* () {
+          for (const m of messages) yield m;
+          throw new Error(error);
+        })();
+      },
+      tool: (name: string) => ({ name }),
+      createSdkMcpServer: (opts) => ({ type: "sdk", name: opts.name, tools: opts.tools }),
+    };
+  }
+
+  it("уведомление о лимите пришло «ответом» и потоком-ошибкой → ход ПРОВАЛЕН, а не успешен", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = throwingSdk(
+      [{ type: "assistant", message: { content: [{ type: "text", text: LIMIT }] } }],
+      `Claude Code returned an error result: ${LIMIT}`,
+    );
+    const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+    await expect(p.complete(BASE)).rejects.toThrow(/лимит подписки/);
+    expect(lastSubscriptionFailure()?.kind).toBe("credits");
+  });
+
+  it("то же самое result-сообщением (без исключения) — тоже провал", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([
+      { type: "assistant", message: { content: [{ type: "text", text: LIMIT }] } },
+      { type: "result", subtype: "error_during_execution", result: LIMIT },
+    ]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/лимит подписки/);
+  });
+
+  it("НАСТОЯЩИЙ частичный ответ обрывом не выбрасывается (работу модели не теряем)", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = throwingSdk(
+      [{ type: "assistant", message: { content: [{ type: "text", text: "Открываю блокнот, сэр" }] } }],
+      "socket hang up",
+    );
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(r.text).toBe("Открываю блокнот, сэр");
+    expect(r.stubbed).toBe(false);
+  });
+
+  it("isErrorEcho: подстрока ошибки — эхо; осмысленный ответ — нет", () => {
+    expect(isErrorEcho(LIMIT, `Claude Code returned an error result: ${LIMIT}`)).toBe(true);
+    expect(isErrorEcho("  you've hit your SESSION limit · resets 2:20pm (Europe/Moscow) ", LIMIT)).toBe(true);
+    expect(isErrorEcho("Открываю блокнот, сэр", "socket hang up")).toBe(false);
+    expect(isErrorEcho("", "socket hang up")).toBe(false);
+    expect(isErrorEcho("что-то", "")).toBe(false);
+    // КОРОТКИЙ настоящий ответ случайно лежит внутри текста ошибки — это не эхо, а совпадение:
+    // выбросить его значило бы провалить состоявшийся ход (нечестность наизнанку).
+    expect(isErrorEcho("да", "Ошибка: неверные данные")).toBe(false);
+    expect(isErrorEcho("Четыре", "Request failed: четыре попытки исчерпаны")).toBe(false);
+    // Точное совпадение — эхо при любой длине.
+    expect(isErrorEcho("timeout", "timeout")).toBe(true);
+  });
+
+  it("формулировка лимита окна переведена владельцу, а не отдана сырой строкой", () => {
+    expect(classifySubscriptionError(LIMIT).kind).toBe("credits");
+    expect(classifySubscriptionError(LIMIT).human).toMatch(/лимит подписки/);
   });
 });

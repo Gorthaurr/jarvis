@@ -26,6 +26,7 @@ import { buildActionLogEntry, insertActionLog } from "../../db/action-log.js";
 import type { Session } from "../../gateway/session.js";
 import type { ILlmProvider, LlmContentBlock, LlmMessage, LlmResponse } from "../../integrations/llm.js";
 import { pruneStaleImages } from "./prune-images.js";
+import { type SelectionSlot, formatSelectionContext, selectionKey } from "./selection-context.js";
 import { maskOldObservations } from "./mask-observations.js";
 import { repeatSignature } from "./repeat-key.js";
 import { describeIrreversible } from "../tasks/misfire.js";
@@ -59,6 +60,7 @@ import { getMode, matchModeCommand } from "../persona/modes.js";
 import { emotionName, emotionOverlay, matchEmotionCommand } from "../persona/emotion.js";
 import {
   OUTBOUND_SEND_TOOLS,
+  DURABLE_NEUTRAL_TOOLS,
   claimsObservedResult,
   isBlindMutate,
   isHollowSuccess,
@@ -70,7 +72,7 @@ import { decideRoundThinking, stripThinkingBlocks, thinkingEnabled } from "./thi
 import { prefillNeedsLlmSteps } from "./skill-prefill.js";
 import { autoReplayBlocked, looksLikeCommandUtterance } from "./replay-gate.js";
 import { hasCommitmentMarker, reflectCommitmentFromUtterance } from "./commitment-reflect.js";
-import { type LocalIntent, classifyTier, matchMediaIntent, resolveClarifyAnswer, stripWakeAndFiller } from "../router/index.js";
+import { type LocalIntent, classifyTier, isNotForMe, matchMediaIntent, resolveClarifyAnswer, stripWakeAndFiller } from "../router/index.js";
 import { cap, failurePhrase, pick, successPhrase } from "../verbalize/action-phrases.js";
 import { type ToolContext, dispatchTool } from "../tools/dispatch.js";
 import { browserUrlBlocked } from "../tools/dispatch-util.js";
@@ -289,6 +291,15 @@ export interface AgentDeps {
    */
   taskAccepted?: () => void;
   userContext?: UserContextSlot;
+  /**
+   * §режим выделения (2026-09-03): слот с областью, которую владелец обвёл на экране. Живёт в
+   * session.scoped (переживает пересоздание agentDeps на реконнекте — идущая петля читает живое
+   * состояние), а в промпт идёт не структура, а строка с ВОЗРАСТОМ указания, посчитанным в момент
+   * сборки. Нет слота / слот пуст = владелец сейчас ни на что не показывает.
+   */
+  selection?: SelectionSlot;
+  /** §режим выделения: какая горячая клавиша РЕАЛЬНО зарегистрирована у клиента (null/undefined — никакая). */
+  selectionHotkey?: string | null;
   /**
    * Реестр программных каналов установленных приложений (2026-09-01): «у этой программы есть
    * API/CLI/протокол — не кликай». Наполняется из client.env; в промпт идёт ОДНОЙ строкой паспорта,
@@ -522,6 +533,8 @@ function shortTime(timezone?: string): string {
 
 /** Маркер Б3-впрыска снимка ПК. */
 const LIVE_SNAPSHOT_MARKER = "🖥️ ОБСТАНОВКА НА ПК ОБНОВИЛАСЬ";
+/** §режим выделения: владелец показал/убрал область ПОСРЕДИ задачи — врезка петли, НЕ его реплика. */
+const SELECTION_NOTE_MARKER = "🖼️ ВЫДЕЛЕНИЕ НА ЭКРАНЕ ИЗМЕНИЛОСЬ";
 
 /**
  * Ревью Волны 3 (#5): схемы URI, безопасные для ДЕТЕРМИНИРОВАННОГО реплея app.launch/browser.open
@@ -713,6 +726,16 @@ export async function handleUserText(
     return finishReply(reply);
   }
 
+  // 🔴 «НЕ ТЕБЕ» — реплика адресована не Джарвису (лог 2026-09-02: владелец говорил с кем-то в
+  // комнате, сказал «Нет, Джарвис, не тебе», а система завела фоновую sonnet-ЗАДАЧУ «Нет не тебе»
+  // на 12 секунд и 563 токена; задача потом висела активной и путала scope соседних реплик).
+  // Молчим НАМЕРЕННО: человека, который сказал «не тебе», ответом перебивать не надо. Активную
+  // задачу не трогаем — это оговорка, а не «отмени».
+  if (isNotForMe(clean)) {
+    log.info("реплика адресована не Джарвису — молчим, задачу не заводим", { text: clean.slice(0, 60) });
+    return finishReply({ voice: "" });
+  }
+
   // Смена режима-маски (§11): «будь дерзким» / «будь собой» — детерминированно, без LLM.
   // Персист в профиль; тон применится со следующего хода (и голос переключится в пайплайне).
   const modeId = matchModeCommand(clean);
@@ -857,7 +880,16 @@ export async function handleUserText(
     const pend = deps.pendingClarify;
     deps.pendingClarify = undefined;
     const resolved = resolveClarifyAnswer(pend.key, clean);
-    if (resolved) return finishReply(await runTier0(session, resolved, deps, sink)); // sink → консьерж-открытие тоже sync-first
+    if (resolved) {
+      // Контроль-9 (clarify-path-ignores-fallback): исход tier0 использовался КАК ЕСТЬ, в отличие от основной ветки
+      // ниже. Под открытой вуалью (или когда приложение не нашлось) `browser.open`/`app.launch` отдают
+      // `fallbackToLlm`, и ход модели, ради которого откат вводился, не отдавался ВООБЩЕ: довести дело после
+      // закрытия рамки было некому, а сказанное владельцу не попадало в рабочую память (sync-first ветка её
+      // сознательно не пишет — «ассистентской реплики ещё нет»).
+      const t0c = await runTier0(session, resolved, deps, sink); // sink → консьерж-открытие тоже sync-first
+      if (!t0c.fallbackToLlm) return finishReply(t0c);
+      log.info("tier0: ответ на уточнение не закрыт детерминированно — передаю модели", { key: pend.key });
+    }
   }
 
   // §20 ПОСТ-ТЕРМИНАЛЬНЫЙ ЭХО-ГЕЙТ (эпизод «двойная отправка Кате» 2026-07-24): пользователь
@@ -972,7 +1004,11 @@ export async function handleUserText(
     if (!t0.fallbackToLlm) return finishReply(t0);
     // Приложение по имени не нашлось → модель решает, что это было («тесты», «стрим», «сервер») — как
     // ЗАДАЧА-ДЕЙСТВИЕ (sonnet), не как болтовня. Раньше здесь был терминал «не нашёл» без второго шанса.
-    log.info("tier0: app.launch не нашёл цель — передаю модели", { app: (decision.local as { app?: string }).app });
+    // Не только app.launch: «сними выделение» без нашей рамки тоже уходит модели — лог называет вид интента.
+    log.info(`tier0: ${decision.local.kind} не закрыт детерминированно — передаю модели`, {
+      app: (decision.local as { app?: string }).app,
+      op: (decision.local as { op?: string }).op,
+    });
     tier0FellBack = true;
   }
   const tier: Exclude<Tier, "tier0"> = decision.tier === "tier0" ? (tier0FellBack ? "sonnet" : "haiku") : decision.tier;
@@ -986,7 +1022,11 @@ export async function handleUserText(
   // не может (стем «напомн» не ловит «напомин-а-ние», «отмен» вообще не было) — денилист принципиально
   // неполон, ровно как в lean-smalltalk. Поэтому решает ПОЛОЖИТЕЛЬНЫЙ признак роутера: кэш работает
   // ТОЛЬКО на РАЗГОВОРНОМ ходе (вопрос). Всё, что роутер счёл действием, идёт в петлю всегда.
-  if (deps.responseCache && decision.conversational === true) {
+  // §режим выделения: пока владелец на что-то ПОКАЗЫВАЕТ, кэш ответов молчит. Дейктический вопрос
+  // («что тут не так?») звучит одинаково для РАЗНЫХ областей — ответ из кэша описывал бы прошлую
+  // картинку как нынешнюю. Это уже случавшийся боевой класс (кэш подсунул устаревший состав списка).
+  const selectionAtStart = Boolean(deps.selection?.get());
+  if (deps.responseCache && decision.conversational === true && !selectionAtStart) {
     const cached = await deps.responseCache.lookup(deps.userId, clean);
     if (cached) {
       deps.memory.pushTurn("assistant", cached);
@@ -1011,7 +1051,7 @@ export async function handleUserText(
     // Без sink (dev.text/чат/тесты) ИЛИ откат JARVIS_SYNC_FIRST=0: прежнее — молча в фон, итог через
     // speakResult (в тексте нет аудио-очереди → скопом не сливается; сеанс не блокируется на длинной задаче).
     deps.taskAccepted?.();
-    startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext, viaWake: meta?.viaWake, machine: machineTurn }), deps, { bounded: true });
+    startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext, viaWake: meta?.viaWake, machine: machineTurn, selectionAtStart }), deps, { bounded: true });
     return finishReply({ voice: "" });
   }
 
@@ -1023,6 +1063,7 @@ export async function handleUserText(
   const reply = await runAgentLoop(session, clean, tier, deps, sink, {
     freshContext,
     conversational: decision.conversational === true,
+    selectionAtStart,
     smalltalk: decision.smalltalk === true,
     viaWake: meta?.viaWake,
     machine: machineTurn,
@@ -1047,14 +1088,16 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
   // Мгновенные глобальные действия (медиа/громкость — keybd_event, не GUI-грундинг): СИНХРОННО, БЕЗ
   // ack-филлера и БЕЗ ожидания аренды ввода. Одна чистая фраза мгновенно — не плодим «Принял»+результат
   // на быстрой команде (лечит «×2 фразы» на медиа) и не ждём, пока освободится мышь от фоновой задачи.
-  const instant = local.kind === "media" || local.kind === "volume";
+  // §режим выделения — тоже instant: оверлей открывается мгновенно, ждать нечего, аренда ввода не нужна
+  // (рисует ВЛАДЕЛЕЦ, не мы), и дворецкий-ack тут был бы второй фразой поверх «Обводите область».
+  const instant = local.kind === "media" || local.kind === "volume" || local.kind === "selection";
   // SYNC-FIRST (та же логика, что для LLM-действий): «открой X» звучит результатом СРАЗУ («Запустил
   // доту, сэр»), а не молча-в-фон-с-отложенным-итогом. Медленное открытие (browser.open висел на
   // CDP) ПРОМОТИМ в фон по бюджету — «Секунду, сэр» + итог по готовности, микрофон освобождается (та
   // же защита от «глохнет», что раньше давал безусловный фон). Откат к старому фону — JARVIS_SYNC_FIRST=0.
   if (sink && deps.speakResult && !instant && process.env.JARVIS_SYNC_FIRST !== "0") {
     const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", 10_000);
-    const runP = runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus);
+    const runP = runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus, () => deps.selection?.drawing === true);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race<{ kind: "done"; reply: AgentReply } | { kind: "error"; error: unknown } | { kind: "slow" }>([
       // onRejected — см. runActionSyncFirst: не плодим unhandled rejection при промоушене.
@@ -1089,14 +1132,14 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
   if (deps.speakResult && !instant) {
     // Откат (JARVIS_SYNC_FIRST=0): прежнее поведение — молча в фон, итог через speakResult.
     if (arbiter?.locked) deps.taskAccepted?.();
-    startBackgroundTask(() => runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus), deps, { bounded: false });
+    startBackgroundTask(() => runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus, () => deps.selection?.drawing === true), deps, { bounded: false });
     return { voice: "" };
   }
   // instant → без аренды; прочее (тесты/dev.text) — инлайн под арендой (корректность > задержки).
   const useArbiter = !instant ? arbiter : undefined;
   if (useArbiter) await useArbiter.acquire();
   try {
-    const reply = await runLocalIntent(session, local, undefined, undefined, deps.openOrFocus);
+    const reply = await runLocalIntent(session, local, undefined, undefined, deps.openOrFocus, () => deps.selection?.drawing === true);
     if (!reply.fallbackToLlm) deps.memory.pushTurn("assistant", reply.voice);
     return reply;
   } finally {
@@ -1257,6 +1300,12 @@ async function runAgentLoop(
     resumeFrom?: TaskCheckpoint;
     /** Машинный реэнтри (watch-action), не речь владельца: чекпойнт не пишем (см. saveCheckpoint). */
     machine?: boolean;
+    /**
+     * §режим выделения (контроль-3): выделение было активно НА СТАРТЕ хода. Гейт store читал слот в
+     * КОНЦЕ хода — выделение, снятое пока модель отвечала, пропускало в кэш дейктический ответ
+     * («вы показываете на область 640×360»), который потом всплывал без всякой рамки.
+     */
+    selectionAtStart?: boolean;
   },
 ): Promise<AgentReply> {
   // §10 realtime: сигналим «думаю» КАК МОЖНО РАНЬШЕ (до retrieval/recall/LLM) — пайплайн
@@ -1266,6 +1315,14 @@ async function runAgentLoop(
   // haiku → sonnet → fable. Так слабая модель не упирается, а заходит сильнее.
   let currentTier: Exclude<Tier, "tier0"> = tier;
   let model = deps.models[currentTier];
+  /**
+   * Модель, которая РЕАЛЬНО отвечала (последний раунд). На резерве-подписке она своя (Opus 5) и с
+   * моделью тира не совпадает — а метрики/лог писали именно тир, и на вопрос владельца «там точно
+   * Opus 5?» ответить по логу было НЕЛЬЗЯ (2026-09-02). Пусто до первого ответа.
+   */
+  let modelUsedLast: string | undefined;
+  /** Каким каналом шёл последний раунд — в метрику задачи (разрез «быстрота/цена по каналу»). */
+  let lastChannelUsed: "api" | "subscription" | undefined;
 
   // Долгая задача (§20): общий с router реестр (или локальный для изолированных тестов).
   // Б6: разговорный ход (вопрос/комплимент/smalltalk) регистрируем НЕсодержательной задачей —
@@ -1298,6 +1355,85 @@ async function runAgentLoop(
     return Number.isFinite(n) && n >= 1_000 ? n : 60_000;
   })();
   const STALE_INPUT_WAIT_MS = 10_000; // ждали дольше — экран считается устаревшим для слепых действий
+  /**
+   * Хотя бы одно действие НЕ ВЫПОЛНЕНО, потому что не дали ресурс (аренда физического ввода не
+   * освободилась за таймаут). 🔴 Разбор эпизода «Дота» 2026-09-02: ход, вслух сказавший владельцу
+   * «Задача не выполнена», уходил в реестр как `state:"done"` и в метрики как `ok:true` — отказ
+   * инструмента кладётся обычным `is_error`-блоком, а `failed` взводится только на исключении петли.
+   * Врала телеметрия, а не модель; на ней же стоит самодиагностика (`self/weaknesses.ts` считает
+   * провалы по `ok === false`) и гейт самообучения — то есть провальная траектория могла осесть
+   * навыком. Признак СТРУКТУРНЫЙ: по тексту ответа не судим (терминал провала не переиспользует
+   * текст модели — контроль-6 волны C).
+   */
+  let inputDenied = false;
+  /**
+   * §режим выделения (контроль-3): хотя бы один вызов за задачу лёг об ВУАЛЬ оверлея (overlayDenied).
+   * Зеркало inputDenied: «вуаль не дала и ничего не сделано» — не успех (реестр, самодиагностика,
+   * навыку — не «успех», журнал чекпойнта не гасим). Сбрасывается правкой цели на ходу, как inputDenied.
+   */
+  let overlayDeniedAny = false;
+  /** Контроль-5 (V4-2): сколько шагов ПОСЛЕДНЕГО навыка/берста/макроса исполнено до остановки вуалью. */
+  let overlayPartialSteps = 0;
+  /** Контроль-6 (C5R-6): сумма исполненных шагов по ВСЕМ остановленным вуалью процедурам задачи (терминал называет её). */
+  let overlayPartialTotal = 0;
+  /** Контроль-6 (C5R-4): частично исполненные вызовы — для журнала чекпойнта (не «ОШИБКА», а «ЧАСТИЧНО — шаги 1..k»). */
+  const partialCalls = new Map<string, { k: number; injected: boolean }>();
+  /**
+   * Контроль-8 (job-status-double-count): исполненные шаги — по ИСТОЧНИКУ, а не по вызову. `job_status` — ИДЕМПОТЕНТНЫЙ
+   * отчёт об одном и том же задании: накопление `+=` превращало 2 реально сделанных клика в «всего исполнено 6» после
+   * трёх опросов, и владельцу называли втрое больше необратимых действий, чем было. Берст/навык, наоборот, каждым
+   * вызовом исполняет НОВЫЕ шаги — у них ключ свой на вызов.
+   */
+  const partialBySource = new Map<string, number>();
+  /**
+   * Контроль-9 (veil-partial-macro-erased): ЕДИНСТВЕННАЯ точка пересчёта. Контроль-8 заменил накопление `+=` на
+   * присваивание суммы по источникам, но АВТО-МАКРОС остался на `+=` и в карту не попадал — первый же отказ вуали
+   * со `stepIndex: 0` (раннер срезал ПЕРВЫЙ шаг берста) присваивал сумму 0 и стирал вклад макроса: терминал говорил
+   * «нужное действие я при этом не сделал» про три уже совершённых необратимых шага, владелец повторял команду.
+   */
+  const notePartial = (source: string, k: number): void => {
+    partialBySource.set(source, k);
+    overlayPartialTotal = [...partialBySource.values()].reduce((a, b) => a + b, 0);
+  };
+  /** Контроль-8 (background-job-no-success): jobId → tool_use id ЗАПУСКА: подтверждённое завершение снимает его неопределённость. */
+  const jobLaunchCalls = new Map<string, string>();
+  /**
+   * Контроль-8 (verified-after-veil-rearm): вуаль отвергла МУТАЦИЮ, и НИЧЕГО не ушло. Чистый взгляд после такого отказа
+   * не «удостоверяет» ход: сверять нечего — действие не состоялось. Без этого первый же чистый ui_snapshot снимал
+   * фикс контроля-7 и пускал «Готово» в done при невыполненном клике.
+   */
+  let veilDeniedNothingDone = false;
+  /**
+   * 🔴 Контроль-10 (veil-verify-order-rearms-c8): контроль-9 заменил этот липкий признак сравнением НОМЕРОВ РАУНДОВ —
+   * и тем откатил фикс контроля-8. `verifiedAfterVeil` и так обнуляется на КАЖДОМ новом отказе, поэтому «сверка позже
+   * отказа» истинна всегда, кроме случая «отказ и сверка в одном раунде»: различалась не суть, а ГРУППИРОВКА вызовов
+   * моделью. Полое «Готово» после отказанного НОВОГО клика снова уезжало в done с ok:true.
+   *
+   * Признак вернулся липким, но настоящая боль контроля-9 закрыта ИНАЧЕ и честнее: сверенное УШЕДШЕЕ действие
+   * (`injectedVerified`) больше не отрицается в терминале — там, где раньше владельцу говорили «нужное действие я не
+   * сделал» про отправленное сообщение, теперь называются ОБА факта: что ушло и сверено, и что вуаль не дала сделать.
+   * Судить «повтор это был или новое дело» петля не может и не пытается: отказанная мутация, которой не было, — не успех.
+   */
+  /** Контроль-8 (durable-neutral-masked): в ходе ВООБЩЕ пробовали мутирующий инструмент (успешно или нет). */
+  let anyMutateAttempted = false;
+  /** Контроль-6 (SR-C6-2): после ушедшего под вуалью действия модель СВЕРИЛА исход чистым взглядом — дальше судит её текст. */
+  let verifiedAfterVeil = false;
+  /** Контроль-6 (C5R-5): сделано durable-дело нейтральным инструментом (память/напоминание/навык) — «посмотреть не смог» не обнуляет его. */
+  let anyDurableNeutralSucceeded = false;
+  /** Контроль-5 (S1): действие остановленного шага уже ушло в GUI — исход неизвестен, повтор = дубль. */
+  let overlayActionInjected = false;
+  /** Контроль-5 (V4-1): ход остановила ВУАЛЬ (взгляд/ожидание под ней), закрыт честным «не могу — жду» без единого дела. */
+  let veilGaveUp = false;
+  /**
+   * 🔴 ШТОРМ ПАРАЛЛЕЛЬНОСТИ (лог 2026-09-02, вечер: шесть задач разом при потолке в три). Потолок
+   * `MAX_PARALLEL_TASKS` держит семафор, и action-путь (`runActionSyncFirst`) слот берёт — а
+   * РАЗГОВОРНЫЙ ход не берёт НИКОГДА, хотя с инструментами он идёт минутами (в логе: «вопрос —
+   * разговор», 6 раундов, 127 секунд). Значит семафор ВРАЛ о занятости: следующая команда видела
+   * свободный слот и стартовала поверх. Берём слот ЛЕНИВО (на первом же tool-раунде) и
+   * НЕБЛОКИРУЮЩЕ (`tryAcquire`): сам вопрос не тормозим, но занятость становится правдой, и
+   * очередная команда честно уходит в bounded-фон вместо перегруза.
+   */
+  let convoSlotHeld = false;
   const ensureInput = async (): Promise<boolean> => {
     if (!arbiter) return true;
     if (holdsInput) return true;
@@ -1308,7 +1444,15 @@ async function runAgentLoop(
       queueWaitMs += waited;
       loopStartMs += waited; // потолок задачи не тикает, пока стоим в очереди за арендой
     }
-    if (!got) return false;
+    if (!got) {
+      // 🔴 Признак ставим ЗДЕСЬ, а не у call-site (адверс-ревью 2026-09-02, HIGH): отказ аренды
+      // рождается в одном месте, а потребителей два — tool-цикл и БЫСТРЫЙ РЕПЛЕЙ макроса (§8).
+      // Реплей ловил отказ своим catch, флаг не ставился, и голосовой ход заканчивался `done` +
+      // «Готово, сэр — поиск игры запущен», хотя не выполнилось НИ ШАГА; навыку при этом писался
+      // УСПЕХ (recordOutcome). Тот же дефект «Доты», просто в соседней ветке.
+      inputDenied = true;
+      return false;
+    }
     holdsInput = true;
     lastAcquireWaitMs = waited;
     // Могли отменить, пока ждали аренду (§20 «отмена ≤1 шага»): сразу отдаём её —
@@ -1418,6 +1562,7 @@ async function runAgentLoop(
   // §econ (лог-анализ 2026-07-21): тривиальный smalltalk («привет») не требует полной 33К-персоны — на холодном
   // кеше (тир-свитч) это ~$0.2/ход, 11% трат. LEAN-ядро (~500 ток) за флагом; дефолт — полная персона (0 регресс).
   const lean = opts?.smalltalk === true && process.env.JARVIS_LEAN_SMALLTALK === "1";
+  const selectionLine = formatSelectionContext(deps.selection?.get(), Date.now());
   const sys = buildSystemPrompt(
     {
       ...deps.userContext,
@@ -1430,6 +1575,9 @@ async function runAgentLoop(
       // Волна E: паспорт возможностей — живой снимок «что доступно СЕЙЧАС» (расширение/MCP/ключи/
       // killswitch). Честность ДО провала: модель не обещает мёртвый канал. Некешируемый хвост.
       ...(deps.capabilities ? { capabilities: deps.capabilities() } : {}),
+      // §режим выделения: указатель владельца «вот тут» — факт, размер, монитор и ВОЗРАСТ указания.
+      // Содержимое области сюда не попадает: его модель добывает свежим кадром (screen_selection).
+      ...(selectionLine ? { selection: selectionLine } : {}),
     },
     { lean },
   );
@@ -1536,10 +1684,16 @@ async function runAgentLoop(
     obligations: deps.obligations, // §проактив-всё: счета/обязательства (ambient напоминает по датам)
     activities: deps.activities, // фоновые активности: чип виден, пока идёт работа (автолистание Shorts)
     origin: "user" as const, // §бесшумный-ввод: agent-петля исполняет реплику юзера → физ.ввод не гейтить присутствием
+    // §режим выделения: машинный реэнтри (watch-action) НЕ имеет права открывать оверлей поверх экрана —
+    // просить владельца обвести можно только в ответ на его реплику.
+    machineTurn: opts?.machine === true,
 
     resolutionMemory: deps.resolutionMemory, // §: опытная память резолва (скорость)
     sessionId: session.sessionId,
     systemContext: () => deps.userContext?.systemContext ?? "", // §14 гейт GUI-коммитов: процесс на переднем плане
+    // Контроль-9 (browser-open-ext-bypasses-veil): фаза рисования нужна хендлеру ДО выбора канала — путь через
+    // расширение (штатный) клиентского гейта не проходит вовсе.
+    veilDrawing: () => deps.selection?.drawing === true,
     ext: deps.ext, // §: браузер пользователя через расширение (browser_open/read/act в его вкладках)
     toolActivation: deps.toolActivation, // §15: набор подгруженных холодных инструментов (tool_load)
     mcp: deps.mcp, // § MCP-host: исполнение mcp__-инструментов через callTool
@@ -1559,10 +1713,28 @@ async function runAgentLoop(
   // env JARVIS_TASK_MAX_MS (деф 4 мин, кламп [30с, 30мин]). let: ensureInput сдвигает старт на время,
   // простоянное в очереди за арендой ввода (Волна 1 — очередь не сжигает бюджет задачи).
   let loopStartMs = Date.now();
-  const loopMaxMs = (() => {
+  const loopMaxBaseMs = (() => {
     const n = Number.parseInt(process.env.JARVIS_TASK_MAX_MS ?? "", 10);
     return Number.isFinite(n) ? Math.min(1_800_000, Math.max(30_000, n)) : 240_000;
   })();
+  /**
+   * 🔴 ПОТОЛОК ЗАВИСИТ ОТ КАНАЛА (решение владельца 2026-09-02: «отдельное решение на время
+   * подписки»). 240 с калиброваны под ОСНОВНОЙ канал: там раунд с prompt-кешем §15 стоит доли
+   * секунды. У резерва кеша нет вовсе, и ЗАМЕР по логу дня даёт медиану 4.9 с и p90 14.9 с НА РАУНД —
+   * те же 22 шага GUI-задачи физически не влезают в 240 с и умирают на середине («время вышло,
+   * сделал двадцать два шага»). Один потолок для каналов, отличающихся на порядок, — не «защита»,
+   * а гарантированный обрыв.
+   * Считаем ФУНКЦИЕЙ, а не один раз на старте: канал выясняется ПЕРВЫМ обращением к модели, и после
+   * перезапуска сервера первая же задача иначе получала бы узкий потолок; плюс канал может
+   * переключиться посреди длинной задачи. Множитель применяется ТОЛЬКО когда основной реально
+   * выключен (`channelStatus`), а не «на всякий случай».
+   */
+  const loopMaxMs = (): number => {
+    if (deps.llm.channelStatus?.().primary !== "off") return loopMaxBaseMs;
+    const raw = Number.parseFloat(process.env.JARVIS_SUBSCRIPTION_TASK_X ?? "");
+    const k = Number.isFinite(raw) && raw >= 1 && raw <= 5 ? raw : 2;
+    return Math.min(1_800_000, Math.round(loopMaxBaseMs * k));
+  };
   // Гард переполнения контекст-окна (hardening; ревью learn-coding-agent 2026-07-15). Промпт растёт с
   // каждым tool-раундом (крупные web/OCR/browser-дампы), и на патологически длинной задаче следующий раунд
   // может упереться в ЖЁСТКИЙ HTTP 400 (max context ~200K) на середине — деньги в мусор, итог потерян.
@@ -1675,7 +1847,7 @@ async function runAgentLoop(
         tier: currentTier,
         // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
         // иначе третий заход не видел отправок первого и мог повторить их людям).
-        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
+        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls, partialCalls })),
         ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
       };
       const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);
@@ -1703,6 +1875,8 @@ async function runAgentLoop(
   let budgetNudged = false;
   /** Контроль-2 Ф0: в ЭТОМ раунде действие остановил §14-гейт (отказ/нет ответа/не смогли спросить). */
   let gateStoppedRound = false;
+  /** Контроль-5: остановка была именно ВУАЛЬЮ (не §14-гейтом) — честный give-up после неё = провал по вуали, не done. */
+  let gateStoppedByVeil = false;
   // Волна E: на 70%-нудже лёг страховочный снимок чекпойнта (переживает ТОЛЬКО жёсткий kill —
   // штатный выход из петли гасит его в finally, терминалы прерывания пишут поверх свою версию).
   let preventiveCheckpoint = false;
@@ -1727,6 +1901,9 @@ async function runAgentLoop(
   // Впрыскиваем свежий снимок ХВОСТОМ convo (не пересобирая system-блок — иначе инвалидировались бы
   // rolling-брейкпоинты, класс Д5), только когда он РЕАЛЬНО изменился и только после нескольких раундов.
   let lastLiveCtx = (deps.userContext?.systemContext ?? "").trim();
+  // §режим выделения: КЛЮЧ выделения, о котором петля знает (адверс-ревью 2026-09-05: сравнение
+  // отрендеренной строки с тикающим возрастом давало «выделение изменилось» КАЖДЫЙ раунд).
+  let lastSelectionKey = deps.selection?.key() ?? "";
   let lastLiveRefreshRound = -100; // троттл Б3 (#2): не чаще LIVE_REFRESH_EVERY раундов между впрысками
   let liveRefreshCount = 0; // кап числа впрысков за задачу (#3: НЕ прунить старые — это ломало бы кеш Д5)
   const liveRefreshOn = process.env.JARVIS_LIVE_CONTEXT_REFRESH !== "0";
@@ -1852,6 +2029,13 @@ async function runAgentLoop(
   })();
   // §3.9: страницы документов (file_view) — ОТДЕЛЬНЫЙ бюджет: они не устаревают, как скриншоты, но
   // тоже ~2K токенов каждая; сравнение двух страниц требует держать ≥2. env JARVIS_KEEP_DOC_IMAGES, кламп [1,8].
+  // §режим выделения: кроп области — ОТДЕЛЬНЫЙ бюджет от скриншотов. При общем keep=1 пара «деталь
+  // (view) + контекст (screen_capture)» никогда не лежала в контексте вместе — каждый добор одного
+  // вырезал другой (пинг-понг, адверс-ревью 2026-09-05). env JARVIS_KEEP_SELECTION_VIEWS, кламп [1,4].
+  const KEEP_SELECTION_VIEWS = (() => {
+    const n = Number.parseInt(process.env.JARVIS_KEEP_SELECTION_VIEWS ?? "", 10);
+    return Number.isFinite(n) ? Math.max(1, Math.min(4, n)) : 1;
+  })();
   const KEEP_DOC_IMAGES = (() => {
     const n = Number.parseInt(process.env.JARVIS_KEEP_DOC_IMAGES ?? "", 10);
     return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 2;
@@ -2102,15 +2286,39 @@ async function runAgentLoop(
           { kind: "skill.execute", skillId: recalled.id, version: recalled.version, steps: replaySteps, params: {} },
           REPLAY_MACRO_SERVER_TIMEOUT_MS,
         );
+        // Контроль-4: шаги ДО остановки исполнены (мутации!) — врезка обязана их назвать, иначе модель
+        // (и «доделай» по журналу) повторит напечатанное/отправленное. Метка «УЖЕ ВЫПОЛНЕНЫ» — сигнал для
+        // секции «СДЕЛАНО» чекпойнта.
+        const macroK = !res.ok && typeof res.stepIndex === "number" ? res.stepIndex : 0;
+        const macroDone =
+          (macroK > 0 ? ` Шаги 1..${macroK} УЖЕ ВЫПОЛНЕНЫ — не повторяй их, продолжай с шага ${macroK + 1}.` : "") +
+          // Контроль-5 (S1): вуаль поймала ретрай/сверку — действие шага уже инжектировано, исход неизвестен.
+          (!res.ok && res.stepActionInjected === true
+            ? ` Действие шага ${macroK + 1} УЖЕ УШЛО в GUI, сверить его исход под вуалью нельзя — ИСХОД НЕИЗВЕСТЕН: сверь, не повторяй вслепую.`
+            : "");
         note = res.ok
           ? `${MACRO_NOTE_MARKER} навыка «${recalled.name}» v${recalled.version} уже ОТРАБОТАЛ за ` +
             `${((Date.now() - t0) / 1000).toFixed(1)}с (${replaySteps.map((s) => s.action).join(" → ")}). ` +
             `НЕ повторяй эти шаги. Реплей слепой: сверь результат глазами (screen_capture) — цель достигнута → ` +
             `коротко подтверди; не достигнута → добей по процедуре навыка.`
+          : res.error?.code === "overlay_drawing"
+            ? `${MACRO_NOTE_MARKER} навыка «${recalled.name}» НЕ выполнился: поверх экрана вуаль режима выделения ` +
+              `(физический ввод не инжектируется, пока открыт оверлей) — это состояние системы, не сбой навыка и не ` +
+              `«экран изменился». Дождись закрытия оверлея (или спроси владельца) и тогда действуй по процедуре; ` +
+              `шаги вслепую не повторяй.${macroDone}`
           : `${MACRO_NOTE_MARKER} навыка «${recalled.name}» упал (${res.error?.message ?? res.error?.code ?? "runtime"}` +
             `${res.stepIndex !== undefined ? `, шаг ${res.stepIndex + 1}` : ""}) — вероятно, приложение не запущено ` +
-            `или экран изменился. Выполни задачу по процедуре навыка обычным путём.`;
+            `или экран изменился. Выполни задачу по процедуре навыка обычным путём.${macroDone}`;
         log.info("§8 макрос: быстрый реплей", { id: recalled.id, ok: res.ok, ms: Date.now() - t0 });
+        if (!res.ok && res.error?.code === "overlay_drawing") {
+          // Контроль-3: реплей лёг об вуаль — не капитуляция и не успех (те же признаки, что у tool-раунда).
+          overlayDeniedAny = true;
+          gateStoppedRound = true;
+          gateStoppedByVeil = true;
+          overlayPartialSteps = macroK;
+          notePartial("macro", macroK); // контроль-9: макрос — ТАКОЙ ЖЕ источник, иначе его вклад стирало присваивание
+          if (res.stepActionInjected === true) overlayActionInjected = true;
+        }
       } catch (e) {
         note = `${MACRO_NOTE_MARKER} навыка не выполнился (${e instanceof Error ? e.message : String(e)}) — действуй по процедуре навыка.`;
         log.warn("§8 макрос: быстрый реплей не выполнился", { id: recalled.id, error: e instanceof Error ? e.message : String(e) });
@@ -2136,12 +2344,14 @@ async function runAgentLoop(
     // всё равно обвиняла модель в капитуляции, эскалировала на Opus и гнала переспрашивать
     // (проверено живым прогоном петли). Снимок переносит признак ровно через одну границу раунда.
     const gateStoppedPrevRound = gateStoppedRound;
+    const veilStoppedPrevRound = gateStoppedByVeil;
     gateStoppedRound = false;
+    gateStoppedByVeil = false;
     // §Волна2 (2.5): очередь не дождалась аренды — ни одного LLM-раунда, честный терминал ниже.
     if (queueTimedOut) break;
     // Защитный потолок времени: задача не висит в «выполняю» бесконечно (§20).
-    if (Date.now() - loopStartMs > loopMaxMs) {
-      log.warn("agent-loop: превышен потолок времени задачи — финализирую", { taskId, ms: loopMaxMs });
+    if (Date.now() - loopStartMs > loopMaxMs()) {
+      log.warn("agent-loop: превышен потолок времени задачи — финализирую", { taskId, ms: loopMaxMs() });
       timedOut = true;
       break;
     }
@@ -2151,9 +2361,9 @@ async function runAgentLoop(
     // на середине — деньги в мусор), сворачиваемся сразу.
     {
       const elapsedMs = Date.now() - loopStartMs;
-      if (!budgetNudged && elapsedMs > loopMaxMs * 0.7 && round > 0) {
+      if (!budgetNudged && elapsedMs > loopMaxMs() * 0.7 && round > 0) {
         budgetNudged = true;
-        const leftSec = Math.max(5, Math.round((loopMaxMs - elapsedMs) / 1000));
+        const leftSec = Math.max(5, Math.round((loopMaxMs() - elapsedMs) / 1000));
         pushSystemNote(
           `⏳ БЮДЖЕТ ВРЕМЕНИ: на задачу осталось ~${leftSec}с. Не начинай новых длинных подходов: ` +
             `заверши текущий подшаг, сверь результат глазами и дай ЧЕСТНЫЙ итог — что успел сделать, ` +
@@ -2172,7 +2382,7 @@ async function runAgentLoop(
             deps.checkpoints?.refreshJournal(
               deps.userId,
               opts.resumeFrom.taskId,
-              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
+              mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls, partialCalls })),
               Math.max(round, committedToolRounds),
             );
           } catch (e) {
@@ -2255,10 +2465,10 @@ async function runAgentLoop(
       }
       if (round > 0 && roundDurTotalMs > 0) {
         const avgRoundMs = roundDurTotalMs / round;
-        if (loopMaxMs - elapsedMs < avgRoundMs * 0.9) {
+        if (loopMaxMs() - elapsedMs < avgRoundMs * 0.9) {
           log.warn("agent-loop: остаток бюджета меньше среднего раунда — сворачиваюсь заранее", {
             taskId,
-            leftMs: Math.max(0, loopMaxMs - elapsedMs),
+            leftMs: Math.max(0, loopMaxMs() - elapsedMs),
             avgRoundMs: Math.round(avgRoundMs),
           });
           timedOut = true;
@@ -2288,6 +2498,21 @@ async function runAgentLoop(
           );
           log.info("§Б3 live-рефреш: свежий снимок ПК впрыснут в длинную задачу", { taskId, round, n: liveRefreshCount });
         }
+      }
+      // §режим выделения (2026-09-03): system-блок собран ОДИН раз перед циклом — выделение, сделанное
+      // владельцем на пятом раунде, модель иначе не увидит до конца задачи («вот тут посмотри» в
+      // середине работы просто пропало бы). Врезаем хвостом convo через pushSystemNote: это НАША
+      // врезка, а не реплика владельца, и журнал чекпойнта (волна C) не должен выдать её за его слова.
+      const curSelKey = deps.selection?.key() ?? "";
+      if (curSelKey !== lastSelectionKey) {
+        lastSelectionKey = curSelKey;
+        const curSel = formatSelectionContext(deps.selection?.get(), Date.now());
+        pushSystemNote(
+          curSel
+            ? `${SELECTION_NOTE_MARKER}: ${curSel}`
+            : `${SELECTION_NOTE_MARKER}: владелец СНЯЛ выделение — «вот тут/здесь» больше ни на что не указывают, и смотреть на область нечего.`,
+        );
+        log.info("§выделение: изменение указателя впрыснуто в идущую задачу", { taskId, round, active: Boolean(curSel) });
       }
     }
     // Пауза реальна (§20, user-takeover §6): пока задача paused — петля ЖДЁТ, не шлёт
@@ -2331,6 +2556,23 @@ async function runAgentLoop(
       // флаги наблюдения: успех-мутации, висящую слепую сверку, отметку goal-check и счётчик
       // verify-нуджей — чтобы verify/masked-failure проверялись с чистого листа под новую цель.
       anyMutateSucceeded = false;
+      // Отказ аренды по СТАРОЙ (отменённой правкой) цели не делает провальным ход по НОВОЙ:
+      // адверс-ревью 2026-09-02 прогнало сценарий «клик отказан → „просто скажи, что в новостях" →
+      // содержательный ответ» и получило state:"failed" за отменённое действие.
+      inputDenied = false;
+      overlayDeniedAny = false;
+      overlayPartialSteps = 0;
+      overlayPartialTotal = 0;
+      partialBySource.clear();
+      veilDeniedNothingDone = false;
+      anyMutateAttempted = false;
+      // Контроль-7 (loop-1): partialCalls НЕ чистим — это факт истории (шаги УЖЕ исполнены, Enter УЖЕ ушёл), как
+      // confirmedSends/declinedCalls/uncertainCalls: правка цели его не отменяет, а журнал после обрыва снова печатал
+      // бы «ОШИБКА» и «доделай» повторяло бы напечатанное.
+      overlayActionInjected = false;
+      verifiedAfterVeil = false;
+      anyDurableNeutralSucceeded = false;
+      veilGaveUp = false;
       blindMutatePending = false;
       sendCommitDebt = false; // §P1: новая цель — прежний долг сверки отправки к ней не относится
       composedPending = false;
@@ -2465,6 +2707,7 @@ async function runAgentLoop(
     //   - конверсация (нет tool_use): held дофлашиваем в конце, streamedFinal=true (терминал не дублирует);
     //   - tool-ход: held (преамбулу) ОТБРАСЫВАЕМ — финал произнесём в терминале ровно один раз.
     let resp: LlmResponse;
+    const llmCallStartedMs = Date.now(); // время ИМЕННО обращения к модели — для замера быстроты канала
     // SYNC-FIRST (фикс ревью, double-speak): при suppressStepStream пофразный step-0-стрим ОТКЛЮЧЁН —
     // ничего не уходит в sink ПОСРЕДИ петли. Иначе для текстового action-ответа стрим ставил pushedAny в
     // пайплайне ДО промоушена → «Берусь» глох, а итог через speakResult звучал ВТОРОЙ раз (двойная озвучка).
@@ -2509,9 +2752,12 @@ async function runAgentLoop(
     // подписки и полезная телеметрия), деньги — нет.
     const turnCostUsd = resp.channel === "subscription" ? 0 : costUsd(model, resp.usage);
     taskChargedUsd += turnCostUsd; // фактически начисленные деньги задачи — для /cogs (см. metrics.record ниже)
+    // Кто ответил НА САМОМ ДЕЛЕ: у резерва модель своя, у основного канала — модель тира.
+    modelUsedLast = resp.modelUsed ?? model;
+    lastChannelUsed = resp.channel === "subscription" ? "subscription" : "api";
     deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, turnCostUsd);
     deps.usageSink?.({
-      taskId, round, model, usage: resp.usage, costUsd: turnCostUsd, kind: "turn", channel: resp.channel === "subscription" ? "subscription" : "api",
+      taskId, round, model: modelUsedLast, usage: resp.usage, costUsd: turnCostUsd, kind: "turn", channel: resp.channel === "subscription" ? "subscription" : "api",
       stubbed: resp.stopReason === "stub", promptTokensEstimate: lastPromptTokens,
     });
     cacheReadTokens += resp.usage.cacheReadTokens;
@@ -2552,8 +2798,14 @@ async function runAgentLoop(
         taskId,
         round: step,
         tier: currentTier,
-        model,
+        // Модель и деньги — ФАКТИЧЕСКИЕ: резерв отвечает своей моделью и не тарифицируется по токенам.
+        model: modelUsedLast ?? model,
         usage: resp.usage,
+        costUsd: turnCostUsd,
+        // Время ИМЕННО этого раунда и канал — по ним меряется «быстрота» (запрос владельца
+        // 2026-09-02): на резерве раунд стоит секунды, на кешированном основном — доли секунды.
+        latencyMs: Math.max(0, Date.now() - llmCallStartedMs),
+        channel: resp.channel === "subscription" ? "subscription" : "api",
         toolNames: resp.toolUses.map((t) => t.name),
         ...(thrashCause ? { cacheThrashCause: thrashCause } : {}),
       });
@@ -2606,6 +2858,10 @@ async function runAgentLoop(
       // Анти-капитуляция: текст-отказ (looksLikeGiveUp), И при этом НЕ было НИ ОДНОГО успешного инструмента
       // (ноль вызовов ИЛИ все — провал/denied). Ревью: «сделал 1 промах (input_key→USER_BUSY) → сдался
       // словами» — массовый паттерн, раньше не ловился (гейт был traj===0). Теперь ловим и форсим попытку.
+      // Контроль-5 (V4-1): прошлый раунд остановила ВУАЛЬ (взгляд/ожидание под ней), модель честно закрывает ход
+      // «не могу — жду», и ни одного дела не сделано. Анти-капитуляция и goal-check его правильно не трогают,
+      // но без этого признака ход заканчивался state:done, ok:true и УСПЕХОМ навыку при нуле сделанного.
+      if (resp.stopReason === "end_turn" && veilStoppedPrevRound && looksLikeGiveUp(resp.text) && !anyMutateSucceeded && !anyDurableNeutralSucceeded) veilGaveUp = true;
       if (
         resp.stopReason === "end_turn" &&
         retryNudges < MAX_RETRY_NUDGES &&
@@ -2694,7 +2950,12 @@ async function runAgentLoop(
       // сверила глазами ПОДЦЕЛЬ (запуск), а не цель (поиск матча). Финал, звучащий как чистый
       // запуск/открытие, проходит goal-check ДАЖЕ после verify-раунда: запуск почти никогда не цель.
       const launchOnlyClaim = /(?<![\p{L}])(запущен|запустил|поднялс|стартовал|открыл)\p{L}*/iu.test(resp.text || "");
-      if (resp.stopReason === "end_turn" && !goalCheckDone && round >= 2 && (!lastRoundHadVerify || launchOnlyClaim)) {
+      // Контроль-4 (режим выделения): прошлый раунд остановило СОСТОЯНИЕ системы (вуаль / §14-гейт), и модель
+      // честно сообщает, что НЕ сделала («оверлей открыт — дождусь») — сверять такой финал с целью незачем:
+      // «выполнена ли целиком?» уже отвечено самим текстом, а нудж лишь жёг раунд и толкал в закрытый ввод.
+      // Заявка УСПЕХА после такого раунда goal-check по-прежнему проходит (гард только на give-up-тексте).
+      const goalCheckRedundant = gateStoppedPrevRound && looksLikeGiveUp(resp.text);
+      if (resp.stopReason === "end_turn" && !goalCheckDone && round >= 2 && (!lastRoundHadVerify || launchOnlyClaim) && !goalCheckRedundant) {
         goalCheckDone = true;
         // QUALITY-эскалацию на goal-check НЕ вешаем (ревью cost): launchOnlyClaim ловит «открыл/включил» —
         // частейшее ЛЕГИТИМНОЕ голосовое завершение (round≥2 «Открыл ютуб, включил видео») → эскалация на
@@ -2740,11 +3001,22 @@ async function runAgentLoop(
     for (const tu of resp.toolUses) {
       assistantBlocks.push({ type: "tool_use", id: tu.id, name: tu.name, input: tu.input });
     }
+    // Разговорный ход ушёл в ИНСТРУМЕНТЫ → он уже не «мгновенный ответ», а работа: занимаем слот,
+    // чтобы потолок параллельности видел правду. Не вышло — просто идём дальше (никого не ждём).
+    if (opts?.conversational && !convoSlotHeld && resp.toolUses.length > 0 && deps.concurrency?.tryAcquire()) {
+      convoSlotHeld = true;
+    }
     convo.push({ role: "assistant", content: assistantBlocks });
 
     const resultBlocks: LlmContentBlock[] = [];
     let sawVerifyThisRound = false; // §адаптация к цели: был ли в раунде успешный verify-инструмент
     let roundChannelDown = false; // Б4 (г/д): хоть одна команда не ушла — канал ПК временно мёртв
+    let roundOverlayDenied = false; // §режим выделения: ввод не инжектировался из-за вуали — состояние системы, не провал модели
+    const overlayDeniedIds = new Set<string>(); // контроль-3: такие вызовы не считаются «топтанием» в семейном anti-runaway
+    let roundErrors = 0; // контроль-4: сколько результатов раунда — ошибки (вуаль засчитывается только если ВСЕ ошибки — вуаль)
+    let roundVeiled = false; // контроль-4: в раунде был сенсор/кадр ПОД ВУАЛЬЮ — вуаль ещё стоит
+    const veiledIds = new Set<string>(); // контроль-5 (V4-4): опрос под вуалью — ожидание, не «топтание» и не флуд
+    const backgroundRunningIds = new Set<string>(); // контроль-9: опрос ИДУЩЕГО фонового задания — ожидание процесса
     // §Волна2 (2.2): раунд целиком из ЯВНО READ-ONLY вызовов → диспатчим ПАРАЛЛЕЛЬНО: wall-clock =
     // max, не сумма (research-раунды в 2-3× быстрее). Любой прочий вызов в раунде → строго
     // последовательный путь как раньше (порядок побочных эффектов свят — fs_write→fs_read не
@@ -2777,14 +3049,16 @@ async function runAgentLoop(
         if (!got) {
           // Волна 1: аренда не освободилась за таймаут → ЧЕСТНАЯ ошибка инструмента, решает модель
           // (работать без физического ввода / завершить с честным статусом), а не вечное зависание.
-          toolTrajectory.push(`${tu.name} (ошибка)`);
+          toolTrajectory.push(`${tu.name} (ошибка)`); // сам признак inputDenied ставит ensureInput
           resultBlocks.push({
             type: "tool_result",
             tool_use_id: tu.id,
             content:
-              `Мышь/клавиатура заняты другой задачей — аренда ввода не освободилась за ` +
-              `${Math.round(INPUT_WAIT_MS / 1000)}с. Сделай, что можно БЕЗ физического ввода ` +
-              `(web/код/чтение), или заверши с честным статусом «ввод занят».`,
+              `Мышь/клавиатура заняты ДРУГОЙ ЗАДАЧЕЙ Джарвиса — аренда ввода не освободилась за ` +
+              `${Math.round(INPUT_WAIT_MS / 1000)}с. Это внутренняя очередь, ВЛАДЕЛЕЦ тут ни при чём: ` +
+              `не объясняй провал тем, что он «за компьютером» — система по этой причине твои ` +
+              `действия не отклоняет. Сделай, что можно БЕЗ физического ввода (web/код/чтение), ` +
+              `или заверши с честным статусом «ввод занят другой задачей».`,
             is_error: true,
           });
           continue;
@@ -2860,6 +3134,49 @@ async function runAgentLoop(
       // повторило бы отправку живому человеку. Тот же класс, что мёртвый `gateStoppedRound` из
       // контроля-3 пульта Ф0: фикс есть, а проводки нет.
       if (r.uncertain === true) uncertainCalls.add(tu.id);
+      // Контроль-9 (any-mutate-attempted-ignores-declared-effect): эффект — РАЗРЕШЁННЫЙ (декларация mcp.json главнее
+      // эвристики по имени, op-override у screen_selection), один на весь разбор вызова. Раньше здесь стоял голый
+      // `toolEffect`, и `mcp__think__sequentialthinking` (объявлен neutral, но имя не проходит READONLY_NAME_RE)
+      // считался попыткой мутации: `durableNeutralDone` гас, и реально созданное напоминание объявлялось «не сработало».
+      const effOfCall =
+        tu.name === "screen_selection"
+          ? String((tu.input as Record<string, unknown> | undefined)?.op ?? "view") === "view"
+            ? "verify"
+            : "neutral"
+          : ((tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolEffect(tu.name));
+      if (effOfCall === "mutate") anyMutateAttempted = true; // контроль-8 (durable-neutral-masked)
+      // Контроль-8 (background-job-no-success/-string-flag): жизнь ФОНОВОГО задания. Запуск неопределён (spawn ≠ исход),
+      // завершение с кодом 0 — РЕАЛЬНО сделанная мутирующая работа (иначе «инструменты не отработали» при собранном
+      // проекте), а «ещё выполняется» — не капитуляция модели (иначе честное «пока не могу сказать» получало нудж
+      // «СТОП, не сдавайся» и эскалацию на Opus за ожидание фонового процесса).
+      // Контроль-10 (job-report-self-registers-launch): «запуск» регистрирует ТОЛЬКО реальный запуск. Раньше условием
+      // был `uncertain`, а его ставит и `overlayDeniedResult` у ОТЧЁТА об остановке — отчёт регистрировал сам себя,
+      // и гейт «отчёт этого хода» становился мёртвым ровно для инжектированных остановок.
+      if (typeof r.jobId === "string" && r.jobLaunched === true) jobLaunchCalls.set(r.jobId, tu.id);
+      // Идемпотентный отчёт о задании, запущенном НЕ в этом ходе, не может решать исход текущего хода: реестр заданий
+      // клиента отвечает одинаково 6 часов (контроль-9 ввёл этот гейт для вуальной ветки, контроль-10 — для остальных).
+      const reportOfThisTurn = typeof r.jobId !== "string" || jobLaunchCalls.has(r.jobId);
+      if (r.backgroundJob === "done" && reportOfThisTurn) {
+        anyMutateSucceeded = true;
+        const launch = typeof r.jobId === "string" ? jobLaunchCalls.get(r.jobId) : undefined;
+        if (launch) uncertainCalls.delete(launch); // исход выяснен — журнал не зовёт его неизвестным
+      } else if (r.backgroundJob === "running") {
+        // Контроль-9 (background-running-gate-whole-round): признак РАУНДОВЫЙ, как у вуали. Раньше он ставился прямо
+        // здесь, и один идущий job_status рядом с двумя провалившимися инструментами глушил анти-капитуляцию и
+        // goal-check на весь следующий раунд — настоящая капитуляция проходила молча под прикрытием фонового процесса.
+        backgroundRunningIds.add(tu.id);
+      } else if (r.backgroundJob === "killed") {
+        // Контроль-9 (job-kill-neutral-masked-failure): «останови сборку» → job_status{kill} РЕАЛЬНО бьёт дерево
+        // процессов, но инструмент нейтрален и в DURABLE_NEUTRAL_TOOLS не входит — дворецкое «Готово, сэр.»
+        // подменялось на «Не вышло, сэр — нужное действие не сработало» при убитой сборке.
+        anyDurableNeutralSucceeded = true;
+      }
+      // Контроль-8 (step-failure-journal): ЧАСТИЧНОЕ исполнение процедуры доходит до журнала НЕЗАВИСИМО от причины
+      // остановки. Раньше `partialCalls` наполнялся только внутри ветки вуали, и обычный провал берста на шаге 3
+      // («элемент не найден») уезжал в несокращаемую секцию как «ОШИБКА» — «доделай» повторяло набор и клики.
+      if ((typeof r.partialSteps === "number" && r.partialSteps > 0) || r.partialInjected === true) {
+        partialCalls.set(tu.id, { k: r.partialSteps ?? 0, injected: r.partialInjected === true });
+      }
       if (!r.isError) {
         // §15: подгрузили холодный инструмент — он обязан появиться в наборе СЛЕДУЮЩЕГО шага ЭТОЙ же
         // задачи, иначе модель зовёт tool_load по кругу (живой эпизод 2026-09-01: три вызова подряд и
@@ -2870,7 +3187,9 @@ async function runAgentLoop(
         if (tu.name === "tool_load") ({ tools, systemTools } = buildToolSet());
         // MCP-контракт (аудит 2026-07-28): декларация владельца в mcp.json главнее эвристики по имени —
         // «think»≠mutate (не слепит masked-failure), мутирующий get_* не проскочит neutral'ом.
-        const eff = (tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolEffect(tu.name);
+        // §режим выделения: у screen_selection ТРИ операции под одним именем — по имени он neutral, но
+        // `view` — настоящий свежий кадр области (как screen_capture) и verify-долг снимает; start/clear — нет.
+        const eff = effOfCall; // контроль-9: один разрешённый эффект на весь разбор вызова (вычислен выше)
         // 🔴 ЛЕСТНИЦА ВОСПРИЯТИЯ (форензика 2026-09-01). Числа: screen_capture — 156 вызовов (самый
         // частый инструмент вообще), ui_snapshot — 0 из 973 за два месяца; задачи со скринами дают
         // 76% успеха против 88% у остальных. Лестница была прописана только словами в персоне и в
@@ -2896,6 +3215,11 @@ async function runAgentLoop(
         // сверки отправки, притом что соседний fused-путь то же самое пустое наблюдение считает
         // слабым. Пустой и ошибочный результат сверкой не считаем.
         const realVerify = eff === "verify" && !r.isError && r.empty !== true;
+        // Контроль-6 (SR-C6-2): действие ушло под вуалью, потом модель СВЕРИЛА исход ЧИСТЫМ взглядом (не под вуалью) —
+        // «остальное — нет / исход не подтверждён» и failed в реестре были бы ложью; дальше судит её текст.
+        if (overlayActionInjected && realVerify && r.veiled !== true) verifiedAfterVeil = true;
+        // Контроль-6 (C5R-5): durable-дело нейтральным инструментом — не «ничего не сделано».
+        if (eff === "neutral" && DURABLE_NEUTRAL_TOOLS.has(tu.name)) anyDurableNeutralSucceeded = true;
         const combo = (tu.input as { combo?: unknown }).combo;
         // §P1-отправка (форензика «Отправлено — ушло в Клод», а сообщение осталось в поле): КОММИТ =
         // send-key после набора (composedPending), ЛИБО берст compose→send одним input_batch (ревью р1
@@ -2934,7 +3258,11 @@ async function runAgentLoop(
           // его не пропустил (отказ / не ответил / не смогли спросить). Раньше такой результат
           // (isError:false) взводил флаг для fs_delete/system_power/code_run/skill_execute/MCP →
           // masked-failure и анти-капитуляция глохли, и ход заканчивался «Готово» при нулевом деле.
-          if (r.declined !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) anyMutateSucceeded = true;
+          // Контроль-7 (sdk-2/sdk-3): «исход неизвестен» (скрипт перехватил отказ вуали и продолжил; фоновое задание
+          // только ЗАПУЩЕНО — spawn ≠ исход) — не «дело сделано»: иначе masked-failure и анти-капитуляция глохнут.
+          // Контроль-8 (background-string-flag): признак берём из НОРМАЛИЗОВАННОГО `uncertain` хендлера, а не из сырого
+          // input — форма `background:"true"` (её хендлер принимает) мимо прежней проверки взводила «дело сделано».
+          if (r.declined !== true && r.uncertain !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) anyMutateSucceeded = true;
           if (r.declined === true) {
             declinedCalls.add(tu.id); // журнал не должен звать это «сделанным»
             // Контроль-2 Ф0: остановка §14-ГЕЙТОМ — это НЕ капитуляция модели. Без этого флага мой же
@@ -2976,6 +3304,52 @@ async function runAgentLoop(
       }
       if ((tu.name === "web_search" || tu.name === "web_fetch") && !r.isError) wasResearched = true;
       if (r.channelDown) roundChannelDown = true; // Б4: команда не ушла — канал мёртв (не провал модели)
+      if (r.isError) roundErrors += 1;
+      if (r.veiled && effOfCall !== "mutate") {
+        // Контроль-6 (C5R-3): «ожидание под вуалью» — только сенсор/кадр/опрос. МУТАЦИЯ с наблюдением из окна
+        // оверлея (ui_invoke по одному хендлу ×6) остаётся под identical-repeat и семейным капом — иначе без
+        // единого гарда и с state:done.
+        roundVeiled = true;
+        veiledIds.add(tu.id);
+      }
+      if (r.overlayDenied) {
+        overlayDeniedIds.add(tu.id);
+        // Контроль-5: сколько шагов УЖЕ исполнено до остановки и ушло ли действие — терминал и журнал обязаны это назвать.
+        if (typeof r.overlayStepIndex === "number" && reportOfThisTurn) {
+          // Контроль-10 (partial-steps-zero-overwrite): НУЛЕВАЯ остановка (раннер срезал ПЕРВЫЙ шаг) — не «последняя
+          // остановка на 0 шагах»: она перетирала честное k и давала «остановлено после 0 выполненных шагов (всего 3)».
+          if (r.overlayStepIndex > 0) overlayPartialSteps = r.overlayStepIndex;
+          // Контроль-8 (job-status-double-count): по ИСТОЧНИКУ, а не накоплением: идемпотентный отчёт job_status об
+          // ОДНОМ задании не складывается сам с собой (два берста по 2 и 1 по-прежнему дают «всего 3»).
+          notePartial(typeof r.jobId === "string" ? `job:${r.jobId}` : `call:${tu.id}`, r.overlayStepIndex);
+        }
+        if (r.overlayActionInjected === true) overlayActionInjected = true;
+        // Контроль-4: «вуаль не дала и ничего не сделано» — только про МУТИРУЮЩИЙ вызов (input_*/input_batch/
+        // skill_execute): отказанный ВЗГЛЯД (screen_selection view = verify) не делает верно отвеченный
+        // ход провальным (раньше: «Тут написано X» + «Нужное действие я не сделал: вуаль» + failed).
+        // Контроль-8 (job-status-not-mutate): но класс судится по СМЫСЛУ ИСХОДА, а не по ВИДУ вызова — остановленная
+        // вуалью ПРОЦЕДУРА (есть исполненные шаги / ушедшее действие) мутирующая, даже если о ней доложил НЕЙТРАЛЬНЫЙ
+        // `job_status` фонового скрипта: иначе на финале «Готово» терминал говорил «инструменты не отработали» про два
+        // уже ушедших клика, а на содержательном финале ход вообще уходил в done. Это ровно корень контроля-6,
+        // вернувшийся через мой же фикс контроля-7 (sdk-2).
+        // Контроль-9 (job-veil-done0-not-failure): «процедура остановлена» — структурный признак ОТЧЁТА, а не наличие
+        // исполненных шагов: фоновый скрипт, легший об вуаль на ПЕРВОМ действии (done=0, ничего не инжектировано),
+        // не давал ни stepIndex, ни injected — и ход, в котором не сделано НИЧЕГО, уходил в done с ok:true.
+        // Контроль-9 (job-status-past-stop-fails-turn): но НЕЙТРАЛЬНЫЙ отчёт о ПРОШЛОЙ остановке (реестр заданий
+        // живёт 6 часов и отвечает идемпотентно) провалом ЭТОГО хода быть не может — иначе на вопрос «что там со
+        // скриптом?» верный ответ помечался failed. Считаем только отчёт о задании, запущенном ЗДЕСЬ.
+        const procedureStopped =
+          typeof r.overlayStepIndex === "number" || r.overlayActionInjected === true || r.overlayProcedure === true;
+        if (tu.name !== "screen_selection" && (effOfCall === "mutate" || (procedureStopped && reportOfThisTurn))) {
+          overlayDeniedAny = true;
+          // Контроль-7 (loop-2): «сверено чистым взглядом» относится к ПРЕЖНЕМУ ушедшему действию; новый отказ вуалью
+          // (ничего не сделано) не может ехать под старой сверкой в done.
+          verifiedAfterVeil = false;
+          // Контроль-8 (verified-after-veil-rearm): отказ, при котором НИЧЕГО не ушло, чистым взглядом не «удостоверяется»
+          // — сверять нечего. Иначе следующий же ui_snapshot снимал признак обратно и «Готово» ехало в done.
+          if (r.overlayActionInjected !== true) veilDeniedNothingDone = true;
+        }
+      }
       resultBlocks.push({
         type: "tool_result",
         tool_use_id: tu.id,
@@ -2992,6 +3366,25 @@ async function runAgentLoop(
         resultBlocks.push({ type: "tool_result", tool_use_id: tu.id, content: "отменено пользователем", is_error: true });
       }
     }
+    // Контроль-4: признаки вуали считаются ПО РАУНДУ, а не по одному вызову. Один overlay_drawing среди
+    // ошибок раньше выкидывал ВЕСЬ раунд из §7-эскалации и глушил анти-капитуляцию — реальный not_found
+    // соседнего инструмента маскировался вуалью (закон честности в обратную сторону). Теперь раунд «вуальный»,
+    // только если КАЖДАЯ его ошибка — вуаль; раунд ожидания ПОД вуалью (сенсор/кадр veiled, ошибок нет) тоже
+    // продлевает «остановка вуалью ≠ капитуляция» — честное «оверлей ещё открыт, дождусь» после раунда OCR
+    // под вуалью ловилось нуджем «СДЕЛАЙ» и уводило на Opus.
+    roundOverlayDenied = overlayDeniedIds.size > 0 && roundErrors === overlayDeniedIds.size;
+    if (roundOverlayDenied || (roundVeiled && roundErrors === 0)) {
+      gateStoppedRound = true;
+      gateStoppedByVeil = true;
+    }
+    // Контроль-9 (background-running-gate-whole-round): «задание ещё идёт» гасит анти-капитуляцию/goal-check ТОЛЬКО
+    // когда раунд без провалов — иначе реальные ошибки инструментов маскируются фоновым процессом (класс контроля-4).
+    // Контроль-10 (background-wait-round-too-wide): «раунд ожидания» — только если ВЕСЬ раунд из опросов идущего
+    // задания (правило контроля-4 «раунд вуальный, только если КАЖДАЯ его ошибка — вуаль»). Иначе один job_status
+    // рядом с повторяющимся успешным кликом выключал identical-repeat: ни нуджа на 3-м, ни обрыва на 4-м.
+    const backgroundWaitRound =
+      backgroundRunningIds.size > 0 && backgroundRunningIds.size === resp.toolUses.length && roundErrors === 0;
+    if (backgroundWaitRound) gateStoppedRound = true;
     convo.push({ role: "user", content: resultBlocks });
     // Подсказка лестницы — ПОСЛЕ результатов инструментов: теперь последнее сообщение user, и
     // appendUserNote допишет её в него, не разрывая пару assistant(tool_use)↔tool_result.
@@ -3019,7 +3412,7 @@ async function runAgentLoop(
           deps.checkpoints.refreshJournal(
             deps.userId,
             opts.resumeFrom.taskId,
-            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
+            mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls, partialCalls })),
             Math.max(round + 1, committedToolRounds),
           );
         } else if (preventiveCheckpoint) {
@@ -3045,7 +3438,7 @@ async function runAgentLoop(
     if (resp.toolUses.length > 0) lastRoundHadVerify = sawVerifyThisRound;
 
     // §скорость (зрение): старые скрины — вон из контекста (см. prune-images.ts: токены, TTFT, кеш).
-    const prunedImages = pruneStaleImages(convo, KEEP_SCREENSHOTS, KEEP_DOC_IMAGES);
+    const prunedImages = pruneStaleImages(convo, KEEP_SCREENSHOTS, KEEP_DOC_IMAGES, KEEP_SELECTION_VIEWS);
     if (prunedImages > 0) {
       prunedLastRound = true; // диагностика кеша (1.8): prune мутирует историю → перезапись префикса
       log.debug("зрение: устаревшие скрины вырезаны из контекста", { pruned: prunedImages });
@@ -3096,7 +3489,11 @@ async function runAgentLoop(
     // «чистая механика» (transient-сбой чтения лишь отложит откат на пару раундов — консервативно/безопасно).
     const anyErrored = resultBlocks.some((b) => b.type === "tool_result" && b.is_error === true);
     cleanRoundsStreak = anyErrored ? 0 : cleanRoundsStreak + 1;
-    if (allErrored) {
+    if (allErrored && roundOverlayDenied) {
+      // §режим выделения: раунд лёг об вуаль оверлея — это не слабость модели (класс Б4(д) «лечить транспорт
+      // Opus'ом»): серию провалов не растим и тир не эскалируем.
+      log.info("раунд отклонён вуалью режима выделения — §7-эскалация не считает его провалом", { taskId, round });
+    } else if (allErrored) {
       consecErrorRounds += 1;
       if (consecErrorRounds >= ESCALATE_AFTER && currentTier !== "fable") {
         // аннотация обязательна: вывод типа зацикливается через back-edge петли (currentTier = nextTier)
@@ -3126,7 +3523,10 @@ async function runAgentLoop(
           model = nextModel;
           consecErrorRounds = 0;
           familyBoost = null; // липкая эскалация перекрывает одноразовый family-boost
-          log.info("эскалация тира: модель застряла — захожу сильнее", { to: currentTier, model });
+          // `model` — модель ТИРА. Если ходы идут резервом (подписка), она не меняется от эскалации
+          // вовсе: там модель своя (Opus 5) на любом тире. Пишем оба поля, чтобы лог не создавал
+          // впечатление смены модели там, где сменился только эффорт.
+          log.info("эскалация тира: модель застряла — захожу сильнее", { to: currentTier, model, фактически: modelUsedLast ?? model });
           // Filler: дать понять, что не зависли, а пробуем иначе (а не молчать на застревании).
           session.send("transcript", { text: "Секунду, зайду с другой стороны.", final: true });
         } else {
@@ -3151,7 +3551,16 @@ async function runAgentLoop(
     // Сигнатура НОРМАЛИЗОВАННАЯ (волна F F1): перестановка ключей/пробелы/свежий nonce не делают
     // повтор «новым действием» — см. repeat-key.ts.
     const toolSig = repeatSignature(resp.toolUses);
-    if (toolSig === lastToolSig && !allErrored) {
+    // Контроль-5 (V4-4): опрос под вуалью (wait_for/OCR/кадр, ошибок нет) — ОЖИДАНИЕ владельца, а не «одно и то же
+    // без результата»: раньше 3-й опрос получал нудж, 4-й — runawayStuck и failed, пока владелец ещё обводил.
+    // Контроль-9 (background-poll-runaway): схема code_run САМА велит опрашивать job_status до `running:false`, а
+    // anti-runaway считал одинаковые опросы «одним и тем же без результата»: на 3-м шёл нудж «смени подход», на 4-м —
+    // runawayStuck и «Застрял, не довёл» про исправно идущее задание. Ожидание процесса — той же природы, что
+    // ожидание владельца под вуалью, и обрабатывается той же веткой.
+    const veiledWaitRound = (roundVeiled && roundErrors === 0) || backgroundWaitRound;
+    if (veiledWaitRound) {
+      // ни повтор, ни сброс серии — как у провального раунда (!allErrored)
+    } else if (toolSig === lastToolSig && !allErrored) {
       identicalRepeats += 1;
       if (identicalRepeats >= 2) {
         if (!repeatNudged) {
@@ -3172,12 +3581,13 @@ async function runAgentLoop(
     } else {
       identicalRepeats = 0;
     }
-    lastToolSig = toolSig;
+    if (!veiledWaitRound) lastToolSig = toolSig;
 
     // Мягкий anti-runaway по СЕМЕЙСТВУ инструментов (фикс «дублирует команды»): один tool NAME вызван
     // слишком много раз за задачу → флуд без сходимости. Сначала интервент-нудж (смени подход / оцени, не
     // достигнута ли цель) + эскалация на Opus; при упорстве — честный обрыв ДО упора в max_steps(50).
     for (const tu of resp.toolUses) {
+      if (overlayDeniedIds.has(tu.id) || veiledIds.has(tu.id) || backgroundRunningIds.has(tu.id)) continue; // контроль-3/5/9: отказ вуали, опрос под ней и опрос идущего задания — состояние системы, не «топтание»
       if (tu.name === "file_view") {
         const inp = tu.input as { path?: unknown; page?: unknown };
         const sig = `${String(inp.path ?? "")}#${String(inp.page ?? 1)}`;
@@ -3242,6 +3652,11 @@ async function runAgentLoop(
   } finally {
     // §20: отложенный ack не должен пережить петлю (терминал сам скажет итог).
     if (ackTimer) clearTimeout(ackTimer);
+    // Слот, занятый разговорным ходом с инструментами, освобождаем на ЛЮБОМ выходе.
+    if (convoSlotHeld) {
+      convoSlotHeld = false;
+      deps.concurrency?.release();
+    }
     // Освобождаем аренду ввода на ЛЮБОМ выходе (успех/отмена/лимит/исключение, §20),
     // иначе следующая задача навечно зависнет на acquire. Терминал ниже ввод не трогает.
     if (holdsInput && arbiter) arbiter.release();
@@ -3276,11 +3691,41 @@ async function runAgentLoop(
   // maskedFailure/taskOk считаются ЗДЕСЬ (а не ниже, у телеметрии): по ним гейтится самообучение —
   // сохранять «приём» из траектории, которая НЕ привела к результату, нельзя (контроль-5). Обе величины
   // — чистые производные уже финальных переменных петли, порядок вычисления от переноса не меняется.
+  // Контроль-6 (SR-C6-2): действие ушло под вуалью и модель СВЕРИЛА исход чистым взглядом — её «ушло» опирается
+  // на наблюдение, а не на «ok» инструмента; masked-failure тут дал бы ложное «Не вышло».
+  // Контроль-8 (verified-after-veil-rearm): сверка удостоверяет ТОЛЬКО ушедшее действие; непокрытый отказ вуали
+  // (мутация, которая не состоялась) её обесценивает — иначе фикс контроля-7 снимался первым же чистым сенсором.
+  // Контроль-10: «ушедшее действие сверено чистым взглядом» — САМОСТОЯТЕЛЬНЫЙ факт, и терминал обязан его назвать,
+  // даже когда ход всё равно провален непокрытым отказом вуали (иначе владельцу говорят «не сделал» про отправленное).
+  const injectedVerified = overlayActionInjected && verifiedAfterVeil;
+  const veilOutcomeVerified = injectedVerified && !veilDeniedNothingDone;
+  // Контроль-7 (loop-3): полое «Сделано» при k исполненных шагах / ушедшем действии — провал, но ЧЕСТНЫЙ overlay-терминал
+  // (называет k и «ушло»), а не «инструменты не отработали» — по нему владелец повторял команду и получал дубль.
+  const overlayPartialOutcome = overlayDeniedAny && !anyMutateSucceeded && (overlayPartialTotal > 0 || overlayActionInjected);
+  // Контроль-8 (durable-neutral-masked): durable-дело нейтральным инструментом (напоминание/память/наблюдение) —
+  // это СДЕЛАННОЕ дело. Признак вводился контролем-6 с этой формулировкой, но был подключён к ОДНОМУ потребителю
+  // (give-up), и «поставь напоминание» + дворецкое «Готово, сэр.» давало «Не вышло — нужное действие не сработало»
+  // при реально созданном напоминании. Гасим узко: только когда мутирующего дела в ходе не пробовали вовсе.
+  const durableNeutralDone = anyDurableNeutralSucceeded && !anyMutateAttempted;
   const maskedFailure =
-    opts?.conversational !== true && toolTrajectory.length > 0 && !anyMutateSucceeded && isHollowSuccess(finalText || "");
+    opts?.conversational !== true &&
+    toolTrajectory.length > 0 &&
+    !anyMutateSucceeded &&
+    !veilOutcomeVerified &&
+    !overlayPartialOutcome &&
+    !durableNeutralDone &&
+    isHollowSuccess(finalText || "");
 
+  // «Ввод не дали и при этом НИЧЕГО не сделано» — не успех. Узко и структурно: ход, который отказ
+  // пережил и добился своего другим путём (anyMutateSucceeded), успехом остаётся; исключения для
+  // разговорного хода тут НЕТ — телеметрия обязана быть честной и там.
+  const inputDeniedFailure = inputDenied && !anyMutateSucceeded;
+  // Контроль-3: «вуаль не дала и ничего не сделано» — тот же класс, второй признак (иначе state:done, ok:true,
+  // навыку — успех, «доделай» гасит журнал при нуле выполненных действий).
+  // Контроль-5 (V4-1): + честный give-up после раунда, остановленного вуалью, без единого дела.
+  const overlayDeniedFailure = (overlayDeniedAny || veilGaveUp) && !anyMutateSucceeded && !veilOutcomeVerified;
   const taskOk =
-    !failed && !limited && !timedOut && !cancelled && !maskedFailure && !llmStubbed && !runawayStuck && !floodStuck && !queueTimedOut && !channelLost && (!capExhausted || capAnswered);
+    !failed && !limited && !timedOut && !cancelled && !maskedFailure && !llmStubbed && !runawayStuck && !floodStuck && !queueTimedOut && !channelLost && !inputDeniedFailure && !overlayDeniedFailure && (!capExhausted || capAnswered);
 
   const learnWorthy = round >= 3 || (wasResearched && round >= 1);
   // 🔴 Гейт по `taskOk` (контроль-5): прежний ручной список неуспехов расходился с истиной — в нём не
@@ -3349,7 +3794,10 @@ async function runAgentLoop(
   // Ревью волны Б 2-й проход (#4): обрыв канала ПК (channelLost) — ТОЖЕ не вина навыка (тот же класс,
   // что стаб LLM): иначе N сетевых блипов подряд копят fail_count и recall перестаёт подсовывать
   // ИСПРАВНЫЙ навык. capExhausted (исчерпал шаги без ответа) — исход неоднозначен, навыку не кредитуем.
-  if (recalled && !recalled.fromShared && deps.skills?.recordOutcome && !cancelled && !limited && !timedOut && !llmStubbed && !queueTimedOut && !channelLost && !capExhausted) {
+  // Ревью 2026-09-02: отказ АРЕНДЫ ВВОДА — тот же класс «не дали работать», что queueTimedOut: навык
+  // не запускался ни на шаг, а получал бы −1 (три параллельные задачи за мышь стирали бы исправный
+  // навык из recall) либо, на пути реплея, ложный кредит успеха.
+  if (recalled && !recalled.fromShared && deps.skills?.recordOutcome && !cancelled && !limited && !timedOut && !llmStubbed && !queueTimedOut && !channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
     void deps.skills.recordOutcome(deps.userId, recalled.id, taskOk).catch((e) =>
       log.debug("recordOutcome навыка пропущен", e instanceof Error ? e.message : String(e)),
     );
@@ -3375,20 +3823,31 @@ async function runAgentLoop(
   }
   metrics.record({
     tier: currentTier,
-    model,
+    // Модель, которая РЕАЛЬНО работала (резерв на подписке отвечает своей, не моделью тира).
+    // По этому полю считается /cogs и «какой моделью это делалось» — оно обязано быть правдой.
+    model: modelUsedLast ?? model,
     userId: deps.userId,
     latencyMs,
     rounds: round,
     toolCalls: toolCallsTotal,
     usage: taskUsage,
     ok: taskOk,
+    // Деньги — РОВНО начисленные (ход по подписке = $0), а не пересчёт по прайсу API: на этих
+    // событиях стоит /cogs, и фантомная стоимость превращала экономику продукта в выдумку.
+    costUsd: taskChargedUsd,
+    // Канал хода — чтобы «быстрота» и цена резались по нему, а не гадались по имени модели.
+    ...(lastChannelUsed ? { channel: lastChannelUsed } : {}),
+    // Действовавший потолок: без него из телеметрии не отличить «не успел» от «упёрся в узкий потолок».
+    capMs: loopMaxMs(),
     // Канал модели не ответил → это НЕ провал работы Джарвиса, и в статистике слабостей он не должен
     // выглядеть как «не справился» (разбор телеметрии 2026-08-31: 31 такой ход из 86 «провалов»).
     ...(taskOk ? {} : { failKind: llmStubbed ? ("llm_unavailable" as const) : ("task" as const) }),
   });
   log.info("task-метрики", {
     tier: currentTier,
+    model: modelUsedLast ?? model, // кто РЕАЛЬНО отвечал (резерв — своя модель, не модель тира)
     latencyMs, // чистое время работы (очередь за арендой ВЫЧТЕНА — см. queueWaitMs)
+    capMs: loopMaxMs(), // действующий потолок задачи (на резерве-подписке он ШИРЕ — раунд там дороже)
     queueWaitMs, // сколько простояли в очереди за арендой ввода (Волна 1)
     rounds: round,
     toolCalls: toolCallsTotal,
@@ -3428,7 +3887,7 @@ async function runAgentLoop(
       deps.checkpoints.refreshJournal(
         deps.userId,
         opts.resumeFrom.taskId,
-        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls })),
+        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes, effectOf, confirmedSends, declinedCalls, uncertainCalls, partialCalls })),
         Math.max(round, committedToolRounds),
       );
     } catch (e) {
@@ -3598,8 +4057,61 @@ async function runAgentLoop(
   // Волна C: продолжение ДОВЕЛО задачу — журнал больше не нужен (иначе позднее «доделай» подняло бы
   // уже сделанное). clearIf, а не clear: за время работы параллельная задача могла занять слот своим
   // чекпойнтом — чужую недоделку успех этой задачи стирать не вправе.
-  if (opts?.resumeFrom) deps.checkpoints?.clearIf(deps.userId, opts.resumeFrom.taskId);
-  tasks.finish(taskId, finalText);
+  // Журнал недоделки гасит только УСПЕХ: ревью 2026-09-02 показало, что «доделай», упершееся в
+  // занятый ввод, стирало журнал 18-раундовой работы — и следующее «доделай» получало «нечего
+  // возобновлять», хотя система сама только что объявила заход неуспешным.
+  if (opts?.resumeFrom && !inputDeniedFailure && !overlayDeniedFailure) deps.checkpoints?.clearIf(deps.userId, opts.resumeFrom.taskId);
+  // 🔴 «Ввод не дали и ничего не сделано» — в РЕЕСТР это идёт провалом (разбор «Доты» 2026-09-02):
+  // ход, вслух сказавший «Задача не выполнена», лежал как state:"done".
+  // Реплику модели НЕ подменяем (она несёт подробности и частичный результат), но ДОПОЛНЯЕМ честной
+  // оговоркой: ревью проверило прогоном, что maskedFailure тут НЕ страхует — «Готово, сэр — нажал
+  // «Играть», поиск запущен» длиннее трёх слов, а «нажал» не входит в SUCCESS_VERB. Без оговорки
+  // владелец слышал бы успех при провале в реестре.
+  // Контроль-8 (input-denied-shadows-overlay): ветка аренды ввода стояла ПЕРВОЙ и перекрывала вуальную — про задачу,
+  // где 3 шага и Enter УЖЕ ушли в GUI, владельцу говорили «не сделал» и называли не ту причину (по ней же группирует
+  // провалы самодиагностика). Частичное исполнение важнее того, какая из двух причин «выиграла».
+  const veilPartial = overlayPartialTotal > 0 || overlayActionInjected;
+  if (inputDeniedFailure && !(overlayDeniedFailure && veilPartial)) {
+    tasks.fail(taskId, "ввод занят другой задачей — действие не выполнено");
+    finalText = `${finalText.trimEnd()} Нужное действие я при этом не сделал, сэр: ввод был занят другой задачей.`;
+  } else if (overlayDeniedFailure) {
+    // Контроль-3: вуаль оверлея не дала инжектировать ввод, и ничего не сделано — провал в реестре, не done.
+    // Контроль-5 (V4-2): k шагов навыка/берста/макроса УЖЕ исполнено (в т.ч. Enter) — «не сделал» было бы ложью, по
+    // которой владелец повторяет команду и получает дубль; причина в реестре и приписка называют k. Приписку не
+    // дублируем, если модель уже честно сказала «не смог/жду» (V4-1); «действие ушло, исход неизвестен» — отдельно.
+    const k = overlayPartialSteps;
+    const total = overlayPartialTotal;
+    const rest = overlayActionInjected ? "следующий шаг ушёл — исход не подтверждён" : "остальное не выполнено";
+    const leaseAlso = inputDeniedFailure ? "; ввод при этом был занят другой задачей" : ""; // контроль-8: обе причины названы
+    tasks.fail(
+      taskId,
+      (total > 0
+        ? `поверх экрана была вуаль режима выделения — остановлено после ${k} выполненных шагов${total !== k ? ` (всего исполнено ${total})` : ""}, ${rest}`
+        : overlayActionInjected
+          ? "поверх экрана была вуаль режима выделения — действие ушло, исход не подтверждён"
+          : "поверх экрана была вуаль режима выделения — действие не выполнено") + leaseAlso,
+    );
+    // Контроль-6 (C5R-6): одна связная приписка без противоречий («остальное — нет» и «ушёл» рядом не стоят).
+    const veilTail = "сэр: поверх экрана была вуаль режима выделения.";
+    // Контроль-10: ушедшее действие сверено чистым взглядом — отрицать его нельзя (ровно на этом владельцу говорили
+    // «не сделал» про отправленное сообщение). Ход всё равно провален: отказанная вуалью мутация не состоялась.
+    if (injectedVerified) {
+      finalText = `${isHollowSuccess(finalText || "") ? "" : `${finalText.trimEnd()} `}Ушедшее действие я сверил — оно прошло; а вот следующее под вуалью сделать не смог, ${veilTail}`;
+    } else
+    if (!looksLikeGiveUp(finalText)) {
+      // Контроль-7 (loop-3): полое «Сделано/Готово» модели терминал провала НЕ переиспользует (урок контроль-6 волны C) —
+      // ведём своей честной фразой; содержательный текст оставляем и дописываем.
+      const base = isHollowSuccess(finalText || "") ? "" : `${finalText.trimEnd()} `;
+      finalText =
+        total > 0
+          ? `${base}Часть шагов (${total}) я выполнил, и они не откатываются; ${overlayActionInjected ? "следующий шаг ушёл, но его исход не подтверждён — перед повтором сверю" : "остальное — нет"}, ${veilTail}`
+          : overlayActionInjected
+            ? `${base}Действие ушло, но его исход под вуалью не подтверждён — перед повтором сверю, ${veilTail}`
+            : `${base}Нужное действие я при этом не сделал, ${veilTail}`;
+    } else if (overlayActionInjected) {
+      finalText = `${finalText.trimEnd()} Исход последнего шага не подтверждён — перед повтором сверю.`;
+    }
+  } else tasks.finish(taskId, finalText);
   if (shown) emitTaskStatus(session, task);
   const spokenFinal = verbalize(finalText);
   // §15 семантический кэш: запоминаем ТОЛЬКО чисто-вербальный ход (НИ ОДНОГО инструмента → нет
@@ -3608,7 +4120,7 @@ async function runAgentLoop(
   // ...и ЗАПИСЫВАЕМ тоже только разговорный ход (симметрично гарду на lookup выше): ответ на команду
   // в кэше — мина, даже если инструментов в том ходе не было (модель могла лишь ПЕРЕСПРОСИТЬ, и этот
   // переспрос с числами/состоянием оседал как «готовый ответ» на любую будущую такую команду).
-  if (deps.responseCache && toolTrajectory.length === 0 && opts?.conversational === true) {
+  if (deps.responseCache && toolTrajectory.length === 0 && opts?.conversational === true && !opts?.selectionAtStart && !deps.selection?.get()) {
     void deps.responseCache.store(deps.userId, text, spokenFinal);
   }
   return terminal(spokenFinal);
@@ -3688,6 +4200,8 @@ async function runLocalIntent(
   arbiter?: AsyncMutex,
   isClosed?: () => boolean,
   openOrFocus?: (url: string) => Promise<unknown>,
+  /** Контроль-10: идёт ли фаза рисования вуали — ветка расширения клиентского гейта не проходит. */
+  veilDrawing?: () => boolean,
 ): Promise<AgentReply> {
   if (arbiter) await arbiter.acquire();
   try {
@@ -3699,6 +4213,12 @@ async function runLocalIntent(
     // вкладок — есть вкладка сервиса → ФОКУС (не дубль), нет → новая. Не трогает мышь (chrome.tabs).
     // Расширение не подключено / ошибка → откат на обычный путь (shell-open в дефолтный браузер).
     if (intent.kind === "browser.open" && intent.inDefault && openOrFocus) {
+      // Контроль-10 (tier0-openorfocus-no-veil-gate): фикс контроля-9 закрыл ветку расширения у `browser_open`
+      // (инструмент), но ОСНОВНОЙ путь «Джарвис, открой ютуб» — вот этот tier0, и он до модели не доходит вовсе.
+      // `openOrFocus` поднимает окно Chrome поверх окна рисования и забирает у владельца Esc.
+      if (veilDrawing?.()) {
+        return { voice: verbalize(failurePhrase(intent, "overlay_drawing")), fallbackToLlm: true };
+      }
       try {
         const r = (await openOrFocus(intent.url)) as { focused?: boolean } | undefined;
         return { voice: verbalize(r?.focused ? "Уже было открыто — переключился." : "Открыл.") };
@@ -3709,12 +4229,23 @@ async function runLocalIntent(
     const command = intentToCommand(intent);
     const result = await session.sendAction(command, actionTimeoutMs(command.kind));
     void insertActionLog(buildActionLogEntry(session.sessionId, result.commandId, command, result));
-    if (result.ok) return { voice: verbalize(successPhrase(intent)) };
+    if (result.ok) {
+      // §режим выделения: «сними выделение» без нашей рамки — почти наверняка про ПРИЛОЖЕНИЕ (Photoshop
+      // Ctrl+D, граница таблицы в Word): tier0 это не его дело → отдаём модели, а не «снимать было нечего».
+      if (intent.kind === "selection" && intent.op === "clear") {
+        const d = (result.data as { cleared?: boolean; drawCancelled?: boolean } | undefined) ?? {};
+        if (!d.cleared && !d.drawCancelled) return { voice: verbalize(successPhrase(intent, result.data)), fallbackToLlm: true };
+      }
+      return { voice: verbalize(successPhrase(intent, result.data)) };
+    }
     log.warn("локальное действие не удалось", { kind: command.kind, code: result.error?.code });
     const voice = verbalize(failurePhrase(intent, result.error?.code));
     // Не нашёл ПРИЛОЖЕНИЕ по имени — это не приговор, а сигнал «имя не exe»: модель разберёт («тесты» →
     // code_run vitest, «стрим» → obs_request). Голос оставляем — потребители без отката озвучат честный провал.
     if (intent.kind === "app.launch" && result.error?.code === "not_found") return { voice, fallbackToLlm: true };
+    // Контроль-8 (tier0-overlay-reason): вуаль — ВРЕМЕННОЕ состояние системы. Отдаём ход модели: она может дождаться
+    // закрытия оверлея и довести дело, вместо того чтобы владелец повторял команду и слышал один и тот же отказ.
+    if (result.error?.code === "overlay_drawing") return { voice, fallbackToLlm: true };
     return { voice };
   } finally {
     if (arbiter) arbiter.release();
@@ -3733,6 +4264,12 @@ function intentToCommand(intent: LocalIntent): ActionCommand {
       return { kind: "system.media", op: intent.op };
     case "volume":
       return { kind: "system.volume", op: intent.op, ...(intent.level !== undefined ? { level: intent.level } : {}) };
+    case "selection":
+      // §режим выделения: оверлей открывается СРАЗУ (без waitMs) — ack звучит мгновенно, а обведённая
+      // область приедет отдельным сообщением client.selection и попадёт в контекст следующего хода.
+      // force: голосовая команда — явная воля владельца: start перерисовывает только что обведённое, clear
+      // закрывает вуаль ЕГО рукой (клиент докладывает «владелец закрыл», а не «прервано не владельцем»).
+      return { kind: "screen.selection", op: intent.op, force: true };
     case "clarify":
       throw new Error("clarify не превращается в ActionCommand (обрабатывается в handleUserText)");
   }

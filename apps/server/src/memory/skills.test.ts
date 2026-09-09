@@ -8,6 +8,7 @@ import {
   type RecalledSkill,
   type SavedLearnedSkill,
   type SkillDistiller,
+  mentionsDeadRefusal,
   createSkillProvider,
   distillProcedure,
   findDuplicateSkill,
@@ -646,5 +647,25 @@ describe("F2 (волна F, адаптация OpenClaw): скан навыка 
     expect(pr.reason).toBe("blocked_scan");
     // Общей копии нет: чужому юзеру этот id не recall'ится (адресно — по id, соседние shared не мешают).
     expect((await sp.recall("u-scan-promote-reader", "когда легаси навык"))?.id).not.toBe("learned__legacy-inject");
+  });
+});
+
+/**
+ * 🔴 Адверс-ревью 2026-09-02 (HIGH): выученный навык инжектится в системный промпт ДОВЕРЕННЫМ блоком,
+ * и однажды записанная ложная модель системы воспроизводится вечно. Пять навыков учили, что
+ * `input_click` отказывает, «когда владелец за компьютером» — такого отказа не бывает (гейт требует
+ * origin="proactive", сервер всегда шлёт "user"), и модель этим объясняла владельцу свои провалы.
+ * Признак УЗКИЙ: карантин тут неуместен (словарь принципиально неполон), поэтому только WARN на boot.
+ */
+describe("mentionsDeadRefusal — навык учит отказу, которого не бывает", () => {
+  it("ловит связку USER_BUSY + присутствие владельца", () => {
+    expect(mentionsDeadRefusal("- Если пользователь занят за ПК, input_click вернёт USER_BUSY")).toBeTruthy();
+    expect(mentionsDeadRefusal("**USER_BUSY**: если пользователь сейчас за мышью — отказ")).toBeTruthy();
+  });
+
+  it("не трогает честные тексты: вежливость без ссылки на несуществующий код отказа", () => {
+    expect(mentionsDeadRefusal("Не дёргай мышь, если владелец за компьютером — предложи подождать.")).toBeUndefined();
+    expect(mentionsDeadRefusal("Аренда ввода занята другой задачей — это внутренняя очередь.")).toBeUndefined();
+    expect(mentionsDeadRefusal("")).toBeUndefined();
   });
 });

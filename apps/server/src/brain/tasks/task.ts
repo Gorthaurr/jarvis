@@ -366,6 +366,13 @@ export function stepLabelFor(toolName: string, input: Record<string, unknown>): 
     }
     case "screen_capture":
       return "Смотрю на экран";
+    case "screen_selection": {
+      // §режим выделения: чип §20 иначе показал бы «Работаю…» — ровно та жалоба, ради которой метка вводилась.
+      const op = s(input.op);
+      if (op === "start") return "Прошу обвести область";
+      if (op === "clear") return "Снимаю выделение";
+      return "Смотрю на выделенную область";
+    }
     case "file_view":
       return "Смотрю файл";
     case "job_status":

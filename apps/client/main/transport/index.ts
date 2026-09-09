@@ -38,6 +38,8 @@ import type {
   Takeover,
   ClientEnv,
   ClientSystem,
+  ClientSelection,
+  ScreenSelection,
   ClientContext,
   ClientSettings,
   ModelsCatalog,
@@ -236,13 +238,15 @@ export class Transport extends EventEmitter {
 
   /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту.
    *  §Волна2 (2.6): + структурные списки приложений/игр — лексикон STT-нормализатора. */
-  sendEnv(summary: string, apps?: string[], games?: string[], installed?: ClientEnv["installed"]): void {
+  sendEnv(summary: string, apps?: string[], games?: string[], installed?: ClientEnv["installed"], selectionHotkey?: string | null): void {
     this.send(
       makeEnvelope<ClientEnv>("client.env", {
         summary,
         ...(apps?.length ? { apps } : {}),
         ...(games?.length ? { games } : {}),
         ...(installed?.length ? { installed } : {}),
+        // §режим выделения: какая клавиша РЕАЛЬНО зарегистрирована (null — никакая) — для паспорта возможностей.
+        ...(selectionHotkey !== undefined ? { selectionHotkey } : {}),
       }),
     );
   }
@@ -251,6 +255,17 @@ export class Transport extends EventEmitter {
   sendSystem(summary: string): void {
     this.send(makeEnvelope<ClientSystem>("client.system", { summary }));
   }
+  /** §выделение (2026-09-03): владелец обвёл область экрана / снял её (null) — сервер кладёт это в контекст хода. */
+  sendSelection(selection: ScreenSelection | null, ageMs?: number | null, drawing?: boolean): void {
+    this.send(
+      makeEnvelope<ClientSelection>("client.selection", {
+        selection,
+        ...(typeof ageMs === "number" ? { ageMs } : {}),
+        ...(typeof drawing === "boolean" ? { drawing } : {}),
+      }),
+    );
+  }
+
 
   /** §9 «не мешать»: контекст занятости (звонок/полный экран/блокировка) → сервер гейтит проактивную речь. */
   sendContext(c: ClientContext): void {

@@ -11,6 +11,8 @@
  * met:true — реально наблюдённое состояние (это легитимная сверка).
  */
 import type { WaitCondition } from "@jarvis/protocol";
+import { selectionStore } from "../selection/store.js";
+import { VISUAL_WAIT_KINDS } from "../selection/veil-policy.js";
 import { createLogger, sleep } from "@jarvis/shared";
 import { type CaptureRect, captureScreen } from "./screen.js";
 import { ground } from "./ground.js";
@@ -79,6 +81,13 @@ export interface WaitOutcome {
   met: boolean;
   elapsedMs: number;
   polls: number;
+  /**
+   * Контроль-5 (ACT-1): исход снят ПОД ВУАЛЬЮ режима выделения — по РЕШАЮЩЕМУ опросу (контроль-7): met:true на чистом
+   * экране после закрытия вуали честен, и met:false после минуты чистых опросов — тоже. dispatch помечает результат по
+   * этому полю, а не по окну всей команды (ожидание живёт до минуты).
+   * ⚠️ Контроль-8: «вуаль была где-то в окне» отражается НЕ здесь, а в `unknown` для ВИЗУАЛЬНЫХ ожиданий — см. ниже.
+   */
+  veiled?: boolean;
   /** Что реально наблюдали в последний опрос (для честного отчёта модели). */
   detail: string;
   /**
@@ -237,18 +246,28 @@ export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: 
   // «Не смог проверить» ПОСЛЕДНИМ опросом (финальное ревью): met:false с unknown — незнание, а не
   // достоверное «условие не выполняется». Серверный watch по нему не считает состояние отлипшим.
   let unknown = false;
+  // Контроль-5 (ACT-1): вуаль судится ПО ОПРОСУ (окно опроса, как окно команды в dispatch), а не по всему ожиданию.
+  let sawVeil = false;
+  let lastPollVeiled = false;
   log.info("wait.for", { kind: cond.kind, timeout, poll });
 
   for (;;) {
     polls += 1;
+    const pollStart = Date.now();
+    const veiledBefore = selectionStore.drawing;
+    const pollVeiled = (): boolean => veiledBefore || selectionStore.drawing || selectionStore.drawingEndedAfter(pollStart);
     try {
       // Кап опроса = остаток бюджета (чтобы зависший OCR не переехал timeout wait_for).
       const [met, seen, state, unsure] = await checkOnceCapped(cond, timeout - (Date.now() - startedAt));
+      lastPollVeiled = pollVeiled();
+      if (lastPollVeiled) sawVeil = true;
       detail = seen;
       unknown = unsure === true;
       if (state) gsiState = state; // R4: состояние источника последнего опроса — серверному watch
-      if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}) };
+      if (met) return { met: true, elapsedMs: Date.now() - startedAt, polls, detail, ...(gsiState ? { gsiState } : {}), ...(lastPollVeiled ? { veiled: true } : {}) };
     } catch (e) {
+      lastPollVeiled = pollVeiled();
+      if (lastPollVeiled) sawVeil = true;
       // Транзиентный сбой сенсора (в т.ч. на ПЕРВОМ опросе, ревью Волны 2) не роняет ожидание —
       // условие могло ещё не наступить; сбой виден в detail, честный met:false по таймауту.
       detail = e instanceof Error ? e.message : String(e);
@@ -261,7 +280,15 @@ export async function waitFor(cond: WaitCondition, timeoutMs?: number, pollMs?: 
         polls,
         detail,
         ...(gsiState ? { gsiState } : {}),
-        ...(unknown ? { unknown: true } : {}),
+        // Контроль-8 (veiled-during-dead): признак «вуаль была в окне» контроль-7 ввёл ОТДЕЛЬНЫМ полем, которого никто
+        // не читал (ни dispatch, ни applyVeil, ни watch) и которое не вычищалось из untrusted-тела — мёртвый
+        // компенсатор и вторая редакция статуса. Но факт остаётся: ВИЗУАЛЬНОЕ условие могло наступить и уйти ПОД
+        // вуалью, значит met:false тут выражает НЕЗНАНИЕ, а не «не наступило» (закон «не смог проверить» ≠ «нет»).
+        // Невизуальные ожидания (файл/процесс/gsi/звук) вуаль не слепит — их исход остаётся достоверным.
+        ...(unknown || (sawVeil && VISUAL_WAIT_KINDS.has(cond.kind)) ? { unknown: true } : {}),
+        // Контроль-7 (sensors-6): «снято под вуалью» — по ПОСЛЕДНЕМУ опросу: минута чистых опросов после 2 с вуали не
+        // должна превращаться в «дождись закрытия оверлея».
+        ...(lastPollVeiled ? { veiled: true } : {}),
       };
     }
     await sleep(poll);

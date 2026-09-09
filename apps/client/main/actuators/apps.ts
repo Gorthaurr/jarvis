@@ -15,6 +15,7 @@
 import { spawn } from "node:child_process";
 import { createLogger } from "@jarvis/shared";
 import { LaunchError, smartLaunch } from "./app-resolve.js";
+import { DrawingOverlayError, assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 
 const log = createLogger("actuator:apps");
 
@@ -129,6 +130,9 @@ export function isProtectedProcess(name: string): boolean {
  * парсится как команда, а трактуется как единый -FilePath (умеет и .exe из PATH, и URI ms-settings:).
  */
 export async function launchApp(app: string): Promise<LaunchOutcome> {
+  // Контроль-7 (sensors-3): новое окно (приложение/браузер по url) встаёт на передний план и отбирает клавиатуру у окна
+  // рисования; browser.open/tier0 зовут launchApp мимо раннего гейта dispatch — гард в точке действия.
+  assertNoDrawingOverlay();
   // Алиасы (браузер→msedge, настройки→ms-settings:, стим→steam, …) — быстрый known-good путь;
   // затем умный резолвер из источников истины ОС (App Paths / Steam-манифесты / Пуск / PATH) +
   // ЧЕСТНАЯ проверка факта запуска. Игры (Dota и пр.) резолвятся generically (steam://rungameid/<id>),
@@ -174,6 +178,9 @@ export interface FocusOutcome {
 }
 
 export async function focusApp(app: string): Promise<FocusOutcome> {
+  // Контроль-6 (SR-C6-1): реплей навыка зовёт focusApp МИМО раннего гейта dispatch — смена фокуса отобрала бы
+  // клавиатуру у окна рисования (Esc владельца ушёл бы в чужое приложение). Гард — в точке действия.
+  assertNoDrawingOverlay();
   const target = resolveAppTarget(app);
 
   // §Волна2 (2.4, закрывает TODO M3): ОСНОВНОЙ путь — сайдкар window.focus (SetForegroundWindow+
@@ -189,9 +196,17 @@ export async function focusApp(app: string): Promise<FocusOutcome> {
     }
     log.debug(`focus: сайдкар не сфокусировал «${probe}» — фолбэк на AppActivate`);
   } catch (e) {
+    // Контроль-9 (focus-app-veil-swallowed): вуаль, открывшаяся ВНУТРИ сайдкарного RPC, приходит сюда исключением —
+    // и общий catch превращал честный отказ в «сайдкар недоступен», после чего AppActivate менял фокус под открытой
+    // вуалью. Состояние системы наверх, а не в фолбэк.
+    if (e instanceof DrawingOverlayError) throw e;
     log.debug(`focus: сайдкар недоступен (${e instanceof Error ? e.message : String(e)}) — фолбэк на AppActivate`);
   }
 
+  // Контроль-9: ОТДЕЛЬНАЯ точка инжекции — от входного гарда её отделяет RPC сайдкара с таймаутом 8 с, и вуаль
+  // успевает открыться внутри этого окна. AppActivate выводит чужое окно поверх окна рисования (Esc владельца
+  // уходит в чужое приложение), а возвращали мы при этом чистый ok.
+  assertNoDrawingOverlay();
   log.info(`focus (AppActivate fallback): "${app}" -> "${target}"`);
 
   // Имя процесса без расширения и без URI-схемы — то, что AppActivate сможет сопоставить.
@@ -214,6 +229,7 @@ export async function focusApp(app: string): Promise<FocusOutcome> {
     "Write-Output ('FOCUSED:' + ([int][bool]$r));",
   ].join(" ");
 
+  const tActivate = Date.now();
   return new Promise<FocusOutcome>((resolve, reject) => {
     const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
       windowsHide: true,
@@ -224,6 +240,14 @@ export async function focusApp(app: string): Promise<FocusOutcome> {
     child.stdout?.on("data", (d: string) => (out += d));
     child.on("error", (e) => reject(e));
     child.on("exit", () => {
+      // Контроль-10 (focus-no-postcheck): AppActivate живёт секунды (PowerShell + COM) — вуаль, открывшаяся внутри
+      // этого окна, получает чужое окно поверх себя, а мы вернули бы чистый ok.
+      try {
+        assertNoOverlayDuring(tActivate, "Смена фокуса приложения");
+      } catch (e) {
+        reject(e);
+        return;
+      }
       const m = out.match(/FOCUSED:(\d)/);
       resolve({ resolved: target, focused: m ? m[1] === "1" : false });
     });

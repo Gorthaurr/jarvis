@@ -8,7 +8,7 @@ import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep,
 import { fillSlots } from "../../../memory/skill-slots.js";
 import { isQuarantined } from "../../../memory/skills.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
-import { type PostActionObservation, channelDownResult, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, ok } from "../dispatch-util.js";
+import { type PostActionObservation, channelDownResult, overlayDeniedResult, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, ok, applyVeil, stripVeilFields } from "../dispatch-util.js";
 
 /** Каталог выученных навыков для модели (id, имя, версия). */
 export async function skillList(ctx: ToolContext): Promise<ToolResult> {
@@ -56,13 +56,41 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   // а не эскалировала тир («Opus от транспорта»). Хендлер обходит generic-путь dispatch — делаем сами.
   const cd = channelDownResult(result, `Навык «${skillId}» не отправлен: канал с ПК недоступен (переподключение).`);
   if (cd) return cd;
+  // Контроль-3: шаг лёг об вуаль режима выделения — состояние системы, не сбой навыка (иначе §7-эскалация).
+  // Контроль-4: шаги ДО остановки уже исполнены (мутации!) — «повтори» без номера шага давало бы дубль
+  // напечатанного/отправленного; называем, где остановились, и что НЕ откатывается (как у input_batch).
+  const kv = typeof result.stepIndex === "number" ? result.stepIndex : 0;
+  const od = overlayDeniedResult(
+    result,
+    result.stepActionInjected === true
+      ? // Контроль-5 (S1): вуаль поймала РЕТРАЙ/сверку постусловия — действие шага уже инжектировано, исход неизвестен.
+        // Контроль-6 (V5-4): стадию не утверждаем — по бинарному признаку «до сверки» от «на ретрае» не отличить.
+        `Навык «${skillId}» остановлен вуалью на шаге ${kv + 1}: действие этого шага УЖЕ УШЛО в GUI, сверить его исход под ` +
+        `вуалью нельзя — ИСХОД НЕИЗВЕСТЕН, шаг НЕ повторяй вслепую. ${kv > 0 ? `Сделанные ${kv} шагов УЖЕ ВЫПОЛНЕНЫ и не откатываются. ` : ""}` +
+        `Дождись закрытия оверлея (screen_selection{op:"start", waitMs} или спроси владельца), СВЕРЬ состояние и продолжай по факту.`
+      : kv > 0
+      ? `Навык «${skillId}» остановлен на шаге ${kv + 1}: поверх экрана вуаль режима выделения — физический ввод не ` +
+          `инжектируется, пока открыт оверлей. Сделанные ${kv} шагов УЖЕ ВЫПОЛНЕНЫ и НЕ откатываются — не повторяй их; ` +
+          `дождись закрытия оверлея (screen_selection{op:"start", waitMs} или спроси владельца), сверь состояние и ` +
+          `продолжай с шага ${kv + 1}.`
+      : `Навык «${skillId}» НЕ выполнен: поверх экрана вуаль режима выделения — физический ввод не инжектируется, ` +
+          `пока открыт оверлей (владелец обводит область или оверлей ждёт его). Это состояние системы, не сбой навыка и ` +
+          `не «экран изменился»: дождись закрытия оверлея (screen_selection{op:"start", waitMs} или спроси владельца) ` +
+          `и повтори; шаги вслепую не дублируй.`,
+  );
+  if (od) return od;
   // Таймаут КАНАЛА ≠ «не выполнено»: клиент мог продолжать исполнять шаги — статус неизвестен.
   if (!result.ok && result.error?.code === "timeout") {
-    return err(
+    // Контроль-9 (skill-timeout-no-uncertain): текст говорил «СТАТУС НЕИЗВЕСТЕН», а на результате не было НИ ОДНОГО
+    // структурного признака — журнал прерванной задачи печатал такому вызову «ОШИБКА» в НЕСОКРАЩАЕМОЙ секции
+    // «СДЕЛАНО», то есть «не сделано», и «доделай» повторяло шаги, которые могли уже уйти в GUI.
+    const outT = err(
       `Навык «${skillId}» не уложился в ${Math.round(SKILL_EXECUTE_SERVER_TIMEOUT_MS / 1000)}с — СТАТУС НЕИЗВЕСТЕН ` +
         `(шаги могли выполниться и ещё выполняться). НЕ повторяй навык и не дублируй его шаги вслепую: ` +
         `сверь текущее состояние (ui_snapshot/screen_capture) и действуй по факту.`,
     );
+    outT.uncertain = true; // контроль-10: `partialSteps` здесь был МЁРТВ — синтетический таймаут канала stepIndex не несёт
+    return outT;
   }
   if (result.ok) {
     // §Волна2 (2.1, ревью M11): fused-наблюдение после реплея — текст С ЭКРАНА, в tool_result
@@ -71,17 +99,59 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
     const obs = data?.observation;
     if (obs?.text) {
       const { observation: _o, ...rest } = data!;
-      const restJson = Object.keys(rest).length > 0 ? ` ${JSON.stringify(rest)}` : "";
+      const restClean = stripVeilFields(rest as Record<string, unknown>); // контроль-6 (V5-5)
+      const restJson = Object.keys(restClean).length > 0 ? ` ${JSON.stringify(restClean)}` : "";
       // M11: заголовок окна — влияемые данные → внутрь untrusted-блока (внутри общего хелпера).
       // Ревью 2026-09-01: своя копия текста подписывала ДЕЛЬТУ как «состояние», а «изменений нет» —
       // как «текста не распознано»; модель делала вывод «сенсор ослеп» и шла за скриншотом.
       const out = ok(`Навык «${skillId}» выполнен.${restJson}\n${formatObservationBlock(obs, "Наблюдение после реплея")}`);
       if (obs.weak !== true) out.observed = true;
+      applyVeil(out, result.data); // контроль-4: наблюдение с окна оверлея — не сверка
       return out;
     }
     return ok(result.data !== undefined ? JSON.stringify(result.data) : `Навык «${skillId}» выполнен.`);
   }
-  return err(`Навык «${skillId}» не выполнен: ${result.error?.code ?? "runtime"} ${result.error?.message ?? ""}`);
+  // Контроль-6 (V5-3): обычный провал на шаге k+1 — как у берста: k сделанных шагов НЕ откатываются, а действие
+  // шага k+1 могло уйти (Enter с ретраями) — «не выполнен» без этого вело к повтору skill_execute целиком.
+  return stepFailure(`Навык «${skillId}»`, steps.length, steps, result);
+}
+
+/** Срезать клиентский префикс/хвост с номером шага — в одной фразе номер шага называется ОДИН раз (контроль-5 S2, -6 V5-6). */
+export function stripStepPrefix(msg: string): string {
+  return msg
+    .replace(/^шаг \d+ \([^)]*\)\s*:?\s*/u, "") // контроль-7 (sensors-7): и «шаг N (a) требует LLM…», не только «: …»/«не подтвердил»
+    .replace(/\s*\(шаг \d+(?:,\s*([^)]*))?\)\s*$/u, (_m, tail: string | undefined) => (tail ? ` (${tail})` : "")) // суть скобки остаётся
+    .trim();
+}
+
+/**
+ * Единый честный текст провала реплея/берста на шаге k+1 (контроль-6, DRY для skill_execute и input_batch):
+ * k сделанных НЕ откатываются; ушедшее действие шага k+1 = ИСХОД НЕИЗВЕСТЕН (ToolResult.uncertain — журнал не
+ * прочтёт «ОШИБКА» как «не сделано» и не повторит).
+ */
+function stepFailure(
+  what: string,
+  n: number,
+  steps: ReadonlyArray<{ action: string }>,
+  result: { stepIndex?: number; stepActionInjected?: boolean; error?: { code?: string; message?: string } },
+): ToolResult {
+  const k = typeof result.stepIndex === "number" ? result.stepIndex : 0;
+  const injected = result.stepActionInjected === true;
+  const reason = stripStepPrefix(result.error?.message ?? result.error?.code ?? "ошибка");
+  const done = k > 0 ? ` Сделанные ${k} шагов НЕ откатываются.` : "";
+  const went = injected ? ` Действие шага ${k + 1} УХОДИЛО в GUI (до всех попыток) — его ИСХОД НЕ ПОДТВЕРЖДЁН, не повторяй вслепую.` : "";
+  const out = err(
+    `${what} остановлен: выполнено ${k} из ${n}, шаг ${k + 1} («${steps[k]?.action ?? "?"}») не прошёл — ${reason}.${done}${went} ` +
+      `Сверь текущее состояние (ui_snapshot/screen_capture) и продолжай с места остановки, не повторяя сделанное.`,
+  );
+  // Контроль-8 (step-failure-journal): k исполненных шагов обязан знать и ЖУРНАЛ, а не только текст для модели —
+  // иначе прерванная задача печатает «input_batch — ОШИБКА», и «доделай» повторяет набор и клики.
+  if (k > 0) out.partialSteps = k;
+  if (injected) {
+    out.partialInjected = true;
+    out.uncertain = true;
+  }
+  return out;
 }
 
 // §Волна2 (2.2): действия, разрешённые в ad-hoc берсте. Только то, что skill-runner исполняет
@@ -171,12 +241,30 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
   // Б4 (ревью #4): канал ПК мёртв → channelDown (петля ждёт reconnect, не эскалирует тир).
   const cdb = channelDownResult(result, "Берст не отправлен: канал с ПК недоступен (переподключение).");
   if (cdb) return cdb;
+  // Контроль-3: шаг лёг об вуаль режима выделения — состояние системы, не провал шага (иначе §7-эскалация).
+  const k0 = typeof result.stepIndex === "number" ? result.stepIndex : 0;
+  const odb = overlayDeniedResult(
+    result,
+    result.stepActionInjected === true
+      ? `Берст остановлен вуалью на шаге ${k0 + 1} из ${n}: действие этого шага УЖЕ УШЛО в GUI, сверить его исход под вуалью ` +
+        `нельзя — ИСХОД НЕИЗВЕСТЕН, шаг НЕ повторяй вслепую.${k0 > 0 ? ` Сделанные ${k0} шагов не откатываются.` : ""} Дождись закрытия ` +
+        `оверлея, СВЕРЬ состояние (ui_snapshot/screen_capture) и продолжай по факту.`
+      : `Берст остановлен на шаге ${k0 + 1} из ${n}: поверх экрана вуаль режима выделения — физический ввод не ` +
+      `инжектируется, пока открыт оверлей. Это состояние системы, не провал шага: сделанные ${k0} шагов НЕ ` +
+      `откатываются; дождись закрытия оверлея (screen_selection{op:"start", waitMs} или спроси владельца) и ` +
+      `продолжай с места остановки, не повторяя сделанное.`,
+  );
+  if (odb) return odb;
   // Таймаут КАНАЛА ≠ «выполнено 0 из n»: клиент мог продолжать исполнять шаги — статус неизвестен.
   if (!result.ok && result.error?.code === "timeout") {
-    return err(
+    // Контроль-9 (skill-timeout-no-uncertain): зеркало skill_execute — «статус неизвестен» обязан дойти до журнала
+    // отдельной меткой, иначе «ОШИБКА» читается продолжением как «не сделано».
+    const outT = err(
       `Берст не уложился в ${Math.round(timeoutMs / 1000)}с — СТАТУС НЕИЗВЕСТЕН (часть шагов могла выполниться ` +
         `и ещё выполняться). НЕ повторяй берст вслепую: сверь текущее состояние (ui_snapshot/screen_capture) и действуй по факту.`,
     );
+    outT.uncertain = true; // контроль-10: то же — таймаут КАНАЛА номера шага не знает
+    return outT;
   }
   if (result.ok) {
     // §Волна2 (2.1): клиент прикладывает наблюдение после последнего шага → сверка в том же раунде.
@@ -188,14 +276,10 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
     );
     // Слабое наблюдение (пустой OCR) verify-долг не снимает (ревью Волны 2).
     if (obs && obs.weak !== true) out.observed = true;
+    applyVeil(out, result.data); // контроль-4: наблюдение с окна оверлея — не сверка
     return out;
   }
-  const k = typeof result.stepIndex === "number" ? result.stepIndex : 0;
-  return err(
-    `Берст остановлен: выполнено ${k} из ${n}, шаг ${k + 1} («${steps[k]?.action ?? "?"}») не прошёл — ` +
-      `${result.error?.message ?? result.error?.code ?? "ошибка"}. Сделанные ${k} шагов НЕ откатываются: ` +
-      `сверь текущее состояние (ui_snapshot/screen_capture) и продолжай с места остановки, не повторяя сделанное.`,
-  );
+  return stepFailure("Берст", n, steps, result);
 }
 
 /**

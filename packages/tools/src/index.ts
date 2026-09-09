@@ -156,6 +156,7 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "job.status": "job_status", // фоновое задание code_run{background:true}: статус/хвост вывода/остановка
   "skill.execute": "skill_execute",
   "screen.capture": "screen_capture",
+  "screen.selection": "screen_selection", // §режим выделения: область, на которую показывает владелец
   "context.read": "context_read",
   "demo.record": "demo_record",
   "message.send": "message_send",
@@ -662,7 +663,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
       "Выполнить код для РЕАЛЬНОГО управления Windows (ActionCommand code.run): python | node | powershell (FullLanguage — Add-Type/COM/.NET доступны). Тебе ОТКРЫТЫ реестр, службы, сеть, COM, запуск процессов, системные пути — разбирайся и делай САМ (это твой основной инструмент «рук», не запасной). Подтверждение нужно ТОЛЬКО на необратимое: удаление файлов / форматирование диска. ЗАПРЕЩЕНО (рельсы §4): выключать/перезагружать ПК отсюда (только через system_power) и завершать процессы самого Джарвиса (electron/node/sidecar). Карты/платёжные данные — нельзя (§0). ВРЕМЯ: окно по умолчанию ~30 с; для тестов/сборок задай timeoutMs (до 180000 — но это съедает потолок задачи); всё дольше (прогон всех тестов, деплой, транскрипция, рендер) — background:true: ответ придёт СРАЗУ с jobId, а исход — job_status{jobId} (running/exitCode/хвост вывода) или wait_for{kind:\"file\"} по файлу результата; «запустил» ≠ «сделал». КАТАЛОГ: cwd — обязателен для git/npm/pnpm/vitest/docker в репозитории (без него команда идёт во временной папке и падает «not a git repository»). " +
       "🚀 jarvis SDK (ТОЛЬКО lang=python) — ГЛАВНЫЙ путь для многошаговых задач на ПК. Для процедуры из ≥2 действий/окон пиши ОДИН скрипт с `import jarvis` — он драйвит ТЕ ЖЕ актуаторы за ОДИН раунд, без похода в LLM между шагами (убирает медленный цикл «скриншот→клик→снова скриншот»). ТАЙМАУТЫ В СЕКУНДАХ. API: " +
       "jarvis.launch(app) | jarvis.focus(query) | jarvis.close(app) | jarvis.key('r'|'ctrl+s'|'enter', mode=None, scancode=False) [игры→scancode=True; mode='down'/'up' — удержание] | jarvis.write(text) [печать в фокус] | jarvis.click(x,y,button=None,count=None) [x,y — АБСОЛЮТНЫЕ экранные DIP, ровно как их отдают ocr()/find(); НЕ подставляй сюда координаты из screen_capture-картинки] | jarvis.find('текст') → Element [сначала UIA-снапшот→надёжный invoke без курсора, потом OCR; el.click()/el.write(text); проверяй `if el:`] | jarvis.wait_window(title, timeout=5) | jarvis.wait_text(text, timeout=5) | jarvis.wait_for(condition_dict, timeout=5) | jarvis.sleep(sec) | jarvis.snapshot()/ocr()/read_context()/windows(). " +
-      "Любой вызов кидает jarvis.JarvisError при провале → скрипт падает → ты видишь ЧЕСТНУЮ ошибку (не ложный успех), НЕ обёртывай в try без нужды. print(...) итог — вернётся в stdout. " +
+      "Любой вызов кидает jarvis.JarvisError при провале → скрипт падает → ты видишь ЧЕСТНУЮ ошибку (не ложный успех), НЕ обёртывай в try без нужды. Отказ вуали режима выделения (владелец обводит область) завершает скрипт SystemExit(77) — НЕ пиши голый except:/except BaseException (перехваченный отказ = «выполнено» про невыполненное; я это замечу и помечу исход неизвестным). print(...) итог — вернётся в stdout. " +
       "ПРИМЕР («открой блокнот и напиши тест»): `import jarvis\\njarvis.launch('notepad')\\njarvis.wait_window('Блокнот', timeout=5)\\njarvis.write('тест')\\nprint('готово')`. ПРЕДПОЧИТАЙ jarvis-скрипт отдельным tool-раундам для любой процедуры из нескольких шагов.",
     input_schema: obj(
       {
@@ -703,6 +704,19 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         scale: { type: "number", minimum: 0.25, maximum: 2, description: "Доп. масштаб кропа (>1 — «лупа» для мелкого текста). Только с rect." },
       },
       [],
+    ),
+  },
+  {
+    name: "screen_selection",
+    description:
+      "ОБЛАСТЬ, НА КОТОРУЮ ВЛАДЕЛЕЦ ПОКАЗЫВАЕТ (режим выделения, ActionCommand screen.selection). Владелец обводит кусок экрана рамкой — горячей клавишей или голосом («выдели область») — и дальше говорит о нём дейксисом: «вот смотри, ТУТ недочёт», «что ЗДЕСЬ не так», «переведи ЭТО». В контексте хода видно, есть ли активное выделение и когда его сделали. op:'view' — ПОСМОТРЕТЬ на выделенное: снимает СВЕЖИЙ кадр области (не картинку момента выделения) и возвращает изображение + ageMs (сколько прошло с выделения) + changedSinceSelection (содержимое области с тех пор изменилось — не выдавай старое за новое; проба идёт только для кадра БЕЗ scale, иначе результат честно скажет, что не проводилась). op:'start' — попросить владельца обвести область (когда «вот тут» сказано, а выделения нет: честнее попросить показать, чем гадать); waitMs>0 — дождаться и вернуть исход. op:'clear' — снять рамку («убери выделение»). Выделения нет → ЧЕСТНАЯ ошибка, а не случайный кусок экрана. Область — не весь экран: если для ответа нужен контекст вокруг, добери screen_capture.",
+    input_schema: obj(
+      {
+        op: { type: "string", enum: ["view", "start", "clear"], description: "view — снять свежий кадр выделенной области; start — дать владельцу обвести; clear — снять выделение." },
+        waitMs: { type: "number", minimum: 0, maximum: 120000, description: "Только для start: сколько ждать, пока владелец обведёт (0/без него — вернуться сразу)." },
+        scale: { type: "number", minimum: 0.25, maximum: 2, description: "Только для view: масштаб кадра (>1 — «лупа» для мелкого текста)." },
+      },
+      ["op"],
     ),
   },
   {

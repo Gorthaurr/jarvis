@@ -53,6 +53,22 @@ export interface AgentMetricEvent {
    *  • `task` — ход шёл, но результата не дал (это и есть настоящая слабость).
    */
   failKind?: "llm_unavailable" | "task";
+  /**
+   * ФАКТИЧЕСКИ начисленные деньги за задачу. Задан — берём его; не задан — считаем по прайсу модели.
+   * 🔴 Зачем (адверс-разбор 2026-09-02, MED): ход по ПОДПИСКЕ не тарифицируется по токенам (она
+   * оплачена помесячно), и петля это знает — `turnCostUsd = channel==="subscription" ? 0 : …`. Но в
+   * метрику передавался только `usage`, и агрегатор пересчитывал цену по прайсу API: за 2026-09-02
+   * набежало $2.53 фантомных трат при 15 реальных обращениях к API против 100 ходов по подписке.
+   * По этим же событиям строится `/cogs` — то есть экономика продукта считалась по выдуманным числам.
+   */
+  costUsd?: number;
+  /** Каким каналом шёл ход (для разреза «быстрота/цена по каналу»). */
+  channel?: "api" | "subscription";
+  /**
+   * Действовавший потолок времени задачи, мс. Он ЗАВИСИТ ОТ КАНАЛА (на резерве шире, раунд дороже),
+   * поэтому без него из телеметрии нельзя понять, «не успел» ход или «упёрся в узкий потолок».
+   */
+  capMs?: number;
 }
 
 /** Агрегаты по типам токенов. */
@@ -124,8 +140,9 @@ export function aggregate(events: readonly AgentMetricEvent[]): MetricsSnapshot 
     tokens.output += e.usage.outputTokens;
     tokens.cacheRead += e.usage.cacheReadTokens;
     tokens.cacheCreation += e.usage.cacheCreationTokens;
-    // Стоимость по ФАКТИЧЕСКОЙ модели хода (не Opus-blind, как раньше).
-    const c = costUsd(e.model, e.usage);
+    // Стоимость: фактически начисленная, если петля её сообщила (подписка = $0), иначе по прайсу
+    // ФАКТИЧЕСКОЙ модели хода (не Opus-blind, как раньше).
+    const c = typeof e.costUsd === "number" && Number.isFinite(e.costUsd) ? e.costUsd : costUsd(e.model, e.usage);
     totalCost += c;
     const bm = (byModel[e.model] ??= { costUsd: 0, requests: 0 });
     bm.costUsd += c;
@@ -333,8 +350,19 @@ export class MetricsCollector {
     usage: TokenUsage;
     toolNames: readonly string[];
     cacheThrashCause?: string;
+    /** Фактически начисленные деньги раунда (подписка = 0); не задан — считаем по прайсу модели. */
+    costUsd?: number;
+    /**
+     * Длительность раунда и КАНАЛ, которым он выполнен. 🔴 Без них «быстроту» измерить было нечем:
+     * per-round строки несли токены, но не время, а канал вычислялся по имени модели — то есть
+     * гадался. Владелец (2026-09-02) прямо просил возможность ПРОВЕРЯТЬ скорость на время работы от
+     * подписки: медиана раунда там 4.9 с против долей секунды на кешированном основном канале.
+     */
+    latencyMs?: number;
+    channel?: "api" | "subscription";
   }): void {
-    this.appendJsonl({ ts: new Date().toISOString(), type: "round", ...event, costUsd: costUsd(event.model, event.usage) });
+    const charged = typeof event.costUsd === "number" && Number.isFinite(event.costUsd) ? event.costUsd : costUsd(event.model, event.usage);
+    this.appendJsonl({ ts: new Date().toISOString(), type: "round", ...event, costUsd: charged });
   }
 
   /**
@@ -364,7 +392,8 @@ export class MetricsCollector {
     this.events.push(event);
     if (this.events.length > this.cap) this.events.shift();
     // Durable-хвост: одна JSONL-строка на задачу (fail-safe — сбой ФС не ломает горячий путь агента).
-    this.appendJsonl({ ts: new Date().toISOString(), ...event, costUsd: costUsd(event.model, event.usage) });
+    const chargedUsd = typeof event.costUsd === "number" && Number.isFinite(event.costUsd) ? event.costUsd : costUsd(event.model, event.usage);
+    this.appendJsonl({ ts: new Date().toISOString(), ...event, costUsd: chargedUsd });
   }
 
   /** Снимок агрегатов по текущему окну событий. */

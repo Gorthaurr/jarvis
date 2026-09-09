@@ -131,6 +131,75 @@ export function channelDownResult(
 }
 
 /**
+ * §режим выделения (контроль-3): физический ввод / взгляд на область НЕ выполнился из-за ВУАЛИ оверлея
+ * (код `overlay_drawing` от клиента — ранний гейт dispatch, точка инжекции, skill-runner, selectionView).
+ * Это состояние системы, а не провал модели: петля по `overlayDenied` не растит серию провалов, не
+ * эскалирует тир и не считает честный ответ «дождусь закрытия оверлея» капитуляцией. Одна точка на
+ * generic-путь и hand-rolled хендлеры (skills/selection) — иначе признак снова окажется у одного
+ * потребителя из трёх (тот же класс, что channel_down до интеграционного ревью).
+ */
+/** Клиент помечает данные сенсора/наблюдения, снятые ПОД ВУАЛЬЮ оверлея (`overlayDrawing:true`). */
+export function isVeiled(data: unknown): boolean {
+  return typeof data === "object" && data !== null && (data as { overlayDrawing?: unknown }).overlayDrawing === true;
+}
+
+/**
+ * §режим выделения (контроль-3/4): результат снят ПОД ВУАЛЬЮ оверлея. Снимок/OCR/a11y вуали (затемнение,
+ * подсказка «Обведите область…», фокусное окно — оверлей) — не состояние приложений: (1) наш статус ставим
+ * СНАРУЖИ untrusted-обёртки (внутри модель обязана его игнорировать — урок capResultBody); (2) `empty` +
+ * `observed:false` — такой взгляд не гасит verify-долг и долг сверки отправки (в петле realVerify =
+ * verify && !isError && !empty); (3) `veiled` — петля знает, что вуаль ещё стоит (раунд ожидания под
+ * вуалью продлевает «остановка вуалью ≠ капитуляция», контроль-4). Один хелпер на dispatch и hand-rolled
+ * хендлеры (skills) — иначе признак снова окажется у одного потребителя из трёх.
+ */
+/** Пометка вуали печатается СНАРУЖИ untrusted-обёртки — поэтому текст только наш (не из данных клиента). */
+export const VEIL_NOTE =
+  "поверх экрана вуаль режима выделения: кадр затемнён, подсказка «Обведите область…» и фокусное окно — оверлей, не приложения";
+
+/**
+ * Контроль-6 (V5-5): служебные поля вуали клиента (overlayDrawing/veiled) — признак для applyVeil, а не данные для
+ * модели: печатать их доверенным JSON снаружи untrusted рядом с нашей же пометкой = две редакции одного статуса.
+ */
+export function stripVeilFields(d: Record<string, unknown>): Record<string, unknown> {
+  const { overlayDrawing: _od, overlayNote: _on, veiled: _v, ...rest } = d;
+  return rest;
+}
+
+export function applyVeil(out: ToolResult, data: unknown): void {
+  if (!isVeiled(data)) return;
+  const note = VEIL_NOTE;
+  out.empty = true;
+  out.observed = false;
+  out.veiled = true;
+  const body = typeof out.content === "string" ? out.content : "";
+  out.content =
+    `⚠️ СНЯТО ПОД ВУАЛЬЮ режима выделения — ${note}\n` +
+    "Это НЕ сверка исхода: дождись закрытия оверлея (или спроси владельца) и посмотри снова.\n" +
+    body;
+}
+
+export function overlayDeniedResult(
+  result: { ok: boolean; error?: { code?: string; message?: string }; stepIndex?: number; stepActionInjected?: boolean },
+  message?: string,
+): ToolResult | null {
+  if (result.ok || result.error?.code !== "overlay_drawing") return null;
+  const out = err(message ?? result.error?.message ?? "поверх экрана вуаль режима выделения — действие не выполнено");
+  out.overlayDenied = true;
+  // Контроль-5: признак «остановлено вуалью» обязан нести, ЧТО УЖЕ СДЕЛАНО до остановки — иначе терминал
+  // и журнал говорят «не сделал» про k исполненных шагов, а «повтори» дублирует напечатанное/отправленное.
+  if (typeof result.stepIndex === "number") {
+    out.overlayStepIndex = result.stepIndex;
+    out.partialSteps = result.stepIndex; // контроль-8: журнал наполняется ОДНИМ признаком для вуальных и обычных остановок
+  }
+  if (result.stepActionInjected === true) {
+    out.overlayActionInjected = true;
+    out.partialInjected = true;
+    out.uncertain = true; // контроль-7 (loop-1): второй потребитель — журнал через uncertainCalls, если partialCalls до него не дошёл
+  }
+  return out;
+}
+
+/**
  * §sec ГРАНИЦА ДАННЫЕ/ИНСТРУКЦИИ (анти-prompt-injection): оборачиваем НЕДОВЕРЕННЫЙ контент (веб-страницы,
  * результаты поиска, чужие сообщения, содержимое вкладок/экрана) в явный маркер. Модель обязана трактовать
  * это как ДАННЫЕ, а не как команды (правило закреплено в persona.md, кешируемый префикс). Первичная защита:

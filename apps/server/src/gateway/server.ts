@@ -74,7 +74,7 @@ import { CachingWebProvider, WebProvider } from "../integrations/web.js";
 import { AutoPredictor, MarketDataProvider, TradeExpert, TradingService, autoPredictorConfigFromEnv, loadPredictionStore, makeTinkoffProvider } from "../brain/trading/index.js";
 import { KnowledgeBase } from "../brain/knowledge/index.js";
 import { createEpisodicMemory } from "../memory/episodic.js";
-import { SHARED_USER_ID, type SkillDistiller, createSkillProvider, seedSharedSkills } from "../memory/skills.js";
+import { SHARED_USER_ID, type SkillDistiller, createSkillProvider, seedSharedSkills, warnOnDeadRefusalLessons } from "../memory/skills.js";
 import { SHARED_SKILL_SEED } from "../seed/shared-skills.js";
 import { ensureUser } from "../db/users.js";
 import { forgetClientContext } from "../proactive/salience.js";
@@ -660,6 +660,8 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       void ensureUser(SHARED_USER_ID)
         .then(() => seedSharedSkills(SHARED_SKILL_SEED))
         .catch((e) => log.warn("общая библиотека навыков: сид пропущен", e instanceof Error ? e.message : String(e)));
+      // Разовый скан памяти на устаревшие уроки (учат отказу, которого не бывает) — только WARN.
+      void warnOnDeadRefusalLessons();
       const bindHost = resolveBindHost(config, log);
       await app.listen({ port: config.port, host: bindHost });
       log.info("gateway слушает", { host: bindHost, port: config.port });

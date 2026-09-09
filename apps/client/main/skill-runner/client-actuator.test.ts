@@ -9,13 +9,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillStep } from "@jarvis/protocol";
 
 const typeText = vi.fn(async (_t?: unknown) => undefined);
-const pressKey = vi.fn(async (_c?: unknown) => undefined);
+const pressKey = vi.fn(async (_c?: unknown, _m?: unknown, _s?: unknown) => undefined);
 const click = vi.fn(async (_target?: unknown, _method?: unknown) => ({ clicked: true }));
 const launchApp = vi.fn(async (_app?: unknown) => ({ launched: true }));
 
 vi.mock("../actuators/input.js", () => ({
   typeText: (t: unknown) => typeText(t),
-  pressKey: (c: unknown) => pressKey(c),
+  pressKey: (c: unknown, m?: unknown, s?: unknown) => pressKey(c, m, s),
   click: (target: unknown, method: unknown) => click(target, method),
 }));
 vi.mock("../actuators/apps.js", () => ({
@@ -92,5 +92,19 @@ describe("createClientActuator — USER_BUSY-гейт физ.ввода (§H5)",
     const act = createClientActuator();
     await act.executeStep(step("input.type", { params: { text: "п".repeat(120) } }));
     expect(typeText).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Контроль-7 (runner-4): mode/scancode шага доезжают до pressKey — иначе «up» исполнялся как press (лишний тап при
+// игровом удержании), а исключение stepGatedUnderVeil для up было мёртвым.
+describe("client-actuator × input.key mode/scancode", () => {
+  it("runner-4: {combo:'W', mode:'up'} → pressKey('W','up',false); без mode → undefined; scancode:true доезжает", async () => {
+    const act = createClientActuator();
+    await act.executeStep(step("input.key", { params: { combo: "W", mode: "up" } }));
+    expect(pressKey).toHaveBeenLastCalledWith("W", "up", false);
+    await act.executeStep(step("input.key", { params: { combo: "Enter" } }));
+    expect(pressKey).toHaveBeenLastCalledWith("Enter", undefined, false);
+    await act.executeStep(step("input.key", { params: { combo: "W", mode: "down", scancode: true } }));
+    expect(pressKey).toHaveBeenLastCalledWith("W", "down", true);
   });
 });

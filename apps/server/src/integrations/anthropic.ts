@@ -461,6 +461,20 @@ export function lastApiFailure(): ApiFailure | undefined {
   return undefined;
 }
 
+/**
+ * Тест-хук: записать причину отказа API так же, как это делает реальный вызов (зеркало
+ * subscription-llm). `atMs` — подменить отметку времени: нужно, чтобы проверять СВЕЖЕСТЬ причины
+ * (протухшая причина прошлого сбоя не имеет права выключать живой канал — см. fallback-llm).
+ */
+export function _setApiFailureForTest(text: string, status?: number, atMs?: number): void {
+  lastApiFailure_ = { ...classifyApiError(text, status), ...(atMs === undefined ? {} : { at: atMs }) };
+}
+
+/** Тест-хук: забыть причину (изоляция тестов — иначе класс отказа течёт между кейсами). */
+export function _resetApiFailureForTest(): void {
+  lastApiFailure_ = undefined;
+}
+
 function rememberApiFailure(e: unknown): void {
   const status = (e as { status?: number })?.status;
   const text = e instanceof Error ? e.message : String(e);

@@ -542,3 +542,134 @@ describe("журнал: действие, остановленное §14-гей
     expect(buildResumeDigest(done)).toMatch(/fs_delete\([^)]*\) — ok/);
   });
 });
+
+describe("контроль-4: провальная врезка авто-макроса — не «СДЕЛАНО»", () => {
+  it("реплей, легший об вуаль / упавший на первом шаге, в несокращаемую секцию не попадает; отработавший и частично выполненный — попадают", () => {
+    const convoFor = (note: string): LlmMessage[] => [
+      { role: "user", content: [{ type: "text", text: "напиши привет вот тут" }, { type: "text", text: `${MACRO_NOTE_MARKER} ${note}` }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "a", name: "web_fetch", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: "страница" }] },
+    ];
+    const failed = buildResumeDigest(convoFor("навыка «Привет» НЕ выполнился: поверх экрана вуаль режима выделения — дождись закрытия оверлея."));
+    expect(failed).not.toMatch(/СДЕЛАНО[\s\S]*вуаль режима выделения/u); // ничего не сделано — под «действия, менявшие мир» ей не место
+    const done = buildResumeDigest(convoFor("навыка «Привет» v1 уже ОТРАБОТАЛ за 1.2с (input.type → input.key). НЕ повторяй эти шаги."));
+    expect(done).toMatch(/СДЕЛАНО[\s\S]*ОТРАБОТАЛ/u);
+    const partial = buildResumeDigest(convoFor("навыка «Привет» остановился: вуаль. Шаги 1..2 УЖЕ ВЫПОЛНЕНЫ — не повторяй их, продолжай с шага 3."));
+    expect(partial).toMatch(/СДЕЛАНО[\s\S]*УЖЕ ВЫПОЛНЕНЫ/u);
+    // Контроль-5 (V4-3): реальная врезка длиннее 200 симв., хвост «Шаги 1..k УЖЕ ВЫПОЛНЕНЫ» стоит в КОНЦЕ — раньше
+    // squeeze(…,200) его отрезал, и в несокращаемой секции оставалось «НЕ выполнился» → «доделай» повторяло k шагов.
+    const long = buildResumeDigest(
+      convoFor(
+        "навыка «выбрать/пикнуть героя в Dota 2» НЕ выполнился: поверх экрана вуаль режима выделения (физический ввод не " +
+          "инжектируется, пока открыт оверлей) — это состояние системы, не сбой навыка и не «экран изменился». Дождись закрытия " +
+          "оверлея (или спроси владельца) и тогда действуй по процедуре; шаги вслепую не повторяй. Шаги 1..3 УЖЕ ВЫПОЛНЕНЫ — не " +
+          "повторяй их, продолжай с шага 4. Действие шага 4 УЖЕ УШЛО в GUI (вуаль поймала сверку постусловия) — ИСХОД НЕИЗВЕСТЕН: сверь, не повторяй вслепую.",
+      ),
+    );
+    const doneLine = long.split("\n").find((l) => l.startsWith("- ") && l.includes("Авто-макрос")) ?? "";
+    expect(doneLine).toMatch(/Шаги 1\.\.3 УЖЕ ВЫПОЛНЕНЫ/u);
+    expect(doneLine).toMatch(/УЖЕ УШЛО[^.]*ИСХОД НЕИЗВЕСТЕН/u);
+  });
+});
+
+// Контроль-6 (C5R-4): реплей/берст, остановленный вуалью ПОСЛЕ k шагов и/или с ушедшим действием шага k+1, — формально
+// ошибка, по смыслу ЧАСТИЧНО сделано. «ОШИБКА» в «СДЕЛАНО» читалась бы продолжением как «не сделано» → повтор Enter.
+describe("журнал: частично исполненный реплей/берст — «ЧАСТИЧНО», а не «ОШИБКА»", () => {
+  const convo: LlmMessage[] = [
+    { role: "assistant", content: [{ type: "tool_use", id: "p1", name: "skill_execute", input: { skillId: "sk1" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "p1", is_error: true, content: "Навык остановлен вуалью на шаге 3: действие УЖЕ УШЛО" }] },
+  ];
+
+  it("k=2, injected → «шаги 1..2 УЖЕ ВЫПОЛНЕНЫ … действие шага 3 УШЛО … СВЕРЬ»", () => {
+    const d = buildResumeDigest(convo, { partialCalls: new Map([["p1", { k: 2, injected: true }]]) });
+    expect(d).toMatch(/skill_execute\([^)]*\) — ЧАСТИЧНО — шаги 1\.\.2 УЖЕ ВЫПОЛНЕНЫ \(не откатываются\); действие шага 3 УШЛО, исход неизвестен — СВЕРЬ перед повтором/u);
+    expect(d).not.toMatch(/skill_execute\([^)]*\) — ОШИБКА/u);
+  });
+
+  it("k=1 без injected → «дальше — нет»; k=0 injected → «ни один шаг не завершён; действие шага 1 УШЛО»", () => {
+    expect(buildResumeDigest(convo, { partialCalls: new Map([["p1", { k: 1, injected: false }]]) })).toMatch(/шаги 1\.\.1 УЖЕ ВЫПОЛНЕНЫ \(не откатываются\); дальше — нет/u);
+    expect(buildResumeDigest(convo, { partialCalls: new Map([["p1", { k: 0, injected: true }]]) })).toMatch(/ЧАСТИЧНО — ни один шаг не завершён; действие шага 1 УШЛО/u);
+  });
+
+  it("метка переживает УСЕЧЕНИЕ журнала; без partialCalls (регресс-контроль) — прежняя «ОШИБКА»", () => {
+    const long = "щ".repeat(4000);
+    const noisy: LlmMessage[] = [...convo];
+    for (let i = 0; i < 6; i += 1) {
+      noisy.push({ role: "assistant", content: [{ type: "tool_use", id: `w${i}`, name: "web_fetch", input: {} }] });
+      noisy.push({ role: "user", content: [{ type: "tool_result", tool_use_id: `w${i}`, content: [{ type: "text", text: long }] }] });
+    }
+    const d = buildResumeDigest(noisy, { maxChars: 1200, partialCalls: new Map([["p1", { k: 2, injected: true }]]) });
+    expect(d).toContain("начало журнала опущено");
+    expect(d).toMatch(/ЧАСТИЧНО — шаги 1\.\.2/u);
+    expect(buildResumeDigest(convo)).toMatch(/skill_execute\([^)]*\) — ОШИБКА/u);
+  });
+});
+
+// Контроль-8 (partial-marks-collapsed): секция «СДЕЛАНО» схлопывала массовую механику ПО ИМЕНИ инструмента — вместе с
+// метками честности. Отклонённый §14-гейтом коммит и остановленный вуалью берст исчезали под «ui_invoke ×N
+// (механика интерфейса)» под заголовком «действия, менявшие мир», и продолжение читало счётчик как «совершено».
+describe("журнал: счётчик механики не съедает метки честности", () => {
+  function bulkConvo(n: number): LlmMessage[] {
+    const out: LlmMessage[] = [];
+    for (let i = 0; i < n; i += 1) {
+      out.push({ role: "assistant", content: [{ type: "tool_use", id: `c${i}`, name: "input_click", input: { x: i } }] });
+      out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: `c${i}`, content: "ok" }] });
+    }
+    out.push({ role: "assistant", content: [{ type: "tool_use", id: "d1", name: "ui_invoke", input: { handle: "7" } }] });
+    out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: "d1", content: "не стал: подтверждение не получено" }] });
+    out.push({ role: "assistant", content: [{ type: "tool_use", id: "p1", name: "input_batch", input: { steps: 4 } }] });
+    out.push({ role: "user", content: [{ type: "tool_result", tool_use_id: "p1", is_error: true, content: "остановлен вуалью" }] });
+    return out;
+  }
+
+  it("70 массовых кликов схлопнуты в счётчик, но «НЕ ВЫПОЛНЕНО» и «ЧАСТИЧНО» остаются построчно", () => {
+    const d = buildResumeDigest(bulkConvo(70), {
+      declinedCalls: new Set(["d1"]),
+      partialCalls: new Map([["p1", { k: 3, injected: true }]]),
+    });
+    // ⚠️ Утверждаем про НЕСОКРАЩАЕМУЮ секцию, а не про весь журнал: те же метки есть и в подробной части, которая
+    // режется усечением — первая версия теста из-за этого проходила и со схлопнутыми метками (мутация «декоративна»).
+    const done = d.split("⟪подробности захода⟫")[0] ?? "";
+    expect(done).toMatch(/input_click ×\d+/u); // счётчик механики работает как прежде
+    expect(done).toContain("НЕ ВЫПОЛНЕНО"); // до фикса: строка исчезала под «ui_invoke ×N»
+    expect(done).toMatch(/ЧАСТИЧНО — шаги 1\.\.3 УЖЕ ВЫПОЛНЕНЫ/u);
+    expect(done).toMatch(/действие шага 4 УШЛО/u);
+  });
+});
+
+// Контроль-9: несокращаемая секция «СДЕЛАНО» — allowlist вместо денилиста, и не только mutate-вызовы.
+describe("журнал: секция «СДЕЛАНО» держит ВСЕ метки, кроме «ok»", () => {
+  it("done-section-collapses-error-marks: «ОШИБКА» и «без результата» не схлопываются в счётчик механики", () => {
+    const convo: LlmMessage[] = [];
+    for (let i = 0; i < 70; i += 1) {
+      convo.push({ role: "assistant", content: [{ type: "tool_use", id: `c${i}`, name: "input_click", input: { x: i } }] });
+      convo.push({ role: "user", content: [{ type: "tool_result", tool_use_id: `c${i}`, content: "ok" }] });
+    }
+    convo.push({ role: "assistant", content: [{ type: "tool_use", id: "e1", name: "input_batch", input: { steps: 3 } }] });
+    convo.push({ role: "user", content: [{ type: "tool_result", tool_use_id: "e1", is_error: true, content: "берст не прошёл ни шага" }] });
+    convo.push({ role: "assistant", content: [{ type: "tool_use", id: "x1", name: "input_click", input: { x: 999 } }] }); // ответа нет: раунд оборвался
+    const done = buildResumeDigest(convo, {}).split("⟪подробности захода⟫")[0] ?? "";
+    expect(done).toMatch(/input_click ×\d+/u); // счётчик механики на месте
+    expect(done).toMatch(/input_batch\([^)]*\) — ОШИБКА/u); // до фикса: обе строки уходили в счётчик…
+    expect(done).toMatch(/без результата \(оборвалось\)/u); // …и «доделай» считало их совершёнными
+  });
+
+  it("partial-neutral-not-in-done-section: ЧАСТИЧНОЕ исполнение нейтрального job_status попадает в «СДЕЛАНО»", () => {
+    // ⚠️ Порядок ВАЖЕН: job_status идёт ПЕРВЫМ, дальше — гора чтений. Подробная часть режется С НАЧАЛА,
+    // значит эта строка в ней ГАРАНТИРОВАННО не выживает — тест проверяет именно несокращаемую секцию.
+    // (Первая версия ставила job_status последним и была ДЕКОРАТИВНОЙ: строка выживала в хвосте подробностей.)
+    const convo: LlmMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "j1", is_error: true, content: "задание остановлено вуалью" }] },
+    ];
+    for (let i = 0; i < 40; i += 1) {
+      convo.push({ role: "assistant", content: [{ type: "tool_use", id: `w${i}`, name: "web_fetch", input: { url: `https://x/${i}` } }] });
+      convo.push({ role: "user", content: [{ type: "tool_result", tool_use_id: `w${i}`, content: "текст страницы ".repeat(60) }] });
+    }
+    const digest = buildResumeDigest(convo, { partialCalls: new Map([["j1", { k: 2, injected: true }]]), maxChars: 1200 });
+    expect(digest).toContain("⟪подробности захода⟫"); // секция «СДЕЛАНО» вообще собралась
+    const done = digest.split("⟪подробности захода⟫")[0] ?? "";
+    expect(done).toMatch(/job_status/u); // до фикса: строка жила только в подробной части, которую режет усечение
+    expect(done).toMatch(/шаги 1\.\.2 УЖЕ ВЫПОЛНЕНЫ/u);
+  });
+});

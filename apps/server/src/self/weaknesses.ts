@@ -34,6 +34,13 @@ export interface WeaknessReport {
    */
   tasks: { total: number; failed: number; llmUnavailable: number };
   weaknesses: Weakness[];
+  /**
+   * БЫСТРОТА ПО КАНАЛАМ (запрос владельца 2026-09-02: «нужно прям проверять быстроту»). Медиана и p90
+   * длительности ОДНОГО обращения к модели, отдельно по каналам: основной (API, с prompt-кешем §15) и
+   * резерв на подписке (кеша нет вовсе). Разница на порядок — именно она определяет, влезет ли
+   * многошаговая задача в потолок времени. Пусто — таких раундов в окне не было (не «быстро»).
+   */
+  speed?: { channel: "api" | "subscription"; rounds: number; medianMs: number; p90Ms: number }[];
   /** Телеметрию прочитать не удалось (нет каталога/пустые файлы) — «не знаю», не «всё хорошо». */
   unavailable?: string;
 }
@@ -209,8 +216,38 @@ export async function collectWeaknesses(logsDir: string, opts: { days?: number; 
     return { windowDays: dayFiles.length, tasks: { total: 0, failed: 0, llmUnavailable: 0 }, weaknesses: [], unavailable: "телеметрия пуста — судить о слабостях не по чему" };
   }
 
+  const speed = speedByChannel(metricEvents);
   const fromMetrics = weaknessesFromMetrics(metricEvents);
   const fromLogs = weaknessesFromLogs(logEntries);
   const weaknesses = [...fromMetrics.weaknesses, ...fromLogs].sort((a, b) => b.count - a.count).slice(0, limit);
-  return { windowDays: dayFiles.length, tasks: fromMetrics.tasks, weaknesses };
+  return { windowDays: dayFiles.length, tasks: fromMetrics.tasks, weaknesses, ...(speed.length ? { speed } : {}) };
+}
+
+/**
+ * Длительность обращения к модели по каналам — из per-round строк телеметрии.
+ * Считаем МЕДИАНУ и p90, а не среднее: одно 40-секундное «думание» на max-эффорте сдвинуло бы
+ * среднее так, что цифра перестала бы описывать типичный шаг. Строки без `latencyMs`/`channel`
+ * (записаны до 2026-09-02) молча пропускаем — врать по ним нечем. ЧИСТАЯ функция.
+ */
+export function speedByChannel(
+  events: readonly Record<string, unknown>[],
+): { channel: "api" | "subscription"; rounds: number; medianMs: number; p90Ms: number }[] {
+  const buckets = new Map<"api" | "subscription", number[]>();
+  for (const e of events) {
+    if (e.type !== "round") continue;
+    const ms = Number(e.latencyMs);
+    const ch = e.channel === "subscription" ? "subscription" : e.channel === "api" ? "api" : undefined;
+    if (!ch || !Number.isFinite(ms) || ms <= 0) continue;
+    const arr = buckets.get(ch) ?? [];
+    arr.push(ms);
+    buckets.set(ch, arr);
+  }
+  const out: { channel: "api" | "subscription"; rounds: number; medianMs: number; p90Ms: number }[] = [];
+  for (const [channel, arr] of buckets) {
+    const sorted = [...arr].sort((a, b) => a - b);
+    // Нearest-rank (стандарт для латентностей): p-й процентиль — элемент ранга ceil(p·n).
+    const at = (q: number): number => sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1))] ?? 0;
+    out.push({ channel, rounds: sorted.length, medianMs: Math.round(at(0.5)), p90Ms: Math.round(at(0.9)) });
+  }
+  return out.sort((a, b) => b.rounds - a.rounds);
 }

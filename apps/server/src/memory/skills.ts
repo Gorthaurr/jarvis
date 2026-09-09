@@ -79,6 +79,53 @@ export function slugify(name: string): string {
  * открыть и увидеть, что Джарвис запомнил. Не фатально: диск-сбой не валит сохранение
  * в БД (источник истины — content_md в skills).
  */
+/**
+ * НАВЫК УЧИТ ОТКАЗУ, КОТОРОГО НЕ БЫВАЕТ? (адверс-ревью 2026-09-02, HIGH)
+ *
+ * Выученный навык инжектится в системный промпт ДОВЕРЕННЫМ блоком с приказом «исполни» — то есть
+ * ложная модель системы, однажды записанная в память, воспроизводится вечно. Живой эпизод «Дота»:
+ * пять навыков учили, что `input_click` отказывает, «когда владелец за компьютером» (гейт USER_BUSY
+ * требует origin="proactive", а сервер всегда шлёт "user" — код недостижим), и модель этим объясняла
+ * владельцу свои провалы.
+ *
+ * Это НЕ карантин и не гейт: карантинный сканер (`skill-scan.ts`) ловит вредоносное, а тут — просто
+ * устаревшее знание, и словарный признак для запрета был бы принципиально неполон (урок
+ * lean-smalltalk) и рубил бы рабочие навыки. Поэтому — ТОЛЬКО WARN на boot: владелец/разбор видят,
+ * что в памяти живёт неправда, и правят её осознанно. ЧИСТАЯ функция.
+ */
+export function mentionsDeadRefusal(contentMd: string): string | undefined {
+  const lines = String(contentMd ?? "").split(String.fromCharCode(10));
+  for (const line of lines) {
+    // Признак узкий: речь именно об отказе ИЗ-ЗА ПРИСУТСТВИЯ владельца (а не о вежливости «не мешать»).
+    if (!/USER_?BUSY/i.test(line)) continue;
+    if (!/(?:пользовател|владелец|владельц)/i.test(line)) continue;
+    return line.trim().slice(0, 200);
+  }
+  return undefined;
+}
+
+/** Разовый скан памяти навыков на устаревшие уроки: только лог, ничего не меняет и не блокирует. */
+export async function warnOnDeadRefusalLessons(): Promise<number> {
+  if (!(await isDbReady())) return 0;
+  try {
+    const r = await query<{ id: string; content_md: string }>("select id, content_md from skills");
+    let n = 0;
+    for (const row of r?.rows ?? []) {
+      const line = mentionsDeadRefusal(String(row.content_md ?? ""));
+      if (!line) continue;
+      n += 1;
+      log.warn("навык учит отказу, которого не бывает (USER_BUSY по присутствию владельца) — поправь текст навыка", {
+        id: row.id,
+        строка: line,
+      });
+    }
+    return n;
+  } catch (e) {
+    log.debug("скан навыков на устаревшие уроки пропущен", e instanceof Error ? e.message : String(e));
+    return 0;
+  }
+}
+
 export async function writeSkillFile(id: string, contentMd: string): Promise<void> {
   try {
     await mkdir(skillsDir(), { recursive: true });

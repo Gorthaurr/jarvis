@@ -32,6 +32,7 @@ import { WorkingMemory } from "../../memory/working.js";
 import { SemanticResponseCache } from "../response-cache.js";
 import { TaskManager } from "../tasks/manager.js";
 import { type AgentDeps, handleUserText } from "./index.js";
+import { SelectionSlot } from "./selection-context.js";
 
 /** КОМАНДА (роутер: не conversational, тир sonnet), при этом ПРОХОДЯЩАЯ денилист `isCacheableQuery` —
  *  ровно класс живого инцидента: денилист неполон, гейт обязан держать роутером. */
@@ -149,5 +150,49 @@ describe("§15 кэш ответов: на ВОПРОСЕ механизм ре�
     // До фикса гейта `toolTrajectory.length === 0`: ответ с траекторией инструментов кэшировался,
     // и повтор вопроса отдавал бы его БЕЗ единого вызова инструмента.
     expect(await cache.lookup("u1", QUESTION)).toBeNull();
+  });
+});
+
+describe("§режим выделения: кэш ответов молчит, пока владелец на что-то показывает (контроль-3)", () => {
+  const SEL = { x: 1200, y: 400, w: 640, h: 360, monitorIndex: 1, monitor: "Монитор 2", createdAt: 1 };
+  const slotWith = () => {
+    const s = new SelectionSlot();
+    s.set(SEL, 1_000, Date.now());
+    return s;
+  };
+
+  it("активное выделение → попадание в кэш НЕ используется, ответ НЕ записывается", async () => {
+    const cache = newCache();
+    await cache.store("u1", QUESTION, "Канберра, сэр.");
+    expect(await cache.lookup("u1", QUESTION)).toBe("Канберра, сэр."); // предусловие честности: кэш отдал бы
+    const llm = new MockLlmProvider([{ text: "Смотрю на область, сэр." }]);
+    const storeSpy = vi.spyOn(cache, "store");
+    await handleUserText(fakeSession(), QUESTION, makeDeps(llm, cache, { selection: slotWith() }));
+    expect(llm.requests).toHaveLength(1); // модель вызвана — кэш не перехватил дейктический вопрос
+    await settle();
+    expect(storeSpy).not.toHaveBeenCalled();
+  });
+
+  it("выделение СНЯТО, пока модель отвечала → дейктический ответ всё равно НЕ записывается (гейт по состоянию на СТАРТЕ хода)", async () => {
+    const cache = newCache();
+    const slot = slotWith();
+    const base = new MockLlmProvider([{ text: "Вы показываете на область 640×360, сэр." }]);
+    const clearing = Object.assign(Object.create(Object.getPrototypeOf(base)), base, {
+      complete: (req: Parameters<MockLlmProvider["complete"]>[0]) => {
+        slot.set(null, 0, Date.now()); // Esc/хоткей владельца посреди хода → client.selection:null
+        return base.complete(req);
+      },
+      completeStream: (req: Parameters<MockLlmProvider["completeStream"]>[0], onDelta: Parameters<MockLlmProvider["completeStream"]>[1]) => {
+        slot.set(null, 0, Date.now());
+        return base.completeStream(req, onDelta);
+      },
+    }) as MockLlmProvider;
+    const storeSpy = vi.spyOn(cache, "store");
+    await handleUserText(fakeSession(), QUESTION, makeDeps(clearing, cache, { selection: slot }));
+    await settle();
+    // До фикса гейт store читал слот в КОНЦЕ хода (уже пустой) и записывал «вы показываете на область…»
+    // под вопрос без всякой рамки — через день кэш утверждал бы указатель, которого нет.
+    expect(storeSpy).not.toHaveBeenCalled();
+    expect(await cache.lookup("u1", QUESTION)).toBeFalsy();
   });
 });

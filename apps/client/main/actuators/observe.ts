@@ -45,6 +45,14 @@ export interface Observation {
 /** Снимок структуры окна ДО действия — база для дельты. */
 export interface UiFingerprint {
   title?: string;
+  /**
+   * OCR-снимок области действия ДО — ТОЛЬКО для UIA-слепых окон (игра/canvas), где a11y-выжимки нет.
+   * 🔴 Зачем (разбор эпизода «Дота» 2026-09-02, HIGH): в слепом окне наблюдение возвращало просто
+   * распознанный текст рядом с точкой клика и НЕ ставило `weak` — значит любой кусок HUD засчитывался
+   * как «сверил исход», verify-долг снимался, и терминал «Готово» проходил без единой настоящей
+   * проверки. Сравнение с этим снимком превращает «я вижу текст» в «изменилось/не изменилось».
+   */
+  ocr?: string;
   /** Строки a11y-выжимки: одна строка = один элемент («Button: Отправить [значение]»). */
   lines: string[];
   /**
@@ -243,7 +251,7 @@ export function formatDelta(d: UiDelta): string {
  * Снимок структуры активного окна ДО действия. Дёшево (та же выжимка, что и после), короткий
  * бюджет: без снимка наблюдение просто вернётся в прежнем режиме «описание окна».
  */
-export async function captureUiFingerprint(): Promise<UiFingerprint | undefined> {
+export async function captureUiFingerprint(clickPoint?: { x: number; y: number }): Promise<UiFingerprint | undefined> {
   if (!enabled() || !sidecar().ready) return undefined;
   // Бюджет РАВЕН бюджету снимка ПОСЛЕ (ревью, HIGH): работа одна и та же, а асимметрия 2с/4с давала
   // класс окон (тяжёлое дерево Steam/Chromium), где «до» систематически не успевал — задержку перед
@@ -254,7 +262,14 @@ export async function captureUiFingerprint(): Promise<UiFingerprint | undefined>
       // Целевое окно фиксируем ЯВНО: снимок ПОСЛЕ читается по этому же pid, даже если фокус уехал.
       const fg = await foregroundWindow();
       const first = await readDigest(fg?.pid);
-      if (!first) return undefined;
+      // UIA-СЛЕПОЕ окно (игра/canvas): a11y-выжимки нет или она короче порога — значит наблюдение
+      // ПОСЛЕ пойдёт ступенью OCR. Чтобы там было с чем сравнивать, снимаем OCR области действия
+      // ЗАРАНЕЕ. Без этого «увидел текст рядом с кликом» засчитывалось как сверка исхода.
+      if (!first || first.trim().length < MIN_A11Y_CHARS) {
+        if (!clickPoint) return undefined; // сравнивать нечем — как раньше, наблюдение без дельты
+        const ocr = await ocrAround(clickPoint);
+        return ocr === undefined ? undefined : { title: fg?.title, pid: fg?.pid, lines: [], ocr };
+      }
       const lines = splitDigest(first);
       // Волатильность ИЗМЕРЯЕМ, а не угадываем: второе чтение выявляет строки, меняющиеся сами.
       // Платим за него ТОЛЬКО когда есть чему тикать (в снимке вообще есть числа) — иначе вопроса нет.
@@ -267,9 +282,119 @@ export async function captureUiFingerprint(): Promise<UiFingerprint | undefined>
   return fp;
 }
 
+/**
+ * Скелет OCR-текста для сравнения «до/после». Регистр и пробелы OCR шумят от кадра к кадру, а цифры
+ * в игре тикают сами (таймер, золото, HP) — поэтому они схлопываются в «#». Это ЗЕРКАЛО политики
+ * a11y-дельты: «ничего не изменилось» и «поменялись только цифры» сверкой исхода не считаются.
+ * ЧИСТАЯ функция.
+ */
+export function ocrSkeleton(text: string): string {
+  return String(text ?? "")
+    .toLowerCase()
+    .replace(/\d+/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+/**
+ * СРАВНЕНИЕ ДВУХ OCR-СНИМКОВ области действия. Три исхода, а не два (адверс-ревью 2026-09-02, MED):
+ *  • "same" — тексты совпали: изменений не видно;
+ *  • "digits" — совпали СКЕЛЕТЫ, различаются только числа: это может быть и таймер, и результат
+ *    (счёт, страница, громкость) — сверкой исхода НЕ считаем, но и не утверждаем «ничего не
+ *    изменилось»: прежняя формулировка объявляла фактом то, чего сенсор не устанавливал;
+ *  • "changed" — различается сам текст.
+ *
+ * ШУМ РАСПОЗНАВАНИЯ отсеивается: OCR регулярно путает похожие глифы («kill» → «kiII»), и такая пара
+ * добавленного/исчезнувшего слова — не изменение экрана. Иначе тик таймера с опечаткой распознавания
+ * давал `changed:true`, то есть «сверил исход» на пустом месте. ЧИСТАЯ функция.
+ */
+export function compareOcr(before: string, after: string): { kind: "same" | "digits" | "changed"; added: string[]; removed: string[] } {
+  const a = ocrSkeleton(before);
+  const b = ocrSkeleton(after);
+  if (before.trim() === after.trim()) return { kind: "same", added: [], removed: [] };
+  if (a === b) return { kind: "digits", added: [], removed: [] };
+  const wordsA = a.split(" ").filter(Boolean);
+  const wordsB = b.split(" ").filter(Boolean);
+  const removed = diffWords(wordsA, wordsB);
+  const added = diffWords(wordsB, wordsA);
+  // Пары «почти одинаковых» слов гасим — это глифовый шум, а не смена экрана.
+  const keptAdded: string[] = [];
+  const leftRemoved = [...removed];
+  for (const w of added) {
+    const i = leftRemoved.findIndex((r) => nearSameWord(r, w));
+    if (i >= 0) leftRemoved.splice(i, 1);
+    else keptAdded.push(w);
+  }
+  if (keptAdded.length === 0 && leftRemoved.length === 0) return { kind: "digits", added: [], removed: [] };
+  return { kind: "changed", added: keptAdded.slice(0, 8), removed: leftRemoved.slice(0, 8) };
+}
+
+/** Мультимножественная разница «что есть в a, но не покрыто b». */
+function diffWords(a: readonly string[], b: readonly string[]): string[] {
+  const pool = [...b];
+  const out: string[] = [];
+  for (const w of a) {
+    const i = pool.indexOf(w);
+    if (i >= 0) pool.splice(i, 1);
+    else out.push(w);
+  }
+  return out;
+}
+
+/**
+ * Свести ПУТАЕМЫЕ ГЛИФЫ к канону: OCR регулярно меняет l/I/|/1 и O/0, S/5, B/8 местами. Это не
+ * «другое слово», а шум распознавания — и различать их значит принимать шум за смену экрана.
+ * (Цифры к этому моменту уже схлопнуты скелетом, поэтому таблица про буквенные пары.)
+ */
+export function foldConfusables(word: string): string {
+  return word
+    .toLowerCase()
+    .replace(/[l|ı]/g, "i")
+    .replace(/0/g, "o")
+    .replace(/5/g, "s")
+    .replace(/8/g, "b")
+    .replace(/rn/g, "m");
+}
+
+/** Похожи ли слова настолько, что различие — глифовый шум OCR (после свода путаемых глифов). */
+export function nearSameWord(x: string, y: string): boolean {
+  if (x === y) return true;
+  if (foldConfusables(x) === foldConfusables(y)) return true;
+  if (Math.abs(x.length - y.length) > 2) return false;
+  const budget = Math.max(1, Math.floor(Math.max(x.length, y.length) / 4));
+  let prev = Array.from({ length: y.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= x.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= y.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (x[i - 1] === y[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return (prev[y.length] ?? 99) <= budget;
+}
+
 /** Есть ли в строке цифры (дёшево: гейт на измерение волатильности). ЧИСТАЯ функция. */
 export function hasDigits(line: string): boolean {
   return /\d/.test(line);
+}
+
+/**
+ * OCR области вокруг точки действия (или активного окна целиком, если точки нет). ОДИН источник и
+ * для снимка «до», и для наблюдения «после» — иначе сравнивались бы разные области.
+ */
+async function ocrAround(point?: { x: number; y: number }): Promise<string | undefined> {
+  try {
+    const { screenOcr } = await import("./sensors-cheap.js");
+    const rect = point
+      ? { x: point.x - OCR_REGION_W / 2, y: point.y - OCR_REGION_H / 2, w: OCR_REGION_W, h: OCR_REGION_H, space: "screen" as const }
+      : undefined;
+    const ocr = await screenOcr("active", rect);
+    return ocr.text.trim();
+  } catch (e) {
+    log.debug(`observe: OCR области не удался (${e instanceof Error ? e.message : String(e)})`);
+    return undefined;
+  }
 }
 
 /** Пауза между двумя чтениями при измерении самоизменяемости. */
@@ -453,18 +578,7 @@ async function observeInner(opts?: {
     }
 
     // Ступень 2: UIA-слепое окно (игра/canvas) → локальный OCR региона вокруг точки действия.
-    const { screenOcr } = await import("./sensors-cheap.js");
-    const rect = opts?.clickPoint
-      ? {
-          x: opts.clickPoint.x - OCR_REGION_W / 2,
-          y: opts.clickPoint.y - OCR_REGION_H / 2,
-          w: OCR_REGION_W,
-          h: OCR_REGION_H,
-          space: "screen" as const,
-        }
-      : undefined;
-    const ocr = await screenOcr("active", rect);
-    const text = ocr.text.trim();
+    const text = (await ocrAround(opts?.clickPoint)) ?? "";
     // Пустой OCR — СЛАБОЕ наблюдение (weak): модель видит «пусто», но verify-долг не снимается
     // (ревью Волны 2: «ничего не распознано» — не подтверждение исхода).
     if (!text) {
@@ -475,7 +589,36 @@ async function observeInner(opts?: {
         weak: true,
       };
     }
-    return { via: "ocr", window: await foregroundTitle(), text: clip(text) };
+    const beforeOcr = opts?.before?.ocr;
+    if (beforeOcr !== undefined) {
+      const cmp = compareOcr(beforeOcr, text);
+      const body =
+        cmp.kind === "same"
+          ? `в области действия изменений не видно. Тот же текст: ${clip(text)}`
+          : cmp.kind === "digits"
+            ? `в области действия изменились только ЧИСЛА — это может быть и таймер, и результат: сверь целевое значение прицельно. Сейчас видно: ${clip(text)}`
+            : `в области действия изменилось: ${cmp.added.length ? `+ появилось «${cmp.added.join(", ")}»` : ""}` +
+              `${cmp.added.length && cmp.removed.length ? "; " : ""}` +
+              `${cmp.removed.length ? `− исчезло «${cmp.removed.join(", ")}»` : ""}. Сейчас видно: ${clip(text)}`;
+      return {
+        via: "ocr",
+        window: await foregroundTitle(),
+        text: body,
+        delta: true,
+        changed: cmp.kind === "changed",
+        // Сверкой исхода считается ТОЛЬКО содержательное изменение: «то же самое» и «поменялись
+        // цифры» — не подтверждение (зеркало политики a11y-дельты).
+        weak: cmp.kind !== "changed",
+      };
+    }
+    // Сравнивать не с чем → это ОПИСАНИЕ окрестности, а не сверка исхода: verify-долг остаётся.
+    // 🔴 Раньше здесь возвращалось наблюдение БЕЗ weak, и любой кусок HUD рядом с кликом снимал долг.
+    return {
+      via: "ocr",
+      window: await foregroundTitle(),
+      text: `${clip(text)} — это снимок ОКРЕСТНОСТИ действия без сравнения «до/после»: исход НЕ подтверждён, сверь прицельно.`,
+      weak: true,
+    };
   } catch (e) {
     log.debug(`observe: наблюдение недоступно (${e instanceof Error ? e.message : String(e)})`);
     return undefined;

@@ -1,5 +1,6 @@
 // Волна G: резерв мозга на подписке — переключение каналов и ЧЕСТНОСТЬ исходов.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _resetApiFailureForTest, _setApiFailureForTest } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback-llm.js";
 import { _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
@@ -206,5 +207,247 @@ describe("оба канала легли — владельцу называют
     const secondary = { live: true, complete: async () => { throw new Error("что-то пошло не так"); }, completeStream: async () => { throw new Error("что-то пошло не так"); } };
     const r = await new FallbackLlmProvider(primary as never, secondary as never).complete(req as never);
     expect(r.text).toMatch(/Связь с сервером прервалась/);
+  });
+});
+
+/**
+ * 🔴 «Правильно вырубать API, а не долбить его всё время» (владелец, 2026-09-02, по разбору логов:
+ * 15 заведомо мёртвых вызовов за день + 101 строка «переключаюсь на резерв»). Отказ, который повтором
+ * НЕ лечится (кончился баланс / ключ не принят), обязан ВЫКЛЮЧАТЬ канал, а не ставить его на паузу.
+ * Каждый тест здесь падает, если снять фикс (проверено ревертом).
+ */
+describe("терминальный отказ основного канала — выключаем, а не долбим", () => {
+  /** Провайдер, который ведёт себя как настоящий: перед возвратом стаба ЗАПИСЫВАЕТ причину отказа. */
+  function primaryWithFailure(text: string, status?: number): ILlmProvider & { calls: number } {
+    const p = {
+      live: true,
+      calls: 0,
+      async complete(): Promise<LlmResponse> {
+        p.calls += 1;
+        _setApiFailureForTest(text, status);
+        return STUB;
+      },
+      async completeStream(): Promise<LlmResponse> {
+        p.calls += 1;
+        _setApiFailureForTest(text, status);
+        return STUB;
+      },
+    };
+    return p;
+  }
+
+  beforeEach(() => {
+    _resetApiFailureForTest();
+    delete process.env.JARVIS_PRIMARY_LLM;
+    delete process.env.JARVIS_PRIMARY_RECHECK_MS;
+  });
+  afterEach(() => {
+    _resetApiFailureForTest();
+    delete process.env.JARVIS_PRIMARY_LLM;
+    delete process.env.JARVIS_PRIMARY_RECHECK_MS;
+  });
+
+  const CREDITS = "400 {\"error\":{\"message\":\"Your credit balance is too low to access the Anthropic API\"}}";
+
+  it("кончился баланс → канал выключен с ПЕРВОГО отказа, больше ни одного запроса", async () => {
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    for (let i = 0; i < 5; i++) await p.complete(REQ);
+    expect(primary.calls).toBe(1); // до фикса: 2 (порог предохранителя) и дальше пробы после паузы
+    expect(p.lastChannel).toBe("subscription");
+  });
+
+  it("пауза транзиентного предохранителя выключенный канал НЕ воскрешает", async () => {
+    let clock = 0;
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    clock += 400_000; // прежняя 5-минутная пауза истекла бы
+    await p.complete(REQ);
+    clock += 400_000;
+    await p.complete(REQ);
+    expect(primary.calls).toBe(1); // до фикса: 3 — ровно то «долбление», на которое жаловался владелец
+  });
+
+  it("редкая перепроверка настаёт → канал пробуется снова (пополненный баланс подхватится сам)", async () => {
+    let clock = 0;
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    clock += 6 * 3_600_000 + 1_000; // деф 6 часов
+    await p.complete(REQ);
+    expect(primary.calls).toBe(2); // канал не «умер навсегда» — самолечение без перезапуска
+  });
+
+  it("JARVIS_PRIMARY_RECHECK_MS=0 → не перепроверяем вовсе (до перезапуска)", async () => {
+    process.env.JARVIS_PRIMARY_RECHECK_MS = "0";
+    let clock = 0;
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    clock += 24 * 3_600_000;
+    await p.complete(REQ);
+    expect(primary.calls).toBe(1);
+  });
+
+  it("ТРАНЗИЕНТНЫЙ отказ (429) канал НЕ выключает — прежний предохранитель на 5 минут", async () => {
+    let clock = 0;
+    const primary = primaryWithFailure("429 rate limit exceeded", 429);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ); // порог предохранителя
+    clock += 400_000;
+    await p.complete(REQ); // полуоткрытая проба обязана состояться
+    expect(primary.calls).toBe(3);
+  });
+
+  it("ПРОТУХШАЯ причина прошлого сбоя живой канал не выключает", async () => {
+    let clock = 0;
+    // Причина записана 5 минут назад (ещё не протухла по TTL), но НЕ этим вызовом: стаб пришёл по
+    // другой причине (сеть). Выключать канал по чужой улике нельзя.
+    _setApiFailureForTest(CREDITS, 400, Date.now() - 300_000);
+    const primary = fake({ live: true, result: STUB });
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ);
+    clock += 400_000;
+    await p.complete(REQ);
+    expect(primary.calls).toBe(3); // транзиентный путь, а не терминальный латч
+  });
+
+  it("резерва НЕТ → канал не выключаем (иначе терять и работу, и свежую причину)", async () => {
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: false });
+    const p = new FallbackLlmProvider(primary, secondary);
+    await p.complete(REQ);
+    await p.complete(REQ);
+    await p.complete(REQ);
+    expect(primary.calls).toBe(3); // без резерва выключать не в пользу чего
+  });
+
+  it("JARVIS_PRIMARY_LLM=0 → ни одного запроса к API, сразу подписка", async () => {
+    process.env.JARVIS_PRIMARY_LLM = "0";
+    const primary = fake({ live: true, result: resp({ text: "по API" }) });
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const r = await new FallbackLlmProvider(primary, secondary).complete(REQ);
+    expect(r.text).toBe("по подписке");
+    expect(primary.calls).toBe(0);
+  });
+
+  it("channelStatus: паспорт видит выключённый канал и причину", async () => {
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    expect(p.channelStatus()).toEqual({ primary: "ok", subscriptionLive: true });
+    await p.complete(REQ);
+    const st = p.channelStatus();
+    expect(st.primary).toBe("off");
+    expect(st.kind).toBe("credits");
+    expect(st.human).toMatch(/баланс/);
+    expect(st.subscriptionLive).toBe(true);
+  });
+
+  it("основной ожил на перепроверке → латч снят, работаем по API", async () => {
+    let clock = 0;
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    expect(p.channelStatus().primary).toBe("off");
+    clock += 6 * 3_600_000 + 1_000;
+    (primary as unknown as { complete: () => Promise<LlmResponse> }).complete = async () => resp({ text: "по API" });
+    const r = await p.complete(REQ);
+    expect(r.text).toBe("по API");
+    expect(p.channelStatus().primary).toBe("ok");
+  });
+
+  /**
+   * 🔴 Адверс-ревью правки (2026-09-02): «выключенный» канал всё равно получал HTTP-запрос — стаб
+   * добывался вызовом `primary.complete(req)`. Пока резерв отвечал, это было не видно; стоило ему
+   * упасть — и на КАЖДОМ ходе уходил обречённый запрос в API, ровно то, что латч должен был убрать.
+   */
+  it("латч + УПАВШИЙ резерв: обречённых запросов к API больше нет", async () => {
+    const primary = primaryWithFailure(CREDITS);
+    const secondary: ILlmProvider = {
+      live: true,
+      complete: async () => {
+        throw new Error("подписка: лимит исчерпан");
+      },
+      completeStream: async () => {
+        throw new Error("подписка: лимит исчерпан");
+      },
+    };
+    const p = new FallbackLlmProvider(primary, secondary);
+    for (let i = 0; i < 5; i++) await p.complete(REQ);
+    expect(primary.calls).toBe(1); // до фикса: 5 — по одному живому HTTP на каждый ход
+    expect(p.channelStatus().primary).toBe("off");
+  });
+
+  /**
+   * 🔴 Там же: при `JARVIS_PRIMARY_LLM=0` и отсутствующем резерве путь стаба звал API — и его
+   * НАСТОЯЩИЙ ответ уходил владельцу (`stubbed:false`), хотя лог писал «стаб». Выключатель, который
+   * ничего не выключает, хуже отсутствующего.
+   */
+  it("JARVIS_PRIMARY_LLM=0 без резерва: API не зовём вовсе, отдаём честный стаб", async () => {
+    process.env.JARVIS_PRIMARY_LLM = "0";
+    const primary = fake({ live: true, result: resp({ text: "РЕАЛЬНЫЙ ОТВЕТ ПО API" }) });
+    const secondary = fake({ live: false });
+    const r = await new FallbackLlmProvider(primary, secondary).complete(REQ);
+    expect(primary.calls).toBe(0);
+    expect(r.stubbed).toBe(true);
+    expect(r.text).not.toBe("РЕАЛЬНЫЙ ОТВЕТ ПО API");
+  });
+
+  it("JARVIS_FORCE_SUBSCRIPTION=1: паспорт не говорит «канал ok», и API не трогаем при падении резерва", async () => {
+    process.env.JARVIS_FORCE_SUBSCRIPTION = "1";
+    try {
+      const primary = fake({ live: true, result: resp({ text: "по API" }) });
+      const secondary: ILlmProvider = {
+        live: true,
+        complete: async () => {
+          throw new Error("подписка: лимит исчерпан");
+        },
+        completeStream: async () => {
+          throw new Error("подписка: лимит исчерпан");
+        },
+      };
+      const p = new FallbackLlmProvider(primary, secondary);
+      const r = await p.complete(REQ);
+      expect(primary.calls).toBe(0); // флаг обещает «минуя API» — обещание должно быть правдой
+      expect(r.stubbed).toBe(true);
+      const st = p.channelStatus();
+      expect(st.primary).toBe("off");
+      expect(st.kind).toBe("forced");
+    } finally {
+      delete process.env.JARVIS_FORCE_SUBSCRIPTION;
+    }
+  });
+
+  it("ПУСТАЯ строка в env — это не «никогда», а дефолт (Number(\"\") === 0)", async () => {
+    process.env.JARVIS_PRIMARY_RECHECK_MS = "";
+    let clock = 0;
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    clock += 6 * 3_600_000 + 1_000; // дефолтные 6 часов
+    await p.complete(REQ);
+    expect(primary.calls).toBe(2); // перепроверка состоялась, канал не выключен навсегда молча
+  });
+
+  it("стрим идёт тем же путём: выключенный канал не трогаем", async () => {
+    const primary = primaryWithFailure(CREDITS);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    await p.completeStream(REQ, () => {});
+    await p.completeStream(REQ, () => {});
+    await p.completeStream(REQ, () => {});
+    expect(primary.calls).toBe(1);
   });
 });

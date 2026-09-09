@@ -50,9 +50,13 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         case "app.launch":
           await apps.launchApp(str(p.app));
           return;
-        case "app.focus":
-          await apps.focusApp(str(p.app));
+        case "app.focus": {
+          // Контроль-9 (focus-app-veil-swallowed, побочно): возвращённый `focused` игнорировался — шаг, НЕ
+          // сфокусировавший окно, засчитывался успешным, и следующие шаги печатали в чужое окно.
+          const fr = await apps.focusApp(str(p.app));
+          if (!fr.focused) throw new Error(`окно «${str(p.app)}» не сфокусировано (фокус не перешёл)`);
           return;
+        }
         case "browser.open":
           await apps.launchApp(str(p.url));
           return;
@@ -79,7 +83,9 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
           return;
         }
         case "input.key":
-          await input.pressKey(str(p.combo));
+          // Контроль-7 (runner-4): mode/scancode шага доезжают до pressKey — иначе «up» исполнялся как press (лишний тап
+          // при игровом удержании), а исключение stepGatedUnderVeil для up было мёртвым.
+          await input.pressKey(str(p.combo), p.mode === "down" || p.mode === "up" ? p.mode : undefined, p.scancode === true);
           return;
         case "input.click":
           if (!step.target) throw new Error("input.click без target");
