@@ -1,7 +1,7 @@
 // W3 «Петля»: мутационная таблица рефакторинга. Применяет ОДНУ мутацию к коду петли, гоняет тесты
 // каталога src/brain/agent, печатает упавшие тесты, восстанавливает файл. Смысл: те же тесты должны
 // падать на тех же поломках ДО и ПОСЛЕ рефакторинга (иначе структура съела семантику).
-// Запуск из apps/server: node scripts/mutate-loop.cjs [имя|all] [файл-отчёта.json]
+// Запуск из apps/server: node scripts/mutate-loop.cjs [имя|all] [файл-отчёта.json] (деф — во временной папке ОС, не в репозитории)
 // Якоря пишутся БЕЗ отступа (каждая строка trim), ищутся по всем файлам петли (index.ts + loop/*.ts)
 // с любым отступом — так одна таблица работает и на петле-монолите, и на фазах.
 const fs = require("fs");
@@ -64,5 +64,7 @@ for (const name of names) {
     fs.writeFileSync(file, raw);
   }
 }
-fs.writeFileSync(process.argv[3] ?? "mutation-table.json", JSON.stringify(table, null, 2));
+const out = process.argv[3] ?? path.join(require("os").tmpdir(), "mutation-table.json");
+fs.writeFileSync(out, JSON.stringify(table, null, 2));
+console.log("отчёт:", out);
 for (const row of table) console.log(row.name, row.error ?? `${row.failed.length} упало (${row.file})`, (row.failed ?? []).slice(0, 4).map((s) => "\n    " + s.slice(0, 160)).join(""));
