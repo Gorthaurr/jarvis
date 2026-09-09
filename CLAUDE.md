@@ -3576,3 +3576,50 @@ Electron-клиента; живой смоук в игре — за владел
   смена динамики system/thinking ВНУТРИ сессии (фиксируются на старте; live-контекст идёт врезкой).
 - Тесты: `subscription-session.test.ts` (20, поддельный SDK «как настоящий»: зовёт хендлер и ждёт его),
   `subscription-llm.test.ts` (политика эффорта, usage), `agent/streaming.test.ts` (первая фраза, sessionKey/release).
+
+## ВОЛНА W3 «ПЕТЛЯ» (2026-09-09, ветка `feat/w0-2026-09-09`)
+Рефакторинг без изменения поведения: `runAgentLoop` (2857 строк, ~90 `let`-флагов в замыкании) и
+`handleUserText` (391 строка) разрезаны на модули; каждая функция `brain/agent/` ≤150 строк
+(`apps/server/scripts/fn-lengths.mjs` — приёмочный замер: было 2 функции >150, стало 0; всего 228 функций).
+Ни одного нового флага `JARVIS_*` (правило W3.2). Текст блоков и комментарии переносились ДОСЛОВНО скриптом
+по якорям (комментарии в этом проекте — спецификация поведения, их нельзя терять при переносе).
+- **Карта петли** (`brain/agent/loop/`): `state.ts` (`LoopState` — типизированное состояние вместо
+  флагов: группы `tier`/`exit`/`budget`/`honesty`/`nudge`/`progress`/`usage`/`arsenal`, у каждого
+  поля — прежний комментарий объявления) · `config.ts` (капы/пороги из env, один раз на задачу) ·
+  `context.ts` (`LoopCtx`: всё, что фазы читают; собирается ОДИН раз: `input-lease` (аренда ввода,
+  `ensureInput`/`notePartial`), `retrieval`, `prompt`, `tool-set`, `convo`, `tool-ctx`,
+  `checkpoint-save` (`pushSystemNote`/`saveCheckpoint`), `tiering` (`loopMaxMs`/`escalateForQuality`)) ·
+  `ack-timer` · `admission` (очередь GUI-задач + быстрый реплей макроса: `replayGate`→`runReplay`) ·
+  `step.ts` (одна итерация: `round-snapshot` (снимок контроля-3 через границу раунда) → `guards`
+  (время/бюджет/контекст-окно/live-снимок/выделение/пауза/правка на ходу/предохранитель) →
+  `tiering.adjustTierBeforeCall` → `thinking.prepareCall` → `model-call` (`callModel`/`accountRound`/
+  `noteStub`) → `text-turn` + `nudge-policy` (NudgePolicy: докрутка max_tokens, анти-капитуляция,
+  verify-нудж, goal-check, пустой финал — каждая функция возвращает «нуджнул → следующий раунд») ИЛИ
+  `tool-round` (`acquireForTool`→диспатч→`tool-classify` (`noteToolCall`/`applySuccessEffects`/
+  `applyRoundFlags`)→`closeRound`; факты раунда — `RoundResult`) → `post-round.finishRound`
+  (подсказка лестницы, коммит раунда/журнал, обрыв канала, `round-classify.summarizeRound` (ЧИСТАЯ
+  сводка: allErrored/anyErrored/toolSig/veiledWaitRound), §7-эскалация, `anti-runaway` (повтор/семейный
+  кап), счёт раунда)) · `outcome.ts` (ЧИСТЫЙ `computeOutcome`: capExhausted/maskedFailure/taskOk и
+  спутники — по нему гейтятся самообучение, метрики, терминал) · `finalize.ts` (самообучение, расход,
+  исход навыка, макрос, метрики) · `terminal.ts` (`selectTerminal` — упорядоченная ТАБЛИЦА предикат→
+  фраза, порядок строк = прежний if-каскад; `terminalSuccess` с приписками отказа ввода/вуали) ·
+  `util.ts` (общие хелперы/константы) · `self-learn.ts`. Директивы фаз: `"break"` = выйти из петли,
+  `"continue"`/`"next"` = следующая итерация — прежние `break`/`continue` тела цикла.
+- **`handleUserText`** = голова (finishReply/clean/scope) + список `TURN_INTERCEPTS`
+  (`agent/turn-intercepts.ts`: имя, «не тебе», режим, эмоция, активная задача (дубль/steer), рефлексы
+  памяти и обязательств, уточнение консьержа, пост-терминальный эхо-гейт, продолжение прерванной
+  задачи — порядок прежней if-цепочки, первый ответивший закрывает ход; исполнители петли идут через
+  `TurnCtx.run`, чтобы не было цикла импортов) + маршрутизация (tier0 → кэш ответов → sync-first/фон/синхронно).
+  Контракты (`AgentDeps`/`AgentReply`/`ReplySink`/`LoopOpts`) — `agent/types.ts`; `index.ts` их реэкспортирует.
+- 🔴 **Гейт рефакторинга — мутационная таблица** (`apps/server/scripts/mutate-loop.cjs`, 8 поломок
+  фиксов честности, якоря ищутся по всем файлам петли): до и после КАЖДОЙ стадии падают ТЕ ЖЕ тесты —
+  gate-snapshot 12, declined-gates-mutate 2, input-denied-flag 5, veil-mutate-only 3, partial-by-source 1,
+  cap-by-loop-iters 1. ⚠️ Две мутации НЕ ловятся ни до, ни после (это дыры покрытия, не регресс W3):
+  `verified-after-veil-rearm` (сброс `verifiedAfterVeil` при новом отказе вуали) и
+  `sent-required-for-outbound` (успех отправки человеку только по `sent:true`) — закрыть тестами ПЕТЛЁЙ
+  отдельным заходом. Плюс: tsc чист, тесты петли 464/464, полный прогон 2868 на каждой стадии.
+- Стадии (по коммиту на каждую, чтобы регресс бисектился): A — `LoopState` без переноса кода (ссылки
+  переписаны токенизатором внутри функции); B1 — модульные хелперы/типы; B2 — фазы петли; B3 —
+  перехваты `handleUserText`. Скрипты переноса — одноразовые, в репозиторий не входят.
+- Осознанно НЕ делалось: правка семантики флагов (каждое «а можно слить два флага» — отдельная волна);
+  диета `CLAUDE.md` до 20 КБ (правило §8.3 ревью) — следующий заход.
