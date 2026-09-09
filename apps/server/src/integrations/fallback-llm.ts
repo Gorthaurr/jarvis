@@ -216,6 +216,12 @@ export class FallbackLlmProvider implements ILlmProvider {
     return { primary: "ok", subscriptionLive };
   }
 
+  /** W2: сессии держит резерв (подписка); основной канал сессий не имеет. */
+  release(sessionKey: string): void {
+    this.secondary.release?.(sessionKey);
+    this.primary.release?.(sessionKey);
+  }
+
   async complete(req: LlmRequest): Promise<LlmResponse> {
     if (forceSubscription()) return this.viaSubscription(req, "принудительная проверка резерва", () => localStub());
     const wallStart = Date.now();

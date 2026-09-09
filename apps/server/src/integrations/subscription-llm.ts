@@ -26,16 +26,14 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 import { lazyDataPath } from "../paths.js";
-import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse, ToolUse } from "./llm.js";
+import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
+import { MCP_PREFIX, type SdkQuery, type SessionTurn, SubscriptionSession, type ToolOutcome, unwrapArgs } from "./subscription-session.js";
 
 const log: Logger = createLogger("llm:subscription");
 
-/** Префикс, который SDK даёт инструментам нашего in-process MCP-сервера. */
-const MCP_PREFIX = "mcp__jarvis__";
 const SERVER_NAME = "jarvis";
 
 /** Токен headless-доступа к подписке (claude setup-token). Пусто → пробуем сохранённый логин. */
@@ -199,6 +197,9 @@ const sdkSandboxDir = lazyDataPath("sdk-cwd");
 function applySandboxEnv(env: Record<string, string | undefined>): void {
   env.CLAUDE_CODE_PROMPT_CACHE_TTL ??= "1h";
   env.DISABLE_AUTOUPDATER ??= "1";
+  // W2: результаты инструментов идут в модель MCP-результатом; дефолтный кап CLI (25K токенов) ниже
+  // нашего серверного капа tool_result (80K символов ≈ 32K токенов кириллицы) — иначе CLI резал бы вывод.
+  env.MAX_MCP_OUTPUT_TOKENS ??= "40000";
   try {
     mkdirSync(sdkSandboxDir(), { recursive: true });
   } catch (e) {
@@ -215,24 +216,24 @@ function applySandboxEnv(env: Record<string, string | undefined>): void {
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 /**
- * Эффорт резерва — **MAX на КАЖДОМ ходе** (решение владельца, подтверждено 2026-09-02: «от подписки
- * моей должно быть opus 5 на максимальном эффорте»).
+ * Эффорт резерва ПО ТИРУ (W2 «Мозг быстрый», 2026-09-09): haiku (простой вопрос) → medium,
+ * sonnet (действие) → high, fable (сложное рассуждение / биржа / эскалация §7) → max.
  *
- * 🔴 ИСТОРИЯ РАСХОЖДЕНИЯ (почему это здесь написано): 2026-08-31 замер показал, что латентность
- * резерва почти не зависит от эффорта (её держит оверхед CLI-подпроцесса), и отсюда был сделан
- * ВЫВОД СВЕРХ ЗАМЕРА — «значит обычным ходам качество не нужно», эффорт свели к `low` для всего,
- * кроме тира `fable`. Замеряли СКОРОСТЬ, а решили про КАЧЕСТВО. Цена ошибки видна в логе 2026-09-02
- * 15:49: вопрос «какой билд на Эмбере» ушёл разговорным тиром → Opus 5 на `low`, ноль инструментов,
- * ответ по памяти — и владелец получил устаревшую сборку. При этом `.env.example` и шапка карты всё
- * это время обещали «деф max»: код разошёлся и с решением владельца, и с собственной документацией.
- *
- * Латентность от этого не страдает (тот же замер), лимит подписки общий с Claude Code владельца —
- * это его осознанный размен. `JARVIS_SUBSCRIPTION_EFFORT` по-прежнему перекрывает (low|…|max).
+ * 🔴 ЭТО ПЕРЕСМОТР решения владельца от 2026-09-02 («opus 5 на максимальном эффорте на каждом ходе»),
+ * сделанный по его же новому запросу от 2026-09-09 «подумай, как ускорить по подписке». Что известно
+ * по замерам: на коротком ответе эффорт латентность почти не меняет (TTFT 2,7-3,1 с и на max, и на
+ * medium), а p90 хода (20-31 с) держит ДЛИННОЕ РАЗМЫШЛЕНИЕ на реальных задачах — его и режет эффорт.
+ * Цена: вопрос на medium может опереться на память там, где max сходил бы за инструментом (эпизод
+ * 2026-09-02 15:49 «какой билд на Эмбере» был на `low` — ниже medium не опускаемся); эскалация §7
+ * и биржа по-прежнему уходят на max. Дорога назад — `JARVIS_SUBSCRIPTION_EFFORT=max` (перекрывает
+ * все тиры), задокументирована в .env.example. Модель остаётся Opus 5 (решение владельца цело).
  */
-function subscriptionEffort(_tier?: string): string {
+const TIER_EFFORT: Record<string, string> = { haiku: "medium", sonnet: "high", fable: "max" };
+
+function subscriptionEffort(tier?: string): string {
   const raw = process.env.JARVIS_SUBSCRIPTION_EFFORT?.trim().toLowerCase();
   if (raw && EFFORTS.includes(raw)) return raw;
-  return "max";
+  return TIER_EFFORT[tier ?? ""] ?? "max";
 }
 
 /**
@@ -347,36 +348,10 @@ export function serializeHistory(req: LlmRequest): string {
   return parts.join("\n\n");
 }
 
-/** Найти tool_use среди блоков ответа SDK и привести к нашему формату (срезав MCP-префикс). */
-function extractToolUses(content: unknown): ToolUse[] {
-  if (!Array.isArray(content)) return [];
-  const out: ToolUse[] = [];
-  for (const b of content) {
-    const blk = b as { type?: string; id?: string; name?: string; input?: unknown };
-    if (blk.type !== "tool_use" || !blk.name) continue;
-    const bare = blk.name.startsWith(MCP_PREFIX) ? blk.name.slice(MCP_PREFIX.length) : blk.name;
-    // Аргументы приходят завёрнутыми в `args` (см. buildTools: свободный объект вместо zod-схемы).
-    const raw = (blk.input ?? {}) as Record<string, unknown>;
-    const input = (raw.args && typeof raw.args === "object" ? raw.args : raw) as Record<string, unknown>;
-    out.push({ id: blk.id || newId(), name: bare, input });
-  }
-  return out;
-}
-
-/** Текст из блоков ответа SDK. */
-function extractText(content: unknown): string {
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((b) => {
-      const blk = b as { type?: string; text?: string };
-      return blk.type === "text" ? (blk.text ?? "") : "";
-    })
-    .join("");
-}
-
 export interface SubscriptionLlmDeps {
   /** Инъекция SDK для тестов (по умолчанию — динамический импорт настоящего). */
   loadSdk?: () => Promise<SdkModule>;
+  now?: () => number;
 }
 
 /** Минимальный контракт используемой части SDK (позволяет тестировать без сети). */
@@ -385,19 +360,58 @@ export interface SdkModule {
   startup?: (opts?: unknown) => Promise<unknown>;
   /** Маркер границы кеша системного промпта (появился не во всех версиях — используем, если есть). */
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY?: string;
-  query: (opts: {
-    prompt: string | AsyncIterable<Record<string, unknown>>;
-    options: Record<string, unknown>;
-  }) => AsyncIterable<Record<string, unknown>>;
+  query: SdkQuery;
   tool: (name: string, description: string, schema: unknown, handler: (args: unknown) => Promise<unknown>) => unknown;
-  createSdkMcpServer: (opts: { name: string; tools: unknown[] }) => unknown;
+  createSdkMcpServer: (opts: { name: string; tools: unknown[]; timeout?: number }) => unknown;
+}
+
+/**
+ * Потолки сессии (W2). Ход модели — до 10 мин (max-эффорт на сложной задаче думает минутами; петля
+ * держит свой потолок задачи и отменит раньше). Ожидание результата инструмента — те же 10 мин:
+ * `skill.execute` до 130 с, `code_run` до 180 с, `wait_for` — минуты. Больше всех живых сессий, чем
+ * слотов параллельности, быть не должно — каждая = CLI-процесс.
+ */
+const TURN_TIMEOUT_MS = 10 * 60_000;
+const TOOL_WAIT_MS = 10 * 60_000;
+const SESSION_MAX_TURNS = 500;
+const MAX_SESSIONS = 6;
+
+/** Продолжение сессии: результаты инструментов из хвоста запроса, если он ровно их и содержит. */
+export function continuationOutcomes(req: LlmRequest, pendingIds: Set<string>): ToolOutcome[] | undefined {
+  const last = req.messages[req.messages.length - 1];
+  if (!last || last.role !== "user" || typeof last.content === "string") return undefined;
+  const results = last.content.filter((b): b is Extract<typeof b, { type: "tool_result" }> => b.type === "tool_result");
+  const texts = last.content.filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text").map((b) => b.text).filter((t) => t.trim());
+  const other = last.content.some((b) => b.type !== "tool_result" && b.type !== "text");
+  if (other || results.length === 0 || results.length !== pendingIds.size) return undefined;
+  if (!results.every((r) => pendingIds.has(r.tool_use_id))) return undefined;
+  const outcomes: ToolOutcome[] = results.map((r) => ({ toolUseId: r.tool_use_id, content: r.content, isError: r.is_error }));
+  if (texts.length > 0) {
+    // Врезки петли (нудж, поправка на ходу, live-контекст) идут в этом же user-сообщении текстом.
+    // В сессии SDK отдельного канала для них нет — доносим хвостом последнего результата, размеченно:
+    // модель обязана отличать наш статус от вывода инструмента (та же логика, что в транскрипте).
+    const lastOut = outcomes[outcomes.length - 1] as ToolOutcome;
+    const note = `\n\n### ВЛАДЕЛЕЦ/СИСТЕМА (примечание к этому ходу)\n${texts.join("\n\n")}`;
+    lastOut.content = typeof lastOut.content === "string" ? lastOut.content + note : [...lastOut.content, { type: "text", text: note }];
+  }
+  return outcomes;
+}
+
+/** Условия, при которых сессию можно продолжать: та же модель/эффорт/набор инструментов/стабильный system. */
+function sessionFingerprint(req: LlmRequest): string {
+  const stable = [req.systemStatic, req.systemSkill, req.systemTools].filter((s) => s && s.trim()).join("\n\n");
+  return [subscriptionModel(), subscriptionEffort(req.tier), (req.tools ?? []).map((t) => t.name).join(","), stable].join(" ");
 }
 
 export class SubscriptionLlmProvider implements ILlmProvider {
   private sdk: SdkModule | null = null;
   private readonly loadSdk: () => Promise<SdkModule>;
+  private readonly now: () => number;
+  /** Живые сессии по ключу задачи (W2). */
+  private readonly sessions = new Map<string, SubscriptionSession>();
 
   constructor(deps: SubscriptionLlmDeps = {}) {
+    this.now = deps.now ?? (() => Date.now());
     this.loadSdk =
       deps.loadSdk ??
       (async () => {
@@ -429,6 +443,23 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       return "нет авторизации подписки: `claude setup-token` → CLAUDE_CODE_OAUTH_TOKEN в .env (надёжно) ИЛИ `claude` → /login (проще)";
     }
     return undefined;
+  }
+
+  /** Сколько сессий живо сейчас (диагностика/тесты). */
+  get liveSessions(): number {
+    return this.sessions.size;
+  }
+
+  /** Задача завершена — её сессия SDK больше не нужна (петля зовёт из finally). */
+  release(key: string): void {
+    this.drop(key, "задача завершена");
+  }
+
+  private drop(key: string, reason: string): void {
+    const s = this.sessions.get(key);
+    if (!s) return;
+    this.sessions.delete(key);
+    s.close(reason);
   }
 
   /**
@@ -479,8 +510,30 @@ export class SubscriptionLlmProvider implements ILlmProvider {
 
   private async run(req: LlmRequest, onDelta?: (d: LlmDelta) => void): Promise<LlmResponse> {
     const sdk = this.sdk ?? (this.sdk = await this.loadSdk());
-    const captured: ToolUse[] = [];
-    const tools = buildTools(sdk, req.tools ?? [], captured);
+    const key = req.sessionKey;
+    const fingerprint = sessionFingerprint(req);
+    const t0 = this.now();
+
+    // W2: ПРОДОЛЖЕНИЕ живой сессии — хвост запроса ровно результаты ожидаемых инструментов.
+    if (key) {
+      const live = this.sessions.get(key);
+      if (live) {
+        const outcomes = live.alive && live.fingerprint === fingerprint ? continuationOutcomes(req, live.pendingIds()) : undefined;
+        if (outcomes) {
+          let turn: SessionTurn;
+          try {
+            turn = await live.continueWith(outcomes, onDelta);
+          } catch (e) {
+            this.drop(key, "продолжение не удалось");
+            throw e;
+          }
+          if (turn.ended) this.drop(key, "ход завершён");
+          return this.toResponse(req, turn, onDelta, "continued", t0);
+        }
+        this.drop(key, !live.alive ? "прежняя сессия завершилась" : live.fingerprint !== fingerprint ? "изменились модель/эффорт/инструменты" : "история разошлась с сессией");
+      }
+    }
+
     // ANTHROPIC_API_KEY ПОБЕЖДАЕТ подписку в порядке кредов SDK — в резерве он именно тот канал,
     // который уже не работает, поэтому вычищаем его из окружения дочернего процесса.
     const env: Record<string, string | undefined> = { ...process.env };
@@ -499,6 +552,22 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     // Поэтому: пустой список источников + отдельный ПУСТОЙ рабочий каталог (не-git, чтобы не
     // подцепить и статус репозитория). Путь ленивый — `.env` читается ПОСЛЕ ESM-импортов (грабля волны E).
     applySandboxEnv(env);
+    // Потолок вывода хода: у SDK нет per-call параметра — он читается из env дочернего процесса.
+    if (req.maxTokens) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(req.maxTokens);
+
+    const session = new SubscriptionSession(sdk.query, {
+      fingerprint,
+      turnTimeoutMs: TURN_TIMEOUT_MS,
+      idleTimeoutMs: TOOL_WAIT_MS,
+      now: this.now,
+      onClose: (reason) => {
+        if (key && this.sessions.get(key) === session) {
+          this.sessions.delete(key);
+          log.debug("резерв: сессия закрыта", { key, reason });
+        }
+      },
+    });
+    const tools = buildTools(sdk, req.tools ?? [], session);
     const options: Record<string, unknown> = {
       systemPrompt: buildSystem(req, sdk.SYSTEM_PROMPT_DYNAMIC_BOUNDARY),
       model: subscriptionModel(),
@@ -506,146 +575,108 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       settingSources: [],
       strictMcpConfig: true,
       cwd: sdkSandboxDir(),
-      // Свой цикл ведём МЫ: SDK должен вернуть первый ход (текст или запрос инструмента) и остановиться.
-      maxTurns: 1,
+      // W2: с ключом сессии цикл живёт всю задачу (наш хендлер отдаёт результаты петли); без ключа —
+      // разовый вызов: SDK возвращает первый ход и останавливается, как в волне G.
+      maxTurns: key ? SESSION_MAX_TURNS : 1,
       // Никаких встроенных инструментов Claude Code (Bash/Read/...): у Джарвиса свой арсенал и свои гейты.
       tools: [],
       ...(tools.length > 0
         ? {
-            mcpServers: { [SERVER_NAME]: sdk.createSdkMcpServer({ name: SERVER_NAME, tools }) },
+            mcpServers: { [SERVER_NAME]: sdk.createSdkMcpServer({ name: SERVER_NAME, tools, timeout: TOOL_WAIT_MS }) },
             allowedTools: [`${MCP_PREFIX}*`],
           }
         : {}),
       // §7/§2.7: размышление — по нашей пер-раундовой политике, а не по дефолту SDK.
       thinking: thinkingOption(req.thinking, req.tier),
       env,
-      ...(onDelta ? { includePartialMessages: true } : {}),
+      // Дельты нужны и продолжениям сессии (у которых свой onDelta) — включаем всегда, дёшево.
+      includePartialMessages: true,
     };
-    // Потолок вывода хода: у SDK нет per-call параметра — он читается из env дочернего процесса.
-    if (req.maxTokens) env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(req.maxTokens);
-
-    let text = "";
-    let streamed = "";
-    let errorText: string | undefined;
 
     // Зрение: есть картинки → streaming-input (блоки Messages API), иначе — обычный текстовый промпт.
     const transcript = serializeHistory(req);
     const images = collectImages(req);
     const prompt = images.length > 0 ? userMessageStream(transcript, images) : transcript;
 
-    // 🔴 РАЗМЕР ПРОМПТА СЧИТАЕМ ДО ЦИКЛА (адверс-разбор 2026-09-02, HIGH). Раньше `usage`
-    // присваивался ТОЛЬКО в ветке `type==="result"`, а на раунде с инструментом мы выходим из потока
-    // РАНЬШЕ (`break` — вызов исполняет НАШ agent-loop). Итог: 74 из 97 раундов дня ушли в телеметрию
-    // с нулями, и вместе с ними ослепли ДВА механизма: SpendGuard (учёт токенов) и, что важнее, гард
-    // контекст-окна — `lastPromptTokens` обнулялся каждым tool-раундом, то есть на длинной GUI-задаче
-    // (ровно эпизод с Дотой) защита от переполнения контекста была МЕРТВА.
-    // Ломать `break` нельзя: досмотрев поток до `result`, SDK успеет вызвать наш MCP-хендлер, а он
-    // кладёт вызов с НОВЫМ id — `dedupeById` не схлопнет его с настоящим, и agent-loop исполнил бы
-    // одно и то же действие ДВАЖДЫ (два клика, в худшем случае две отправки). Поэтому вход считаем
-    // сами (мы знаем, что отправили), а выход берём из usage ассистентского сообщения.
-    const sp = options.systemPrompt;
-    const promptTokens = Math.ceil(((Array.isArray(sp) ? sp.join("\n\n") : String(sp ?? "")).length + transcript.length) / 2.5);
-    let usage = { inputTokens: promptTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
-
-    // 🔴 ГЛАВНЫЙ путь отказа — БРОШЕННОЕ исключение (ревью волны I): когда CLI выходит с ошибкой
-    // (протухшая авторизация — самый частый случай), `sdk.query` бросает, а не отдаёт result-сообщение.
-    // Классификация ниже стояла ТОЛЬКО после цикла, поэтому в реальном сценарии не выполнялась вовсе,
-    // и владелец опять слышал «связь прервалась» вместо «нужно переавторизоваться».
-    try {
-      for await (const msg of sdk.query({ prompt, options })) {
-      const type = String(msg.type ?? "");
-      if (type === "stream_event" && onDelta) {
-        const ev = msg.event as { type?: string; delta?: { type?: string; text?: string } } | undefined;
-        const piece = ev?.delta?.type === "text_delta" ? (ev.delta.text ?? "") : "";
-        if (piece) {
-          streamed += piece;
-          onDelta({ text: piece });
-        }
-        continue;
+    if (key) {
+      if (this.sessions.size >= MAX_SESSIONS) {
+        const oldest = this.sessions.keys().next().value;
+        if (oldest !== undefined) this.drop(oldest, "слишком много живых сессий");
       }
-      if (type === "assistant") {
-        // Выход берём ЗДЕСЬ: на раунде с инструментом до `result` мы не доходим (см. промпт-токены
-        // выше). У SDKAssistantMessage поле message — обычный BetaMessage со своим usage.
-        const au = (msg.message as { usage?: Record<string, unknown> } | undefined)?.usage;
-        const out = Number(au?.output_tokens);
-        if (Number.isFinite(out) && out > 0) usage.outputTokens = out;
-        const content = (msg.message as { content?: unknown })?.content;
-        text += extractText(content);
-        const uses = extractToolUses(content);
-        if (uses.length > 0) {
-          captured.push(...uses);
-          break; // исполняет НАШ agent-loop — дальше SDK не пускаем
-        }
-        continue;
-      }
-      if (type === "result") {
-        const u = (msg.usage ?? {}) as Record<string, number>;
-        // 🔴 ЖИВОЙ БАГ (боевой прогон 2026-08-31): у SDK ИНАЯ семантика usage — `input_tokens` почти
-        // нулевой (видели 2), а `cache_*` кумулятивны по его внутренней сессии (68K+132K на 4-м
-        // раунде). Наш гард контекст-окна складывает input+cache_read+cache_creation как РАЗМЕР
-        // ПРОМПТА → 201K > HARD(185K) → задача обрывалась ложным «разрослась и не помещается» на
-        // четвёртом шаге. Поэтому размер промпта в резерве ОЦЕНИВАЕМ САМИ по тому, что реально
-        // отправили, а кеш-поля не выдаём за размер (в резерве нашего кеша нет вовсе — см. шапку).
-        const sp = options.systemPrompt;
-        const promptChars = (Array.isArray(sp) ? sp.join("\n\n") : String(sp ?? "")).length + transcript.length;
-        usage = {
-          inputTokens: Math.ceil(promptChars / 2.5), // 2.5 симв/ток — кириллическая калибровка проекта
-          outputTokens: Number(u.output_tokens ?? 0),
-          cacheReadTokens: 0,
-          cacheCreationTokens: 0,
-        };
-        if (u.cache_read_input_tokens || u.cache_creation_input_tokens) {
-          log.debug("резерв: кеш-числа SDK не используются как размер промпта", {
-            sdkCacheRead: u.cache_read_input_tokens,
-            sdkCacheCreation: u.cache_creation_input_tokens,
-            ourEstimate: usage.inputTokens,
-          });
-        }
-        // 🔴 `error_max_turns` — НЕ ошибка в нашей схеме: мы СПЕЦИАЛЬНО ставим maxTurns:1, чтобы
-        // цикл вёл наш agent-loop, и SDK помечает так штатный случай «модель запросила инструмент
-        // и остановилась» (поймано живым зондом). Ошибкой считаем только то, где мы ничего не
-        // получили — иначе честный ход с инструментом превращался бы в стаб.
-        const failed = msg.subtype && msg.subtype !== "success" && msg.subtype !== "error_max_turns";
-        if (failed) errorText = String(msg.result ?? msg.subtype);
-        if (!text && typeof msg.result === "string" && msg.subtype === "success") text = msg.result;
-      }
-      }
-    } catch (e) {
-      // Ничего не получили — это отказ канала, и владелец должен услышать ЕГО причину. Если же
-      // модель успела дать текст или запросить инструмент, работу не выбрасываем: обрыв на хвосте
-      // потока не повод превращать состоявшийся ход в стаб.
-      const raw = e instanceof Error ? e.message : String(e);
-      // 🔴 ЖИВОЙ БАГ (лог 2026-09-02, 10:11): у SDK текст самой ошибки приходит и как «ответ
-      // ассистента». Тогда `text` непуст, ветка «частичный ответ» считала ход СОСТОЯВШИМСЯ, и
-      // владельцу озвучили сырое английское «You've hit your session limit · resets 2:20pm»
-      // голосом дворецкого, а ход записали УСПЕШНЫМ (ok:true в метриках). Эхо ошибки — это не
-      // работа модели: ход провален, причина называется по-русски (см. withKnownReason).
-      if (captured.length === 0 && ((!text && !streamed) || isErrorEcho(text || streamed, raw))) {
-        lastFailure = classifySubscriptionError(raw);
-        log.warn("резерв недоступен (исключение SDK)", { kind: lastFailure.kind, human: lastFailure.human, эхоОшибки: Boolean(text || streamed) });
-        throw new Error(`подписка: ${lastFailure.human}`);
-      }
-      log.warn("резерв: поток оборвался после частичного ответа — отдаю, что получил", { error: raw });
+      this.sessions.set(key, session);
     }
+    let turn: SessionTurn;
+    try {
+      turn = await session.start(prompt, options, onDelta);
+    } catch (e) {
+      this.drop(key ?? "", "старт не удался");
+      session.close("старт не удался");
+      throw e;
+    }
+    // Разовый вызов (без ключа) исполняет инструмент НАШ agent-loop — SDK дальше не пускаем:
+    // досмотрев поток, он дождался бы хендлера с новым вызовом, и действие исполнилось бы дважды.
+    if (!key || turn.ended) {
+      session.close(key ? "ход завершён" : "разовый вызов");
+      if (key) this.sessions.delete(key);
+    }
+    return this.toResponse(req, turn, onDelta, "fresh", t0, transcript, options);
+  }
 
+  /** Ход сессии → ответ провайдера: честность по ошибкам, usage, метрика раунда. */
+  private toResponse(
+    req: LlmRequest,
+    turn: SessionTurn,
+    onDelta: ((d: LlmDelta) => void) | undefined,
+    mode: "fresh" | "continued",
+    t0: number,
+    transcript?: string,
+    options?: Record<string, unknown>,
+  ): LlmResponse {
+    let text = turn.text;
+    if (!text && turn.resultText && turn.toolUses.length === 0) text = turn.resultText;
+    const errorText = turn.errorText;
     // Ошибку поднимаем, только если ход ничего не дал: пришедший текст/вызов инструмента — уже
     // результат, и превращать его в стаб (потеря работы модели) было бы ложным провалом.
-    // Исключение — то же эхо: «ответ», совпадающий с текстом ошибки, результатом не является.
-    if (errorText && captured.length === 0 && ((!text && !streamed) || isErrorEcho(text || streamed, errorText))) {
+    // 🔴 Исключение — ЭХО ошибки (живой баг 2026-09-02, 10:11): у SDK текст ошибки приходит и как
+    // «ответ ассистента» — владельцу озвучили сырое «You've hit your session limit» голосом
+    // дворецкого, а ход записали успешным. «Ответ», совпадающий с текстом ошибки, результатом не является.
+    if (errorText && turn.toolUses.length === 0 && (!text || isErrorEcho(text, errorText))) {
       lastFailure = classifySubscriptionError(errorText);
-      log.warn("резерв недоступен", { kind: lastFailure.kind, human: lastFailure.human });
+      log.warn("резерв недоступен", { kind: lastFailure.kind, human: lastFailure.human, эхоОшибки: Boolean(text), mode });
       throw new Error(`подписка: ${lastFailure.human}`);
     }
+    if (errorText) log.warn("резерв: поток оборвался после частичного ответа — отдаю, что получил", { error: errorText });
     // Ход прошёл — прежняя причина отказа больше не актуальна (иначе паспорт врал бы о мёртвом канале).
     lastFailure = undefined;
-    // Стрим уже отдал текст наружу — не дублируем его в ответе иным содержимым (инвариант
-    // «сумма дельт === resp.text» из контракта ILlmProvider).
-    const finalText = onDelta && streamed ? streamed : text;
-    const toolUses = dedupeById(captured);
+
+    // usage — per-call числа ассистентского сообщения SDK: input + cache_read + cache_creation = РЕАЛЬНЫЙ
+    // размер промпта этого вызова (в сессии история сидит в кеше — так гард контекст-окна видит правду).
+    // SDK не отдал usage (сбой/мок) → оцениваем вход сами по тому, что отправили (2.5 симв/ток, кириллица).
+    let usage = turn.usage;
+    if (usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens === 0 && transcript !== undefined) {
+      const sp = options?.systemPrompt;
+      const promptChars = (Array.isArray(sp) ? sp.join("\n\n") : String(sp ?? "")).length + transcript.length;
+      usage = { ...usage, inputTokens: Math.ceil(promptChars / 2.5) };
+    }
+    const totalMs = this.now() - t0;
+    log.info("резерв: раунд", {
+      mode,
+      tier: req.tier,
+      effort: subscriptionEffort(req.tier),
+      initMs: turn.initMs,
+      ttftMs: turn.ttftMs,
+      totalMs,
+      in: usage.inputTokens,
+      cacheRead: usage.cacheReadTokens,
+      cacheCreate: usage.cacheCreationTokens,
+      out: usage.outputTokens,
+      toolUses: turn.toolUses.map((u) => u.name),
+    });
+    const finalText = onDelta ? text : text;
     return {
       text: finalText.trim(),
-      toolUses,
-      stopReason: toolUses.length > 0 ? "tool_use" : "end_turn",
+      toolUses: turn.toolUses,
+      stopReason: turn.toolUses.length > 0 ? "tool_use" : "end_turn",
       usage,
       stubbed: false,
       channel: "subscription", // расход считается лимитами подписки, а не долларами API
@@ -658,7 +689,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
 
 /**
  * Один user-ход с блоками (текст + картинки) в формате streaming-input SDK. Генератор завершается
- * сразу: наш цикл ведёт агент-петля, продолжения диалога внутри SDK-сессии нам не нужны.
+ * сразу: продолжения диалога идут через результаты инструментов (сессия W2), а не новыми user-ходами.
  */
 function userMessageStream(text: string, images: Array<Record<string, unknown>>): AsyncIterable<Record<string, unknown>> {
   return (async function* () {
@@ -670,20 +701,13 @@ function userMessageStream(text: string, images: Array<Record<string, unknown>>)
   })();
 }
 
-/** Уникальные вызовы по id (перехват может добавить их и из потока, и из хендлера). */
-function dedupeById(uses: ToolUse[]): ToolUse[] {
-  const seen = new Set<string>();
-  return uses.filter((u) => (seen.has(u.id) ? false : (seen.add(u.id), true)));
-}
-
 /**
  * Наши JSON-Schema-инструменты → инструменты SDK. `tool()` требует zod-shape, а у нас сырая JSON
  * Schema, поэтому объявляем ОДИН свободный параметр `args` и кладём настоящую схему в описание:
  * строгую валидацию всё равно делает наш dispatch, а модель видит поля из описания.
- * Хендлер не исполняет: если поток перехватить не удалось, он фиксирует вызов и честно сообщает
- * модели, что исполнение идёт на стороне Джарвиса.
+ * Хендлер (W2) не исполняет сам: он ЖДЁТ результат от agent-loop через сессию и отдаёт его SDK.
  */
-function buildTools(sdk: SdkModule, schemas: readonly ToolSchema[], captured: ToolUse[]): unknown[] {
+function buildTools(sdk: SdkModule, schemas: readonly ToolSchema[], session: SubscriptionSession): unknown[] {
   // Лимит Anthropic на имя инструмента — 64 символа, а в резерве к имени добавляется наш префикс
   // `mcp__jarvis__` (13). Наши имена короткие, но инструменты ВНЕШНИХ MCP-серверов приходят уже с
   // собственным префиксом (`mcp__github__…` — проверено живым зондом: срез префикса восстанавливает
@@ -699,12 +723,7 @@ function buildTools(sdk: SdkModule, schemas: readonly ToolSchema[], captured: To
       s.name,
       `${s.description}\n\nПАРАМЕТРЫ (JSON Schema) — передавай их объектом в поле args:\n${JSON.stringify(s.input_schema)}`,
       argsShape(),
-      async (args: unknown) => {
-        const a = (args ?? {}) as Record<string, unknown>;
-        const input = (a.args && typeof a.args === "object" ? a.args : a) as Record<string, unknown>;
-        captured.push({ id: newId(), name: s.name, input });
-        return { content: [{ type: "text", text: "Принято: выполняет Джарвис." }] };
-      },
+      async (args: unknown) => session.handle(s.name, unwrapArgs(args)),
     ),
   );
 }

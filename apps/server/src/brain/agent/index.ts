@@ -2744,6 +2744,8 @@ async function runAgentLoop(
       // §7 «эффорт» по тиру → thinking (модель-aware в anthropic); §Волна2 (2.7) — с пер-раундовым
       // override (off на механике). При эскалации currentTier меняется → меняется и эффорт.
       thinking: roundThinking,
+      // W2: одна сессия модели на задачу (провайдер подписки держит диалог между раундами; release — в finally).
+      sessionKey: taskId,
     };
     // §10 realtime: на ПЕРВОМ ходе с sink стримим текст пофразно (token-streaming) — НО ТОЛЬКО
     // для многопредложенных конверсационных реплик (как в плане: «пофразный — для много-
@@ -2762,7 +2764,10 @@ async function runAgentLoop(
     if (sink && step === 0 && !opts?.suppressStepStream) {
       const chunker = new SentenceChunker();
       const held: string[] = [];
-      let eager = false; // подтверждённый конверсационный режим (≥2 фразы) → немедленная отдача
+      // W2 (2026-09-09): на РАЗГОВОРНОМ ходе первую фразу отдаём сразу — mouth-to-ear = первый токен + одна
+      // фраза, а не вся генерация. Преамбула перед инструментом («Сейчас гляну…») тут и есть честная
+      // обратная связь; финал tool-хода произносит терминал. На action-пути гард ≥2 фраз остаётся.
+      let eager = opts?.conversational === true; // подтверждённый конверсационный режим → немедленная отдача
       const onPiece = (raw: string): void => {
         if (eager) {
           emitSentence(sink, raw);
@@ -3714,6 +3719,8 @@ async function runAgentLoop(
     // (флаг не взводился), но снимок ОСТАВАЛСЯ в ОЗУ-сторе — успешный терминал его не гасил, и
     // «доделай» 30 минут воскрешал СДЕЛАННУЮ задачу. clearIf по чужому/пустому слоту — no-op.
     deps.checkpoints?.clearIf(deps.userId, taskId);
+    // W2: сессия модели этой задачи больше не нужна (подписка держит CLI-процесс и ждёт результат инструмента).
+    deps.llm.release?.(taskId);
   }
 
   // Ревью волны Б (#4): петля исчерпала HARD_STEP_CAP БЕЗ финального текста (модель звала инструменты

@@ -86,13 +86,12 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(r.text).toBe("Блокнот открыт.");
     expect(r.stopReason).toBe("end_turn");
     expect(r.stubbed).toBe(false); // это НАСТОЯЩИЙ ход, а не заглушка
-    // 🔴 Живой баг волны G: usage у SDK иной семантики (input≈2, cache_* кумулятивны по его сессии) —
-    // сложенные, они давали «размер промпта» 201K и рвали задачу ложным contextWrap на 4-м шаге.
-    // Поэтому размер промпта ОЦЕНИВАЕМ САМИ по отправленному, а кеш-числа SDK не выдаём за него.
+    // W2: usage — per-call числа SDK (input + cache_read + cache_creation = реальный размер промпта
+    // ЭТОГО вызова). Кумулятивным был usage у `result` многоходовой сессии — его берём лишь когда
+    // ассистентское сообщение своего не дало (одноходовый запрос: совпадают).
     expect(r.usage.outputTokens).toBe(7);
-    expect(r.usage.cacheReadTokens).toBe(0);
-    expect(r.usage.cacheCreationTokens).toBe(0);
-    expect(r.usage.inputTokens).toBeGreaterThan(0); // наша оценка по системному промпту + транскрипту
+    expect(r.usage.cacheReadTokens).toBe(3);
+    expect(r.usage.inputTokens).toBe(100);
     expect(r.channel).toBe("subscription"); // канал → петля не начислит долларовую стоимость
   });
 
@@ -259,16 +258,31 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
    * «по тиру» (обычный ход low) выводилась из замера СКОРОСТИ, а решала про КАЧЕСТВО — и в живом
    * логе дала ответ по памяти вместо проверки. Тест падает, если политика вернётся к low.
    */
-  it("модель всегда сильная (opus-5), эффорт — max на ЛЮБОМ тире", async () => {
+  // W2 (2026-09-09): эффорт ПО ТИРУ — единственный рычаг скорости на подписке, который не меняет модель
+  // (замер: сама модель на латентность почти не влияет, p90 держит длинное размышление). Дорога назад
+  // к решению 2026-09-02 «max везде» — JARVIS_SUBSCRIPTION_EFFORT=max (см. тест ниже).
+  it("модель всегда сильная (opus-5), эффорт — по тиру: haiku medium, sonnet high, fable max", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
     await p.complete({ ...BASE, tier: "haiku" });
     expect(sdk.lastOptions?.model).toBe("opus");
-    expect(sdk.lastOptions?.effort).toBe("max");
+    expect(sdk.lastOptions?.effort).toBe("medium");
     await p.complete({ ...BASE, tier: "sonnet" });
-    expect(sdk.lastOptions?.effort).toBe("max");
+    expect(sdk.lastOptions?.effort).toBe("high");
     await p.complete({ ...BASE, tier: "fable" });
     expect(sdk.lastOptions?.effort).toBe("max");
+  });
+
+  it("JARVIS_SUBSCRIPTION_EFFORT=max возвращает «max на любом тире» (дорога назад к решению 2026-09-02)", async () => {
+    process.env.JARVIS_SUBSCRIPTION_EFFORT = "max";
+    try {
+      const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+      const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+      await p.complete({ ...BASE, tier: "haiku" });
+      expect(sdk.lastOptions?.effort).toBe("max");
+    } finally {
+      delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
+    }
   });
 
   /**
@@ -312,7 +326,7 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
       const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
       const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
       await p.complete({ ...BASE, tier: "sonnet" });
-      expect(sdk.lastOptions?.effort).toBe("max");
+      expect(sdk.lastOptions?.effort).toBe("high");
       await p.complete({ ...BASE, tier: "fable" });
       expect(sdk.lastOptions?.effort).toBe("max");
     } finally {

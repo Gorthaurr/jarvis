@@ -107,3 +107,76 @@ describe("brain пофразный стрим (§10)", () => {
     expect(reply.voice).toContain("Антон");
   });
 });
+
+/**
+ * W2 «Мозг быстрый» (2026-09-09). Провайдер-обёртка: помнит, сколько фраз уже ушло в голос на момент
+ * КАЖДОГО обращения к модели, и фиксирует release(sessionKey) — проводка петли с сессией провайдера.
+ */
+function observingLlm(script: ConstructorParameters<typeof MockLlmProvider>[0], sentences: string[]) {
+  const inner = new MockLlmProvider(script);
+  const spokenAtCall: number[] = [];
+  const released: string[] = [];
+  const llm: ILlmProvider = {
+    live: false,
+    complete: async (req) => {
+      spokenAtCall.push(sentences.length);
+      return inner.complete(req);
+    },
+    completeStream: async (req, onDelta) => {
+      spokenAtCall.push(sentences.length);
+      return inner.completeStream(req, onDelta);
+    },
+    release: (key) => {
+      released.push(key);
+    },
+  };
+  return { llm, inner, spokenAtCall, released };
+}
+
+describe("W2: первая фраза разговора — сразу; сессия модели — на задачу", () => {
+  it("на РАЗГОВОРНОМ ходе преамбула перед инструментом звучит ДО его исполнения, финал — после (не дублируется)", async () => {
+    const { sink, sentences } = collectSink();
+    const { llm, spokenAtCall } = observingLlm(
+      [
+        { text: "Сейчас проверю погоду.", toolUses: [{ id: "t1", name: "web_search", input: { query: "погода" } }] },
+        { text: "В Москве плюс пять." },
+      ],
+      sentences,
+    );
+    await handleUserText(session, "какая сейчас погода в москве?", makeDeps(llm), sink);
+    expect(sentences[0]).toBe("Сейчас проверю погоду."); // первая фраза ушла сразу, без ожидания второй
+    expect(spokenAtCall[1]).toBe(1); // ко второму обращению к модели она УЖЕ прозвучала
+    expect(sentences.filter((s) => s.includes("плюс пять"))).toHaveLength(1); // финал ровно один раз
+    expect(sentences.filter((s) => s.includes("проверю"))).toHaveLength(1); // преамбула ровно один раз
+  });
+
+  it("на action-пути (команда) преамбула по-прежнему НЕ стримится (гард ≥2 фраз, анти-двойной-голос)", async () => {
+    const { sink, sentences } = collectSink();
+    const { llm } = observingLlm(
+      [
+        { text: "Сейчас открою.", toolUses: [{ id: "t1", name: "app_launch", input: { app: "блокнот" } }] },
+        { text: "Открыл блокнот." },
+      ],
+      sentences,
+    );
+    await handleUserText(session, "открой мне пожалуйста блокнот и подготовь его", makeDeps(llm), sink);
+    expect(sentences).not.toContain("Сейчас открою.");
+  });
+
+  it("петля даёт каждому обращению sessionKey = id задачи и освобождает сессию в finally ровно один раз", async () => {
+    const { sink, sentences } = collectSink();
+    const { llm, inner, released } = observingLlm(
+      [
+        { text: "", toolUses: [{ id: "t1", name: "web_search", input: { query: "погода" } }] },
+        { text: "В Москве плюс пять." },
+      ],
+      sentences,
+    );
+    await handleUserText(session, "какая сейчас погода в москве?", makeDeps(llm), sink);
+    const keys = new Set(inner.requests.map((r) => r.sessionKey));
+    expect(keys.size).toBe(1); // одна сессия на задачу, оба раунда с одним ключом
+    const key = [...keys][0];
+    expect(typeof key).toBe("string");
+    expect(released).toEqual([key]);
+  });
+});
