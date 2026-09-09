@@ -27,6 +27,8 @@ interface FakeSdk extends SdkModule {
   handlerDelayMs: number;
   /** Завершить сессию ошибкой после результата инструмента. */
   failAfterTool?: string;
+  /** Не слать message_stop после tool_use (старый SDK / потерянное событие) — проверка страховки. */
+  noMessageStop?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -49,10 +51,12 @@ function realisticSdk(): FakeSdk {
         yield {
           type: "assistant",
           message: {
+            id: "msg_1",
             usage: { input_tokens: 2, cache_creation_input_tokens: 100, output_tokens: 5 },
             content: [{ type: "tool_use", id: "t1", name: "mcp__jarvis__app_launch", input: { args: { app: "notepad" } } }],
           },
         };
+        if (!sdk.noMessageStop) yield { type: "stream_event", event: { type: "message_stop" } };
         const tool = server?.tools.find((t) => t.name === "app_launch");
         if (!tool) return;
         if (sdk.handlerDelayMs > 0) await sleep(sdk.handlerDelayMs);
@@ -110,6 +114,60 @@ describe("W2: непрерывная сессия SDK (провайдер)", () 
     expect(second.usage.cacheReadTokens).toBe(100); // история в кеше CLI
     expect(second.usage.inputTokens).toBe(2);
     expect(p.liveSessions).toBe(0); // текстовый финал завершил сессию
+  });
+
+  it("ДВА tool_use одного ответа (SDK шлёт их отдельными assistant-сообщениями с одним id) → ОДИН раунд петли, оба хендлера получают свои результаты", async () => {
+    const results: string[] = [];
+    const sdk: FakeSdk = {
+      ...realisticSdk(),
+      query({ options }) {
+        const abort = options.abortController as AbortController;
+        sdk.queries.push({ prompt: "", options, abort });
+        const launch = ((options.mcpServers as Record<string, { tools: FakeTool[] }>).jarvis as { tools: FakeTool[] }).tools[0] as FakeTool;
+        return (async function* () {
+          const usage = { input_tokens: 2, output_tokens: 31 };
+          yield { type: "assistant", message: { id: "msg_A", usage, content: [{ type: "tool_use", id: "a", name: "mcp__jarvis__app_launch", input: { args: { app: "x" } } }] } };
+          // как настоящий CLI: хендлер первого блока зовётся ДО прихода второго блока
+          const pa = launch.handler({ args: { app: "x" } }).then((r) => results.push("a:" + r.content[0]?.text));
+          yield { type: "assistant", message: { id: "msg_A", usage, content: [{ type: "tool_use", id: "b", name: "mcp__jarvis__app_launch", input: { args: { app: "y" } } }] } };
+          yield { type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" } } };
+          yield { type: "stream_event", event: { type: "message_stop" } };
+          await pa;
+          const rb = await launch.handler({ args: { app: "y" } });
+          results.push("b:" + rb.content[0]?.text);
+          if (abort.signal.aborted) return;
+          yield { type: "assistant", message: { id: "msg_B", usage: { input_tokens: 2, output_tokens: 3 }, content: [{ type: "text", text: "Оба открыл." }] } };
+          yield { type: "result", subtype: "success", usage: {} };
+        })();
+      },
+    };
+    const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+    const first = await p.complete(BASE);
+    expect(first.toolUses.map((u) => u.id)).toEqual(["a", "b"]); // один раунд с обоими вызовами
+    expect(first.usage.outputTokens).toBe(31); // usage ответа посчитан один раз, не по блокам
+    const second = await p.complete({
+      ...BASE,
+      messages: [
+        ...BASE.messages,
+        { role: "assistant", content: [{ type: "tool_use", id: "a", name: "app_launch", input: { app: "x" } }, { type: "tool_use", id: "b", name: "app_launch", input: { app: "y" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: "окно x" }, { type: "tool_result", tool_use_id: "b", content: "окно y" }] },
+      ],
+    });
+    expect(results).toEqual(["a:окно x", "b:окно y"]); // каждый хендлер — свой результат, в порядке CLI
+    expect(second.text).toBe("Оба открыл.");
+    expect(sdk.queries).toHaveLength(1);
+  });
+
+  it("без message_stop (потерянное событие) tool_use-ход всё равно отдаётся по страховочному таймеру", async () => {
+    vi.useFakeTimers();
+    const sdk = realisticSdk();
+    sdk.noMessageStop = true;
+    const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
+    const pending = p.complete(BASE);
+    await vi.advanceTimersByTimeAsync(2100);
+    const first = await pending;
+    expect(first.toolUses.map((u) => u.id)).toEqual(["t1"]);
+    p.release("task-1");
   });
 
   it("результат, пришедший РАНЬШЕ вызова хендлера, ждёт его (порядок событий SDK не гарантирован)", async () => {
@@ -226,7 +284,7 @@ describe("W2: непрерывная сессия SDK (провайдер)", () 
     const p = new SubscriptionLlmProvider({ loadSdk: async () => sdk });
     await p.complete(BASE);
     expect(sdk.queries[0]?.options.maxTurns).toBeGreaterThan(1);
-    const server = (sdk.queries[0]?.options.mcpServers as Record<string, { timeout?: number }>).jarvis;
+    const server = (sdk.queries[0]?.options.mcpServers as Record<string, { timeout?: number }>).jarvis as { timeout?: number };
     expect(server.timeout).toBeGreaterThanOrEqual(120_000); // skill.execute/code_run/wait_for — минуты
     const env = sdk.queries[0]?.options.env as Record<string, string>;
     expect(Number(env.MAX_MCP_OUTPUT_TOKENS)).toBeGreaterThan(25_000); // дефолтный кап CLI ниже нашего tool_result
@@ -287,6 +345,7 @@ describe("W2: SubscriptionSession (мост хендлер ↔ результа�
             ],
           },
         };
+        yield { type: "stream_event", event: { type: "message_stop" } };
         void options;
         await new Promise(() => {}); // сессию закроют снаружи
       })();
@@ -328,6 +387,7 @@ describe("W2: SubscriptionSession (мост хендлер ↔ результа�
     const query = () =>
       (async function* () {
         yield { type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "mcp__jarvis__k", input: {} }] } };
+        yield { type: "stream_event", event: { type: "message_stop" } };
         await new Promise(() => {});
       })();
     const s = new SubscriptionSession(query as never, { fingerprint: "f", turnTimeoutMs: 60_000, idleTimeoutMs: 5000, onClose: (r) => (onClose = r) });

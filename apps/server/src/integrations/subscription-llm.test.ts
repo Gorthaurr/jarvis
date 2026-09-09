@@ -234,12 +234,13 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   // На ПОНИЖЕННОМ эффорте (владелец явно попросил экономить) пер-раундовая политика §2.7 работает:
   // механические раунды не платят за размышление. На боевом дефолте (max) размышление не глушится —
   // см. соседний тест: «max без thinking» противоречиво.
-  it("на пониженном эффорте политика §2.7 уважается: off → disabled", async () => {
+  // W2: зонд показал, что disabled↔adaptive ломает кеш CLI целиком — на подписке thinking всегда adaptive.
+  it("на пониженном эффорте политика «off» НЕ переключает thinking в disabled (иначе промах кеша CLI)", async () => {
     process.env.JARVIS_SUBSCRIPTION_EFFORT = "low";
     try {
       const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
       await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, tier: "sonnet", thinking: "off" });
-      expect(sdk.lastOptions?.thinking).toEqual({ type: "disabled" });
+      expect(sdk.lastOptions?.thinking).toEqual({ type: "adaptive" });
     } finally {
       delete process.env.JARVIS_SUBSCRIPTION_EFFORT;
     }
@@ -445,9 +446,11 @@ describe("изоляция CLI-подпроцесса (экономия лими
     const sp = sdk.lastOptions?.systemPrompt as string[];
     expect(Array.isArray(sp)).toBe(true);
     expect(sp[1]).toBe("__BOUNDARY__");
-    expect(sp[0]).toContain("ПЕРСОНА"); // стабильная часть — до границы (кешируется)
-    expect(sp[0]).toContain("НАВЫК");
-    expect(sp[2]).toBe("СЕЙЧАС 22:00"); // меняющаяся — после
+    expect(sp[0]).toBe("ПЕРСОНА"); // до границы — ТОЛЬКО персона (один кеш-блок CLI, 81K токенов)
+    // W2: навык и каталог меняются от задачи к задаче — в кеш-блок им нельзя (промах на весь блок)
+    expect(sp[2]).toContain("НАВЫК");
+    expect(sp[2]).toContain("КАТАЛОГ");
+    expect(sp[2]).toContain("СЕЙЧАС 22:00"); // меняющаяся — после
   });
 
   it("SDK без маркера границы → одна строка, как раньше (совместимость, а не поломка)", async () => {
