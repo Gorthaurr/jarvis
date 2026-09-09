@@ -3510,7 +3510,14 @@ Electron-клиента; живой смоук в игре — за владел
   читает кириллицу; sherpa-onnx-node и onnxruntime-node в одном процессе конфликтуют → на клиенте только
   sherpa (VAD тоже его); модуль external в esbuild (`scripts/build.mjs`) и в `electron-builder.yml`;
   `reset()` детектора = НОВЫЙ стрим (kws.reset оставляет левый контекст энкодера — второе «Джарвис» на
-  хвосте прошлого хода ловилось нестабильно). Ставить модели: `node apps/client/scripts/fetch-hearing-models.mjs`.
+  хвосте прошлого хода ловилось нестабильно); `import("sherpa-onnx-node")` из CJS-бандла отдаёт namespace
+  БЕЗ части именованных экспортов (живой лог: `keys=OnlineRecognizer,default`) — брать `ns.default ?? ns`;
+  `activate()` при локальном wake гейт НЕ открывает (renderer зовёт его при старте ПОСЛЕ подъёма слуха —
+  иначе гейт висел открытым до первого idle). Ставить модели: `node apps/client/scripts/fetch-hearing-models.mjs`.
+  **Живой прогон 2026-09-09 09:06 на голосе владельца:** «Джарвис, ты меня слышишь?» → локальный wake
+  (написание `javas`) → wake_local + пре-ролл → Deepgram «Джарвис, ты меня слышишь?» → ответ; далее
+  «Джарвис, открой дискорд» → tier0 (mouth-to-ear 1,9 с; сам запуск Discord упал в резолвере —
+  `process-exited-immediately`, не про слух).
 - **Гейт микрофона закрыт между ходами** (`audio/index.ts`): при `wakeword.ready` idle сервера закрывает
   гейт; «Джарвис» локально → `audio.vad{wake_local}` + ПРЕ-РОЛЛ 1,5 с (кольцо кадров — само слово и начало
   команды) + живой поток. `activate({hold})`/`release()` — запись голосового отпечатка держит гейт;

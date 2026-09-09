@@ -271,11 +271,13 @@ describe("W1 (2026-09-09): локальный wake — гейт закрыт м�
   });
 
   it("idle сервера ЗАКРЫВАЕТ гейт, когда есть локальный wake (§0.6 по построению); без него — нет (прежнее поведение)", () => {
-    const local = setup(wakeOnFrame(999));
-    local.ac.activate();
-    local.ac.setServerState("idle");
+    const local = setup(wakeOnFrame(1));
+    local.ac.activate(); // с локальным wake activate() гейт НЕ открывает (слух = детектор на устройстве)
+    local.ac.ingest(loud()); // 1-й кадр — детект → гейт открыт, пре-ролл ушёл
+    expect(local.sendFrame).toHaveBeenCalledTimes(1);
+    local.ac.setServerState("idle"); // ход кончился → гейт закрывается
     local.ac.ingest(loud());
-    expect(local.sendFrame).not.toHaveBeenCalled(); // гейт закрыт — только локальный детектор
+    expect(local.sendFrame).toHaveBeenCalledTimes(1); // гейт закрыт — только локальный детектор
     expect(local.onMicState).toHaveBeenLastCalledWith(false);
 
     const cloud = setup(); // MockWakeWord (ready=false)
@@ -316,5 +318,47 @@ describe("W1 (2026-09-09): локальный wake — гейт закрыт м�
     ac.setEngines({ wake: wakeOnFrame(999) });
     ac.ingest(loud());
     expect(sendFrame).toHaveBeenCalledTimes(1); // больше не стримит
+  });
+});
+
+describe("W1: закрытие гейта по таймеру listening (фон в комнате не даёт серверу дойти до idle)", () => {
+  function wakeOnFrame(n: number): IWakeWord & { calls: number } {
+    const w = {
+      ready: true,
+      calls: 0,
+      process: (_p: Int16Array) => {
+        w.calls += 1;
+        return w.calls === n;
+      },
+    };
+    return w;
+  }
+
+  it("сервер завис в listening (ТВ держит VAD) → через 10 с гейт закрывается; новый ход (thinking) отменяет таймер", () => {
+    vi.useFakeTimers();
+    try {
+      const { ac, sendFrame } = setup(wakeOnFrame(1));
+      ac.ingest(loud()); // wake → гейт открыт
+      expect(sendFrame).toHaveBeenCalledTimes(1);
+      ac.setServerState("listening");
+      vi.advanceTimersByTime(9_000);
+      ac.ingest(loud());
+      expect(sendFrame).toHaveBeenCalledTimes(2); // ещё открыт
+      vi.advanceTimersByTime(1_500);
+      ac.ingest(loud());
+      expect(sendFrame).toHaveBeenCalledTimes(2); // закрылся по таймеру
+
+      // Второй сценарий: listening → thinking (ход пошёл) → таймер снят, гейт живёт.
+      const b = setup(wakeOnFrame(1));
+      b.ac.ingest(loud());
+      b.ac.setServerState("listening");
+      vi.advanceTimersByTime(8_000);
+      b.ac.setServerState("thinking");
+      vi.advanceTimersByTime(5_000);
+      b.ac.ingest(loud());
+      expect(b.sendFrame).toHaveBeenCalledTimes(2); // открыт: ход в работе
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

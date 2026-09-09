@@ -184,9 +184,12 @@ export async function createSherpaHearing(opts: { dir?: string; onWake?: (keywor
   let sherpa: SherpaModule;
   try {
     const spec = "sherpa-onnx-node"; // по переменной: esbuild не бандлит нативный модуль
-    sherpa = (await import(spec)) as SherpaModule;
+    // CJS-модуль через import(): в бандле Electron именованные экспорты не все переезжают в namespace
+    // (живой лог: keys = OnlineRecognizer,default) — берём сам module.exports из `default`.
+    const ns = (await import(spec)) as { default?: SherpaModule } & Partial<SherpaModule>;
+    sherpa = (ns.default ?? ns) as SherpaModule;
   } catch (e) {
-    log.warn("sherpa-onnx-node не загрузился — слух на заглушках", e instanceof Error ? e.message : String(e));
+    log.warn("sherpa-onnx-node не загрузился — слух на заглушках", { error: e instanceof Error ? e.message : String(e) });
     return null;
   }
   const p = hearingPaths(dir);
@@ -220,7 +223,12 @@ export async function createSherpaHearing(opts: { dir?: string; onWake?: (keywor
     log.info("слух поднят: локальный wake «Джарвис» (sherpa KWS) + Silero VAD", { ms: Date.now() - t0, keywords: p.keywords });
     return { wake: new SherpaWakeWord(kws, opts.onWake), vad: new SherpaVad(vad), keywordsFile: p.keywords };
   } catch (e) {
-    log.warn("слух не поднялся (sherpa) — заглушки", e instanceof Error ? e.message : String(e));
+    log.warn("слух не поднялся (sherpa) — заглушки", {
+      error: e instanceof Error ? e.message : String(e),
+      stack: e instanceof Error ? (e.stack ?? "").split("\n").slice(0, 4).join(" | ") : undefined,
+      keys: Object.keys(sherpa as unknown as Record<string, unknown>).slice(0, 12).join(","),
+      paths: p,
+    });
     return null;
   }
 }

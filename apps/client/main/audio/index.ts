@@ -100,6 +100,11 @@ const MAX_PLAYBACK_TAIL_MS = 90_000;
  * 75 кадров × 20 мс = 1,5 с — хватает на «Джарвис» + начало команды.
  */
 const PREROLL_FRAMES = 75;
+/** W1: сервер в listening без нового хода дольше этого → гейт закрыть (env JARVIS_LISTEN_IDLE_CLOSE_MS, деф 10 с). */
+const LISTEN_IDLE_CLOSE_MS = (() => {
+  const n = Number.parseInt(process.env.JARVIS_LISTEN_IDLE_CLOSE_MS ?? "", 10);
+  return Number.isFinite(n) && n >= 2_000 ? n : 10_000;
+})();
 
 export class AudioCoordinator {
   private wakeword: IWakeWord;
@@ -152,6 +157,14 @@ export class AudioCoordinator {
   activate(opts: { hold?: boolean } = {}): void {
     this.muted = false;
     if (opts.hold) this.holdOpen = true;
+    // W1: с локальным wake «включить слух» = слушать «Джарвис» на устройстве, а НЕ лить звук в облако.
+    // Гейт откроет сам детектор (или удержание на запись голоса). Живой лог 2026-09-09: renderer звал
+    // activate() при старте ПОСЛЕ подъёма слуха, и гейт оставался открытым до первого idle сервера.
+    if (this.localWakeAvailable() && !opts.hold) {
+      if (this.gateOpen && this.lastServerState === "idle") this.closeGate("activate-local-wake");
+      this.log.info("слух включён: локальный wake, гейт закрыт до «Джарвис»");
+      return;
+    }
     if (!this.gateOpen) this.openGate(opts.hold ? "manual-hold" : "manual");
   }
 
@@ -235,6 +248,32 @@ export class AudioCoordinator {
     // Без локального wake — прежнее поведение: НЕ закрываем на idle (иначе, как в §3 ambient, гейт
     // закрылся бы НАВСЕГДА — открыть некому — и Джарвис «глох» после первого ответа).
     if (state === "idle" && this.localWakeAvailable() && !this.holdOpen && !this.muted) this.closeGate("idle-local-wake");
+    // Живой прогон 2026-09-09: в комнате с фоном (ТВ/Discord) сервер до idle НЕ доходит — VAD-события
+    // держат его в listening бесконечно, и гейт не закрывался никогда. Поэтому закрываем и по ТАЙМЕРУ:
+    // сервер в listening дольше LISTEN_IDLE_CLOSE_MS без нового хода (thinking/speaking) → закрыть.
+    // Окно follow-up владельца укладывается в этот срок; дальше — снова «Джарвис» (и это цель W0/W1).
+    if (this.localWakeAvailable() && !this.holdOpen && !this.muted && this.gateOpen && state === "listening") this.armListenIdleClose();
+    else this.clearListenIdleClose();
+  }
+
+  private listenIdleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private armListenIdleClose(): void {
+    this.clearListenIdleClose();
+    this.listenIdleTimer = setTimeout(() => {
+      this.listenIdleTimer = null;
+      if (this.gateOpen && this.lastServerState === "listening" && this.localWakeAvailable() && !this.holdOpen && !this.muted) {
+        this.closeGate("listen-idle-local-wake");
+      }
+    }, LISTEN_IDLE_CLOSE_MS);
+    this.listenIdleTimer.unref?.();
+  }
+
+  private clearListenIdleClose(): void {
+    if (this.listenIdleTimer) {
+      clearTimeout(this.listenIdleTimer);
+      this.listenIdleTimer = null;
+    }
   }
 
   /** Принудительно закрыть микрофон (честный mute, §0.6). */
