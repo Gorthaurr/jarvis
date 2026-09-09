@@ -32,7 +32,7 @@ function fake(opts: { live: boolean; result?: LlmResponse; throws?: Error; text?
       p.calls += 1;
       if (opts.throws) throw opts.throws;
       const r = opts.result ?? resp();
-      if (r.text) onDelta({ text: r.text });
+      if (r.text && !r.stubbed) onDelta({ text: r.text }); // как реальный провайдер: стаб дельтой не отдаётся (W0)
       return r;
     },
   };
@@ -449,5 +449,67 @@ describe("терминальный отказ основного канала �
     await p.completeStream(REQ, () => {});
     await p.completeStream(REQ, () => {});
     expect(primary.calls).toBe(1);
+  });
+});
+
+describe("W0 (2026-09-09): стрим основного канала пробрасывается СРАЗУ, а не после генерации", () => {
+  /** Основной канал, который отдаёт дельты по одной и ждёт разрешения завершиться. */
+  function slowPrimary(deltas: string[], final: LlmResponse) {
+    let release!: () => void;
+    const done = new Promise<void>((r) => (release = r));
+    const p = {
+      live: true,
+      calls: 0,
+      async complete(): Promise<LlmResponse> {
+        p.calls += 1;
+        return final;
+      },
+      async completeStream(_r: LlmRequest, onDelta: (d: LlmDelta) => void): Promise<LlmResponse> {
+        p.calls += 1;
+        for (const t of deltas) onDelta({ text: t });
+        await done;
+        return final;
+      },
+      release: () => release(),
+    };
+    return p;
+  }
+
+  it("первая дельта доходит до потребителя ДО завершения ответа основного канала (реверт: буферизация — падает)", async () => {
+    const primary = slowPrimary(["Секунду, ", "сэр."], resp({ text: "Секунду, сэр." }));
+    const secondary = fake({ live: true });
+    const p = new FallbackLlmProvider(primary, secondary);
+    const seen: string[] = [];
+    const pending = p.completeStream(REQ, (d) => seen.push(d.text));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seen).toEqual(["Секунду, ", "сэр."]); // уже пришли, хотя ответ ещё не завершён
+    primary.release();
+    const r = await pending;
+    expect(r.text).toBe("Секунду, сэр.");
+    expect(secondary.calls).toBe(0);
+  });
+
+  it("основной оборвался ПОСЛЕ выдачи дельт → честный стаб, резерв НЕ зовём (двойного голоса нет)", async () => {
+    const primary = slowPrimary(["Начал..."], STUB);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    const seen: string[] = [];
+    const pending = p.completeStream(REQ, (d) => seen.push(d.text));
+    await new Promise((r) => setTimeout(r, 0));
+    primary.release();
+    const r = await pending;
+    expect(r.stubbed).toBe(true);
+    expect(secondary.calls).toBe(0);
+    expect(seen).toEqual(["Начал..."]);
+  });
+
+  it("основной отказал ДО первой дельты → резерв со стримом, как раньше", async () => {
+    const primary = fake({ live: true, result: STUB });
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary);
+    const seen: string[] = [];
+    const r = await p.completeStream(REQ, (d) => seen.push(d.text));
+    expect(r.text).toBe("по подписке");
+    expect(seen).toEqual(["по подписке"]);
   });
 });

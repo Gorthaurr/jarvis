@@ -63,6 +63,9 @@ export class WorkingMemory {
 
   /** Добавить реплику; старые вытесняются (кольцевой буфер). */
   pushTurn(role: Turn["role"], text: string): void {
+    // W0 (2026-09-09): пустая реплика (тихий финал отменённой задачи: terminal("")) в историю не идёт —
+    // пустой assistant-content в середине диалога API не принимает, а смысла в ней нет.
+    if (text.trim().length === 0) return;
     this.turns.push({ role, text, ts: Date.now() });
     if (this.turns.length > this.maxTurns) {
       this.turns.splice(0, this.turns.length - this.maxTurns);

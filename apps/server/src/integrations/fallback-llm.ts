@@ -230,21 +230,31 @@ export class FallbackLlmProvider implements ILlmProvider {
   }
 
   async completeStream(req: LlmRequest, onDelta: (d: LlmDelta) => void): Promise<LlmResponse> {
-    // 🔴 Стрим и фолбэк: дельты, уже отданные наружу, «отыграть» нельзя (двойной голос). Поэтому на
-    // основном канале сначала пробуем БЕЗ выдачи наружу — копим локально и отдаём одним куском, если
-    // ход удался. Так переключение на резерв остаётся возможным без риска озвучить два ответа.
+    // 🔴 W0 (2026-09-09): дельты основного канала ПРОБРАСЫВАЮТСЯ СРАЗУ. Версия волны G копила их в буфер и
+    // отдавала одним куском ПОСЛЕ завершения генерации — ради переключения на резерв без «двойного голоса».
+    // Цена: первое слово = полная генерация; замеренный 29.07 выигрыш пофразного стрима был обнулён на всём
+    // API-канале. Компромисс: резерв пробуем, только если основной отказал ДО первой дельты; отказ ПОСЛЕ
+    // выдачи дельт — честный стаб (как было до волны G), двойного голоса нет.
     if (forceSubscription()) {
       return this.viaSubscription(req, "принудительная проверка резерва", () => localStub(), onDelta);
     }
-    let acc = "";
+    let emitted = false;
     const wallStart = Date.now();
     const tryPrimary = this.primaryWorthTrying();
-    const first = tryPrimary ? await this.primary.completeStream(req, (d) => (acc += d.text)) : undefined;
+    const first = tryPrimary
+      ? await this.primary.completeStream(req, (d) => {
+          if (d.text) emitted = true;
+          onDelta(d);
+        })
+      : undefined;
     if (first) this.notePrimary(!first.stubbed, wallStart);
     if (first && !first.stubbed) {
       this.lastChannel = "primary";
-      if (acc) onDelta({ text: acc });
       return first;
+    }
+    if (first && emitted) {
+      log.warn("основной канал оборвался ПОСЛЕ выдачи дельт — резерв не пробуем (двойной голос), ход честно провален");
+      return withKnownReason(first);
     }
     return this.viaSubscription(req, this.switchReason(first), () => first ?? localStub(), onDelta);
   }

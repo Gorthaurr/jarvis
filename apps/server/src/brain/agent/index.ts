@@ -1051,7 +1051,8 @@ export async function handleUserText(
     // Без sink (dev.text/чат/тесты) ИЛИ откат JARVIS_SYNC_FIRST=0: прежнее — молча в фон, итог через
     // speakResult (в тексте нет аудио-очереди → скопом не сливается; сеанс не блокируется на длинной задаче).
     deps.taskAccepted?.();
-    startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext, viaWake: meta?.viaWake, machine: machineTurn, selectionAtStart }), deps, { bounded: true });
+    const preTask = queuedPreTask(session, clean, deps);
+    startBackgroundTask(() => runAgentLoop(session, clean, tier, deps, undefined, { freshContext, viaWake: meta?.viaWake, machine: machineTurn, selectionAtStart, preTask }), deps, { bounded: true, preTask });
     return finishReply({ voice: "" });
   }
 
@@ -1096,7 +1097,7 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
   // CDP) ПРОМОТИМ в фон по бюджету — «Секунду, сэр» + итог по готовности, микрофон освобождается (та
   // же защита от «глохнет», что раньше давал безусловный фон). Откат к старому фону — JARVIS_SYNC_FIRST=0.
   if (sink && deps.speakResult && !instant && process.env.JARVIS_SYNC_FIRST !== "0") {
-    const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", 10_000);
+    const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", SYNC_PROMOTE_DEFAULT_MS);
     const runP = runLocalIntent(session, local, arbiter, deps.isClosed, deps.openOrFocus, () => deps.selection?.drawing === true);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const outcome = await Promise.race<{ kind: "done"; reply: AgentReply } | { kind: "error"; error: unknown } | { kind: "slow" }>([
@@ -1153,15 +1154,33 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
  * серия. bounded=true — под ограничителем параллельных agent-loop'ов (не спамить LLM).
  * Итог озвучивается по готовности через speakResult; в мёртвую сессию — молчим.
  */
+/**
+ * W0: зарегистрировать задачу ДО ожидания семафора — в состоянии queued. Раньше tasks.create жил внутри
+ * runAgentLoop, то есть ПОСЛЕ sem.acquire(): пока слоты заняты, задачу не видели ни «отмени всё»
+ * (cancelUser), ни дубль-гейт, ни «что делаешь» — «отмени всё» снимало три, четвёртая стартовала после
+ * и исполнялась.
+ */
+function queuedPreTask(session: Session, goal: string, deps: AgentDeps): Task | undefined {
+  if (!deps.tasks) return undefined;
+  const task = deps.tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal });
+  deps.tasks.markQueued(task.taskId);
+  return task;
+}
+
 function startBackgroundTask(
   run: () => Promise<AgentReply>,
   deps: AgentDeps,
-  opts: { bounded: boolean },
+  opts: { bounded: boolean; preTask?: Task },
 ): void {
   const sem = opts.bounded ? deps.concurrency : undefined;
   const task = (async () => {
     if (sem) await sem.acquire();
     try {
+      // W0: отменили, пока стояли в очереди → не стартуем вовсе.
+      if (opts.preTask && (opts.preTask.cancel.cancelled || opts.preTask.state === "cancelled")) {
+        log.info("§20 задача отменена в очереди — не запускаем", { taskId: opts.preTask.taskId });
+        return;
+      }
       const reply = await run();
       deps.memory.pushTurn("assistant", reply.voice);
       if (reply.voice.trim() && !deps.isClosed?.()) {
@@ -1204,7 +1223,8 @@ async function runActionSyncFirst(
   if (sem && !sem.tryAcquire()) {
     log.info("sync-first: слоты параллельности заняты — команда в bounded-фон (не превышаем MAX_PARALLEL_TASKS)");
     deps.taskAccepted?.();
-    startBackgroundTask(() => runAgentLoop(session, text, tier, deps, undefined, { ...opts }), deps, { bounded: true });
+    const preTask = queuedPreTask(session, text, deps);
+    startBackgroundTask(() => runAgentLoop(session, text, tier, deps, undefined, { ...opts, preTask }), deps, { bounded: true, preTask });
     sink.done(""); // тихий финал (как прежний фон-путь)
     return { voice: "" };
   }
@@ -1216,7 +1236,7 @@ async function runActionSyncFirst(
     }
   };
 
-  const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", 10_000);
+  const promoteMs = envInt("JARVIS_SYNC_PROMOTE_MS", SYNC_PROMOTE_DEFAULT_MS);
   let detached = false;
   // Обёртка: до промоушена — прозрачна к реальному sink; после — инертна (петля больше не стримит
   // в голосовой канал; её финал доставит speakResult). Петля зовёт только sentence/thinking (см.
@@ -1265,7 +1285,7 @@ async function runActionSyncFirst(
   // ПРОМОУШЕН: задача затянулась → «Берусь, сэр» СРАЗУ (не молчание), микрофон освобождается, итог в фон.
   detached = true;
   log.info("sync-first: задача затянулась — промоушен в фон", { promoteMs });
-  sink.done(verbalize("Берусь, сэр — доложу по готовности."));
+  sink.done(verbalize(promoteAck()));
   const bg = loopP
     .then((reply) => {
       deps.memory.pushTurn("assistant", reply.voice);
@@ -1283,6 +1303,23 @@ async function runActionSyncFirst(
   return { voice: "" }; // ход уже озвучил «Берусь» через sink.done выше
 }
 
+/**
+ * W0 (2026-09-09): ПРОМОУШЕН В ФОН ЧЕРЕЗ 1,5 с, а не через 10. Телеметрия за 30 дней: 41 из 86 замеров
+ * mouth-to-ear легли ровно в 10 013–10 525 мс — первым звуком любого хода с инструментами был «Берусь, сэр»
+ * на 10-й секунде, а до него только earcon-тик на 700 мс. То есть Джарвис был СПРОЕКТИРОВАН отвечать
+ * через 10 секунд. Теперь первый звук — через ~1,5 с (короткие задачи по-прежнему отвечают результатом
+ * сразу: они укладываются в бюджет). Env JARVIS_SYNC_PROMOTE_MS переопределяет.
+ */
+const SYNC_PROMOTE_DEFAULT_MS = 1_500;
+/** Короткие ack промоушена — ротация, чтобы не было заученной отбивки (персона: «variety is mandatory»). */
+const PROMOTE_ACKS = ["Берусь, сэр.", "Сию минуту.", "Занимаюсь.", "Сейчас сделаю.", "Принял, делаю.", "Есть, сэр."] as const;
+let promoteAckIdx = 0;
+function promoteAck(): string {
+  const ack = PROMOTE_ACKS[promoteAckIdx % PROMOTE_ACKS.length]!;
+  promoteAckIdx += 1;
+  return ack;
+}
+
 /** Полный agent-loop с tool-use (§7, §8). sink (§10) — пофразный стрим финальной реплики. */
 async function runAgentLoop(
   session: Session,
@@ -1296,6 +1333,8 @@ async function runAgentLoop(
     smalltalk?: boolean;
     suppressStepStream?: boolean;
     viaWake?: boolean;
+    /** W0: задача, созданная ДО ожидания семафора (state queued) — иначе в очереди её не видят «отмени»/дубль-гейт. */
+    preTask?: Task;
     /** Волна C: продолжаем ПРЕРВАННУЮ задачу — журнал прошлого захода уходит хвостом в convo. */
     resumeFrom?: TaskCheckpoint;
     /** Машинный реэнтри (watch-action), не речь владельца: чекпойнт не пишем (см. saveCheckpoint). */
@@ -1329,7 +1368,9 @@ async function runAgentLoop(
   // она нужна для механики петли (cancel/прогресс), но не всплывает в active()/scope/«сделал?».
   const isConversational = opts?.conversational === true;
   const tasks = deps.tasks ?? new TaskManager();
-  const task = tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal: text, conversational: isConversational });
+  // W0: задача могла быть зарегистрирована заранее (queued за семафором) — переводим в running, не плодим вторую.
+  const task = opts?.preTask ?? tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal: text, conversational: isConversational });
+  if (opts?.preTask) tasks.start(task.taskId);
   const taskId = task.taskId;
 
   // Аренда ввода (§20): задача занимает мышь/клаву на ПЕРВОЙ GUI-команде и держит до
@@ -1632,10 +1673,15 @@ async function runAgentLoop(
   // (continuity без раздувания), обычный ход — полный недавний диалог.
   const FRESH_CONTEXT_WINDOW = 10;
   const turns = opts?.freshContext ? deps.memory.recentTurns(FRESH_CONTEXT_WINDOW) : deps.memory.recentTurns();
-  const convo: LlmMessage[] = turns.map((t) => ({ role: t.role, content: t.text }) as LlmMessage);
+  // W0: пустые реплики (тихий финал отменённой задачи и т.п.) в промпт не идут — пустой content = 400 у API.
+  const convo: LlmMessage[] = turns.filter((t) => t.text.trim().length > 0).map((t) => ({ role: t.role, content: t.text }) as LlmMessage);
   // Opus 4.8 не принимает префилл: convo ДОЛЖЕН заканчиваться сообщением пользователя.
   // Страховка от хвостовых assistant-сообщений (дворецкий ack, гонки фоновых задач).
   while (convo.length > 0 && convo[convo.length - 1]?.role !== "user") convo.pop();
+  // W0: цель петли — ЯВНЫЙ text этой команды. Задача, простоявшая в очереди за семафором, стартует, когда
+  // в рабочей памяти последней может лежать уже ДРУГАЯ реплика владельца — модель исполнила бы не ту команду.
+  const lastUser = convo.length > 0 ? convo[convo.length - 1] : undefined;
+  if (!lastUser || lastUser.content !== text) convo.push({ role: "user", content: text } as LlmMessage);
   // Волна C (P0 #4): ПРОДОЛЖЕНИЕ прерванной задачи — журнал прошлого захода идёт ХВОСТОМ (как steer/
   // live-рефреш): system-блок не пересобирается, кеш персоны §15 цел. Журнал компактен и текстов —
   // никаких tool_use/thinking-инвариантов Anthropic на резюме (см. checkpoint.ts, «почему журнал»).

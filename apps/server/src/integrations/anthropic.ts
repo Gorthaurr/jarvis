@@ -161,9 +161,10 @@ export class AnthropicLlmProvider implements ILlmProvider {
    */
   async completeStream(req: LlmRequest, onDelta: (d: LlmDelta) => void): Promise<LlmResponse> {
     if (!this.live) {
-      const s = stub(req);
-      if (s.text) onDelta({ text: s.text });
-      return s;
+      // W0: текст СТАБА дельтой не отдаём — это не ответ модели, а сообщение о провале; его озвучивает
+      // терминал петли (H2). Иначе FallbackLlmProvider не отличил бы «стаб до первой дельты» от «оборвался
+      // после дельт» и не переключался бы на резерв.
+      return stub(req);
     }
     let acc = "";
     try {
@@ -184,7 +185,7 @@ export class AnthropicLlmProvider implements ILlmProvider {
         };
       }
       const resp = await this.complete(req);
-      if (resp.text) onDelta({ text: resp.text });
+      if (resp.text && !resp.stubbed) onDelta({ text: resp.text }); // W0: стаб дельтой не отдаём (см. выше)
       return resp;
     }
   }
