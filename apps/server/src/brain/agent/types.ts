@@ -1,4 +1,6 @@
 // W3 «Петля»: контракты агента (ответ, sink стрима, зависимости) — вынесены из agent/index.ts дословно.
+import type { Task } from "../tasks/task.js";
+import type { TaskCheckpoint } from "./checkpoint.js";
 import { type AsyncMutex, type Semaphore, type ThinkingEffort, type Tier } from "@jarvis/shared";
 import type { McpManager } from "../mcp/manager.js";
 import type { ILlmProvider } from "../../integrations/llm.js";
@@ -222,4 +224,25 @@ export interface AgentDeps {
   bgTasks?: Set<Promise<void>>;
   /** Закрыта ли сессия (§20): фоновый итог не озвучиваем в мёртвую сессию. */
   isClosed?: () => boolean;
+}
+
+/** Опции одного прогона петли (runAgentLoop). */
+export interface LoopOpts {
+  freshContext?: boolean;
+  conversational?: boolean;
+  smalltalk?: boolean;
+  suppressStepStream?: boolean;
+  viaWake?: boolean;
+  /** W0: задача, созданная ДО ожидания семафора (state queued) — иначе в очереди её не видят «отмени»/дубль-гейт. */
+  preTask?: Task;
+  /** Волна C: продолжаем ПРЕРВАННУЮ задачу — журнал прошлого захода уходит хвостом в convo. */
+  resumeFrom?: TaskCheckpoint;
+  /** Машинный реэнтри (watch-action), не речь владельца: чекпойнт не пишем (см. saveCheckpoint). */
+  machine?: boolean;
+  /**
+   * §режим выделения (контроль-3): выделение было активно НА СТАРТЕ хода. Гейт store читал слот в
+   * КОНЦЕ хода — выделение, снятое пока модель отвечала, пропускало в кэш дейктический ответ
+   * («вы показываете на область 640×360»), который потом всплывал без всякой рамки.
+   */
+  selectionAtStart?: boolean;
 }
