@@ -136,6 +136,7 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "app.close": "app_close",
   "ui.ground": "ui_ground",
   "ui.invoke": "ui_invoke",
+  "gui.act": "act", // W4 «Руки»: ОДИН примитив «сделай X с элементом Y» — лестница поиска + действие + сверка на клиенте
   "ui.snapshot": "ui_snapshot", // §Волна2 (2.4): set-of-marks окна — дешёвые «глаза»
   "window.list": "window_list", // §Волна2 (2.4): окна верхнего уровня on-demand
   "window.focus": "window_focus", // §Волна2 (2.4): фокус по hwnd/подстроке с честным readback
@@ -200,6 +201,52 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
 };
 
 const ACTUATOR_TOOLS: ToolSchema[] = [
+  {
+    name: "act",
+    description:
+      "ГЛАВНЫЙ инструмент рук в GUI (W4): «нажми «Отправить» в Telegram», «открой вкладку «Настройки»», «напечатай X в поле «Поиск»» — ОДНИМ вызовом. Клиент САМ находит цель лестницей (handle → UIA-снапшот активного окна по тексту/роли → локальный OCR всего экрана → элемент под точкой), делает действие БЕЗ курсора где возможно (UIA invoke; физический клик — только фолбэк или physical:true), и СВЕРЯЕТ исход: снимок структуры окна ДО/ПОСЛЕ (дельта «+появилось/−исчезло») плюс ожидание признака verify. Ответ: found{via,name,role} — что реально найдено и как; did — что сделано; verified: \"met\" (признак наступил — исход подтверждён) | \"failed\" (действие УШЛО, признак за timeoutMs не наступил — НЕ повторяй вслепую, сверь глазами: ui_snapshot/screen_read_text) | \"unchecked\" (verify не задан или сенсор не смог ответить — сверь сам); detail; наблюдение-дельта. Не найдено → ЧЕСТНАЯ ошибка со списком видимых элементов (подбери точное имя из них) — не «клик мимо с ok». Несколько одинаковых → ошибка с кандидатами (уточни role/automationId/x,y). target: строка = видимый текст элемента (кнопка/пункт/вкладка/поле), объект — {text, role, automationId, handle из ui_snapshot, x/y точка}. app — сперва сфокусировать окно по подстроке заголовка/процесса («Telegram», «Блокнот»); окна нет → ошибка, ничего не нажато. do: click (дефолт) | double | right | type (клик в поле + печать text) | set (UIA setValue text — мгновенно, для полей) | toggle | select | expand | key (нажать combo, напр. «Ctrl+S»; target не нужен). ВСЕГДА задавай verify, когда знаешь признак успеха («Отправлено», новое окно, исчезновение диалога) — это и есть сверка. §14: Enter/«Отправить»/«Оплатить» в мессенджере/банке/1С → подтверждение владельца. Игра/canvas (UIA слепа): цель по тексту найдётся через OCR; пиксельный геймплей НЕ обещай — потолок у всех агентов (OSWorld 2.0 ~20%).",
+    input_schema: obj(
+      {
+        target: {
+          description: "Строка — видимый текст элемента; ИЛИ объект {text?, role?, automationId?, handle?, x?, y?, space?:\"screen\"} (x/y — координаты последнего screen_capture; space:\"screen\" — абсолютные DIP).",
+          anyOf: [
+            { type: "string" },
+            {
+              type: "object",
+              properties: {
+                text: { type: "string" },
+                role: { type: "string", description: "Роль UIA: Button, Edit, ListItem, TabItem, MenuItem, CheckBox, ComboBox, Hyperlink, TreeItem…" },
+                automationId: { type: "string" },
+                handle: { type: "string", description: "handle из ui_snapshot — точная адресация без поиска." },
+                x: { type: "number" },
+                y: { type: "number" },
+                space: { type: "string", enum: ["screen"] },
+              },
+              additionalProperties: false,
+            },
+          ],
+        },
+        app: { type: "string", description: "Сначала сфокусировать окно (подстрока заголовка/процесса). Не найдено → ошибка, действие не выполняется." },
+        do: { type: "string", enum: ["click", "double", "right", "type", "set", "toggle", "select", "expand", "key"], description: "Действие (дефолт click)." },
+        text: { type: "string", description: "Для do=type/set: что напечатать/установить." },
+        combo: { type: "string", description: "Для do=key: клавиша/сочетание в нотации input_key («Enter», «Ctrl+S»)." },
+        verify: {
+          type: "object",
+          description: "Признак исхода: text (появился на экране), element {role,name} (есть в окне), title (заголовок окна содержит); gone:true — ждать исчезновения; timeoutMs (деф 4000, макс 15000).",
+          properties: {
+            text: { type: "string" },
+            element: { type: "object", properties: { role: { type: "string" }, name: { type: "string" } }, required: ["role"], additionalProperties: false },
+            title: { type: "string" },
+            gone: { type: "boolean" },
+            timeoutMs: { type: "integer", minimum: 500, maximum: 15000 },
+          },
+          additionalProperties: false,
+        },
+        physical: { type: "boolean", description: "Сразу физический клик SendInput (игра/canvas, где UIA заведомо слепа)." },
+      },
+      [],
+    ),
+  },
   {
     name: "app_launch",
     description:

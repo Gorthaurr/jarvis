@@ -30,6 +30,8 @@ import { selectionClear, selectionStart, selectionView } from "./selection.js";
 import { selectionStore } from "../selection/store.js";
 import { OVERLAY_EXIT_CODE, focusStealsUnderVeil, isVeilGatedInput, overlayDrawingFromCodeRun, veilRelevant } from "../selection/veil-policy.js";
 import { DrawingOverlayError } from "./input.js";
+import { act } from "./act.js";
+import { ActPartialError } from "./act-do.js";
 import { screenOcr, waitFor } from "./sensors-cheap.js";
 import { captureUiFingerprint, observeAfterAction } from "./observe.js";
 import * as system from "./system.js";
@@ -74,7 +76,7 @@ const JARVIS_INPUT_TOLERANCE_MS = 900;
 /** Последний ввод, признанный ВЛАДЕЛЬЦЕВЫМ (не нашим) — для честного присутствия в снимке ПК. */
 let lastUserInputAt = 0;
 /** Команды, которые ФИЗИЧЕСКИ инжектят ввод в сессию пользователя (в отличие от UIA-invoke/CDP). */
-const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key", "input.mouse"]);
+const PHYSICAL_INPUT_KINDS = new Set<ActionCommand["kind"]>(["input.click", "input.type", "input.key", "input.mouse", "gui.act"]); // W4: act может уйти физическим вводом
 /**
  * Команды, после которых снимается fused-наблюдение → для них нужен снимок структуры ДО действия
  * (иначе дельту не с чем считать). Список ровно повторяет call-site'ы observeAfterAction.
@@ -253,7 +255,7 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
       log.info(`physical-input «${cmd.kind}» отклонён: открыт оверлей режима выделения`);
       // Контроль-3: код ОДИН на оба рубежа (здесь и в точке инжекции) — сервер узнаёт вуаль только по
       // `overlay_drawing`; прежний «denied» уходил в петлю обычным провалом и кормил §7-эскалацию.
-      const drawMsg = focusStealsUnderVeil(cmd.kind)
+      const drawMsg = focusStealsUnderVeil(cmd.kind) || (cmd.kind === "gui.act" && Boolean(cmd.app))
         ? `${drawBlock} Смена фокуса окна отобрала бы клавиатуру у окна рисования — Esc владельца ушёл бы в чужое приложение.`
         : drawBlock;
       return errResult(commandId, startedAt, "overlay_drawing", drawMsg);
@@ -398,6 +400,12 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
           ? await observeAfterAction({ settleMs: 400, clickPoint: dragEnd, before: beforeUi })
           : undefined;
         return okResult(commandId, startedAt, observation ? { op: cmd.op, observation } : { op: cmd.op });
+      }
+      case "gui.act": {
+        // W4 «Руки»: поиск → действие → сверка внутри ОДНОГО вызова (act.ts); снимок «до» act снимает сам —
+        // после фокуса окна и поиска цели (needsBeforeSnapshot для него false осознанно).
+        const out = await act(cmd, { restoreCursor: !userActiveNow() });
+        return okResult(commandId, startedAt, out);
       }
       case "ui.invoke": {
         await ground.invoke(cmd.target, cmd.pattern, cmd.value);
@@ -787,6 +795,9 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
       // Контроль-6 (C5R-2): «ушло, исход не подтверждён» — отдельный признак (сервер: overlayActionInjected).
       return { ...errResult(commandId, startedAt, "overlay_drawing", e.message), ...(e.injected ? { stepActionInjected: true } : {}) };
     }
+    // W4: часть act ушла в GUI (клик в поле прошёл, печать упала) — ошибка, но с признаком «ушло»: сервер
+    // помечает исход неизвестным, чтобы «доделай» не повторило действие вслепую.
+    if (e instanceof ActPartialError) return { ...errResult(commandId, startedAt, "runtime", e.message), stepActionInjected: true };
     const message = e instanceof Error ? e.message : String(e);
     log.error(`actuator ${cmd.kind} упал: ${message}`);
     // NotImplementedError из стабов — это тоже runtime-ошибка наружу (честно).

@@ -119,3 +119,25 @@ describe("web_act (невидимый браузер) — по последне�
     expect(c2.confirm).not.toHaveBeenCalled();
   });
 });
+
+describe("W4 act — гейт через dispatchTool", () => {
+  it("act do:key Enter при Telegram на переднем плане: отказ → declined, gui.act НЕ уходит клиенту", async () => {
+    const sendAction = vi.fn(okSend);
+    const c = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "Telegram", approved: false });
+    const r = await dispatchTool("act", { do: "key", combo: "Enter" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(r.declined).toBe(true);
+    expect(sendAction).not.toHaveBeenCalled();
+  });
+
+  it("act клик «Отправить» при Telegram — спрашивает, одобрение → gui.act уходит; клик «Настройки» — не спрашивает", async () => {
+    const sendAction = vi.fn(okSend);
+    const c = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "Telegram", approved: true });
+    await dispatchTool("act", { target: "Отправить" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(sendAction).toHaveBeenCalledTimes(1);
+    expect(sendAction.mock.calls[0]?.[0]).toMatchObject({ kind: "gui.act", target: "Отправить" });
+    await dispatchTool("act", { target: "Настройки" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+  });
+});

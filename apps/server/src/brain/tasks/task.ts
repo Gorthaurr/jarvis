@@ -397,6 +397,16 @@ export function stepLabelFor(toolName: string, input: Record<string, unknown>): 
       return "Ищу элемент на экране";
     case "ui_invoke":
       return "Нажимаю элемент";
+    case "act": {
+      // W4 «Руки»: метка по глаголу и цели — чип §20 показывает «Нажимаю «Отправить»», а не «Работаю…».
+      const verb = s(input.do) || "click";
+      const t = input.target;
+      const name = typeof t === "string" ? t : t && typeof t === "object" ? s((t as { text?: unknown }).text) : "";
+      const tail = name ? ` «${name.slice(0, 30)}»` : "";
+      if (verb === "type" || verb === "set") return `Печатаю${name ? ` в${tail}` : ""}`;
+      if (verb === "key") return `Нажимаю ${s(input.combo) || "клавишу"}`;
+      return `Нажимаю${tail || " элемент"}`;
+    }
     case "input_click":
     case "input_mouse":
       return "Кликаю";

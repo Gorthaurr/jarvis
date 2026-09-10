@@ -171,3 +171,17 @@ describe("мышь под вуалью гейтится ЦЕЛИКОМ", () => {
     expect(arrangeGatedUnderVeil("minimize")).toBe(false);
   });
 });
+
+describe("W4 act под вуалью", () => {
+  it("гейтится: app / physical / double / right / type / key / цель-точка; бесшумный клик по тексту, set и toggle проходят", () => {
+    expect(isVeilGatedInput({ kind: "gui.act", target: "Отправить", app: "Telegram" })).toBe(true);
+    expect(isVeilGatedInput({ kind: "gui.act", target: "Отправить", physical: true })).toBe(true);
+    for (const verb of ["double", "right", "type", "key"] as const) {
+      expect(isVeilGatedInput({ kind: "gui.act", target: "x", do: verb, text: "t", combo: "Enter" }), verb).toBe(true);
+    }
+    expect(isVeilGatedInput({ kind: "gui.act", target: { x: 1, y: 2 } })).toBe(true);
+    expect(isVeilGatedInput({ kind: "gui.act", target: "Отправить" })).toBe(false);
+    expect(isVeilGatedInput({ kind: "gui.act", target: "Флажок", do: "toggle" })).toBe(false);
+    expect(isVeilGatedInput({ kind: "gui.act", target: { text: "Поиск", role: "Edit" }, do: "set", text: "x" })).toBe(false);
+  });
+});

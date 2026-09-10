@@ -23,6 +23,7 @@ export const INPUT_BEARING_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>(
   "input.click",
   "input.mouse", // §Волна2 (2.4): SendInput — та же мышь, тот же арбитраж
   "ui.invoke",
+  "gui.act", // W4 «Руки»: фокус окна + клик/печать — та же мышь/клавиатура/фокус
   "app.launch",
   "app.focus",
   "app.close",

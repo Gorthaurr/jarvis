@@ -17,6 +17,7 @@ describe("классификация аренды ввода (§20)", () => {
         "app.launch",
         "browser.act",
         "browser.open",
+      "gui.act", // W4 «Руки»: фокус окна + клик/печать
         "input.click",
         "input.key",
         "input.mouse",

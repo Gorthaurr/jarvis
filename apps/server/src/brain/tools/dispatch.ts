@@ -81,6 +81,7 @@ import { mailRead } from "./handlers/mail.js";
 import { selfCodeRead, selfCodeSearch, selfPatch, selfWeaknesses } from "./handlers/self.js";
 import { fileView } from "./handlers/file-view.js";
 import { screenSelection } from "./handlers/selection.js";
+import { actResult } from "./handlers/act.js";
 
 /** Минимальный приёмник действий (реализует Session). */
 export interface ActuatorSink {
@@ -676,7 +677,8 @@ async function dispatchToolCore(
   // Enter в Telegram Desktop/Discord, «Оплатить» в банк-клиенте — по процессу на переднем плане из живого
   // снимка ПК; в невидимом браузере (web_act) — по хосту последнего web_open. Координатный клик и
   // безымянный селектор не судятся (осознанный предел). Отказ → declined (петля не считает сделанным).
-  if (name === "ui_invoke" || name === "input_key" || name === "input_click") {
+  // W4 «Руки»: act судится тем же гейтом — do:key Enter ≡ input_key, клик по подписи-коммиту ≡ input_click по тексту.
+  if (name === "ui_invoke" || name === "input_key" || name === "input_click" || name === "act") {
     const sessObj = ctx.session as unknown as object;
     const risk = assessGuiCommit({
       foregroundProcess: parseForegroundProcess(ctx.systemContext?.() ?? ""),
@@ -725,6 +727,12 @@ async function dispatchToolCore(
   // проактивные каналы (когда начнут гнать актуаторы) = "proactive". Перекрываем любой origin из аргументов модели.
   const command = { kind, ...input, origin: ctx.origin ?? "user" } as ActionCommand;
   const result = await ctx.session.sendAction(command, actionTimeoutMs(kind));
+  // W4 «Руки»: у act ТРИ исхода сверки (met/failed/unchecked) + частичное исполнение — свой хендлер, чтобы
+  // observed/uncertain ставились по СМЫСЛУ вердикта, а не по одному лишь fused-наблюдению.
+  if (kind === "gui.act") {
+    const special = actResult(result);
+    if (special) return special;
+  }
   if (result.ok) {
     // §Волна2 (2.1) fused act+observe: актуатор приложил наблюдение состояния ПОСЛЕ действия →
     // кладём его в ТОТ ЖЕ tool_result (текст с экрана = недоверенные ДАННЫЕ) и помечаем observed —

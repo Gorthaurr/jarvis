@@ -171,6 +171,8 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
 // ui_ground здесь НЕ значится — это чтение (см. NEUTRAL_TOOLS выше).
 const BLIND_MUTATE_TOOLS = new Set([
   "input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke",
+  // W4 «Руки»: act — тот же клик/печать; долг снимает ТОЛЬКО его собственная сверка (verified:"met" → observed).
+  "act",
   // Волна 2 (2.4): input_mouse — тот же слепой SendInput (drag/удержание/колесо без обратной связи).
   // window_focus сюда НЕ входит: он самоподтверждается честным readback focused (как system_volume).
   "input_mouse",

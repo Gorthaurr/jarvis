@@ -65,3 +65,25 @@ describe("assertReplayCommitAllowed — реплей навыка", () => {
     await expect(assertReplayCommitAllowed("Enter", undefined, async () => "notepad")).resolves.toBeUndefined();
   });
 });
+
+describe("W4 act — клиентский рубеж (SDK-мост / реплей)", () => {
+  it("do:key Enter и клик по «Отправить»/«Оплатить» в рискованном процессе — отказ; печать, «Настройки», блокнот — пропуск", () => {
+    expect(assessClientCommit({ kind: "gui.act", do: "key", combo: "Enter" }, "Telegram", "bridge")).not.toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", target: "Отправить" }, "discord", "bridge")?.message).toMatch(/клик «Отправить»/u);
+    expect(assessClientCommit({ kind: "gui.act", target: { text: "Оплатить" }, do: "double" }, "sbbol", "replay")).not.toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", target: "Отправить", do: "type", text: "x" }, "Telegram", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", target: "Настройки" }, "Telegram", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", target: "Отправить" }, "notepad", "bridge")).toBeNull();
+  });
+
+  it("guardedDispatch: act «Отправить» при Telegram → denied без dispatch; act «Настройки» проходит", async () => {
+    const dispatch = vi.fn(async (id: string, _c: ActionCommand) => ok(id));
+    const g = guardedDispatch(dispatch, async () => "Telegram");
+    const r = await g("c1", { kind: "gui.act", target: "Отправить" });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("denied");
+    expect(dispatch).not.toHaveBeenCalled();
+    await g("c2", { kind: "gui.act", target: "Настройки" });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+});

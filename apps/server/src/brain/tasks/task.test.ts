@@ -233,3 +233,12 @@ describe("formatRecentTasks — границы памяти (эпистемич�
     expect(formatRecentTasks([t()], 2_000)).not.toMatch(/ВИДНО ТОЛЬКО/);
   });
 });
+
+describe("W4 act — метка чипа по глаголу и цели", () => {
+  it("click/type/key/точка", () => {
+    expect(stepLabelFor("act", { target: "Отправить" })).toBe("Нажимаю «Отправить»");
+    expect(stepLabelFor("act", { target: { text: "Поиск" }, do: "type", text: "x" })).toBe("Печатаю в «Поиск»");
+    expect(stepLabelFor("act", { do: "key", combo: "Ctrl+S" })).toBe("Нажимаю Ctrl+S");
+    expect(stepLabelFor("act", { target: { x: 1, y: 2 } })).toBe("Нажимаю элемент");
+  });
+});

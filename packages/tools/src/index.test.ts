@@ -57,6 +57,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "input.click",
       "ui.invoke",
       "ui.ground",
+      "gui.act", // W4 «Руки»: один примитив «сделай X с элементом Y»
       "app.launch",
       "app.focus",
       "app.close",

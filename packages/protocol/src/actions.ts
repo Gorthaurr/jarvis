@@ -39,6 +39,32 @@ export type MessageChannel = "vk" | "telegram";
 export type MouseButton = "left" | "right" | "middle";
 
 /**
+ * W4 «Руки»: цель примитива gui.act. Строка — видимый текст элемента (кнопка/пункт/вкладка), объект —
+ * уточнение: text (подстрока/точное имя), role (Button/Edit/…), automationId, handle (из ui.snapshot),
+ * x/y — точка (vision-координаты последнего screen_capture; space:"screen" — абсолютные DIP).
+ */
+export type ActTarget =
+  | string
+  | { text?: string; role?: string; automationId?: string; handle?: string; x?: number; y?: number; space?: "screen" };
+
+/** W4 «Руки»: что сделать с найденной целью. */
+export type ActVerb = "click" | "double" | "right" | "type" | "set" | "toggle" | "select" | "expand" | "key";
+
+/**
+ * W4 «Руки»: признак исхода, который клиент ждёт ПОСЛЕ действия (короткий wait.for на клиенте, ≤15 с):
+ * text — строка появилась на экране (OCR/UIA), element — элемент {role,name} есть в активном окне,
+ * title — заголовок активного окна содержит строку; gone — ждать ИСЧЕЗНОВЕНИЯ. Не наступило — verified:"failed"
+ * (не «не сделано»: действие уже ушло). Сенсор не смог ответить → "unchecked".
+ */
+export interface ActVerify {
+  text?: string;
+  element?: { role: string; name?: string };
+  title?: string;
+  gone?: boolean;
+  timeoutMs?: number;
+}
+
+/**
  * Регион экрана (§Волна2 2.3): по умолчанию — в координатах ПОСЛЕДНЕГО полного screen_capture
  * (как Target.coords); space="screen" — абсолютные экранные DIP virtual-desktop без маппинга.
  */
@@ -154,6 +180,24 @@ type ActionCommandKind =
       space?: "screen"; // как у Target.coords: абсолютные экранные DIP без маппинга снимка
     }
   | { kind: "ui.invoke"; target: Target; pattern: UiPattern; value?: string } // UIA-паттерны — ОСНОВНОЙ путь
+  // W4 «Руки» (2026-09-10, ревью §7): ОДИН примитив «сделай X с элементом Y» — клиент САМ находит цель лестницей
+  // handle → снапшот UIA (текст/роль/automationId) → OCR полного кадра → элемент под точкой, действует и СВЕРЯЕТ
+  // исход (снимок структуры до/после + ожидание признака verify) — без раундов модели между ступенями. Модель
+  // говорит «нажми «Отправить» в Telegram», клиент находит и проверяет. Цель: строка = видимый текст элемента.
+  // app — сперва сфокусировать окно по подстроке заголовка/процесса (не найдено → честная ошибка, ничего не жмём).
+  // do: click (дефолт) | double | right | type (клик в поле + печать text) | set (UIA setValue text) | toggle |
+  // select | expand | key (нажать combo; target не обязателен). physical — сразу физический клик (игра/canvas).
+  // verify — какой ПРИЗНАК ждать после действия (text/element/title, gone — исчезновение; timeoutMs ≤ 15 с).
+  | {
+      kind: "gui.act";
+      target?: ActTarget;
+      app?: string;
+      do?: ActVerb;
+      text?: string;
+      combo?: string;
+      verify?: ActVerify;
+      physical?: boolean;
+    }
   // §Волна2 (2.4): nameMode="substring" — матч имени по вхождению; automationId — устойчивый id элемента.
   | { kind: "ui.ground"; query: { role: string; name?: string; nameMode?: "exact" | "substring"; automationId?: string } } // -> handle/bbox в ActionResult.data
   // §Волна2 (2.4): set-of-marks — интерактивные элементы окна {handle, role, name, automationId, bbox}

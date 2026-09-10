@@ -95,9 +95,24 @@ export function isVeilGatedInput(cmd: ActionCommand): boolean {
       return keyGatedUnderVeil(cmd.mode);
     case "input.click":
       return cmd.target.by === "coords" || cmd.method === "physical";
+    case "gui.act":
+      return actGatedUnderVeil(cmd);
     default:
       return false;
   }
+}
+
+/**
+ * W4 «Руки»: act гейтится, когда он ЗАВЕДОМО отбирает фокус (app) или инжектирует физический ввод (physical,
+ * двойной/правый клик, печать, клавиша, цель-точка). Бесшумный клик по тексту (UIA invoke) проходит — как у
+ * input.click по handle; его физический фолбэк и OCR-точку ловит точка инжекции в input.ts.
+ */
+export function actGatedUnderVeil(cmd: { app?: string; physical?: boolean; do?: string; target?: unknown }): boolean {
+  if (cmd.app || cmd.physical) return true;
+  const verb = cmd.do ?? "click";
+  if (verb === "double" || verb === "right" || verb === "type" || verb === "key") return true;
+  const t = cmd.target;
+  return typeof t === "object" && t !== null && (t as { x?: unknown }).x !== undefined;
 }
 
 /** Смена фокуса/новое окно — «отбирает клавиатуру у окна рисования»; суффикс для текста отказа (одно знание с dispatch). */

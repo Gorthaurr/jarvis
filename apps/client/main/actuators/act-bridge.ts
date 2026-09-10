@@ -45,6 +45,8 @@ export const BRIDGE_ALLOWED_KINDS: ReadonlySet<string> = new Set<string>([
   "input.key",
   "input.click",
   "input.mouse",
+  // W4 «Руки»: один примитив «найди-сделай-сверь» — тот же механический GUI, что input.*/ui.invoke
+  "gui.act",
   // UIA-действие / грундинг
   "ui.invoke",
   "ui.ground",

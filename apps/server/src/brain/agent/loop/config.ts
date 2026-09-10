@@ -87,7 +87,7 @@ export function loadLoopConfig(isConversational: boolean) {
     const n = Number.parseInt(process.env.JARVIS_MAX_VERIFY_NUDGES ?? "", 10);
     return Number.isFinite(n) && n >= 1 && n <= 5 ? n : 2;
   })();
-  const MACRO_TRACE_TOOLS = new Set(["app_focus", "input_click", "input_key", "input_type"]);
+  const MACRO_TRACE_TOOLS = new Set(["app_focus", "input_click", "input_key", "input_type", "act"]); // W4: act с разрешёнными координатами компилируется в реплей
   return { INPUT_WAIT_MS, STALE_INPUT_WAIT_MS, HARD_STEP_CAP, loopMaxBaseMs, CONTEXT_SOFT_TOKENS, CONTEXT_HARD_TOKENS, QUEUE_WAIT_MS, liveRefreshOn, ESCALATE_AFTER, FAMILY_SOFT_CAP, MAX_FAMILY_NUDGES, KEEP_SCREENSHOTS, KEEP_SELECTION_VIEWS, KEEP_DOC_IMAGES, roundThinkingEnabled, executorDownshiftEnabled, MAX_CONTINUATIONS, MAX_RETRY_NUDGES, STRUCTURAL_SENSORS, MAX_VERIFY_NUDGES, MACRO_TRACE_TOOLS };
 }
 

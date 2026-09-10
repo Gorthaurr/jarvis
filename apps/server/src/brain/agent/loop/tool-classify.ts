@@ -1,5 +1,5 @@
 // W3 «Петля»: классификация результата ОДНОГО вызова инструмента: учёт, эффекты успеха, признаки раунда.
-import { log, isSendKey, isPasteCombo, inspectBatchSteps } from "./util.js";
+import { log, isSendKey, isPasteCombo, inspectBatchSteps, actGesture } from "./util.js";
 import type { LoopCtx } from "./context.js";
 import type { RoundResult } from "./tool-round.js";
 import type { ToolResult } from "../../tools/dispatch.js";
@@ -155,11 +155,14 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
   // сверки исхода (как compose-and-commit в replayUnsafe). Ложный позитив (клик мимо кнопки) стоит
   // одной лишней сверки — дёшево против ложного «Отправлено». Ревью р3 #1/#4: input_batch с
   // коммит-шагом (batch.hasSend) при наборе В ПРОШЛОМ раунде (composedPending) — тоже коммит.
+  // W4 «Руки»: act click/double/key-Enter после набора — тот же коммит (его сверка признаком долг отправки НЕ снимает).
+  const actG = tu.name === "act" ? actGesture(tu.input) : { commit: false, composes: false };
   const commitGesture =
     (tu.name === "input_key" && isSendKey(combo)) ||
     tu.name === "input_click" ||
     tu.name === "input_mouse" ||
-    tu.name === "ui_invoke";
+    tu.name === "ui_invoke" ||
+    actG.commit;
   const sendCommit = ((commitGesture || batch.hasSend) && st.honesty.composedPending) || batch.committed;
   // СНЯТИЕ долга: реальный взгляд снимает ВСЁ (вкл. sendCommitDebt). Fused-наблюдение снимает только
   // ОБЫЧНЫЙ слепой долг и только если это НЕ коммит и НЕ висит долг отправки (ревью р1 #4/#8/#16:
@@ -217,6 +220,7 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
       tu.name === "input_type" ||
       (tu.name === "ui_invoke" && (tu.input as { pattern?: unknown }).pattern === "setValue") ||
       (tu.name === "input_key" && isPasteCombo(combo)) ||
+      actG.composes ||
       batch.endsComposed
     ) {
       st.honesty.composedPending = true;

@@ -40,3 +40,11 @@ export function isCommitKeyCombo(combo: string): boolean {
   const mods = parts.slice(0, -1);
   return mods.every((m) => m === "ctrl" || m === "control" || m === "shift" || m === "");
 }
+
+/**
+ * Глаголы коммита — «опубликовать/отправить/оплатить/подтвердить/провести/подписать/купить/оформить/перевести»
+ * и их английские пары. Ловит и «подписаться» (лишний вопрос на YouTube — безопасная сторона).
+ * W4: переехал сюда из серверного commit-gate — клиентский рубеж (act по тексту кнопки с SDK-моста) читает тот же список.
+ */
+export const COMMIT_WORDS_RE =
+  /(?<![\p{L}])(?:опубликов|разместит|размести|отправ|оплат|заплат|подтвер|провест|провед|подпис|купит|оформ|заказат|перевес|перевод|разослат|publish|post\b|send\b|pay\b|confirm|submit|buy\b|checkout|place order|transfer|sign\b|approve)/iu;

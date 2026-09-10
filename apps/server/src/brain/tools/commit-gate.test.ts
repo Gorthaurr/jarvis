@@ -74,3 +74,18 @@ describe("assessGuiCommit + parseForegroundProcess", () => {
     expect(lastWebTarget({})).toBe("");
   });
 });
+
+describe("W4 act — тот же §14-гейт, что у input_key/input_click", () => {
+  it("do:key Enter в мессенджере → коммит; do:key Ctrl+S → нет", () => {
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { do: "key", combo: "Enter" } })?.what).toMatch(/отправка сообщения/u);
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { do: "key", combo: "Ctrl+S" } })).toBeNull();
+  });
+
+  it("клик по «Провести»/«Отправить» (строка или {text}) → коммит; печать/set и клик по «Настройки»/в блокноте → нет", () => {
+    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "act", input: { target: "Провести" } })?.what).toMatch(/Провести/u);
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: { text: "Отправить", role: "Button" }, do: "double" } })).not.toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Отправить", do: "type", text: "x" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Настройки" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "act", input: { target: "Отправить" } })).toBeNull();
+  });
+});

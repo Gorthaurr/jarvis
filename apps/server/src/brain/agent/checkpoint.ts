@@ -184,7 +184,7 @@ const DONE_MAX_LINES = 60;
  * «сделано» действительно важное (отправку человеку в начале длинной задачи — контрольное ревью-2).
  * Схлопываются в счётчик, а не занимают по строке каждый.
  */
-const BULK_MUTATE_TOOLS = new Set(["input_click", "input_key", "input_type", "input_mouse", "input_batch", "browser_act", "browser_batch", "ui_invoke", "app_focus", "window_focus"]);
+const BULK_MUTATE_TOOLS = new Set(["input_click", "input_key", "input_type", "input_mouse", "input_batch", "browser_act", "browser_batch", "ui_invoke", "app_focus", "window_focus", "act"]); // W4: act — та же массовая механика
 
 /**
  * Контроль-8 (partial-marks-collapsed): метки, МЕНЯЮЩИЕ решение продолжения, схлопывать в счётчик нельзя. Раньше

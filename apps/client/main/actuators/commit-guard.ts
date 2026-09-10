@@ -16,7 +16,7 @@
  * пропускаем (fail-open на неизвестности — та же политика, что у `parseForegroundProcess` на сервере).
  */
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
-import { createLogger, isCommitKeyCombo, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, createLogger, isCommitKeyCombo, riskyProcessCategory } from "@jarvis/shared";
 import { listWindows } from "./windows.js";
 
 const log = createLogger("actuator:commit-guard");
@@ -34,9 +34,8 @@ export interface CommitDenial {
  */
 export function assessClientCommit(cmd: ActionCommand, foreground: string | null, via: "bridge" | "replay"): CommitDenial | null {
   if (!foreground) return null;
-  if (cmd.kind !== "input.key") return null;
-  if (cmd.mode === "up") return null; // отпускание клавиши ничего не коммитит
-  if (!isCommitKeyCombo(cmd.combo)) return null;
+  const what = commitOf(cmd);
+  if (!what) return null;
   const risk = riskyProcessCategory(foreground);
   if (!risk) return null;
   const path = via === "bridge" ? "SDK-мост (jarvis.key из code_run)" : "реплей навыка";
@@ -44,10 +43,28 @@ export function assessClientCommit(cmd: ActionCommand, foreground: string | null
     process: foreground,
     human: risk.human,
     message:
-      `§14: «${cmd.combo}» в программе ${foreground} (${risk.human}) — необратимая отправка. ` +
-      `${path} её не делает: используй инструмент input_key (сервер спросит подтверждение владельца) ` +
+      `§14: ${what} в программе ${foreground} (${risk.human}) — необратимая отправка. ` +
+      `${path} её не делает: используй инструмент input_key/act (сервер спросит подтверждение владельца) ` +
       `или заверши шаг без отправки.`,
   };
+}
+
+/**
+ * Что в команде похоже на коммит: клавиша-коммит (input.key / act do:key) или клик по подписи-коммиту
+ * (act по тексту «Отправить»/«Оплатить» — W4). Остальное (печать, set, toggle) само ничего не отправляет.
+ */
+function commitOf(cmd: ActionCommand): string | null {
+  if (cmd.kind === "input.key") {
+    if (cmd.mode === "up") return null; // отпускание клавиши ничего не коммитит
+    return isCommitKeyCombo(cmd.combo) ? `«${cmd.combo}»` : null;
+  }
+  if (cmd.kind !== "gui.act") return null;
+  const verb = cmd.do ?? "click";
+  if (verb === "key") return cmd.combo && isCommitKeyCombo(cmd.combo) ? `«${cmd.combo}»` : null;
+  if (verb !== "click" && verb !== "double") return null;
+  const t = cmd.target;
+  const text = typeof t === "string" ? t : t && typeof t === "object" ? String(t.text ?? "") : "";
+  return text && COMMIT_WORDS_RE.test(text) ? `клик «${text.trim().slice(0, 60)}»` : null;
 }
 
 /** Процесс окна на переднем плане (null, если сайдкар недоступен или окно не найдено). */
@@ -70,10 +87,10 @@ export type DispatchLike = (commandId: string, cmd: ActionCommand) => Promise<Ac
  */
 export function guardedDispatch(dispatch: DispatchLike, fg: () => Promise<string | null> = foregroundProcess): DispatchLike {
   return async (commandId, cmd) => {
-    if (cmd.kind === "input.key") {
+    if (cmd.kind === "input.key" || cmd.kind === "gui.act") {
       const denial = assessClientCommit(cmd, await fg(), "bridge");
       if (denial) {
-        log.warn("§14 гейт коммита на мосту SDK: отказ", { combo: cmd.combo, process: denial.process });
+        log.warn("§14 гейт коммита на мосту SDK: отказ", { kind: cmd.kind, process: denial.process });
         return { commandId, ok: false, error: { code: "denied", message: denial.message }, durationMs: 0 };
       }
     }

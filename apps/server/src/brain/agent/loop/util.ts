@@ -212,6 +212,17 @@ export function isPasteCombo(combo: unknown): boolean {
   return c === "ctrl+v" || c === "cmd+v" || c === "shift+insert";
 }
 
+/**
+ * W4 «Руки»: act — что за жест по глаголу. commit — жест, который после набора текста коммитит отправку (клик/
+ * двойной клик / клавиша-отправка); composes — набор текста (type/set), после которого следующий коммит = отправка.
+ */
+export function actGesture(input: unknown): { commit: boolean; composes: boolean } {
+  const i = (input && typeof input === "object" ? input : {}) as { do?: unknown; combo?: unknown };
+  const verb = typeof i.do === "string" ? i.do : "click";
+  if (verb === "key") return { commit: isSendKey(i.combo), composes: isPasteCombo(i.combo) };
+  return { commit: verb === "click" || verb === "double", composes: verb === "type" || verb === "set" };
+}
+
 /** Шаг берста «сочинил текст» (input.type / ui.invoke setValue / вставка) — ревью р1 #3/#9. */
 export function isBatchComposeStep(s: { action?: unknown; params?: Record<string, unknown> }): boolean {
   const a = String(s.action ?? "");

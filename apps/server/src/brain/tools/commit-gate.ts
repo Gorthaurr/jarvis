@@ -13,7 +13,7 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-import { type RiskCategory, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, type RiskCategory, riskyProcessCategory } from "@jarvis/shared";
 
 export type { RiskCategory };
 // W0: список процессов и riskyProcessCategory переехали в @jarvis/shared/commit-risk — их же читает
@@ -50,12 +50,8 @@ const RISKY_HOSTS: ReadonlyArray<readonly [string, RiskCategory]> = [
   ["outlook.live.com", "messenger"], ["outlook.office.com", "messenger"], ["max.ru", "messenger"],
 ];
 
-/**
- * Глаголы коммита — «опубликовать/отправить/оплатить/подтвердить/провести/подписать/купить/оформить/перевести»
- * и их английские пары. Ловит и «подписаться» (лишний вопрос на YouTube — безопасная сторона).
- */
-export const COMMIT_WORDS_RE =
-  /(?<![\p{L}])(?:опубликов|разместит|размести|отправ|оплат|заплат|подтвер|провест|провед|подпис|купит|оформ|заказат|перевес|перевод|разослат|publish|post\b|send\b|pay\b|confirm|submit|buy\b|checkout|place order|transfer|sign\b|approve)/iu;
+// W4: COMMIT_WORDS_RE живёт в @jarvis/shared/commit-risk (один список на сервер и клиентский рубеж act); реэкспорт.
+export { COMMIT_WORDS_RE };
 
 export interface CommitRisk {
   category: RiskCategory;
@@ -114,7 +110,7 @@ export function parseForegroundProcess(systemContext: string): string | null {
  */
 export function assessGuiCommit(a: {
   foregroundProcess: string | null;
-  tool: "ui_invoke" | "input_key" | "input_click";
+  tool: "ui_invoke" | "input_key" | "input_click" | "act";
   input: Record<string, unknown>;
   label?: string;
 }): CommitRisk | null {
@@ -133,6 +129,19 @@ export function assessGuiCommit(a: {
     const mode = String(a.input.mode ?? "");
     if (/enter|return/u.test(key) && mode !== "up") return mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение");
     return null;
+  }
+  // W4 «Руки»: act do:key «Enter» ≡ input_key; act click/double по тексту-коммиту ≡ клик по подписи. Печать/set/
+  // toggle сами ничего не отправляют — не судятся (как у input_type).
+  if (a.tool === "act") {
+    const verb = String(a.input.do ?? "click");
+    if (verb === "key") {
+      const combo = String(a.input.combo ?? "").toLowerCase();
+      return /enter|return/u.test(combo) ? mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение") : null;
+    }
+    if (verb !== "click" && verb !== "double") return null;
+    const t = a.input.target;
+    const text = typeof t === "string" ? t : t && typeof t === "object" ? String((t as { text?: unknown }).text ?? "") : "";
+    return text && COMMIT_WORDS_RE.test(text) ? mk(`клик «${text.trim().slice(0, 60)}»`) : null;
   }
   const target = (a.input.target && typeof a.input.target === "object" ? (a.input.target as Record<string, unknown>) : {}) as Record<string, unknown>;
   const text = [a.label, a.input.name, a.input.text, target.text, target.name, target.query]

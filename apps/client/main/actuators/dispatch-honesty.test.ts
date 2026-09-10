@@ -699,3 +699,54 @@ describe("§режим выделения — контроль-9", () => {
     expect((r.data as { overlayCaught?: boolean }).overlayCaught).toBe(true); // до фикса: чистый успех при невыполненных действиях
   });
 });
+
+// ── W4 act: проводка gui.act → act() (лист мокается), маппинг частичного исполнения, ранний гейт вуали ──
+const actSt = vi.hoisted(() => ({
+  act: async (_c: unknown, _o: unknown): Promise<unknown> => ({ did: "x", verified: "met", detail: "d" }),
+}));
+vi.mock("./act.js", () => ({ act: (c: unknown, o: unknown) => actSt.act(c, o) }));
+import { ActPartialError } from "./act-do.js";
+
+describe("W4 act — проводка dispatch", () => {
+  it("успех: данные act уходят как есть; restoreCursor = владелец не трогает мышь", async () => {
+    let seen: unknown;
+    actSt.act = async (c, o) => {
+      seen = { c, o };
+      return { did: "UIA invoke", verified: "met", detail: "ok" };
+    };
+    const r = await dispatch("a1", { kind: "gui.act", target: "Отправить" });
+    expect(r.ok).toBe(true);
+    expect(r.data).toMatchObject({ did: "UIA invoke", verified: "met" });
+    expect(seen).toMatchObject({ c: { kind: "gui.act", target: "Отправить" }, o: { restoreCursor: true } });
+  });
+
+  it("ActPartialError → ok:false runtime + stepActionInjected (клик ушёл, печать упала)", async () => {
+    actSt.act = async () => {
+      throw new ActPartialError("клик ушёл, печать не удалась");
+    };
+    const r = await dispatch("a2", { kind: "gui.act", target: "Поиск", do: "type", text: "x" });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("runtime");
+    expect(r.stepActionInjected).toBe(true);
+  });
+
+  it("под вуалью act с app отклоняется ранним гейтом с причиной про фокус; бесшумный act по тексту доходит до act()", async () => {
+    selectionStore.setDrawing(true);
+    try {
+      const calls: unknown[] = [];
+      actSt.act = async (c) => {
+        calls.push(c);
+        return { did: "x", verified: "unchecked", detail: "" };
+      };
+      const r = await dispatch("a3", { kind: "gui.act", target: "Отправить", app: "Telegram" });
+      expect(r.ok).toBe(false);
+      expect(r.error?.code).toBe("overlay_drawing");
+      expect(r.error?.message).toMatch(/клавиатуру у окна рисования/u);
+      expect(calls).toHaveLength(0);
+      await dispatch("a4", { kind: "gui.act", target: "Отправить" });
+      expect(calls).toHaveLength(1);
+    } finally {
+      selectionStore.setDrawing(false);
+    }
+  });
+});
