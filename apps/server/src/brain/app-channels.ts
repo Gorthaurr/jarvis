@@ -100,7 +100,7 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
       "Проверенные страницы: sound, sound-devices, apps-volume, display, nightlight, network-status, network-vpn, " +
       "network-wifisettings, powersleep, clipboard, bluetooth, windowsupdate.",
     verify:
-      "URI НЕ говорит, какая страница открылась: факт окна — window_list (процесс SystemSettings). " +
+      "URI НЕ говорит, какая страница открылась: факт окна — look{what:'windows'} (процесс SystemSettings). " +
       "САМО значение настройки читать программно (powercfg/netsh/PowerShell через code_run), а не глазами.",
     limits: "Только ОТКРЫВАЕТ страницу для человека — ничего не читает и не меняет. Изменение — powercfg/netsh/реестр.",
   },
@@ -207,12 +207,12 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
       "УНИВЕРСАЛЬНОЕ play/pause/next БЕЗ медиа-клавиш — WinRT Windows.Media.Control (GSMTC) через code_run: " +
       "GlobalSystemMediaTransportControlsSessionManager.RequestAsync() → GetCurrentSession() → " +
       "TryTogglePlayPauseAsync()/TrySkipNextAsync(). Работает для Chrome, Spotify, Я.Музыки и прочих, " +
-      "зарегистрировавших SMTC. Точечный ЗВУК приложения — наш инструмент audio_set (мьют/громкость по процессу).",
+      "зарегистрировавших SMTC. Точечный ЗВУК приложения — наш инструмент audio{op:'set'} (мьют/громкость по процессу).",
     verify:
       "GetPlaybackInfo().PlaybackStatus → Playing/Paused/Stopped — ЭТО и есть сверка исхода (а не «нажал клавишу»). " +
       "Позиция — GetTimelineProperties().Position; что играет — GetMediaPropertiesAsync().",
     limits:
-      "Только приложения с SMTC. Не даёт громкость (это audio_set), не выбирает трек по названию и не открывает контент. " +
+      "Только приложения с SMTC. Не даёт громкость (это audio{op:'set'}), не выбирает трек по названию и не открывает контент. " +
       "Медиа-клавиши (system_media) остаются резервом: они уходят активному плееру вслепую и исход не подтверждают.",
   },
   {
@@ -312,7 +312,7 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
     howTo:
       "🔴 ОТ ЛИЦА ВЛАДЕЛЬЦА программного канала НЕТ. Автоматизация пользовательского аккаунта (self-bot: токен из " +
       "клиента, HTTP с user-токеном) прямо запрещена Discord и ведёт к ПЕРМАНЕНТНОМУ бану — не предлагать и не делать. " +
-      "От лица владельца остаётся GUI: ui_snapshot/browser_inspect → ввод → сверка. " +
+      "От лица владельца остаётся GUI: look{what:'elements'}/browser_inspect → ввод → сверка. " +
       "Если владельцу нужны УВЕДОМЛЕНИЯ от Джарвиса (не от его лица) — вебхук канала: " +
       "POST https://discord.com/api/webhooks/<id>/<token>?wait=true, body {\"content\":\"…\"}.",
     verify:
@@ -515,7 +515,7 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
       "Непустой результат И средняя conf из TSV выше порога — строки с conf ниже 60 за прочитанное НЕ выдавать. Для ocrmypdf " +
       "двойная сверка: sidecar непустой И pdftotext по выходному PDF даёт тот же текст (иначе слой лёг только в лог).",
     limits:
-      "🔴 Для ЭКРАНА не годится — там точнее screen_read_text (Windows.Media.Ocr в сайдкаре); tesseract берём для сканов и " +
+      "🔴 Для ЭКРАНА не годится — там точнее look{what:'text'} (Windows.Media.Ocr в сайдкаре); tesseract берём для сканов и " +
       "файлов. Нужны языковые данные rus. Таблицы и колонки перепутает. ocrmypdf требует ghostscript, а --force-ocr " +
       "растрирует страницу с потерей качества.",
   },
@@ -593,7 +593,7 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
       "ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests (*.item): DisplayName, AppName, InstallLocation, " +
       "LaunchExecutable, bIsIncompleteInstall. Полный путь exe = InstallLocation + LaunchExecutable.",
     verify:
-      "URI ничего не возвращает — сверять появлением процесса (window_list/tasklist по имени из LaunchExecutable). Для «установлена " +
+      "URI ничего не возвращает — сверять появлением процесса (look{what:'windows'}/tasklist по имени из LaunchExecutable). Для «установлена " +
       "ли»: bIsIncompleteInstall не true И файл exe реально существует на диске.",
     limits:
       "Купленное, но не установленное в манифестах отсутствует. AppName у новых игр — UUID без человеческого смысла, название " +
@@ -909,7 +909,7 @@ export function formatChannels(matched: readonly MatchedChannel[], query?: strin
   const list = q ? matched.filter((m) => queryMatches(q, m.app, m.installedAs, ...(m.aliases ?? []))) : matched;
   if (list.length === 0) {
     return q
-      ? `Для «${query}» программного канала в реестре нет — значит остаётся GUI: ui_snapshot → действие по элементу → сверка. ` +
+      ? `Для «${query}» программного канала в реестре нет — значит остаётся GUI: look{what:'elements'} → действие по элементу → сверка. ` +
         `Это не значит, что API не существует в природе: можно поискать документацию (web_search) и водить через code_run.`
       : "Программных каналов не обнаружено (клиент не прислал список установленного или ничего не совпало).";
   }

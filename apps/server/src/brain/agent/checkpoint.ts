@@ -24,6 +24,7 @@ import { classifyImageBlocks } from "./image-marks.js";
 import type { LlmMessage } from "../../integrations/llm.js";
 import { CANCEL_PHRASES, CANCEL_WORDS } from "../tasks/control.js";
 import { OUTBOUND_SEND_TOOLS, toolEffect } from "./error-voice.js";
+import { canonicalToolName } from "@jarvis/tools";
 
 /** Почему задача прервалась (для честной формулировки при продолжении). */
 export type CheckpointReason = "timeout" | "contextWrap" | "earlyWrap" | "stepCap" | "channelLost" | "hardKill";
@@ -406,7 +407,8 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
       for (const b of msg.content) {
         if (b.type === "text" && b.text.trim()) entries.push({ kind: "say", text: b.text });
         else if (b.type === "tool_use") {
-          const call: Extract<Entry, { kind: "call" }> = { kind: "call", id: b.id, tool: b.name, input: briefInput(b.input) };
+          // W4 фасады: журнал судит эффект по КАНОНИЧЕСКОМУ имени (look{what:"elements"} = ui_snapshot, не «мутация»).
+          const call: Extract<Entry, { kind: "call" }> = { kind: "call", id: b.id, tool: canonicalToolName(b.name, b.input), input: briefInput(b.input) };
           callById.set(b.id, call);
           entries.push(call);
         }
@@ -697,7 +699,7 @@ export function buildResumePrompt(cp: Pick<TaskCheckpoint, "goal" | "reason" | "
     `Правила продолжения:\n` +
     `1) НЕ повторяй вслепую то, что по журналу уже сделано.\n` +
     `2) Наблюдения из журнала УСТАРЕЛИ — экран/страница/данные могли измениться. Прежде чем опираться ` +
-    `на них, СВЕРЬ текущее состояние инструментом (ui_snapshot/browser_read/screen_read_text).\n` +
+    `на них, СВЕРЬ текущее состояние инструментом (look{what:"elements"}/browser_read/look{what:"text"}).\n` +
     `3) Доведи исходную цель до конца и дай честный итог: что сделано, что нет.`
   );
 }

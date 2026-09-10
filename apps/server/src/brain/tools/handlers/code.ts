@@ -59,9 +59,9 @@ export async function jobStatusTool(ctx: ToolContext, input: Record<string, unkn
       const tail = injected
         ? `${done > 0 ? `Успешно ушедших действий до остановки: ${done} — они НЕ откатываются. ` : ""}` +
           `Действие последнего шага УЖЕ УШЛО в GUI, его ИСХОД НЕ ПОДТВЕРЖДЁН: перезапуск скрипта ЦЕЛИКОМ повторил бы ` +
-          `его. Сверь состояние (ui_snapshot/screen_capture) и продолжай по факту, вслепую не повторяй.`
+          `его. Сверь состояние (look{what:"elements"}/screen_capture) и продолжай по факту, вслепую не повторяй.`
         : done > 0
-          ? `Успешно ушедших действий до остановки: ${done} — они НЕ откатываются; перезапуск скрипта целиком повторил бы их. Сверь состояние (ui_snapshot/screen_capture) и продолжай с места остановки.`
+          ? `Успешно ушедших действий до остановки: ${done} — они НЕ откатываются; перезапуск скрипта целиком повторил бы их. Сверь состояние (look{what:"elements"}/screen_capture) и продолжай с места остановки.`
           : `Ни одно действие уйти не успело: после закрытия оверлея скрипт можно запустить заново ЦЕЛИКОМ.`;
       const went = "";
       const out = overlayDeniedResult(
@@ -172,7 +172,7 @@ export async function executeGuardedCode(ctx: ToolContext, lang: CodeLang, code:
     if (caught?.overlayCaught === true) {
       const out = ok(
         `⚠️ Скрипт ПЕРЕХВАТИЛ отказ вуали режима выделения (except без типа/BaseException) и продолжил, будто действие прошло: ` +
-          `${caught.overlayReason ?? "часть действий НЕ выполнена"}. Исход скрипта НЕ ПОДТВЕРЖДЁН — сверь состояние (ui_snapshot/screen_capture), ` +
+          `${caught.overlayReason ?? "часть действий НЕ выполнена"}. Исход скрипта НЕ ПОДТВЕРЖДЁН — сверь состояние (look{what:"elements"}/screen_capture), ` +
           `не повторяй вслепую. Данные: ${JSON.stringify(result.data)}`,
       );
       out.uncertain = true;

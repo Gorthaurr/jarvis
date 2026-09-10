@@ -6,6 +6,7 @@ import { noteToolCall, applySuccessEffects, applyRoundFlags } from "./tool-class
 import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
 import { isBlindMutate } from "../error-voice.js";
+import { canonicalToolCall, canonicalToolName } from "@jarvis/tools";
 
 /** Факты одного раунда инструментов — прежние локальные переменные цикла, теперь один объект для фаз. */
 export interface RoundResult {
@@ -54,6 +55,16 @@ export function pushAssistantTurn(ctx: LoopCtx, resp: LlmResponse): void {
   convo.push({ role: "assistant", content: assistantBlocks });
 }
 
+/**
+ * W4 фасады: look/window/audio → канонический инструмент для аренды, диспатча, классификации и метки чипа.
+ * ВСЕГДА новый объект (id тот же): `tu` кладёт SDK, и по нему канал подписки сопоставляет хендлер с результатом
+ * (subscription-session: имя + канонический JSON аргументов) — мутация in-place подвесила бы хендлер.
+ */
+export function canonicalUse(tu: LlmResponse["toolUses"][number]): LlmResponse["toolUses"][number] {
+  const c = canonicalToolCall(tu.name, tu.input);
+  return { ...tu, name: c.name, input: c.input };
+}
+
 export function prefetchReadonly(ctx: LoopCtx, resp: LlmResponse) {
   const { toolCtx } = ctx;
   // §Волна2 (2.2): раунд целиком из ЯВНО READ-ONLY вызовов → диспатчим ПАРАЛЛЕЛЬНО: wall-clock =
@@ -65,12 +76,12 @@ export function prefetchReadonly(ctx: LoopCtx, resp: LlmResponse) {
   // перебрасываются в точке потребления — семантика ошибок 1:1 с последовательным путём.
   const parallelSafe =
     resp.toolUses.length > 1 &&
-    resp.toolUses.every((tu) => PARALLEL_READONLY_TOOLS.has(tu.name));
+    resp.toolUses.every((tu) => PARALLEL_READONLY_TOOLS.has(canonicalToolName(tu.name, tu.input)));
   const prefetched = parallelSafe
     ? new Map(
         resp.toolUses.map((tu) => [
           tu.id,
-          dispatchTool(tu.name, tu.input, toolCtx).then(
+          dispatchTool(canonicalUse(tu).name, canonicalUse(tu).input, toolCtx).then(
             (r) => ({ ok: true as const, r }),
             (e: unknown) => ({ ok: false as const, e }),
           ),
@@ -174,7 +185,8 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
   pushAssistantTurn(ctx, resp);
   const round = newRound();
   const prefetched = prefetchReadonly(ctx, resp);
-  for (const tu of resp.toolUses) {
+  for (const raw of resp.toolUses) {
+    const tu = canonicalUse(raw); // W4 фасады: дальше по циклу — каноническое имя/вход; id — тот же (tool_result парен)
     const gate = await acquireForTool(ctx, tu, round);
     if (gate === "break") break;
     if (gate === "continue") continue;

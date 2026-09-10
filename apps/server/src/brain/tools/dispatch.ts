@@ -81,6 +81,7 @@ import { mailRead } from "./handlers/mail.js";
 import { selfCodeRead, selfCodeSearch, selfPatch, selfWeaknesses } from "./handlers/self.js";
 import { fileView } from "./handlers/file-view.js";
 import { screenSelection } from "./handlers/selection.js";
+import { canonicalToolCall } from "@jarvis/tools";
 import { actResult } from "./handlers/act.js";
 
 /** Минимальный приёмник действий (реализует Session). */
@@ -387,10 +388,13 @@ const MOUSE_TOOLS = new Set<string>(["input_click", "input_mouse"]); // Волн
  * блокировать нечем) добавляется к УСПЕШНОМУ результату: ломать легитимную печать нельзя.
  */
 export async function dispatchTool(
-  name: string,
-  input: Record<string, unknown>,
+  rawName: string,
+  rawInput: Record<string, unknown>,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // W4 фасады: look/window/audio → канонический инструмент и здесь (dispatchTool зовут не только из петли:
+  // реплей, watch-runner, тесты). Незнакомый what/op остаётся именем фасада → честное «Неизвестный инструмент».
+  const { name, input } = canonicalToolCall(rawName, rawInput);
   const cred = checkCredentialInput(name, input, (ref) => refFieldHint(ctx, ref));
   if (cred.block) return err(cred.block);
   const out = await dispatchToolCore(name, input, ctx);
@@ -643,7 +647,7 @@ async function dispatchToolCore(
       `${name} заблокирован: идёт работа в браузере, мышь НЕ двигаем. Действуй через browser_act ` +
         `(intent "click" с text/selector нужного элемента, либо play/pause/next) — это кликает В вкладке ` +
         `без курсора. Нет DOM-элемента (canvas/видео) — сделай browser_act и, если он честно не нашёл цель, ` +
-        `тогда РАЗРЕШЁН координатный клик: screen_capture → input_click по координатам → пересними и сверь.`,
+        `тогда РАЗРЕШЁН координатный клик: screen_capture → act{target:{x,y}} → пересними и сверь.`,
     );
   }
 
@@ -813,7 +817,7 @@ async function dispatchToolCore(
             ? (result.data as { met?: boolean } | undefined)?.met === true
             : false;
       if (empty && (kind === "screen.ocr" || kind === "ui.snapshot")) {
-        out.content = `${out.content}\n⚠️ Сенсор отработал, но НИЧЕГО не увидел (окно UIA-слепое — игра/canvas — либо не то окно активно). Это НЕ сверка исхода: посмотри другим сенсором (screen_read_text / screen_capture) или сфокусируй нужное окно.`;
+        out.content = `${out.content}\n⚠️ Сенсор отработал, но НИЧЕГО не увидел (окно UIA-слепое — игра/canvas — либо не то окно активно). Это НЕ сверка исхода: посмотри другим сенсором (look{what:'text'} / screen_capture) или сфокусируй нужное окно.`;
       }
       applyVeil(out, result.data);
       return out;
@@ -871,7 +875,7 @@ export function visionFallbackHint(kind: ActionKind, code: string, msg: string):
   if (!A11Y_KINDS.has(kind) || !miss) return "";
   return (
     " — элемент не в a11y-дереве (вероятно canvas/игра/нестандартное приложение, где UIA слепа). " +
-    "Сними screen_capture, найди цель глазами, действуй input_click по координатам — затем ПЕРЕСНИМИ экран и сверь исход (verify-after-act)."
+    "Сними screen_capture, найди цель глазами, действуй act{target:{x,y}} (клик по координатам, лучше с verify) — затем ПЕРЕСНИМИ экран и сверь исход (verify-after-act)."
   );
 }
 
@@ -967,7 +971,7 @@ async function lookAtScreen(ctx: ToolContext, input: Record<string, unknown>): P
     ? `\n[ЭТО ЛУПА — кроп региона, НЕ полный экран. Координаты на этой картинке НЕ равны координатам полного кадра. ` +
       `Чтобы кликнуть по увиденному здесь: screenX = ${round2(c.originX)} + x / ${round2(c.scale)}, ` +
       `screenY = ${round2(c.originY)} + y / ${round2(c.scale)} — и зови ` +
-      `input_click{target:{by:"coords", x: screenX, y: screenY, space:"screen"}}. ` +
+      `act{target:{x: screenX, y: screenY, space:"screen"}}. ` +
       `Так мелкая цель попадается точнее, чем прицеливанием по полному кадру.]`
     : "";
   const content: ToolResultContent[] = [

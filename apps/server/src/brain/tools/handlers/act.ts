@@ -34,7 +34,7 @@ export function verdictLine(verified: ActData["verified"], detail: string | unde
     case "met":
       return `✅ ИСХОД ПОДТВЕРЖДЁН признаком verify.${d}`;
     case "failed":
-      return `⚠️ ДЕЙСТВИЕ УШЛО, признак verify НЕ наступил.${d} НЕ повторяй вслепую (второй клик/Enter = дубль): сверь состояние (ui_snapshot / screen_read_text / screen_capture) и действуй иначе.`;
+      return `⚠️ ДЕЙСТВИЕ УШЛО, признак verify НЕ наступил.${d} НЕ повторяй вслепую (второй клик/Enter = дубль): сверь состояние (look{what:"elements"} / look{what:"text"} / screen_capture) и действуй иначе.`;
     default:
       return `ℹ️ Исход признаком НЕ сверен.${d} Суди по дельте наблюдения ниже; её нет или она слабая → сверь глазами перед «готово».`;
   }

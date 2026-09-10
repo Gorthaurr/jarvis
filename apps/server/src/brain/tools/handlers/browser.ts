@@ -542,13 +542,13 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       if (/autoplay/i.test(msg)) {
         return err(
           `browser_act «${intent}»: браузер ЗАБЛОКИРОВАЛ автоплей — звук НЕ пошёл (${msg}). Нужен живой клик по вкладке: ` +
-            `screen_capture → найди элемент глазами → input_click по координатам → ПЕРЕСНИМИ и сверь. НЕ говори «играет».`,
+            `screen_capture → найди элемент глазами → act{target:{x,y}} (клик по координатам) → ПЕРЕСНИМИ и сверь. НЕ говори «играет».`,
         );
       }
       return err(
         `Не вышло «${intent}» на странице: ${msg}. Дальше по лестнице: browser_inspect (покажет реальные элементы, ` +
           `включая iframe'ы — тогда повтори с selector и params.frameId) ИЛИ это canvas/WebGL без DOM-элемента — тогда: ` +
-          `screen_capture → найди цель глазами → input_click по координатам → ПЕРЕСНИМИ и сверь исход.`,
+          `screen_capture → найди цель глазами → act{target:{x,y}} (клик по координатам) → ПЕРЕСНИМИ и сверь исход.`,
       );
     }
   }

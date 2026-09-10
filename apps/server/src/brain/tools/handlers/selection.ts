@@ -197,7 +197,7 @@ export async function screenSelection(ctx: ToolContext, input: Record<string, un
     ? `
 [Координаты НА ЭТОЙ картинке — не координаты экрана. Чтобы кликнуть по увиденному: ` +
       `screenX = ${round2(c.originX)} + x / ${round2(c.scale)}, screenY = ${round2(c.originY)} + y / ${round2(c.scale)}, ` +
-      `затем input_click{target:{by:"coords", x: screenX, y: screenY, space:"screen"}}.]`
+      `затем act{target:{x: screenX, y: screenY, space:"screen"}}.]`
     : "";
   const text =
     formatSelectionViewMark(`${describeSelection(sel)} — ${humanAge(data.ageMs)}${changed}`) +

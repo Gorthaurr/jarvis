@@ -192,7 +192,7 @@ export function appChannelsList(ctx: ToolContext, input: Record<string, unknown>
     }
     return ok(
       `Про «${query ?? "это"}» в реестре ничего нет — ни курируемого рецепта, ни выученного. ` +
-        `Значит остаётся GUI (ui_snapshot → действие → сверка). Если найдёшь программный путь и ПРОВЕРИШЬ его — ` +
+        `Значит остаётся GUI (look{what:"elements"} → act → сверка). Если найдёшь программный путь и ПРОВЕРИШЬ его — ` +
         `запиши через app_channel_learn, чтобы в следующий раз не искать заново.`,
     );
   }

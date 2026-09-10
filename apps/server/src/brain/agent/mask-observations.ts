@@ -28,6 +28,7 @@
  */
 import type { LlmContentBlock, LlmMessage, ToolResultContent } from "../../integrations/llm.js";
 import { toolEffect } from "./error-voice.js";
+import { canonicalToolName } from "@jarvis/tools";
 
 /** Блок результата инструмента (сужение union'а LlmContentBlock). */
 type ToolResultBlock = Extract<LlmContentBlock, { type: "tool_result" }>;
@@ -108,7 +109,7 @@ export function maskOldObservations(convo: LlmMessage[], opts: MaskOptions = {})
   for (const msg of convo) {
     if (msg.role !== "assistant" || typeof msg.content === "string") continue;
     for (const block of msg.content) {
-      if (block.type === "tool_use") nameById.set(block.id, block.name);
+      if (block.type === "tool_use") nameById.set(block.id, canonicalToolName(block.name, block.input)); // W4 фасады
     }
   }
 
