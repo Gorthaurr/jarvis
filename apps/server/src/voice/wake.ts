@@ -7,6 +7,7 @@
  * любой токен в пределах малого расстояния редактирования от «джарвис»/«jarvis». Чистые функции.
  */
 import { looksLikeCommandUtterance } from "../brain/agent/replay-gate.js";
+import { classifyTier } from "../brain/router/index.js";
 
 /** Явные варианты, как STT слышит «Джарвис» (рус/лат) — быстрый путь. Границы — Unicode. */
 const CORE =
@@ -157,7 +158,30 @@ const PREFIX_FUNCTION_WORDS = new Set([
   "что", "чтобы", "так", "вот", "это", "то", "как", "но", "да", "нет", "ага", "угу", "он", "она", "оно", "они", "мы",
   "вы", "ты", "я", "бла", "короче", "значит", "типа", "вообще", "просто", "сказал", "сказала", "говорит", "говорю",
   "слушай", "смотри", "окей", "ладно", "же", "ли", "бы", "вон", "там", "тут", "его", "её", "их", "ещё", "уже",
+  // Контроль-2 №5: междометия/приветствия/вежливость — не смысл команды («Блин, Джарвис, пауза»).
+  "хорошо", "блин", "понял", "поняла", "привет", "алло", "всё", "все", "спасибо", "ок", "эй", "слышь", "давай",
+  "итак", "кстати", "стоп", "погоди", "подожди", "пожалуйста", "здравствуй", "доброе", "утро", "добрый", "вечер", "день",
 ]);
+
+/**
+ * Контроль-2 №5 (ревью 2026-09-24): команда после «Джарвис» сама по себе быстрая (tier0: медиа, громкость, запуск,
+ * сайт) — префикс ей не нужен и только ломает её: «Мама, Джарвис, открой калькулятор» уходило модели вместо
+ * мгновенного запуска. Префикс сохраняем лишь там, где без него команда неполна («Кате, Джарвис, напиши…»).
+ */
+/** Префикс-место («В дискорде», «на ютубе», «в телеге»): это адрес команды, и роутер без него жадно
+ *  принимает «включи демонстрацию» за запуск программы «демонстрация» — место сохраняем всегда. */
+function placePrefix(before: string): boolean {
+  const words = before.toLowerCase().match(TOKEN_RE) ?? [];
+  return words.length >= 2 && words.length <= PREFIX_MAX_WORDS && /^(в|во|на)$/u.test(words[0]!);
+}
+
+function selfSufficient(command: string): boolean {
+  try {
+    return classifyTier(command).tier === "tier0";
+  } catch {
+    return false;
+  }
+}
 const PREFIX_MAX_WORDS = 4;
 function meaningfulPrefix(before: string): boolean {
   const words = before.toLowerCase().match(TOKEN_RE) ?? [];
@@ -189,7 +213,8 @@ export function stripWakeDetailed(text: string): { command: string; droppedPrefi
     if (after && !isCourtesyOnly(after)) {
       if (!before) return { command: after };
       const sameSentence = !/[.!?…]\s*$/u.test(parts.before);
-      if (sameSentence && (looksLikeCommandUtterance(before) || meaningfulPrefix(before))) return { command: `${before} ${after}` };
+      const keep = looksLikeCommandUtterance(before) || placePrefix(before) || (meaningfulPrefix(before) && !selfSufficient(after));
+      if (sameSentence && keep) return { command: `${before} ${after}` };
       return { command: after, droppedPrefix: before };
     }
     return { command: before };
