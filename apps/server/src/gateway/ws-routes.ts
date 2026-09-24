@@ -107,6 +107,14 @@ export function registerWsRoutes(instance: FastifyInstance, deps: WsRouteDeps): 
     const ws = connection as RawWsLike;
     const origin = originOf(request);
     if (!isAllowedWsOrigin(origin, "ext", deps.pinnedExtId)) {
+      if (/^chrome-extension:\/\//iu.test(origin)) {
+        // Чаще всего это НАШЕ расширение с другим ID (распакованное загружено из другой папки). Молча отказать =
+        // «руки в браузере мертвы, а почему — не видно» (24.09 так пролежали сутки). Говорим, что сделать.
+        deps.log.warn("/ext: расширение отклонено пиннингом — если это Jarvis Web Hands, обновите JARVIS_EXT_ID", {
+          пришло: origin.replace(/^chrome-extension:\/\//iu, ""),
+          ожидается: deps.pinnedExtId,
+        });
+      }
       refuse(ws, deps.log, "ext", origin);
       return;
     }
