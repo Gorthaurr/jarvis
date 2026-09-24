@@ -6,6 +6,7 @@
  * («Жорвит», «Джаррис», «Жарвес», «Jarves»…), поэтому помимо явных вариантов матчим FUZZY:
  * любой токен в пределах малого расстояния редактирования от «джарвис»/«jarvis». Чистые функции.
  */
+import { looksLikeCommandUtterance } from "../brain/agent/replay-gate.js";
 
 /** Явные варианты, как STT слышит «Джарвис» (рус/лат) — быстрый путь. Границы — Unicode. */
 const CORE =
@@ -152,8 +153,9 @@ const cleanBefore = (s: string): string => s.replace(/^[\s,.!?:;—-]+/u, "").re
  * Убрать обращение «Джарвис», оставив команду. Команда — то, что ПОСЛЕ обращения (B-F12: текст до него —
  * это обрывок, попавший в пре-ролл); если после обращения ничего содержательного нет («открой блокнот,
  * джарвис», «…, Джарвис, пожалуйста») — команда стоит ДО обращения.
- * ⚠️ Осознанная цена: обращение-вставка посреди своей же команды («Поставь напоминание, Джарвис, на пять»)
- * теряет начало — владелец зовёт «Джарвис» первым словом, а приклеенный фон ломал команды регулярно.
+ * Обращение-ВСТАВКА посреди своей же команды («Поставь напоминание, Джарвис, на пять») начало не теряет:
+ * префикс в той же фразе (не отделён точкой/?/!) и сам похож на команду (глагол-действие) → это одна реплика
+ * владельца. Обрывок фона («…что», «…Путина.») — отбрасывается.
  */
 export function stripWake(text: string): string {
   return stripWakeDetailed(text).command;
@@ -165,7 +167,12 @@ export function stripWakeDetailed(text: string): { command: string; droppedPrefi
   if (parts) {
     const after = cleanAfter(parts.after);
     const before = cleanBefore(parts.before);
-    if (after && !isCourtesyOnly(after)) return before ? { command: after, droppedPrefix: before } : { command: after };
+    if (after && !isCourtesyOnly(after)) {
+      if (!before) return { command: after };
+      const sameSentence = !/[.!?…]\s*$/u.test(parts.before);
+      if (sameSentence && looksLikeCommandUtterance(before)) return { command: `${before} ${after}` };
+      return { command: after, droppedPrefix: before };
+    }
     return { command: before };
   }
   return { command: stripWakeLegacy(text) };
