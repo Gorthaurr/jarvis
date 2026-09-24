@@ -145,6 +145,25 @@ export function splitAtWake(text: string): { before: string; after: string } | n
   return null;
 }
 
+/**
+ * Контроль-1 №3 (ревью 2026-09-24): что стоит ДО «Джарвис» в той же фразе — обрывок пре-ролла или смысл команды?
+ * Первая версия B-F12 сохраняла префикс только с командным глаголом и теряла адресата/время/программу:
+ * «Кате, Джарвис, напиши…» уходило «напиши…» без Кати, «Завтра в девять, Джарвис, напомни…» — без времени.
+ * Обрывок пре-ролла (0,9 с) — это служебные слова («…что», «так вот», «бла бла»); смысл — хоть одно содержательное
+ * слово в короткой (≤ PREFIX_MAX_WORDS) группе. Длиннее — уже не префикс команды, а чужая речь.
+ */
+const PREFIX_FUNCTION_WORDS = new Set([
+  ...NOISE_WORDS,
+  "что", "чтобы", "так", "вот", "это", "то", "как", "но", "да", "нет", "ага", "угу", "он", "она", "оно", "они", "мы",
+  "вы", "ты", "я", "бла", "короче", "значит", "типа", "вообще", "просто", "сказал", "сказала", "говорит", "говорю",
+  "слушай", "смотри", "окей", "ладно", "же", "ли", "бы", "вон", "там", "тут", "его", "её", "их", "ещё", "уже",
+]);
+const PREFIX_MAX_WORDS = 4;
+function meaningfulPrefix(before: string): boolean {
+  const words = before.toLowerCase().match(TOKEN_RE) ?? [];
+  return words.length > 0 && words.length <= PREFIX_MAX_WORDS && words.some((w) => !PREFIX_FUNCTION_WORDS.has(w));
+}
+
 /** Срезать разделители на стыке с обращением. Концевые «?»/«!»/«.» НЕ трогаем: «?» — признак вопроса для роутера. */
 const cleanAfter = (s: string): string => s.replace(/^[\s,.!?:;—-]+/u, "").replace(/\s+/gu, " ").trim();
 const cleanBefore = (s: string): string => s.replace(/^[\s,.!?:;—-]+/u, "").replace(/[\s,:;—-]+$/u, "").replace(/\s+/gu, " ").trim();
@@ -170,7 +189,7 @@ export function stripWakeDetailed(text: string): { command: string; droppedPrefi
     if (after && !isCourtesyOnly(after)) {
       if (!before) return { command: after };
       const sameSentence = !/[.!?…]\s*$/u.test(parts.before);
-      if (sameSentence && looksLikeCommandUtterance(before)) return { command: `${before} ${after}` };
+      if (sameSentence && (looksLikeCommandUtterance(before) || meaningfulPrefix(before))) return { command: `${before} ${after}` };
       return { command: after, droppedPrefix: before };
     }
     return { command: before };

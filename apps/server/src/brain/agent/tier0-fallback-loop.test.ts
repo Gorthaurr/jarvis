@@ -89,6 +89,41 @@ describe("tier0 app.launch не нашёл цель → ход уходит мо
     expect(reply.voice).toContain("processStart");
   });
 
+  // Контроль-1 №4 (ревью 2026-09-24): ГОЛОСОВОЙ путь. exe-запуск ждёт сверки ~1,5 с → «открой дискорд» промотируется
+  // («Секунду, сэр»), и провал приходил уже в фоне — там fallbackToLlm игнорировался, модель не звалась.
+  // Реверт: убери ветку `reply.fallbackToLlm` в bg.then (runTier0) — модель не вызовется, прозвучит «не смог».
+  it("голосовой путь: провал запуска ПОСЛЕ промоушена → модель в фоне получает причину и доводит", async () => {
+    vi.stubEnv("JARVIS_SYNC_PROMOTE_MS", "20");
+    try {
+      const sendAction = vi.fn(
+        (cmd: ActionCommand) =>
+          new Promise((res) =>
+            setTimeout(
+              () =>
+                res(
+                  cmd.kind === "app.launch"
+                    ? { commandId: "c", ok: false, error: { code: "launch_failed", message: "не удалось запустить «дискорд»: process-exited-immediately exit=0" }, durationMs: 60 }
+                    : { commandId: "c", ok: true, durationMs: 1 },
+                ),
+              60,
+            ),
+          ),
+      );
+      const s = { sessionId: "s1", userId: "u1", sendAction, send: vi.fn(), requestConfirm: vi.fn() } as unknown as Session;
+      const spoken: string[] = [];
+      const llm = new MockLlmProvider([{ text: "Запустил Дискорд через Update.exe, сэр." }]);
+      const sink = { sentence: vi.fn(), display: vi.fn(), done: vi.fn() };
+      const d = { ...deps(llm), speakResult: (r: { voice: string }) => spoken.push(r.voice), bgTasks: new Set<Promise<unknown>>() };
+      const reply = await handleUserText(s, "открой дискорд", d, sink);
+      expect(reply.voice).toMatch(/Секунду/u); // промоушен случился
+      await vi.waitFor(() => expect(spoken.some((v) => /Update\.exe/u.test(v))).toBe(true), { timeout: 3000 });
+      expect(JSON.stringify(llm.requests[0]?.messages ?? [])).toContain("process-exited-immediately");
+      expect(spoken.some((v) => /Не смог запустить|сразу закрылась/u.test(v))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("T-F5: без модели (фоновый путь озвучивает voice как есть) фраза провала НАЗЫВАЕТ причину, а не «не получилось»", async () => {
     // Реверт: верни `failurePhrase(intent, code)` в runLocalIntent — прозвучит «не получилось».
     const { session: s } = session("launch_failed");

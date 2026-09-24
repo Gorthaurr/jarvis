@@ -118,7 +118,7 @@ async function findSemanticDuplicate(
 export interface TurnMeta { viaWake?: boolean; origin?: "watch-action" }
 /** Исполнители, которые живут в agent/index.ts (петля, sync-first, фон) — перехваты зовут их через контекст, без цикла импортов. */
 export interface TurnRunners {
-  runTier0: (session: Session, local: LocalIntent, deps: AgentDeps, sink?: ReplySink) => Promise<AgentReply>;
+  runTier0: (session: Session, local: LocalIntent, deps: AgentDeps, sink?: ReplySink, goal?: string) => Promise<AgentReply>;
   runAgentLoop: (session: Session, text: string, tier: Exclude<Tier, "tier0">, deps: AgentDeps, sink?: ReplySink, opts?: LoopOpts) => Promise<AgentReply>;
   runActionSyncFirst: (session: Session, text: string, tier: Exclude<Tier, "tier0">, deps: AgentDeps, sink: ReplySink, opts: { freshContext?: boolean; viaWake?: boolean; resumeFrom?: TaskCheckpoint; machine?: boolean }) => Promise<AgentReply>;
   startBackgroundTask: (run: () => Promise<AgentReply>, deps: AgentDeps, opts: { bounded: boolean; preTask?: Task }) => void;
@@ -318,7 +318,7 @@ export async function interceptClarify(t: TurnCtx): Promise<AgentReply | null> {
       // `fallbackToLlm`, и ход модели, ради которого откат вводился, не отдавался ВООБЩЕ: довести дело после
       // закрытия рамки было некому, а сказанное владельцу не попадало в рабочую память (sync-first ветка её
       // сознательно не пишет — «ассистентской реплики ещё нет»).
-      const t0c = await runTier0(session, resolved, deps, sink); // sink → консьерж-открытие тоже sync-first
+      const t0c = await runTier0(session, resolved, deps, sink, clean); // sink → консьерж-открытие тоже sync-first
       if (!t0c.fallbackToLlm) return finishReply(t0c);
       log.info("tier0: ответ на уточнение не закрыт детерминированно — передаю модели", { key: pend.key });
     }
