@@ -20,6 +20,7 @@ import {
   type ClientContext,
   type ClientEnv,
   type ClientSystem,
+  type ClientSelection,
   type ClientKeys,
   type ClientSettings,
   type ClientStateMsg,
@@ -42,6 +43,7 @@ import { type AgentDeps, type AgentReply, handleUserText } from "../brain/agent/
 import { SessionWarmth } from "../brain/agent/warmth.js";
 import { autonomyFreeze } from "../autonomy/freeze.js";
 import { renderCapabilityPassport } from "../brain/capabilities.js";
+import { SelectionSlot, sanitizeSelection } from "../brain/agent/selection-context.js";
 import { lastSubscriptionFailure } from "../integrations/subscription-llm.js";
 import { getMode } from "../brain/persona/modes.js";
 import type { DynamicToolStore } from "../brain/tools/dynamic.js";
@@ -92,7 +94,7 @@ import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
 import type { VoiceProfileStore } from "../voice/speaker/store.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { ExtensionBridge } from "./extension-bridge.js";
-import { channelSummary, matchChannels } from "../brain/app-channels.js";
+import { channelSummary, matchChannels, sanitizeUsage } from "../brain/app-channels.js";
 import { hotPromotionsFor } from "../brain/tools/hot-promotions.js";
 import type { Session } from "./session.js";
 import { handleControlUtterance, handleTaskControl, handleTakeover } from "./task-control.js";
@@ -377,7 +379,10 @@ export function makeSessionContext(
   // §5 resume + персист: память диалога СКОУПЛЕНА на Session (переживает reconnect) И грузится С ДИСКА
   // по userId (переживает рестарт сервера/клиента) — иначе «забывал, о чём говорили». На новой сессии
   // поднимается из data/memory/<user>.json, дальше авто-сохраняется (см. working-store).
-  const memory = session.scoped("workingMemory", () => loadWorkingMemory(session.userId));
+  // T-F1 (ревью 2026-09-24): dev-сессия (текст-драйвер/смоук) живёт на СВОЕЙ памяти — не читает и не пишет
+  // рабочую память владельца (раньше реплики драйвера оседали в ней на 12 ч и исполнялись «от имени» владельца).
+  const isDev = isDevSession(clientVersion);
+  const memory = session.scoped("workingMemory", () => (isDev ? new WorkingMemory() : loadWorkingMemory(session.userId)));
   // H10: async-контур (§20) СКОУПЛЕН на Session (как workingMemory/toolActivation) → ПЕРЕЖИВАЕТ reconnect.
   // Раньше makeSessionContext создавал новый мьютекс/семафор/набор на КАЖДЫЙ коннект: команда на новом ctx
   // захватывала input-lease с ПОЛНЫМИ пермитами конкурентно с осиротевшей задачей старого ctx (в resume-grace
@@ -389,6 +394,9 @@ export function makeSessionContext(
   let closed = false;
   const agentDeps: AgentDeps = {
     memory,
+    // §режим выделения: слот сидируется ЗДЕСЬ (один экземпляр на сессию), а не при первом client.selection —
+    // иначе петля, запущенная до первого выделения (или пережившая resume), держала бы deps без слота.
+    selection: session.scoped("selection", () => new SelectionSlot()),
     llm: brain.llm,
     episodic: brain.episodic,
     responseCache: brain.responseCache, // §15 семантический кэш ответов (lookup до LLM / store после)
@@ -416,6 +424,7 @@ export function makeSessionContext(
       language: getProfile(session.userId).language,
     },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
+    devSession: isDev, // T-F1: изоляция dev-сессии (память, задачи, самообучение, рефлексы)
     // Волна C: чекпойнт прерванной задачи → честное «продолжи». DEV-ГЕЙТ обязателен (правило проекта
     // для всего, что ПОТРЕБЛЯЕТ накопленное владельцем): слот один на пользователя, и утренний прогон
     // текст-драйвера иначе перетёр бы недоделку владельца своей — а его «доделай» доводило бы смоук.
@@ -457,7 +466,13 @@ export function makeSessionContext(
         // Почему лёг резерв на подписке (протухшая авторизация/исчерпанный лимит) — знание на каждый
         // ход: иначе владелец слышит «связь прервалась» и не догадывается, что нужно переавторизоваться.
         subscriptionFailure: lastSubscriptionFailure(),
-        appChannels: channelSummary(agentDeps.appChannels ?? []),
+        // Состояние ОСНОВНОГО канала (2026-09-02): при исчерпанном балансе/непринятом ключе он
+        // выключается насовсем (не «пауза и снова стучимся»), и работа идёт по подписке — медленнее
+        // и без prompt-кеша. Модель обязана это знать: иначе обещает прежнюю скорость и не понимает,
+        // почему длинные GUI-задачи не укладываются в потолок.
+        llmChannel: brain.llm.channelStatus?.(),
+        appChannels: channelSummary(agentDeps.appChannels ?? [], agentDeps.appUsage),
+        selectionHotkey: agentDeps.selectionHotkey,
       }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
     watch: brain.watch, // §долгие-задачи: durable наблюдение/мониторинг + проактивная озвучка
@@ -594,6 +609,8 @@ export function makeSessionContext(
     // серверу). Арендатору он не адресован и его данными не является (живой прогон 2026-09-02).
     if (devSession || brain.product?.policy.enabled || selfReviewTried || selfReviewInFlight) return;
     if (autonomyFreeze().isFrozen()) return;
+    // W0: явный выключатель — самоосмотр первой репликой владелец не просил (JARVIS_SELF_REVIEW=0).
+    if (process.env.JARVIS_SELF_REVIEW === "0") return;
     const everyDays = Math.max(1, Number(process.env.JARVIS_SELF_REVIEW_DAYS ?? 3) || 3);
     if (!shouldSelfReview({ lastReviewedAt: getProfile(session.userId).lastSelfReviewedAt, everyDays, enabled: true }, Date.now())) {
       selfReviewTried = true;
@@ -647,7 +664,7 @@ export function makeSessionContext(
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
     // Б5 second-chance (форензика 2026-07-10): near-miss обращения при живой задаче → «Вы мне, сэр?».
-    hasActiveTask: () => brain.tasks.activeForUser(session.userId).length > 0,
+    hasActiveTask: () => brain.tasks.activeForUser(session.userId, undefined, isDev).length > 0,
     // §10 realtime: прекеш-филлер «Секунду, сэр.» маскировал пол латентности Opus, НО на
     // каждую реплику (включая болтовню) звучал как деферрал «погоди, занят» → Джарвис будто
     // отделывается, а не разговаривает (фидбэк пользователя). С быстрым STT (deepgram) пауза
@@ -747,8 +764,16 @@ export function makeSessionContext(
   // Волна 1 (эпизод 2026-07-10): мгновенная слышимая ПРИЁМКА фоновой задачи — короткий earcon-тон,
   // не фраза. Убирает сам триггер повторов команды («8с тишины → не услышал → повторил → две петли»).
   agentDeps.taskAccepted = () => voice.playTaskAckEarcon();
-  agentDeps.speakResult = (reply) => {
-    voice.speakQueued(reply.voice);
+  agentDeps.speakResult = (reply, opts) => {
+    // W0: итог ЗАДАЧИ ВЛАДЕЛЬЦА открывает окно разговора (он ждёт ответа); машинный реэнтри
+    // (поручение наблюдения) — проактив, окна не открывает.
+    // Ревью 2026-09-24 (T-F6): итог задачи ВЛАДЕЛЬЦА, пришедший, пока он ЗАНЯТ (полный экран/звонок/блокировка), —
+    // СРОЧНЫЙ. Несрочный busy-гейт §9 держал до освобождения, а TTL очереди (2 мин) выбрасывал МОЛЧА: владелец
+    // спросил из игры, услышал «Берусь, сэр» — и ответа не дождался никогда. Он ждёт именно этот ответ.
+    // Свободному владельцу — прежняя несрочная семантика (свежий вперёд + срок годности: шторм параллельных
+    // задач не превращается в «скопом через минуты»). Проактив (поручение наблюдения) занятость уважает всегда.
+    const origin = opts?.origin ?? "user-turn";
+    voice.speakQueued(reply.voice, origin === "user-turn" && ownerBusy(), { origin });
     // §22: итог фоновой задачи — ТАКЖE в чат-историю (раньше уходил только голосом → в текст-канале
     // результат web/MCP/задач не появлялся; печатающий/в mute пользователь его не видел).
     if (reply.voice.trim()) session.send("chat", { role: "assistant", text: reply.voice });
@@ -797,7 +822,8 @@ export function makeSessionContext(
     // живой речи и не съедает висящее уточнение консьержа.
     void handleUserText(session, goal, agentDeps, undefined, { origin: "watch-action" })
       .then((reply) => {
-        if (reply.voice.trim() || reply.display) agentDeps.speakResult?.(reply);
+        // W0: итог машинного реэнтри — проактив (владелец не ждёт ответа), окно разговора не открываем.
+        if (reply.voice.trim() || reply.display) agentDeps.speakResult?.(reply, { origin: "proactive" });
       })
       .catch((e: unknown) => log.error("watch-action: ошибка исполнения поручения", e instanceof Error ? e.message : String(e)));
   });
@@ -945,6 +971,8 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const payload = env.payload as ClientEnv;
       const summary = payload.summary;
       ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, environment: summary };
+      // §режим выделения: какая клавиша РЕАЛЬНО зарегистрирована — в паспорт возможностей, не литералом в персоне.
+      if (payload.selectionHotkey !== undefined) ctx.agentDeps.selectionHotkey = payload.selectionHotkey;
       // §Волна2 (2.6): структурные списки → лексикон STT-нормализатора (мутируем объект-держатель,
       // который замкнут в источниках TranscriptNormalizer этой сессии).
       if (ctx.envLexicon) {
@@ -956,6 +984,8 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       if (Array.isArray(payload.installed)) {
         ctx.agentDeps.appChannels = matchChannels(payload.installed);
       }
+      // W4.2: минуты фокуса по процессу — санируем (влияемые заголовков тут нет, но форма — с клиента).
+      if (Array.isArray(payload.usage)) ctx.agentDeps.appUsage = sanitizeUsage(payload.usage);
       log.info("client.env: профиль окружения получен", {
         len: summary?.length ?? 0,
         apps: payload.apps?.length ?? 0,
@@ -992,6 +1022,29 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const nowEmpty = !combined.trim();
       if (wasEmpty !== nowEmpty) log.info("client.system: live-контекст " + (nowEmpty ? "ПРОПАЛ (пустые снимки)" : "появился"), { len: combined.length });
       ctx.agentDeps.userContext = { ...ctx.agentDeps.userContext, systemContext: combined };
+      break;
+    }
+    case "client.selection": {
+      // §режим выделения (2026-09-03): владелец обвёл кусок экрана рамкой (или снял её). Кладём в
+      // контекст хода — Джарвис КАЖДЫЙ ход знает, есть ли указатель «вот тут», без tool-call.
+      // Момент фиксируем ПО СВОИМ часам: возраст указания должен быть честным независимо от часов ПК.
+      // Санируем: это НАШ доверенный статус в промпте, значит граница «данные/инструкции» — здесь.
+      // Слот живёт в session.scoped: реконнект пересоздаёт agentDeps, а идущая петля читает живое состояние.
+      const payload = env.payload as ClientSelection;
+      const sel = payload.selection === null ? null : sanitizeSelection(payload.selection);
+      if (payload.selection !== null && !sel) {
+        log.warn("client.selection: отброшен как не похожий на выделение (мусорные поля)");
+        break;
+      }
+      const slot = ctx.session.scoped("selection", () => new SelectionSlot()); // тот же экземпляр, что в agentDeps
+      // Контроль-9 (browser-open-ext-bypasses-veil): фаза рисования — отдельный факт от самого выделения (рамки ещё
+      // нет, а вуаль уже ловит мышь). Серверные пути мимо клиентского гейта (browser_open через расширение) судят по ней.
+      if (typeof payload.drawing === "boolean") slot.setDrawing(payload.drawing);
+      const before = slot.key();
+      slot.set(sel, payload.ageMs, Date.now());
+      if (slot.key() !== before) {
+        log.info(sel ? "client.selection: владелец показывает на область" : "client.selection: выделение снято", sel ? { w: sel.w, h: sel.h, monitor: sel.monitorIndex } : {});
+      }
       break;
     }
     case "client.settings": {

@@ -101,3 +101,27 @@ describe("attachReplaySection", () => {
     expect(out.split(REPLAY_SECTION_HEADER)).toHaveLength(2); // заголовок ровно один
   });
 });
+
+describe("W4 act в авто-макросе", () => {
+  it("act с разрешёнными координатами (физический клик/точка) компилируется; do:type добавляет печать; do:key — клавиша", () => {
+    const lines = compileReplayLines([
+      { name: "app_focus", input: { app: "Блокнот" } },
+      { name: "act", input: { target: "Играть" }, data: { screenX: 240.4, screenY: 120 } },
+      { name: "act", input: { target: "Поиск", do: "type", text: "кот" }, data: { screenX: 10, screenY: 20 } },
+      { name: "act", input: { do: "key", combo: "Enter" } },
+    ]);
+    expect(lines).toContain('input.click x=240 y=120 space="screen" method="physical"');
+    expect(lines).toContain('input.type text="кот"');
+    expect(lines).toContain('input.key combo="Enter"');
+  });
+
+  it("act по UIA-handle (без координат) → макрос НЕ компилируется целиком (частичный опасен)", () => {
+    expect(
+      compileReplayLines([
+        { name: "app_focus", input: { app: "Блокнот" } },
+        { name: "act", input: { target: "Играть" }, data: { found: { via: "snapshot" } } },
+        { name: "input_key", input: { combo: "Enter" } },
+      ]),
+    ).toEqual([]);
+  });
+});

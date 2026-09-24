@@ -57,6 +57,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "input.click",
       "ui.invoke",
       "ui.ground",
+      "gui.act", // W4 «Руки»: один примитив «сделай X с элементом Y»
       "app.launch",
       "app.focus",
       "app.close",
@@ -66,6 +67,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "code.run",
       "skill.execute",
       "screen.capture",
+      "screen.selection", // §режим выделения: область, на которую показывает владелец
       "context.read",
       "demo.record",
       "message.send",

@@ -16,6 +16,7 @@ import type {
 } from "@jarvis/protocol";
 import type { JarvisBridge, LinkState, SpeakChunkPayload, KeyName, SettingsPatch } from "../main/ipc-contract.js";
 import { AudioCapture, AudioPlayback } from "./audio.js";
+import { type CaptureFailInfo, createMicBoot } from "./capture-starter.js";
 import { $ } from "./dom.js";
 import { buildWave } from "./wave.js";
 import { initBillingPanel } from "./billing-panel.js";
@@ -57,11 +58,24 @@ const STATE_RU: Record<ClientState, string> = {
 let currentState: ClientState = "listening"; // для цвета шкалы голоса
 function setOrbState(state: ClientState): void {
   currentState = state;
-  statusbar.className = `statusbar statusbar--${state}`;
-  stateLabel.textContent = STATE_RU[state] ?? state;
+  // B-F4: «слушающее» гало при мёртвом/выключенном микрофоне — та же ложь, что и подпись: цвет покоя.
+  const visual: ClientState = state === "listening" && (micMuted || !micBoot.isUp) ? "idle" : state;
+  statusbar.className = `statusbar statusbar--${visual}`;
+  stateLabel.textContent = orbText(state);
   // Центральный индикатор — та же машина состояний (гало/подпись/волна; кольцо скрыто в CSS).
-  hero.className = `hero hero--${state}`;
-  heroLabel.textContent = STATE_RU[state] ?? state;
+  hero.className = `hero hero--${visual}`;
+  heroLabel.textContent = orbText(state);
+}
+/**
+ * Ревью 2026-09-24 (B-F4): подпись «слушаю» — утверждение, а не декор. При мёртвом захвате или выключенном
+ * микрофоне она врала (idle и listening оба «слушаю»): владелец видел «слушаю» у глухого Джарвиса.
+ */
+function orbText(state: ClientState): string {
+  const base = STATE_RU[state] ?? state;
+  if (state !== "idle" && state !== "listening") return base;
+  if (micMuted) return "микрофон выключен";
+  if (!micBoot.isUp) return "нет микрофона";
+  return base;
 }
 
 function setLink(link: LinkState): void {
@@ -126,6 +140,45 @@ const playback = new AudioPlayback(
   (gen, ts) => jarvis.audioPlayed?.(gen, ts),
 );
 let capture: AudioCapture | null = null;
+/** В строке транскрипта сейчас НАШЕ сообщение об ошибке микрофона (снять его при подъёме, чужой текст не трогать). */
+let micErrorShown = false;
+
+/**
+ * Ревью 2026-09-24 (B-F4/T-F9/H-L1): подъём микрофона с повтором 1 с → 30 с (логика — capture-starter.ts).
+ * Раньше стартовый отказ getUserMedia был окончательным до перезапуска клиента, а activate() всё равно
+ * уходил в main («слух включён» у глухого Джарвиса). Теперь activate() — только из onUp, после подъёма.
+ */
+const micBoot = createMicBoot({
+  startCapture: async () => {
+    const c = new AudioCapture((pcm) => jarvis.pushPcm(pcm));
+    try {
+      await c.start();
+    } catch (e) {
+      // H18: при ЧАСТИЧНОМ провале start() (getUserMedia успел, ворклет — нет) MediaStream оставался
+      // захваченным — микрофон «занят» до перезапуска. Добиваем перед повтором.
+      await c.stop().catch(() => {});
+      throw e;
+    }
+    capture = c;
+  },
+  isMuted: () => micMuted,
+  bridge: jarvis,
+  ui: {
+    up: () => {
+      if (micErrorShown) transcriptEl.textContent = "";
+      micErrorShown = false;
+      console.info("микрофон поднят — захват идёт");
+      setOrbState(currentState); // подпись «нет микрофона» → «слушаю»
+    },
+    down: (info: CaptureFailInfo) => {
+      // НЕ глотаем: имя и текст ошибки (раньше в логе было «[object DOMException]») + срок повтора.
+      console.error(`микрофон недоступен (попытка ${info.attempt}): ${info.error} — повтор через ${Math.round(info.retryInMs / 1000)} с`);
+      transcriptEl.textContent = `${info.hint}. Пробую снова через ${Math.round(info.retryInMs / 1000)} с.`;
+      micErrorShown = true;
+      setOrbState(currentState);
+    },
+  },
+});
 
 // §22 mute озвучки: при выключенном звуке аудио-чанки НЕ проигрываем (Джарвис слышит и делает, но молча).
 jarvis.onSpeakChunk((c: SpeakChunkPayload) => {
@@ -162,7 +215,10 @@ applyMicMute(false); // на старте — только вид; гейт от
 micBtn.addEventListener("click", () => {
   micMuted = !micMuted;
   localStorage.setItem("jarvis.micMuted", micMuted ? "1" : "0");
+  // Включение: activate() сразу (воля владельца доходит до main; там это push-to-talk — гейт на ~8 с,
+  // ревью 2026-09-24 B-F8) + ensure(): захват не поднят — пробуем прямо сейчас, не ждём бэкоффа (B-F4).
   applyMicMute(true);
+  if (!micMuted) void micBoot.ensure();
   // Адверс-ревью [5]: центр экрана обязан отражать mute — «listening» при выключенном микрофоне = ложь.
   setOrbState(micMuted ? "idle" : "listening");
 });
@@ -233,24 +289,6 @@ jarvis.onChat((m: ChatMessage) => {
   // mute + НЕ в чат-режиме: ответ Джарвиса показываем карточкой под индикатором (текст-фидбэк §22).
   if (m.role === "assistant" && outputMuted && !chatMode) addCard({ title: "Джарвис", markdown: m.text });
 });
-
-/** Поднять захват (один раз). Кадры PCM уходят в main, где гейтятся (§0.6). */
-async function ensureCapture(): Promise<void> {
-  if (capture) return;
-  capture = new AudioCapture((pcm) => jarvis.pushPcm(pcm));
-  try {
-    await capture.start();
-  } catch (e) {
-    // НЕ глотаем: раньше тихий catch скрывал отказ микрофона → Джарвис «не слышал»
-    // без единого следа. Логируем и показываем явный статус пользователю.
-    // H18: при ЧАСТИЧНОМ провале start() (getUserMedia успел, ворклет — нет) MediaStream
-    // оставался захваченным — микрофон «занят» до перезапуска. Добиваем перед сбросом ссылки.
-    await capture.stop().catch(() => {});
-    capture = null;
-    console.error("микрофон недоступен:", e);
-    transcriptEl.textContent = "Нет доступа к микрофону — проверьте разрешение в Windows.";
-  }
-}
 
 // Орб — пассивный индикатор состояния. Активация НЕ по клику: Джарвис слушает
 // сам с запуска (ambient, §3). Микрофон поднимается в инициализации ниже.
@@ -382,11 +420,10 @@ initMonitorPanel(jarvis); // фабрика строк + onMonitors + listMonito
 setLink({ online: false });
 setOrbState(micMuted ? "idle" : "listening");
 buildWave();
-void ensureCapture().then(() => {
-  // Контрольное ревью: волю владельца сообщаем main ВСЕГДА — и «включить», и «выключить». Раньше при
-  // персистнутом mute мы просто НЕ звали activate: гейт был закрыт, но main.micKillSwitch оставался
-  // false → запись голоса (она открывает гейт) после рестарта клиента больше его не закрывала, и
-  // красная кнопка «Джарвис не слышит» врала при живом потоке в облако.
-  if (micMuted) jarvis.mute();
-  else jarvis.activate();
-});
+// Контрольное ревью: волю владельца сообщаем main ВСЕГДА. Раньше при персистнутом mute мы просто НЕ звали
+// activate: гейт был закрыт, но main.micKillSwitch оставался false → запись голоса (она открывает гейт)
+// после рестарта клиента больше его не закрывала, и красная кнопка «Джарвис не слышит» врала при живом
+// потоке в облако. «Выключить» — сразу (безопасно при любом состоянии захвата); «включить» (activate) —
+// только когда захват реально поднят, из onUp createMicBoot (ревью 2026-09-24, H-L1).
+if (micMuted) jarvis.mute();
+void micBoot.ensure();

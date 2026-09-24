@@ -12,7 +12,7 @@
  * Чистый stdlib (urllib) — без внешних зависимостей: runnerEnv может не иметь pip-пакетов.
  */
 export const JARVIS_SDK_PY = String.raw`# jarvis SDK — драйвим актуаторы клиента из одного code_run-скрипта.
-import os, json, time, urllib.request, urllib.error
+import os, sys, json, time, urllib.request, urllib.error
 
 _URL = os.environ.get("JARVIS_ACT_URL")
 _TOKEN = os.environ.get("JARVIS_ACT_TOKEN", "")
@@ -20,6 +20,34 @@ _TOKEN = os.environ.get("JARVIS_ACT_TOKEN", "")
 
 class JarvisError(Exception):
     pass
+
+
+_OVERLAY_EXIT_CODE = 77
+_DONE = 0  # успешно ушедшие МУТИРУЮЩИЕ вызовы — честное «сделано N» при остановке вуалью (контроль-6, V5-2)
+_MUTATING = ("app.", "input.", "ui.invoke", "window.focus", "window.arrange")
+
+
+class JarvisVeilExit(SystemExit):
+    """Вуаль режима выделения — СОСТОЯНИЕ СИСТЕМЫ, не сбой скрипта. Это SystemExit(77), не JarvisError:
+    типовая обёртка «try/except Exception → sys.exit(1)» её НЕ ловит (и не съедает код), finally/with отрабатывают
+    штатно, интерпретатор выходит кодом 77, а маркер «[overlay_drawing] done=N injected=0|1 …» уходит в stderr
+    В МОМЕНТ raise — code_run читает оба признака структурно. Ловится только «except BaseException»/«SystemExit» —
+    тогда честность исхода на скрипте. Атрибуты: message, jarvis_code, done, injected."""
+
+    def __init__(self, message, injected=False):
+        self.message = message
+        self.jarvis_code = "overlay_drawing"
+        self.done = _DONE
+        self.injected = bool(injected)
+        try:
+            sys.stderr.write("[overlay_drawing] done=%d injected=%d %s\n" % (_DONE, 1 if injected else 0, message))
+            sys.stderr.flush()
+        except Exception:
+            pass
+        SystemExit.__init__(self, _OVERLAY_EXIT_CODE)
+
+    def __str__(self):
+        return self.message
 
 
 def _call(kind, **fields):
@@ -48,11 +76,34 @@ def _call(kind, **fields):
 
 
 def _ok(kind, **fields):
+    global _DONE
     res = _call(kind, **fields)
     if not res.get("ok"):
         err = res.get("error") or {}
-        raise JarvisError("%s: %s" % (kind, err.get("message", "провал")))
+        code = err.get("code") or ""
+        msg = "%s: %s" % (kind, err.get("message", "провал"))
+        # Вуаль режима выделения — состояние системы, не сбой скрипта: выходим кодом 77 (JarvisVeilExit), сервер по нему
+        # не считает раунд провалом модели. Дождись закрытия оверлея: jarvis.wait_for(...).
+        if code == "overlay_drawing":
+            raise JarvisVeilExit(msg, injected=res.get("stepActionInjected") is True)
+        e = JarvisError(msg)
+        e.code = code
+        raise e
+    if kind.startswith(_MUTATING):
+        _DONE += 1
     return res.get("data")
+
+
+def _veiled(data):
+    "Сенсор/наблюдение снято ПОД ВУАЛЬЮ режима выделения (клиент помечает data.overlayDrawing)."
+    return isinstance(data, dict) and data.get("overlayDrawing") is True
+
+
+def _overlay_error(kind):
+    return JarvisVeilExit(
+        "%s: сенсор снят ПОД ВУАЛЬЮ режима выделения — в кадре наш оверлей, не приложения, искать/читать "
+        "нечего. Дождись закрытия оверлея (jarvis.wait_for(...) / jarvis.sleep) и повтори." % kind
+    )
 
 
 def _ms(timeout=None, timeout_ms=None, default=8000):
@@ -138,6 +189,9 @@ def snapshot(pid=None, max_items=200):
     if pid is not None:
         f["pid"] = pid
     data = _ok("ui.snapshot", **f) or {}
+    # Контроль-6 (C5R-5): снапшот ЯВНО заданного окна (pid) — его UIA-дерево, не оверлей; «в кадре наш оверлей» — ложь.
+    if pid is None and _veiled(data):
+        raise _overlay_error("ui.snapshot")
     # bbox элементов приходят в ФИЗИЧЕСКИХ пикселях UIA, НЕ в screen-DIP системе SDK — прямой click по ним
     # (дефолт space="screen") промахнулся бы на масштабированном дисплее и вернул ok = ЛОЖНЫЙ УСПЕХ.
     # Действие по элементу идёт через handle→invoke, поэтому координаты не отдаём (как rect-ветка ocr()).
@@ -157,6 +211,8 @@ def ocr(monitor=None, rect=None, lang=None):
     if lang is not None:
         f["lang"] = lang
     data = _ok("screen.ocr", **f) or {}
+    if _veiled(data):
+        raise _overlay_error("screen.ocr")
     # Единая система координат SDK — АБСОЛЮТНЫЕ экранные DIP. Полный кадр даёт mapping → конвертируем
     # thumbnail-px строк в screen-DIP (boundsX + x/scale), чтобы click(x,y) по ним попадал.
     m = data.get("mapping")
@@ -186,12 +242,15 @@ def ocr(monitor=None, rect=None, lang=None):
 
 def read_context(scope="active_window"):
     "Текст активного окна/выделения (дейксис)."
-    return _ok("context.read", scope=scope)
+    data = _ok("context.read", scope=scope)
+    if _veiled(data):
+        raise _overlay_error("context.read")
+    return data
 
 
 # ── ожидание событий (без LLM-раундов) ────────────────────────────
 def wait_for(condition, timeout=None, timeout_ms=None, poll_ms=None):
-    "Ждать условие (dict {kind:'ui'|'window'|'text'|'sound'|'gsi', ...}). timeout в СЕКУНДАХ. → {met:bool,...}."
+    "Ждать условие (dict {kind:'ui'|'window'|'text'|'sound'|'gsi'|'file'|'process', ...}). timeout в СЕКУНДАХ. → {met:bool, unknown?:bool, overlayDrawing?:bool, ...}: unknown=True — сенсор не смог достоверно наблюдать (в т.ч. под вуалью режима выделения, overlayDrawing=True) — это НЕ «не наступило»."
     f = {"condition": condition, "timeoutMs": _ms(timeout, timeout_ms)}
     if poll_ms is not None:
         f["pollMs"] = poll_ms
@@ -250,31 +309,27 @@ def _center(o):
 
 
 def find(text):
-    "Найти элемент/текст по подстроке. Сначала UIA-снапшот (handle→надёжный invoke, независим от DPI/монитора), затем OCR (для UIA-слепых окон). Falsy Element, если не нашли — проверяй 'if el:'."
+    "Найти элемент/текст по подстроке. Сначала UIA-снапшот (handle→надёжный invoke, независим от DPI/монитора), затем OCR (для UIA-слепых окон). Falsy Element, если не нашли — проверяй 'if el:'. Под вуалью режима выделения снапшот/OCR завершают скрипт кодом 77 (JarvisVeilExit: в кадре оверлей — искать нечего), а не молчат пустым Element."
     tl = text.lower()
-    try:
-        snap = snapshot() or {}
-        for it in snap.get("items", []):
-            nm = ((it.get("name") or "") + " " + (it.get("value") or "")).lower()
-            if tl in nm:
-                # НАДЁЖНЫЙ путь — invoke по handle (без координат). handle у снапшота есть всегда.
-                return Element(handle=it.get("handle"), name=it.get("name"))
-    except JarvisError:
-        pass
-    try:
-        o = ocr() or {}
-        # ocr() уже вернул координаты в АБСОЛЮТНЫХ screen-DIP (space=='screen') для полного кадра.
-        # Если space нет (rect / нет mapping) — координаты неклик­абельны → честно не матчим под клик.
-        dip = o.get("space") == "screen"
-        for ln in o.get("lines", []):
-            if tl in (ln.get("text") or "").lower():
-                c = _center(ln)
-                if c is None:
-                    continue  # нет координат — не матчим (иначе клик в 0,0)
-                if not dip:
-                    continue  # координаты не в screen-DIP → клик ушёл бы мимо = ложный успех
-                return Element(x=c[0], y=c[1], name=ln.get("text"), space="screen")
-    except JarvisError:
-        pass
+    # Под вуалью snapshot()/ocr() поднимают JarvisVeilExit (SystemExit) — сюда он не ловится и уходит наверх (ACT-3):
+    # пустой Element читался бы как «не нашёл» — ложная причина.
+    snap = snapshot() or {}
+    for it in snap.get("items", []):
+        nm = ((it.get("name") or "") + " " + (it.get("value") or "")).lower()
+        if tl in nm:
+            # НАДЁЖНЫЙ путь — invoke по handle (без координат). handle у снапшота есть всегда.
+            return Element(handle=it.get("handle"), name=it.get("name"))
+    o = ocr() or {}
+    # ocr() уже вернул координаты в АБСОЛЮТНЫХ screen-DIP (space=='screen') для полного кадра.
+    # Если space нет (rect / нет mapping) — координаты неклик­абельны → честно не матчим под клик.
+    dip = o.get("space") == "screen"
+    for ln in o.get("lines", []):
+        if tl in (ln.get("text") or "").lower():
+            c = _center(ln)
+            if c is None:
+                continue  # нет координат — не матчим (иначе клик в 0,0)
+            if not dip:
+                continue  # координаты не в screen-DIP → клик ушёл бы мимо = ложный успех
+            return Element(x=c[0], y=c[1], name=ln.get("text"), space="screen")
     return Element()
 `;

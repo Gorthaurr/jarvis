@@ -9,6 +9,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
 import { isOfferDeclined, resumeOfferWindowMs } from "../brain/agent/checkpoint.js";
 import { classifyTaskControl } from "../brain/tasks/control.js";
+import { matchSelectionIntent } from "../brain/router/index.js";
 import { irreversibleDone, looksLikeMisfire, misfireAck } from "../brain/tasks/misfire.js";
 import { stripWakeAndFiller } from "../brain/router/index.js";
 import { statusReport } from "../brain/tasks/narrate.js";
@@ -18,6 +19,36 @@ import type { SessionContext } from "./router-ws.js";
 import type { Session } from "./session.js";
 
 const log: Logger = createLogger("task-control");
+
+/** W0: после «вырубись» проактив придержан на минуту; после «тишина» — на 10 минут (до явного «Джарвис» — раньше). */
+const KILL_QUIET_MS = 60_000;
+const SILENCE_QUIET_MS = 10 * 60_000;
+
+/**
+ * B-F2 (ревью 2026-09-24): сколько после barge-in реплика ещё считается сказанной «поверх речи Джарвиса».
+ * Владелец перебил — синтез оборван, пайплайн уже в listening, а его «стоп» доезжает из STT через 1–2 с.
+ * Раньше в этот момент «Джарвис не говорит и задач нет» → «стоп» уходил в роутер → медиаклавиша play/pause
+ * (переключатель — мог ЗАПУСТИТЬ музыку), а «замолчи» — в модель задачей.
+ */
+const RECENT_BARGE_MS = 3_000;
+
+/**
+ * Необязательные датчики пайплайна (есть в VoicePipeline с ревью 2026-09-24; старые/тестовые фейки — без них):
+ * клиент ещё ДОИГРЫВАЕТ реплику (синтез кончился раньше звука) и сколько мс назад был barge-in.
+ */
+interface SpeechProbe {
+  state: string;
+  isClientPlaying?: () => boolean;
+  msSinceBargeIn?: () => number;
+}
+
+/** Занят ли канал речью Джарвиса: говорит, клиент ещё играет или только что перебили. */
+export function jarvisSpeechBusy(voice: SpeechProbe): boolean {
+  if (voice.state === "speaking") return true;
+  if (voice.isClientPlaying?.() === true) return true;
+  const since = voice.msSinceBargeIn?.();
+  return typeof since === "number" && since >= 0 && since < RECENT_BARGE_MS;
+}
 
 /**
  * Откуда пришла команда управления: голосом (handleControlUtterance по голосовому вводу), из текст-канала
@@ -59,7 +90,7 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   // (та же грабля, что у resume-гарда: своя копия нормализации разошлась бы).
   const killswitch = matchAutonomyCommand(stripWakeAndFiller(text));
   if (killswitch === "freeze") {
-    const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId);
+    const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId, ctx.agentDeps.devSession === true);
     const durable = autonomyFreeze().freeze(`команда владельца («${text.trim().slice(0, 60)}»)`);
     // Ack честный по составу: что остановлено, что НЕ остановлено (напоминания — заказаны на время),
     // и КАК вернуть (обещаем ровно ту команду, которую матчер принимает, — обещание без срока годности).
@@ -114,7 +145,7 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   // честно называем уже совершённое необратимое: остановка задачи не отменяет отправленного.
   if (looksLikeMisfire(text)) {
     const tasks = ctx.agentDeps.tasks;
-    if (!tasks.hasAnyActive(ctx.session.userId)) {
+    if (!tasks.hasAnyActive(ctx.session.userId, ctx.agentDeps.devSession === true)) {
       // Нечего останавливать — но признать ошибку понимания всё равно нужно (иначе владелец
       // не поймёт, услышали ли его вообще).
       ackControl(ctx, misfireAck(0), source);
@@ -123,7 +154,7 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     }
     // Необратимое собираем ДО отмены — у отменённых задач состояние уже терминальное, а знать, что
     // ушло владельцу, нужно именно сейчас.
-    const cancelledTasks = tasks.cancelUser(ctx.session.userId);
+    const cancelledTasks = tasks.cancelUser(ctx.session.userId, ctx.agentDeps.devSession === true);
     const irreversible = cancelledTasks.flatMap((t) => irreversibleDone(t));
     const cancelled = cancelledTasks.length;
     ackControl(ctx, misfireAck(cancelled, irreversible), source);
@@ -135,8 +166,42 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     return true;
   }
 
+  // 🔴 §режим выделения: «убери/сними/ОТМЕНИ выделение» — команда снять рамку, а не «прерви задачу».
+  // Слово «отмени» ниже классифицируется как cancel и при активной задаче СЪЕЛО БЫ реплику, оборвав
+  // работу вместо снятия рамки. Пропускаем её дальше (tier0-интент selection исполнит) — тот же приём,
+  // что у killswitch выше: узкая якорная форма перехватывается ДО общего классификатора.
+  if (matchSelectionIntent(stripWakeAndFiller(text))) return false;
+
   const decision = classifyTaskControl(text);
   if (decision.kind === "none") return false;
+
+  // 🔴 W0 РЕФЛЕКС «вырубись»/«тишина» (2026-09-09): всё останавливается ЗДЕСЬ, за миллисекунды и без
+  // модели. Живой лог 2026-09-03: «Джарвис, вырубись» ×3 → три LLM-задачи по 10 с/раунд, window_list,
+  // input_key, code_run, app_close — полторы минуты попыток «что-то закрыть» вместо тишины.
+  // Перехватываем ВСЕГДА (даже если нечего останавливать): падение в модель тут — худший исход.
+  if (decision.kind === "kill" || decision.kind === "silence") {
+    const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId, ctx.agentDeps.devSession === true);
+    for (const t of cancelled) emitTaskStatus(ctx.session, t);
+    ctx.voice.onVadEvent("barge_in"); // рубит идущий синтез и отменяет ход в раздумье
+    ctx.voice.clearPendingSpeech(); // отложенные итоги — не нужны
+    ctx.voice.quiet(decision.kind === "silence" ? SILENCE_QUIET_MS : KILL_QUIET_MS); // окно закрыто, проактив придержан
+    ctx.session.send("client.state", { state: "idle" });
+    log.warn("W0 рефлекс: владелец велел остановиться и замолчать", {
+      kind: decision.kind,
+      source,
+      cancelled: cancelled.map((t) => t.taskId),
+      reason: decision.reason,
+    });
+    // Ack — ОДНО слово и МИМО очереди (она придержана quiet): владелец должен знать, что услышан.
+    // На «тишина» молчим совсем — он просил именно этого.
+    if (decision.kind === "kill") {
+      const ack = cancelled.length > 1 ? "Остановил всё." : cancelled.length === 1 ? "Остановил." : "Молчу.";
+      ctx.session.send("transcript", { text: ack, final: true });
+      if (source === "voice") ctx.voice.speak(verbalize(ack));
+      else ctx.session.send("chat", { role: "assistant", text: ack });
+    }
+    return true;
+  }
 
   // «стоп» — оборвать TTS (§20), задачу не трогаем (различие «заткнись» vs «отмени»).
   if (decision.kind === "stop_tts") {
@@ -144,7 +209,17 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     // Живой прогон 2026-09-02: в тишине «тише» и «сделай тише» не делали ВООБЩЕ ничего (ни действия, ни
     // ответа), а синонимы «потише»/«убавь громкость» работали — необъяснимая капризность. Пропускаем
     // такую реплику дальше в роутер, где она честно отработает как команда громкости.
-    if (ctx.voice.state !== "speaking" && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false;
+    // B-F2: «говорит» = не только state==="speaking": после barge-in (≤3 с) и пока клиент доигрывает реплику
+    // «стоп/тише» — это «замолчи», а не медиаклавиша или громкость.
+    if (!jarvisSpeechBusy(ctx.voice) && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId, ctx.agentDeps.devSession === true)) {
+      // «заткнись/замолчи/хватит», а говорить нечего — проглатываем молча: в модели эта реплика стала бы задачей
+      // (B-F2), а в роутере «хватит» — медиаклавишей. «тише/стоп» идут дальше (громкость / плеер).
+      if (decision.hush) {
+        log.info("«замолчи» при молчащем Джарвисе — проглочено", { reason: decision.reason });
+        return true;
+      }
+      return false;
+    }
     ctx.voice.onVadEvent("barge_in");
     ctx.voice.clearPendingSpeech(); // пользователь хочет тишины — не озвучивать отложенные фоновые итоги
     ctx.session.send("client.state", { state: "idle" });
@@ -166,7 +241,7 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
   // (любая активная задача userId, вкл. скрытую разговорную). Иначе «отмени напоминание/подписку»/«забудь
   // что просил» БЕЗ §20-задачи должно уйти в АГЕНТ (cancel_reminder и пр.), а не съесться «Нет задачи».
   if (decision.kind === "cancel") {
-    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) {
+    if (!ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId, ctx.agentDeps.devSession === true)) {
       // Волна C (финальный контроль): активных задач нет, но мы ТОЛЬКО ЧТО предложили продолжить
       // прерванную — «не надо / забудь» в это окно есть ОТКАЗ от предложения. Гасим чекпойнт, иначе
       // обещание живёт весь TTL: сказанное плееру «продолжи» воскрешало бы ЯВНО отклонённую работу.
@@ -184,7 +259,7 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     return true;
   }
   // pause/resume/status осмысленны только при ВИДИМОЙ активной задаче (по самой свежей taskId).
-  const active = ctx.agentDeps.tasks.activeForUser(ctx.session.userId)[0];
+  const active = ctx.agentDeps.tasks.activeForUser(ctx.session.userId, undefined, ctx.agentDeps.devSession === true)[0];
   if (!active) return false;
   handleTaskControl(ctx, decision.kind as TaskControl["action"], active.taskId, source);
   return true;
@@ -203,7 +278,7 @@ export function handleTaskControl(
   // «отмени» без явного taskId → снять ВСЕ задачи ПОЛЬЗОВАТЕЛЯ (Б4а: по userId — переживает
   // reconnect со сменой sessionId). С явным taskId (кнопка в UI) — гранулярная отмена ниже.
   if (action === "cancel" && !taskId) {
-    const cancelled = tasks.cancelUser(ctx.session.userId);
+    const cancelled = tasks.cancelUser(ctx.session.userId, ctx.agentDeps.devSession === true);
     ctx.voice.clearPendingSpeech(); // отменил всё → отложенные фоновые итоги тоже не нужны (ack — ПОСЛЕ сброса)
     for (const t of cancelled) emitTaskStatus(ctx.session, t);
     // Аудит лога 2026-07-03: отмена/пауза не оставляли НИ СТРОКИ в файловом логе — разбор «почему
@@ -222,7 +297,7 @@ export function handleTaskControl(
   // reconnect sessionId новый, а задача жива в старой сессии: прежний гвард молча `return` — «пауза»/
   // «что делаешь» умирали В ПОЛНОЙ ТИШИНЕ (живой пробник: перехвачено=true, озвучено=0). Пользователь
   // один — его команды применимы к его задачам из любой сессии; отказ ВСЕГДА озвучивается, не молчит.
-  const task = taskId ? tasks.get(taskId) : tasks.activeForUser(ctx.session.userId)[0];
+  const task = taskId ? tasks.get(taskId) : tasks.activeForUser(ctx.session.userId, undefined, ctx.agentDeps.devSession === true)[0];
   if (task && task.userId !== ctx.session.userId) {
     log.warn("task.control на задачу ЧУЖОГО пользователя — отказ", { taskId, userId: ctx.session.userId });
     ackControl(ctx, "Эта задача не ваша, сэр.", source);

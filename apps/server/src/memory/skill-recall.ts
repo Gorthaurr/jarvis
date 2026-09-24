@@ -291,6 +291,9 @@ export async function recallSemantic(
         sim += PLATFORM_BOOST;
         boosted = true;
       }
+      // Гибридный ранг — всё ещё МЕРА СХОЖЕСТИ: косинус + бонусы может перевалить за 1 (в логе
+      // 2026-09-02 встречалось «sim: 1.021»), а число >1 бессмысленно и мешает читать пороги.
+      if (sim > 1) sim = 1;
     }
     if (polarityConflict(text, `${s.name} ${s.when}`)) {
       if (sim > blockedSim) {

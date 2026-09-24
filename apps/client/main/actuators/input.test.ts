@@ -3,7 +3,50 @@
  * (Alt+F4 в эмуляции ввода) опасные глобальные комбо НЕ шлются. Нормализация регистра/порядка/алиасов.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { isBlockedCombo, normalizeCombo, pressKey, resetHeldKeys, seedHeldKeys } from "./input.js";
+import { click, isBlockedCombo, mouse, normalizeCombo, pressKey, resetHeldKeys, seedHeldKeys, typeText } from "./input.js";
+import { selectionStore } from "../selection/store.js";
+
+describe("input: §режим выделения — гейт стоит в ТОЧКЕ ИНЖЕКЦИИ (реплей навыка/SDK не обходят)", () => {
+  afterEach(() => selectionStore.setDrawing(false));
+
+  it("пока открыта вуаль рисования, клавиша и печать отвергаются честной причиной ДО сайдкара", async () => {
+    selectionStore.setDrawing(true);
+    await expect(pressKey("Ctrl+S")).rejects.toThrow(/оверлей/u);
+    await expect(typeText("привет")).rejects.toThrow(/оверлей/u);
+  });
+
+  it("явно ФИЗИЧЕСКИЙ клик (coords / physical) и мышь отвергаются ДО сайдкара — этим путём идут реплей навыка и SDK-мост (контроль-3)", async () => {
+    selectionStore.setDrawing(true);
+    await expect(click({ by: "coords", x: 10, y: 10 })).rejects.toThrow(/оверлей/u);
+    await expect(click({ by: "handle", handle: "7" }, "physical")).rejects.toThrow(/оверлей/u);
+    await expect(mouse({ op: "move", x: 1, y: 1 })).rejects.toThrow(/оверлей/u);
+  });
+
+  it("контроль-4: правый / двойной клик по handle под вуалью — тоже физический, гейт ДО сайдкара", async () => {
+    selectionStore.setDrawing(true);
+    await expect(click({ by: "handle", handle: "7" }, "silent", true, { button: "right" })).rejects.toThrow(/оверлей/u);
+    await expect(click({ by: "handle", handle: "7" }, "silent", true, { count: 2 })).rejects.toThrow(/оверлей/u);
+  });
+
+  it("контроль-4: ПОЛИТИКА выше СОСТОЯНИЯ — Alt+F4 под вуалью получает постоянный запрет, а не «дождись и повтори»; up отпускает клавишу и под вуалью", async () => {
+    selectionStore.setDrawing(true);
+    await expect(pressKey("Alt+F4")).rejects.toThrow(/запрещена/);
+    await expect(pressKey("W", "up")).rejects.toThrow(/сайдкар не запущен/); // гейт вуали пропустил — дошли до сайдкара
+  });
+
+  it("контроль-9 (mouse-up-terminates-owner-drawing): под вуалью НЕ проходит ни одна операция мыши, включая отпускание", async () => {
+    selectionStore.setDrawing(true);
+    // Послабление контроля-8 отменено: `mouseup` — ГЛАВНОЕ событие окна рисования, оно завершило бы выделение
+    // владельца в точке курсора. Залипшую кнопку снимает releaseHeldPointer при закрытии вуали.
+    await expect(mouse({ op: "up", button: "left" })).rejects.toThrow(/оверлей/u);
+    await expect(mouse({ op: "down", button: "left" })).rejects.toThrow(/оверлей/u);
+  });
+
+  it("без вуали те же вызовы доходят до сайдкара — гейт не глушит ввод вообще", async () => {
+    await expect(click({ by: "coords", x: 10, y: 10 })).rejects.toThrow(/сайдкар не запущен/);
+    await expect(mouse({ op: "move", x: 1, y: 1 })).rejects.toThrow(/сайдкар не запущен/);
+  });
+});
 
 describe("input: гард опасных комбо (§6)", () => {
   it("Alt+F4 заблокирован в любом регистре/порядке/алиасе", () => {

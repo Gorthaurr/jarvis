@@ -114,10 +114,11 @@ describe("agent-loop (§7, §8)", () => {
       list: async () => [],
       get: async () => null,
       save: async () => null,
-      recall: async () => ({ id: "tg", ownerId: "u-1", name: "Отправить Герману", when: "написать Herman", procedure: "шаги...", version: 1 }),
+      // T-F2 (ревью 2026-09-24): подсказка навыка — только уверенному recall (сырой косинус ≥0.86) на КОМАНДУ.
+      recall: async () => ({ id: "tg", ownerId: "u-1", name: "Отправить Герману", when: "написать Herman", procedure: "шаги...", version: 1, recallSim: 0.93, recallSimRaw: 0.9 }),
       learnedCatalog: async () => [{ name: "Отправить Герману", when: "написать Herman" }],
     };
-    await handleUserText(session, "что там по работе нужно", await makeDeps(llm, { skills }));
+    await handleUserText(session, "напиши Герману по работе", await makeDeps(llm, { skills }));
     const req = llm.requests[0];
     expect(req?.systemSkill ?? "").toContain("шаги..."); // процедура в кеш-блоке
     expect(req?.systemDynamic ?? "").not.toContain("Твои выученные навыки"); // каталог НЕ инжектится (recall попал)
@@ -1039,7 +1040,7 @@ describe("agent-loop (§7, §8)", () => {
       const p = handleUserText(session, "сделай долгую многошаговую штуку", deps, sink);
       // Инструмент висит дольше бюджета → промоушен: «Берусь» звучит СРАЗУ (ход НЕ молчит).
       await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 1000 });
-      expect(calls.done[0]).toContain("Берусь");
+      expect(calls.done[0]).toMatch(/Берусь|Сию минуту|Занимаюсь|Сейчас сделаю|Принял|Есть/u); // W0: ack ротируется
       await p; // ход завершился на промоушене (микрофон свободен), итог ещё не готов
       expect(spoken).toHaveLength(0);
       releaseTool(); // отпускаем инструмент → задача дорабатывает в фоне
@@ -1095,7 +1096,7 @@ describe("agent-loop (§7, §8)", () => {
       const p = handleUserText(session, "сделай долгую штуку", deps, sink);
       await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 1000 });
       expect(calls.sentences).toHaveLength(0); // преамбула НЕ ушла в sink (нет pushedAny) — корень фикса
-      expect(calls.done[0]).toContain("Берусь"); // «Берусь» доставлен (не проглочен pushedAny-гейтом)
+      expect(calls.done[0]).toMatch(/Берусь|Сию минуту|Занимаюсь|Сейчас сделаю|Принял|Есть/u); // W0: ack ротируется // «Берусь» доставлен (не проглочен pushedAny-гейтом)
       await p;
       releaseTool();
       await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 1000 });
@@ -1202,9 +1203,10 @@ describe("agent-loop (§7, §8)", () => {
       when: "прислать отчёт в телеграм",
       procedure: "1. собрать данные\n2. отправить через telegram_send",
       version: 2,
+      recallSimRaw: 0.9, // T-F2: подсказка — только уверенному recall
     }));
     const deps = await makeDeps(llm, { skills: fakeSkills({ recall }) });
-    await handleUserText(session, "пришли отчёт в телеграм", deps);
+    await handleUserText(session, "отправь отчёт в телеграм", deps);
     expect(recall).toHaveBeenCalled();
     // §15-фикс: навык вшивается в КЕШИРУЕМЫЙ systemSkill (свой брейкпоинт), а НЕ в некешируемую
     // динамику — чтобы на повторных ходах задачи он читался из кеша, а не слался заново.
@@ -1266,6 +1268,7 @@ describe("agent-loop (§7, §8)", () => {
         ] as SkillStep[],
         needsReview: false,
         recallSim: sim,
+        recallSimRaw: 0.9, // T-F2: сырой косинус выше порога подсказки (0.86) — реплей режет ГИБРИДНЫЙ порог 0.92
       }));
     // (а) sim 0.85 < порога 0.92 — ровно диапазон ложных реплеев форензики (мат → «закрыть приложение» 0.831)
     {
@@ -1795,5 +1798,93 @@ describe("§20 пост-терминальный эхо-гейт (эпизод �
     tasks.fail(t.taskId, "расширение не ответило");
     await handleUserText(session, "готово?", await makeDeps(llm, { tasks }));
     expect(llm.requests.length).toBeGreaterThan(0); // разбор через модель, не эхо «сделал»
+  });
+});
+
+describe("W0 (2026-09-09): промоушен 1,5 с; задача в очереди за семафором видна; явный текст команды", () => {
+  function sinkSpy() {
+    const calls = { done: [] as string[], sentences: [] as string[] };
+    const sink = { thinking: () => {}, sentence: (s: string) => calls.sentences.push(s), display: () => {}, done: (v: string) => calls.done.push(v) };
+    return { sink, calls };
+  }
+
+  it("промоушен по умолчанию ≈1,5 с: первый звук хода с инструментами приходит через ~1,5 с, не через 10 (реверт 10_000 — таймаут)", async () => {
+    const prev = process.env.JARVIS_SYNC_PROMOTE_MS;
+    delete process.env.JARVIS_SYNC_PROMOTE_MS; // именно ДЕФОЛТ
+    try {
+      let releaseTool: () => void = () => {};
+      const toolGate = new Promise<void>((r) => { releaseTool = r; });
+      const session = fakeSession(vi.fn(() => toolGate.then(() => ({ commandId: "c", ok: true, durationMs: 1 }))));
+      const spoken: { voice: string }[] = [];
+      const { sink, calls } = sinkSpy();
+      const llm = new MockLlmProvider([
+        { toolUses: [{ id: "t1", name: "app_launch", input: { app: "x" } }] },
+        { text: "Готово, сэр." },
+      ]);
+      const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r), bgTasks: new Set() });
+      const t0 = Date.now();
+      const p = handleUserText(session, "сделай долгую многошаговую штуку", deps, sink);
+      await vi.waitFor(() => expect(calls.done.length).toBe(1), { timeout: 3000 });
+      const elapsed = Date.now() - t0;
+      expect(elapsed).toBeGreaterThanOrEqual(1_200);
+      expect(elapsed).toBeLessThan(2_800);
+      expect(calls.done[0]).toMatch(/Берусь|Сию минуту|Занимаюсь|Сейчас сделаю|Принял|Есть/u);
+      await p;
+      releaseTool();
+      await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 3000 });
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SYNC_PROMOTE_MS;
+      else process.env.JARVIS_SYNC_PROMOTE_MS = prev;
+    }
+  });
+
+  it("задача, ждущая слот семафора, ВИДНА (queued) и «отмени всё» её снимает — после освобождения слота петля не стартует", async () => {
+    // Реверт: убери queuedPreTask/preTask — задача появится только после acquire, cancelUser её не увидит,
+    // и после release петля исполнит команду, которую владелец отменил.
+    const { Semaphore } = await import("@jarvis/shared");
+    const concurrency = new Semaphore(1);
+    expect(concurrency.tryAcquire()).toBe(true);
+    const session = fakeSession();
+    const tasks = new TaskManager();
+    const spoken: { voice: string }[] = [];
+    const { sink } = sinkSpy();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "t1", name: "app_launch", input: { app: "calc" } }] },
+      { text: "Готово, сэр." },
+    ]);
+    const bgTasks = new Set<Promise<void>>();
+    const deps = await makeDeps(llm, { speakResult: (r) => spoken.push(r), concurrency, bgTasks, tasks });
+    await handleUserText(session, "создай файл и посчитай что-нибудь", deps, sink);
+    const queued = tasks.activeForUser("u1");
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.state).toBe("queued");
+    expect(queued[0]?.goal).toContain("посчитай");
+    const cancelled = tasks.cancelUser("u1");
+    expect(cancelled).toHaveLength(1);
+    concurrency.release();
+    await Promise.all([...bgTasks]);
+    expect(llm.requests).toHaveLength(0); // модель не звалась: отменённая в очереди задача не стартовала
+    expect(spoken).toHaveLength(0);
+  });
+
+  it("цель петли — ЯВНЫЙ текст команды: задача стояла в очереди, владелец успел сказать ещё — модель получает ТУ команду, а не последнюю реплику", async () => {
+    // Реверт: убери «convo.push({role:user, content:text})» в сборке промпта — последним user-сообщением
+    // окажется «а ещё закрой музыку», и модель исполнит не ту команду под старым task.goal.
+    const { Semaphore } = await import("@jarvis/shared");
+    const concurrency = new Semaphore(1);
+    expect(concurrency.tryAcquire()).toBe(true);
+    const session = fakeSession();
+    const memory = new WorkingMemory();
+    const llm = new MockLlmProvider([{ text: "Посчитал." }]);
+    const bgTasks = new Set<Promise<void>>();
+    const deps = await makeDeps(llm, { memory, concurrency, bgTasks, speakResult: () => {}, tasks: new TaskManager() });
+    await handleUserText(session, "создай файл и посчитай что-нибудь", deps, sinkSpy().sink); // встала в очередь
+    memory.pushTurn("user", "а ещё закрой музыку"); // владелец сказал ещё, пока задача ждала слот
+    concurrency.release();
+    await Promise.all([...bgTasks]);
+    const req = llm.requests.at(-1)!;
+    const last = req.messages.at(-1)!;
+    expect(last.role).toBe("user");
+    expect(String(last.content)).toContain("посчитай что-нибудь");
   });
 });

@@ -13,7 +13,12 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-export type RiskCategory = "bank" | "payment" | "edo" | "gov" | "market" | "social" | "messenger";
+import { COMMIT_WORDS_RE, type RiskCategory, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
+
+export type { RiskCategory };
+// W0: список процессов и riskyProcessCategory переехали в @jarvis/shared/commit-risk — их же читает
+// клиентский рубеж (SDK-мост, реплей навыка). Реэкспорт — для прежних потребителей.
+export { riskyProcessCategory };
 
 const CATEGORY_HUMAN: Record<RiskCategory, string> = {
   bank: "банк",
@@ -45,21 +50,8 @@ const RISKY_HOSTS: ReadonlyArray<readonly [string, RiskCategory]> = [
   ["outlook.live.com", "messenger"], ["outlook.office.com", "messenger"], ["max.ru", "messenger"],
 ];
 
-/** Процессы настольных программ (имя без .exe, регистр не важен) → категория. */
-const RISKY_PROCESSES: ReadonlyArray<readonly [RegExp, RiskCategory, string]> = [
-  [/^1cv8/i, "edo", "1С"],
-  [/sbbol|ibank|bankclient|client-?bank|interbank|isfront|bss\b/i, "bank", "банк-клиент"],
-  [/cryptopro|cryptoarm|vipnet|signtool/i, "edo", "подпись"],
-  [/^(telegram|discord|whatsapp|viber|slack|teams|zoom|max)$/i, "messenger", "мессенджер"],
-  [/^(outlook|thunderbird|thebat)/i, "messenger", "почта"],
-];
-
-/**
- * Глаголы коммита — «опубликовать/отправить/оплатить/подтвердить/провести/подписать/купить/оформить/перевести»
- * и их английские пары. Ловит и «подписаться» (лишний вопрос на YouTube — безопасная сторона).
- */
-export const COMMIT_WORDS_RE =
-  /(?<![\p{L}])(?:опубликов|разместит|размести|отправ|оплат|заплат|подтвер|провест|провед|подпис|купит|оформ|заказат|перевес|перевод|разослат|publish|post\b|send\b|pay\b|confirm|submit|buy\b|checkout|place order|transfer|sign\b|approve)/iu;
+// W4: COMMIT_WORDS_RE живёт в @jarvis/shared/commit-risk (один список на сервер и клиентский рубеж act); реэкспорт.
+export { COMMIT_WORDS_RE };
 
 export interface CommitRisk {
   category: RiskCategory;
@@ -77,13 +69,6 @@ export function riskyHostCategory(host: string): RiskCategory | null {
   for (const [suffix, cat] of RISKY_HOSTS) {
     if (h === suffix || h.endsWith(`.${suffix}`)) return cat;
   }
-  return null;
-}
-
-export function riskyProcessCategory(processName: string): { category: RiskCategory; human: string } | null {
-  const p = processName.trim().replace(/\.exe$/iu, "");
-  if (!p) return null;
-  for (const [re, category, human] of RISKY_PROCESSES) if (re.test(p)) return { category, human };
   return null;
 }
 
@@ -125,25 +110,55 @@ export function parseForegroundProcess(systemContext: string): string | null {
  */
 export function assessGuiCommit(a: {
   foregroundProcess: string | null;
-  tool: "ui_invoke" | "input_key" | "input_click";
+  /** act{app}: окно, которое act сам сфокусирует — судим по НЕМУ (нестрого: «дискорд», «Telegram Desktop»). */
+  app?: string | null;
+  tool: "ui_invoke" | "input_key" | "input_click" | "act" | "input_type";
   input: Record<string, unknown>;
   label?: string;
 }): CommitRisk | null {
-  if (!a.foregroundProcess) return null;
-  const proc = riskyProcessCategory(a.foregroundProcess);
+  const name = a.app?.trim() ? a.app.trim() : a.foregroundProcess;
+  if (!name) return null;
+  const proc = a.app?.trim() ? riskyAppCategory(name) : riskyProcessCategory(name);
   if (!proc) return null;
-  const where = `${a.foregroundProcess} (${proc.human})`;
+  const where = `${name} (${proc.human})`;
   const mk = (what: string): CommitRisk => ({
     category: proc.category,
     where,
     what,
     summary: `Необратимое действие в программе ${where}: ${what}.`,
   });
+  // Ревью 2026-09-24: перевод строки в печатаемом тексте — это Enter (синтетический \r/\n мессенджер читает как
+  // «отправить»). «act{do:"type", text:"привет\n"}» в Telegram уходил человеку МИМО вопроса владельца.
+  // Контроль-2: в ПОЧТОВОМ клиенте перевод строки — новый абзац письма, отправка там — кнопкой (судится отдельно).
+  const typedNewline = (t: unknown): boolean => proc.human !== "почта" && typeof t === "string" && /[\r\n]/u.test(t);
+  if (a.tool === "input_type") {
+    return typedNewline(a.input.text) ? mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит") : null;
+  }
   if (a.tool === "input_key") {
-    const key = String(a.input.key ?? "").toLowerCase();
+    // Ревью 2026-09-24: поле схемы input_key — `combo`. Гейт читал `key`, которого модель не шлёт, и Enter в мессенджере
+    // уходил БЕЗ вопроса владельцу (тесты кормили тем же неверным полем — фикстура била мимо). `key` оставлен как синоним.
+    const key = String(a.input.combo ?? a.input.key ?? "").toLowerCase();
     const mode = String(a.input.mode ?? "");
     if (/enter|return/u.test(key) && mode !== "up") return mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение");
     return null;
+  }
+  // W4 «Руки»: act do:key «Enter» ≡ input_key; act click/double по тексту-коммиту ≡ клик по подписи. Печать/set/
+  // toggle сами ничего не отправляют — не судятся (как у input_type).
+  if (a.tool === "act") {
+    const verb = String(a.input.do ?? "click");
+    if (verb === "key") {
+      const combo = String(a.input.combo ?? "").toLowerCase();
+      return /enter|return/u.test(combo) ? mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение") : null;
+    }
+    if (verb === "type" && typedNewline(a.input.text)) {
+      return mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит");
+    }
+    if (verb !== "click" && verb !== "double") return null;
+    const t = a.input.target;
+    const own = typeof t === "string" ? t : t && typeof t === "object" ? String((t as { text?: unknown }).text ?? "") : "";
+    // H-S1: цель по handle судится подписью элемента из последнего снапшота (label) — иначе «Отправить» по handle шло мимо гейта.
+    const text = own.trim() ? own : (a.label ?? "");
+    return text && COMMIT_WORDS_RE.test(text) ? mk(`клик «${text.trim().slice(0, 60)}»`) : null;
   }
   const target = (a.input.target && typeof a.input.target === "object" ? (a.input.target as Record<string, unknown>) : {}) as Record<string, unknown>;
   const text = [a.label, a.input.name, a.input.text, target.text, target.name, target.query]

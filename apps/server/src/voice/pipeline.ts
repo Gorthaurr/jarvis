@@ -32,7 +32,7 @@ import {
   reduce,
 } from "./state.js";
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
-import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWake, wakeNearMissScore } from "./wake.js";
+import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWakeDetailed, wakeNearMissScore } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
@@ -80,8 +80,9 @@ export interface ReplySink {
   sentence(text: string): void;
   /** Карточка подробностей (§21). */
   display(card: { title?: string; markdown: string }): void;
-  /** Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). */
-  done(full: string): void;
+  /** Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). origin "proactive" — служебный
+   *  ack промоушена: окно разговора не открывает (ревью 2026-09-24, T-F6/B-F1; контракт — brain/agent/types.ts). */
+  done(full: string, opts?: { origin?: "user-turn" | "proactive" }): void;
 }
 
 /** Задержка перед филлером (§10): если реальная реплика подоспела раньше — филлер не нужен. */
@@ -215,10 +216,28 @@ export interface VoicePipelineDeps {
   log?: Logger;
 }
 
+/**
+ * W0 (2026-09-09): ПРОИСХОЖДЕНИЕ речи Джарвиса. Окно разговора (реплики без «Джарвис») открывает
+ * ТОЛЬКО ответ на ход владельца («user-turn»). Проактив (приветствие, брифинг, напоминание, доклад
+ * наблюдения, ack управления) окна НЕ открывает: живой лог 2026-09-06 — после приветствия при старте
+ * сервера шесть реплик телевизора подряд ушли в модель как задачи, ни одна не содержала «Джарвис».
+ */
+export type SpeechOrigin = "user-turn" | "proactive";
+
+/** W1: сколько после локального wake клиента реплика считается адресованной без «Джарвис» в тексте. */
+const LOCAL_WAKE_WINDOW_MS = 8_000;
+
 export class VoicePipeline {
   private ctx: VoiceContext = initialContext();
   private sttStream: SttStream | null = null;
   private ttsStream: TtsStream | null = null;
+  /**
+   * Незакрытые исходы синтезов (ревью 2026-09-24, B-F5). `cancelTts` делает gen++ — ни один чанк этих
+   * синтезов клиенту уже не уйдёт, а Yandex-стрим после cancel() глушит ВСЕ колбэки (onDone/onError не
+   * придут). Раньше исход такой реплики не сообщался никогда: напоминание, чей синтез оборвался (барж-ин,
+   * закрытый сокет → dispose), навсегда оставалось «доставленным». Здесь cancelTts закрывает их `false`.
+   */
+  private readonly pendingSettles = new Set<(spoken: boolean) => void>();
   /** Активная пофразная говорящая сессия (§10 realtime); null вне стримингового ответа. */
   private phraseSpeaker: PhraseSpeaker | null = null;
   /** Таймер прекеш-филлера (§10): «Секунду, сэр.» пока Opus думает. */
@@ -278,6 +297,8 @@ export class VoicePipeline {
     urgent: boolean;
     at: number;
     retriable?: boolean;
+    /** W0: итог задачи владельца («user-turn») открывает окно разговора; прочее — проактив. */
+    origin?: SpeechOrigin;
     onOutcome?: (spoken: boolean) => void;
   }[] = [];
   /** Wake word (§3): активен ли разговор + когда было ПОСЛЕДНЕЕ взаимодействие (любая сторона). */
@@ -291,6 +312,13 @@ export class VoicePipeline {
    * через 12с он «глох» посреди живого разговора (корневой симптом «слушает 5-10с и перестаёт»).
    */
   private lastActiveAt = 0;
+  /** W0: происхождение ПОСЛЕДНЕЙ речи Джарвиса — читает armFollowup на speak_done (см. SpeechOrigin). */
+  private lastSpeechOrigin: SpeechOrigin = "user-turn";
+  /** W0 «вырубись/тишина»: до этого момента проактив не звучит, окно разговора закрыто. */
+  private quietUntil = 0;
+  /** W1: до этого момента следующая реплика считается адресованной — клиент услышал «Джарвис» локально. */
+  private localWakeUntil = 0;
+  private quietTimer: ReturnType<typeof setTimeout> | null = null;
   private lastCmd = ""; // анти-дубль: последняя обработанная команда + время
   private lastCmdAt = 0;
   /** Акустика «строгий wake в шуме»: времена НЕадресованных реплик (для детекции зашумлённой обстановки)
@@ -407,18 +435,22 @@ export class VoicePipeline {
    *   (к его приходу this.turnSeq мог уже уйти вперёд); спекулятивный путь берёт текущий.
    */
   private gateWake(raw: string, turnSeq = this.turnSeq): string {
-    // §3 верификация диктора: ход признан «не своим» (музыка/чужой) — игнорируем СПЕКУЛЯТИВНУЮ
-    // реплику. Поздний реальный финал режется отдельно — постримным флагом streamSpeakerRejected
-    // в onPartial (этот глобальный флаг к приходу финала мог сброситься ensureStt следующего цикла).
-    if (this.speakerRejected) {
-      this.log.info("реплика отклонена верификацией диктора (не свой голос) — игнор");
-      return "";
-    }
     // §Волна2 (2.6): нормализуем доменную латиницу STT ДО wake-гейта/анти-дубля/роутера — одна точка
     // кроет оба входа (спекулятивный эндпоинт и поздний финал); анти-дубль дальше сравнивает уже
     // нормализованные формы (консистентно). Wake-матч цел: latinToCyrillic('jarvis')='джарвис'.
     const normalized = this.deps.normalizeTranscript?.(raw) ?? raw;
     const t = normalized.trim();
+    // §3 верификация диктора: ход признан «не своим» (музыка/чужой) — игнорируем СПЕКУЛЯТИВНУЮ
+    // реплику. Поздний реальный финал режется отдельно — постримным флагом streamSpeakerRejected
+    // в onPartial (этот глобальный флаг к приходу финала мог сброситься ensureStt следующего цикла).
+    // W1 МЯГКИЙ ГЕЙТ: биометрия ложно отклоняла владельца (скоры 0.03–0.7 при пороге 0.35 — гейт
+    // держали выключенным). Теперь «чужой» режет ТОЛЬКО реплики из окна разговора (без обращения):
+    // явное «Джарвис» (в тексте или локальным wake) проходит всегда — цена ложного отклонения = одно
+    // лишнее «Джарвис», а не оглохший ассистент. Строгий режим: JARVIS_SPEAKER_GATE_MODE=strict.
+    if (this.speakerRejected && !this.softAcceptDespiteSpeaker(t)) {
+      this.log.info("реплика отклонена верификацией диктора (не свой голос, без обращения) — игнор");
+      return "";
+    }
     if (!this.requireWake || t.length === 0) {
       this.lastAcceptViaWake = true; // без wake-гейта канал = явное обращение (§P0: жесты не режем)
       return t;
@@ -430,8 +462,23 @@ export class VoicePipeline {
       this.awake = true;
       this.lastAcceptViaWake = true; // §P0: явное обращение — ходу положены слепые жесты
       this.pendingSecondChance = null; // штатное обращение перекрывает висящий переспрос
-      const c = stripWake(t);
+      this.localWakeUntil = 0;
+      // B-F12 (ревью 2026-09-24): команда — ПОСЛЕ обращения; текст до него (обрывок ТВ из пре-ролла)
+      // отбрасывается с записью в лог, чтобы «съел начало фразы» читалось из лога, а не дедукцией.
+      const { command: c, droppedPrefix } = stripWakeDetailed(t);
+      if (droppedPrefix) this.log.info("wake: текст до обращения отброшен (пре-ролл/фон)", { dropped: droppedPrefix.slice(0, 60) });
       cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
+    } else if (this.localWakeActive() && !isNoiseOnly(t)) {
+      // Контроль-1 №9 (ревью 2026-09-24): междометие («хм», «ах») окно адресации не съедает и командой не уходит —
+      // настоящая реплика после него всё ещё адресована.
+      // W1: клиент услышал «Джарвис» ЛОКАЛЬНО (sherpa KWS), а облачный STT само слово ослышался или
+      // отрезал — реплика всё равно адресована. Одноразово: следующая без обращения пойдёт окном.
+      this.awake = true;
+      this.lastAcceptViaWake = true;
+      this.pendingSecondChance = null;
+      this.localWakeUntil = 0;
+      this.log.info("wake: обращение подтверждено локальным детектором клиента", { text: t.slice(0, 40) });
+      cmd = t;
     } else if (this.pendingSecondChance && isSecondChanceConfirm(t)) {
       // Б5 second-chance, шаг 2 (ревью 2026-07-10): на «Вы мне, сэр?» пришло ЯВНОЕ короткое «да/тебе»
       // (≤2 токенов из узкого словаря — «да, объективно» НЕ проходит) → исполняем СОХРАНЁННУЮ
@@ -550,7 +597,52 @@ export class VoicePipeline {
    * (undefined) не тегает чанки, ack такой речи не замкнётся на висящий снапшот хода.
    */
   speak(text: string): void {
-    this.startTts(text, this.gen, false); // проактив/онбординг: m2eSeq=undefined → не тегаем (fix мис-атрибуции)
+    // проактив/онбординг: m2eSeq=undefined → не тегаем (fix мис-атрибуции); origin=proactive → окно НЕ открываем (W0)
+    this.startTts(text, this.gen, false, undefined, undefined, "proactive");
+  }
+
+  /**
+   * W0 «вырубись»/«тишина»: закрыть окно разговора и придержать ВСЮ проактивную озвучку на `ms`.
+   * Отложенные реплики не выбрасываются (retriable-источники и так повторят) — по истечении срока
+   * дренаж возобновляется сам. Урок лога 2026-09-03: на «Джарвис, вырубись» система полторы минуты
+   * пыталась что-то закрыть через модель, вместо того чтобы замолчать.
+   */
+  quiet(ms: number): void {
+    const until = this.now() + Math.max(0, ms);
+    this.quietUntil = Math.max(this.quietUntil, until);
+    this.awake = false;
+    this.lastActiveAt = 0;
+    this.silenceSalvage();
+    if (this.quietTimer) clearTimeout(this.quietTimer);
+    this.quietTimer = setTimeout(() => {
+      this.quietTimer = null;
+      this.maybeDrainSpeech();
+    }, Math.max(0, ms));
+    if (typeof this.quietTimer.unref === "function") this.quietTimer.unref();
+    this.log.info("режим тишины: окно разговора закрыто, проактив придержан", { ms });
+  }
+
+  /** W0: действует ли сейчас режим тишины (для гейтов снаружи). */
+  isQuiet(): boolean {
+    return this.now() < this.quietUntil;
+  }
+
+  /** W1: окно после локального wake клиента ещё открыто (реплика без «Джарвис» в тексте адресована). */
+  private localWakeActive(): boolean {
+    return this.localWakeUntil > 0 && this.now() < this.localWakeUntil;
+  }
+
+  /**
+   * W1 мягкий гейт диктора: «чужой» по биометрии, но ЯВНОЕ обращение (в тексте или локальным wake) —
+   * принимаем. В strict-режиме (JARVIS_SPEAKER_GATE_MODE=strict) — нет.
+   */
+  private softAcceptDespiteSpeaker(text: string): boolean {
+    if (process.env.JARVIS_SPEAKER_GATE_MODE === "strict") return false;
+    if (isWakeAddressed(text) || this.localWakeActive()) {
+      this.log.info("верификация диктора: не свой голос, но явное обращение — принимаю (мягкий гейт)");
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -577,7 +669,7 @@ export class VoicePipeline {
   speakQueued(
     text: string,
     urgent = false,
-    opts?: { retriable?: boolean; onOutcome?: (spoken: boolean) => void },
+    opts?: { retriable?: boolean; onOutcome?: (spoken: boolean) => void; origin?: SpeechOrigin },
   ): boolean {
     if (!text.trim()) return false;
     if (this.pendingSpeech.length >= QUEUE_MAX) {
@@ -603,6 +695,7 @@ export class VoicePipeline {
       }
       const dropped = this.pendingSpeech.splice(victim, 1)[0];
       dropped?.onOutcome?.(false);
+      if (dropped && !dropped.retriable) this.droppedSilently += 1;
       this.log.warn("очередь озвучки переполнена — старая реплика отброшена", { chars: dropped?.text.length ?? 0 });
     }
     this.pendingSpeech.push({
@@ -610,6 +703,7 @@ export class VoicePipeline {
       urgent,
       at: this.now(),
       retriable: opts?.retriable === true,
+      origin: opts?.origin ?? "proactive",
       ...(opts?.onOutcome ? { onOutcome: opts.onOutcome } : {}),
     });
     this.maybeDrainSpeech();
@@ -661,8 +755,55 @@ export class VoicePipeline {
     this.deps.onMouthToEar?.(ms, snap.seq);
   }
 
+  /**
+   * 🔴 СКОЛЬКО ИТОГОВ ВЛАДЕЛЕЦ ТАК И НЕ УСЛЫШАЛ (лог 2026-09-02: за день 21 реплика — 9 из них за
+   * десять минут, когда параллельно шли шесть задач). Механика отбрасывания правильная (протухший
+   * итог произносить вредно, очередь конечна), но потеря была МОЛЧАЛИВОЙ: в комментарии написано
+   * «текст ход уже отдал в чат», а владелец в полноэкранной игре чата не видит — для него Джарвис
+   * просто промолчал. Отсюда его же формулировка: «я не слышу, что ты говоришь».
+   * Поэтому копим счётчик и ОДИН раз честно предупреждаем следующей произносимой репликой.
+   */
+  private droppedSilently = 0;
+  private lastDropNoticeAt = 0;
+
+  /** Приставка к следующей реплике о непроговорённых итогах (пусто — сообщать нечего/рано). */
+  private dropNotice(): string {
+    if (this.droppedSilently <= 0) return "";
+    const t = this.now();
+    // Не мантра: не чаще раза в минуту, иначе шторм задач превратит предупреждение в шум.
+    if (t - this.lastDropNoticeAt < 60_000) return "";
+    const n = this.droppedSilently;
+    this.droppedSilently = 0;
+    this.lastDropNoticeAt = t;
+    return n === 1
+      ? "Сэр, один итог я не успел проговорить — он в чате. "
+      : `Сэр, ${n} итога я не успел проговорить — они в чате. `;
+  }
+
+  /**
+   * Кого произносим следующим. Срочное (напоминания-будильники) — строго по очереди, FIFO.
+   * 🔴 Для НЕсрочных итогов порядок обратный — СВЕЖИЙ ВПЕРЁД (лог 2026-09-02: шторм из шести задач,
+   * девять реплик потеряно за десять минут). Причина: FIFO сначала произносит самый СТАРЫЙ итог, и
+   * пока он звучит, свежие протухают по TTL — владелец слышит ответ на вопрос, о котором забыл, и НЕ
+   * слышит ответ на тот, что задал только что. Это ровно та логика, по которой протухшее вообще не
+   * произносится: «контекст ушёл — говорить вредно». Ничего не теряется дополнительно: тот же TTL,
+   * тот же кап, изменился только порядок выдачи.
+   */
+  private nextToSpeak(): number {
+    const urgent = this.pendingSpeech.findIndex((p) => p.urgent);
+    if (urgent >= 0) return urgent;
+    let best = 0;
+    for (let i = 1; i < this.pendingSpeech.length; i++) {
+      if (this.pendingSpeech[i]!.at > this.pendingSpeech[best]!.at) best = i;
+    }
+    return best;
+  }
+
   private maybeDrainSpeech(): void {
     if (this.pendingSpeech.length === 0) return;
+    // W0 «вырубись/тишина»: владелец попросил замолчать — держим всё (вкл. срочное: оно retriable и
+    // вернётся само), таймер quiet() дёрнет дренаж по истечении срока.
+    if (this.now() < this.quietUntil) return;
     // СРОК ГОДНОСТИ (ревью 2026-07-24, живая жалоба «договаривает спустя минуты 2 сразу всё скопом»):
     // итог, пролежавший в очереди дольше QUEUE_TTL_MS, произносить ВРЕДНО — контекст ушёл, владелец
     // слышит ответ на вопрос, о котором уже забыл. Роняем с логом (текст ход уже отдал в чат).
@@ -675,7 +816,12 @@ export class VoicePipeline {
       });
       // Источник обязан узнать, что реплика НЕ прозвучала: durable-запись он пометил доставленной
       // только на onOutcome(true), поэтому здесь она вернётся в «ждёт доставки» (контроль-9).
-      for (const p of this.pendingSpeech) if (!fresh.includes(p)) p.onOutcome?.(false);
+      for (const p of this.pendingSpeech) {
+        if (fresh.includes(p)) continue;
+        p.onOutcome?.(false);
+        // Повторяемые (напоминания/наблюдения) вернутся сами — про них предупреждать не надо.
+        if (!p.retriable) this.droppedSilently += 1;
+      }
       this.pendingSpeech = fresh;
       if (this.pendingSpeech.length === 0) return;
     }
@@ -691,14 +837,14 @@ export class VoicePipeline {
     // §9 «не мешать»: пользователь занят (звонок/полный экран/блокировка) → отдаём только СРОЧНОЕ
     // (напоминания-будильники), несрочное (итоги фоновых задач) держим до освобождения.
     const busy = this.deps.isUserBusy?.() ?? false;
-    const idx = busy ? this.pendingSpeech.findIndex((p) => p.urgent) : 0;
+    const idx = busy ? this.pendingSpeech.findIndex((p) => p.urgent) : this.nextToSpeak();
     if (idx < 0) return; // занят, срочного нет — держим, отдадим по drainPending при освобождении
     const [next] = this.pendingSpeech.splice(idx, 1);
     // Фоновый итог/проактивная реплика — НЕ ответ текущего пользовательского хода: m2eSeq=undefined
     // (не тегаем turn-seq), иначе её ack замкнулся бы на висящий снапшот хода = ложные «минуты» (fix
     // мис-атрибуции). Собственный ответ хода тегается только в runAgent/runAgentStreaming/playFiller.
     // Колбэк исхода отдаём ВНУТРЬ синтеза: «взяли из очереди» ещё не «прозвучало» (контроль-11).
-    if (next) this.startTts(next.text, this.gen, true, undefined, next.onOutcome);
+    if (next) this.startTts(`${this.dropNotice()}${next.text}`, this.gen, true, undefined, next.onOutcome, next.origin ?? "proactive");
   }
 
   /**
@@ -765,7 +911,29 @@ export class VoicePipeline {
   }
 
   /** VAD-событие от клиента. */
-  onVadEvent(state: "speech_start" | "speech_end" | "barge_in"): void {
+  onVadEvent(state: "speech_start" | "speech_end" | "barge_in" | "wake_local" | "speech_cancel"): void {
+    if (state === "speech_cancel") {
+      // Контроль-1 №8 (ревью 2026-09-24): микрофон выключен посреди реплики — недоговорённое не исполняем.
+      // Речь кончилась (userSpeaking не залипает — B-F3), накопленный interim выбрасываем; ход в прослушивании
+      // закрываем без эндпоинта (close_stt, поздний финал в idle игнорируется). Идущий ход (thinking/speaking)
+      // не трогаем: его реплика была ДОГОВОРЕНА раньше.
+      this.userSpeaking = false;
+      this.clearSilenceTimer();
+      this.interim = "";
+      this.localWakeUntil = 0;
+      if (this.ctx.state === "listening") this.dispatch({ type: "mute" });
+      this.log.info("микрофон выключен посреди реплики — недоговорённое в работу не отдаю");
+      return;
+    }
+    if (state === "wake_local") {
+      // W1: локальный детектор клиента услышал «Джарвис». Окно «эта реплика адресована» — короткое:
+      // хватает на пре-ролл + саму команду; протухает само, если владелец замолчал.
+      this.localWakeUntil = this.now() + LOCAL_WAKE_WINDOW_MS;
+      this.awake = true;
+      this.lastActiveAt = this.now();
+      this.log.info("wake: локальный детектор клиента — окно адресации открыто", { ms: LOCAL_WAKE_WINDOW_MS });
+      return;
+    }
     if (state === "speech_start") {
       this.userSpeaking = true; // пользователь заговорил — не лезем фоном
       this.turn.onSpeechStart();
@@ -773,6 +941,7 @@ export class VoicePipeline {
       return;
     }
     if (state === "barge_in") {
+      this.lastBargeInAt = this.now(); // B-F2: «стоп» в ближайшие секунды после перебивания — это «замолчи»
       this.userSpeaking = true;
       // H11: сообщаем редьюсеру, жив ли синтез. В listening (follow-up открыт STT) cancel_tts бампнул бы
       // gen и убил бы STT-стрим текущего хода → follow-up потерян; пусть шлёт cancel_tts только если есть
@@ -969,8 +1138,8 @@ export class VoicePipeline {
       }
       // §3: ход уже признан «не своим» — режем и спекулятивный (через speakerRejected), и ПОЗДНИЙ
       // реальный финал (через streamSpeakerRejected — глобальный флаг к этому моменту мог сброситься).
-      if (streamSpeakerRejected) {
-        this.log.info("реплика отклонена верификацией диктора (поздний финал, не свой голос) — игнор");
+      if (streamSpeakerRejected && !this.softAcceptDespiteSpeaker((this.deps.normalizeTranscript?.(p.text) ?? p.text).trim())) {
+        this.log.info("реплика отклонена верификацией диктора (поздний финал, не свой голос, без обращения) — игнор");
         this.dispatch({ type: "transcript_final", text: "" });
         return;
       }
@@ -1076,8 +1245,17 @@ export class VoicePipeline {
    * последней). Барежит gen-инвалидацию (barge-in/stop): поздние фразы/чанки глохнут.
    * При ошибке brain — деградация на короткую реплику (без зависания в speaking).
    */
+  /** Момент последнего barge_in (мс) — для B-F2. */
+  private lastBargeInAt = 0;
+
   private async runAgentStreaming(text: string, myGen: number, meta?: UserTurnMeta): Promise<void> {
+    // Состояние окна ДО хода: если ход закончится служебным ack промоушена (origin proactive), окно
+    // возвращается к нему — ack не открывает и не продлевает разговор (ревью 2026-09-24, T-F6/B-F1).
+    const prevAwake = this.awake;
+    const prevActiveAt = this.lastActiveAt;
     // Джарвис заговорит → окно активного разговора (продолжение без wake word), как в startTts.
+    // Это ОТВЕТ на ход владельца → origin user-turn (W0: проактив окна не открывает).
+    this.lastSpeechOrigin = "user-turn";
     this.awake = true;
     this.lastActiveAt = this.now();
     const speaker = new PhraseSpeaker({
@@ -1124,7 +1302,12 @@ export class VoicePipeline {
         if (myGen !== this.gen) return;
         this.deps.sendDisplay?.(d);
       },
-      done: (full) => {
+      done: (full, opts) => {
+        if (opts?.origin === "proactive") {
+          this.lastSpeechOrigin = "proactive"; // armFollowup на speak_done окно не переоткроет
+          this.awake = prevAwake;
+          this.lastActiveAt = prevActiveAt;
+        }
         if (myGen !== this.gen) {
           // Ход инвалидирован (перебивание/стоп/реконнект). speaker.speechStarted=true → часть реплики
           // владелец УЖЕ слышал: озвучивать её заново целиком нельзя (см. salvageCancelledReply).
@@ -1257,6 +1440,16 @@ export class VoicePipeline {
     this.markSpeakerBusy();
     this.lastChunkSentAt = this.now();
     this.deps.sendSpeakChunk(chunk);
+  }
+
+  /** B-F2 (ревью 2026-09-24): клиент ещё играет речь Джарвиса — для task-control «стоп/тише = замолчи». */
+  isClientPlaying(): boolean {
+    return this.clientPlaybackBusy();
+  }
+
+  /** B-F2: сколько мс прошло с последнего перебивания (∞ — не было). */
+  msSinceBargeIn(): number {
+    return this.lastBargeInAt ? this.now() - this.lastBargeInAt : Number.POSITIVE_INFINITY;
   }
 
   /** Занят ли динамик клиента ПРЯМО СЕЙЧАС (со стейл-фолбэком: сигнал старше окна = не верим). */
@@ -1406,6 +1599,7 @@ export class VoicePipeline {
     drive = true,
     m2eSeq?: number,
     onOutcome?: (spoken: boolean) => void,
+    origin: SpeechOrigin = "user-turn",
   ): void {
     // ИСХОД — ПО ФАКТУ ЗВУКА (контроль-11): раньше onOutcome(true) звался ДО синтеза, и отказ TTS
     // (сеть/квота/429) навсегда помечал напоминание доставленным, хотя не прозвучало ни звука, а лог
@@ -1415,11 +1609,18 @@ export class VoicePipeline {
     const settle = (spoken: boolean): void => {
       if (outcomeSent) return;
       outcomeSent = true;
+      this.pendingSettles.delete(settle);
       onOutcome?.(spoken);
     };
-    // Джарвис заговорил → открываем окно активного разговора (продолжение без wake word).
-    this.awake = true;
-    this.lastActiveAt = this.now();
+    if (onOutcome) this.pendingSettles.add(settle); // B-F5: отмена синтеза обязана сообщить «не прозвучало»
+    // Джарвис заговорил → окно активного разговора (продолжение без wake word) — но ТОЛЬКО если это
+    // ответ владельцу. Проактив (W0) окна не открывает и не продлевает: иначе после приветствия/
+    // напоминания 8 секунд любой звук в комнате был командой (лог 2026-09-06).
+    this.lastSpeechOrigin = origin;
+    if (origin === "user-turn") {
+      this.awake = true;
+      this.lastActiveAt = this.now();
+    }
     const stream = this.deps.tts.synthesize(voiceText, this.voiceOpts());
     this.ttsStream = stream;
     let first = true;
@@ -1460,6 +1661,9 @@ export class VoicePipeline {
 
   private cancelTts(): void {
     this.gen += 1; // инвалидируем все колбэки текущего оборота (barge-in/stop)
+    // B-F5: после gen++ ни один чанк начатых синтезов клиенту не уйдёт → их реплики НЕ прозвучали.
+    // Уже прозвучавшие (первый чанк ушёл) закрыты `true` и из набора выбыли — их не трогаем.
+    for (const settle of [...this.pendingSettles]) settle(false);
     this.clearFillerTimer(); // §10: отложенный филлер тоже отменяем (barge-in во время раздумья)
     this.clearThinkEarcon(); // §P1: earcon раздумья на оборванном ходе не нужен
     // Волна B (контрольное ревью): barge-in/стоп = клиент ГЛУШИТ плеер (renderer playback.stop()).
@@ -1534,8 +1738,12 @@ export class VoicePipeline {
     // follow-up), а НЕ от начала его речи. Иначе на длинном ответе convWindowMs истекал, ПОКА он ещё
     // говорил → твоя следующая реплika/уточнение падали как «без обращения» (жалоба «до конца не идёт,
     // дропает продолжение»). Теперь после его реплики у тебя полное окно на ответ без повторного «Джарвис».
-    this.awake = true;
-    this.lastActiveAt = this.now();
+    // W0: окно — только после ОТВЕТА владельцу; после проактивной речи (напоминание, брифинг,
+    // приветствие) STT открывается на follow-up, но реплика без «Джарвис» принята не будет.
+    if (this.lastSpeechOrigin === "user-turn") {
+      this.awake = true;
+      this.lastActiveAt = this.now();
+    }
     this.clearFollowup();
     this.followupTimer = setTimeout(() => {
       this.followupTimer = null;

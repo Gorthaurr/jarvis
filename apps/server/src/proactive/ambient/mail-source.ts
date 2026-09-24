@@ -133,6 +133,20 @@ export function mailSignal(item: MailItem, userId: string, now: number, importan
   };
 }
 
+/**
+ * Сколько нераспознанных вёрсток ПОДРЯД на одном хосте — и источник замолкает (ревью 2026-09-24, T-F13).
+ * Живой случай: 77× `mail_layout_unknown` вхолостую — каждые 90 с расширение лезло в чужую вёрстку почты
+ * (e.mail.ru), ничего не разбирало и снова писало ту же деградацию. Раз вёрстку мы не знаем, повторное
+ * чтение той же вкладки ничего нового не даст.
+ */
+export const MAIL_MUTE_AFTER_UNKNOWN = 5;
+/**
+ * Замолкший источник раз в час делает ОДНО пробное чтение: узнать «сменили вкладку» без чтения нельзя
+ * (расширение сообщает хост только в ответе на mail.read). Другой хост / вёрстку узнали / вкладку закрыли
+ * — источник снова слушает; тот же хост и снова «не узнал» — молчим дальше, без новой деградации.
+ */
+export const MAIL_MUTED_PROBE_MS = 60 * 60_000;
+
 /** Собрать ambient-источник почты поверх ридера расширения. */
 export function createMailSource(reader: MailReader, ownerUserId: string, opts: MailSourceOpts = {}): AmbientSource {
   const now = opts.now ?? Date.now;
@@ -140,6 +154,38 @@ export function createMailSource(reader: MailReader, ownerUserId: string, opts: 
   const important = opts.importantSenders ?? (() => []);
   const maxPerTick = opts.maxPerTick ?? envInt("JARVIS_MAIL_MAX_PER_TICK", 3);
   let lastDegradeAt = 0;
+  // T-F13: подряд нераспознанные вёрстки (по хосту) и состояние «замолчал».
+  let unknownStreak = 0;
+  let unknownHost: string | undefined;
+  let muted: { host: string | undefined; probeAt: number } | null = null;
+  /** Чтение дало ЯСНЫЙ ответ, отличный от «та же непонятная вёрстка» → серия обрывается, источник слушает. */
+  const clearUnknown = (why: string): void => {
+    if (muted) log.info("почта: источник снова слушает", { why, host: muted.host });
+    muted = null;
+    unknownStreak = 0;
+    unknownHost = undefined;
+  };
+  /** Ещё одна нераспознанная вёрстка. true — источник только что замолчал (деградация записана ОДИН раз). */
+  const noteUnknown = (host: string | undefined): boolean => {
+    if (host !== unknownHost) {
+      unknownHost = host;
+      unknownStreak = 0;
+    }
+    unknownStreak += 1;
+    if (unknownStreak < MAIL_MUTE_AFTER_UNKNOWN) return false;
+    muted = { host, probeAt: now() };
+    try {
+      // Мимо 30-минутного троттла noteDegradation: это ОДНО событие «замолчал», его нельзя проглотить.
+      metrics.recordDegradation("mail_source_muted", { host, misses: unknownStreak });
+    } catch {
+      /* наблюдаемость не должна ронять источник */
+    }
+    log.warn("почта: вёрстку не узнаю — источник замолкает до смены вкладки/перезапуска (раз в час — проба)", {
+      host,
+      misses: unknownStreak,
+    });
+    return true;
+  };
   const noteDegradation = (kind: string, meta: Record<string, unknown>): void => {
     const t = now();
     if (t - lastDegradeAt < 30 * 60_000) return;
@@ -156,6 +202,11 @@ export function createMailSource(reader: MailReader, ownerUserId: string, opts: 
     label: "Почта (открытая вкладка)",
     enabled,
     poll: async () => {
+      // T-F13: замолкли → вкладку не дёргаем до часовой пробы.
+      if (muted) {
+        if (now() - muted.probeAt < MAIL_MUTED_PROBE_MS) return [];
+        muted.probeAt = now();
+      }
       let res: MailReadResult;
       try {
         res = ((await reader.mailRead()) ?? {}) as MailReadResult;
@@ -163,17 +214,24 @@ export function createMailSource(reader: MailReader, ownerUserId: string, opts: 
         log.debug("mail.read недоступен (расширение/вкладка) — пропуск", e instanceof Error ? e.message : String(e));
         return [];
       }
-      if (res.noTab) return [];
+      if (res.noTab) {
+        clearUnknown("вкладку почты закрыли");
+        return [];
+      }
+      // Пустая/выгруженная вкладка и ошибка — ни «узнал», ни «не узнал»: серию не трогаем, замолкший молчит.
       if (res.blank || res.ok === false) {
-        noteDegradation("mail_unreadable", { reason: res.blank ? "blank" : (res.error ?? "error").slice(0, 120) });
+        if (!muted) noteDegradation("mail_unreadable", { reason: res.blank ? "blank" : (res.error ?? "error").slice(0, 120) });
         return [];
       }
       // Вёрстку не узнали — это НЕ «писем нет»: пишем деградацию (докстринг модуля это и обещает),
       // иначе новая вёрстка Gmail молча выключала бы D-5 навсегда.
       if (res.recognized === false) {
-        noteDegradation("mail_layout_unknown", { host: res.host });
+        if (muted && muted.host === res.host) return []; // проба: та же непонятная вкладка — молчим дальше
+        if (muted) clearUnknown("другая вкладка почты");
+        if (!noteUnknown(res.host)) noteDegradation("mail_layout_unknown", { host: res.host });
         return [];
       }
+      clearUnknown("вёрстку узнал");
       // Список разобран, но пометку «непрочитано» этого вендора мы не подтвердили → пустота НИЧЕГО не
       // доказывает. Молчим (будить владельца нечем), но пишем деградацию: иначе слепота D-5 была бы
       // невидимой в метриках, как это уже было с `mail_layout_unknown` (контроль-10).

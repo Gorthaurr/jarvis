@@ -74,7 +74,7 @@ import { CachingWebProvider, WebProvider } from "../integrations/web.js";
 import { AutoPredictor, MarketDataProvider, TradeExpert, TradingService, autoPredictorConfigFromEnv, loadPredictionStore, makeTinkoffProvider } from "../brain/trading/index.js";
 import { KnowledgeBase } from "../brain/knowledge/index.js";
 import { createEpisodicMemory } from "../memory/episodic.js";
-import { SHARED_USER_ID, type SkillDistiller, createSkillProvider, seedSharedSkills } from "../memory/skills.js";
+import { SHARED_USER_ID, type SkillDistiller, createSkillProvider, seedSharedSkills, warnOnDeadRefusalLessons } from "../memory/skills.js";
 import { SHARED_SKILL_SEED } from "../seed/shared-skills.js";
 import { ensureUser } from "../db/users.js";
 import { forgetClientContext } from "../proactive/salience.js";
@@ -380,6 +380,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       ext: extBridge,
       rawToText,
       log,
+      pinnedExtId: process.env.JARVIS_EXT_ID, // W0: только своё расширение на /ext
     });
   });
 
@@ -496,12 +497,12 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // POST /dev/vad {state:"barge_in"|"speech_start"|"speech_end"} — зовёт ctx.voice.onVadEvent.
   app.post("/dev/vad", { preHandler: devPre }, async (req) => {
     const state = String((req.body as { state?: string })?.state ?? "").trim();
-    if (!["barge_in", "speech_start", "speech_end"].includes(state)) return { ok: false, error: "state: barge_in|speech_start|speech_end" };
+    if (!["barge_in", "speech_start", "speech_end", "speech_cancel"].includes(state)) return { ok: false, error: "state: barge_in|speech_start|speech_end|speech_cancel" };
     const ids = registry.all().map((s) => s.sessionId);
     let ctx: SessionContext | undefined;
     for (let i = ids.length - 1; i >= 0; i -= 1) { const c = liveCtxs.get(ids[i]!); if (c) { ctx = c; break; } }
     if (!ctx) return { ok: false, error: "нет живой клиентской сессии" };
-    ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end");
+    ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end" | "speech_cancel");
     return { ok: true, sessionId: ctx.session.sessionId, injected: state };
   });
   } // end if (devHttpOn) — §sec gate for DEV/EXT HTTP routes
@@ -660,6 +661,8 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       void ensureUser(SHARED_USER_ID)
         .then(() => seedSharedSkills(SHARED_SKILL_SEED))
         .catch((e) => log.warn("общая библиотека навыков: сид пропущен", e instanceof Error ? e.message : String(e)));
+      // Разовый скан памяти на устаревшие уроки (учат отказу, которого не бывает) — только WARN.
+      void warnOnDeadRefusalLessons();
       const bindHost = resolveBindHost(config, log);
       await app.listen({ port: config.port, host: bindHost });
       log.info("gateway слушает", { host: bindHost, port: config.port });
@@ -704,7 +707,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
 }
 
 /** Минимальный контракт «сырого» ws-сокета, который нам нужен. */
-interface RawWs {
+export interface RawWs {
   send(data: string): void;
   close(code?: number, reason?: string): void;
   on(event: "message", cb: (data: unknown) => void): void;
@@ -892,7 +895,8 @@ function onConnection(
 }
 
 /** Выполнить handshake и поднять сессию (§5). Возвращает контекст или null. */
-async function doHandshake(
+/** @internal Экспорт для теста порядка H7 (gateway/handshake-h7.test.ts); в бою зовётся только из onConnection. */
+export async function doHandshake(
   env: Envelope<Hello>,
   sock: SessionSocket,
   ws: RawWs,
@@ -958,6 +962,16 @@ async function doHandshake(
   // ПРОДУКТОВЫЙ РЕЖИМ: лимиты плана в SpendGuard + durable kill-switch + план/статус для server.hello.
   // При мастер-флаге 0 → undefined, и server.hello остаётся ровно тремя полями.
   const productUser = await brain.product?.afterProvision(userId);
+
+  // H7 — ЗДЕСЬ, а не только в .then вызывающего (ревью 2026-09-24, B-F5). Сокет мог закрыться, пока
+  // мы ждали БД/профиль выше. Всё, что ниже, синхронно: createOrResume (resume перепривязал бы ЖИВУЮ
+  // сессию к мёртвому сокету), makeSessionContext (регистрация спикеров = flushPending отложенных
+  // напоминаний/наблюдений/ambient в закрытый сокет — источник помечал их «доставленными») и приветствие.
+  // Проверка после — уже поздно: флаш успевал случиться (лог 24.09 12:18:31).
+  if (ws.readyState !== WS_OPEN) {
+    log.warn("handshake: сокет закрылся, пока ждали БД — сессию не поднимаю, отложенное не трогаю (H7)", { userId });
+    return null;
+  }
 
   const { session, resumed } = registry.createOrResume(userId, sock, hello.resumeSessionId);
 
@@ -1078,6 +1092,12 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
   }
   // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.
   const t = setTimeout(() => {
+    // B-F5 (ревью 2026-09-24): за задержку сокет мог закрыться — приветствие в мёртвый канал не звучит,
+    // а кулдаун А6 (от факта ПРОИЗНЕСЁННОГО) сжёгся бы зря: следующий коннект молчал бы 6 часов.
+    if (!session.channelUp()) {
+      log.info("онбординг: канал закрыт до приветствия — не здороваюсь");
+      return;
+    }
     // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript — иначе на
     // каждое переподключение копится карточка-спам (НЕ чат-бот, §концепт). Контекст — best-effort.
     const p = getProfile(session.userId);
@@ -1087,6 +1107,10 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
       { name: p.displayName, facts: p.facts },
     )
       .then((line) => {
+        if (!session.channelUp()) {
+          log.info("онбординг: канал закрылся, пока собиралось приветствие — не здороваюсь");
+          return;
+        }
         ctx.voice.speak(line);
         void setLastGreeted(session.userId); // кулдаун А6 — от факта ПРОИЗНЕСЁННОГО приветствия
         log.info("онбординг: приветствие произнесено");

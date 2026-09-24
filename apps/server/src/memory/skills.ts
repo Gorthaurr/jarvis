@@ -79,6 +79,53 @@ export function slugify(name: string): string {
  * открыть и увидеть, что Джарвис запомнил. Не фатально: диск-сбой не валит сохранение
  * в БД (источник истины — content_md в skills).
  */
+/**
+ * НАВЫК УЧИТ ОТКАЗУ, КОТОРОГО НЕ БЫВАЕТ? (адверс-ревью 2026-09-02, HIGH)
+ *
+ * Выученный навык инжектится в системный промпт ДОВЕРЕННЫМ блоком с приказом «исполни» — то есть
+ * ложная модель системы, однажды записанная в память, воспроизводится вечно. Живой эпизод «Дота»:
+ * пять навыков учили, что `input_click` отказывает, «когда владелец за компьютером» (гейт USER_BUSY
+ * требует origin="proactive", а сервер всегда шлёт "user" — код недостижим), и модель этим объясняла
+ * владельцу свои провалы.
+ *
+ * Это НЕ карантин и не гейт: карантинный сканер (`skill-scan.ts`) ловит вредоносное, а тут — просто
+ * устаревшее знание, и словарный признак для запрета был бы принципиально неполон (урок
+ * lean-smalltalk) и рубил бы рабочие навыки. Поэтому — ТОЛЬКО WARN на boot: владелец/разбор видят,
+ * что в памяти живёт неправда, и правят её осознанно. ЧИСТАЯ функция.
+ */
+export function mentionsDeadRefusal(contentMd: string): string | undefined {
+  const lines = String(contentMd ?? "").split(String.fromCharCode(10));
+  for (const line of lines) {
+    // Признак узкий: речь именно об отказе ИЗ-ЗА ПРИСУТСТВИЯ владельца (а не о вежливости «не мешать»).
+    if (!/USER_?BUSY/i.test(line)) continue;
+    if (!/(?:пользовател|владелец|владельц)/i.test(line)) continue;
+    return line.trim().slice(0, 200);
+  }
+  return undefined;
+}
+
+/** Разовый скан памяти навыков на устаревшие уроки: только лог, ничего не меняет и не блокирует. */
+export async function warnOnDeadRefusalLessons(): Promise<number> {
+  if (!(await isDbReady())) return 0;
+  try {
+    const r = await query<{ id: string; content_md: string }>("select id, content_md from skills");
+    let n = 0;
+    for (const row of r?.rows ?? []) {
+      const line = mentionsDeadRefusal(String(row.content_md ?? ""));
+      if (!line) continue;
+      n += 1;
+      log.warn("навык учит отказу, которого не бывает (USER_BUSY по присутствию владельца) — поправь текст навыка", {
+        id: row.id,
+        строка: line,
+      });
+    }
+    return n;
+  } catch (e) {
+    log.debug("скан навыков на устаревшие уроки пропущен", e instanceof Error ? e.message : String(e));
+    return 0;
+  }
+}
+
 export async function writeSkillFile(id: string, contentMd: string): Promise<void> {
   try {
     await mkdir(skillsDir(), { recursive: true });
@@ -372,11 +419,18 @@ function splitFrontmatter(content: string): { frontmatter: SkillFrontmatter; bod
 
 // ── CRUD (pg; no-op без БД) ──────────────────────────────────
 
+/**
+ * Результат сохранения навыка. `persisted` — запись РЕАЛЬНО легла в БД (ревью 2026-09-24, T-F8): без этого
+ * признака вызывающий не отличал «сохранил» от «положил в память процесса» (БД ещё поднималась или запрос
+ * упал), и сид общей библиотеки рапортовал «засеяно 11» при нуле строк в таблице.
+ */
+export type SavedSkillRecord = SkillRecord & { persisted: boolean };
+
 /** Сохранить навык: пересчитать steps из content_md и записать (§8). */
 export async function saveSkill(
   userId: string,
   contentMd: string,
-): Promise<SkillRecord | null> {
+): Promise<SavedSkillRecord | null> {
   const parsed = parseSkillMd(contentMd);
   const id = String(parsed.frontmatter.id ?? "");
   const version = Number(parsed.frontmatter.version ?? 1);
@@ -417,7 +471,7 @@ export async function saveSkill(
       log.debug("saveSkill: БД нет — навык сохранён в памяти процесса (фолбэк)");
     }
   }
-  return record;
+  return { ...record, persisted: res !== null };
 }
 
 /** Прочитать навык по id (null если БД недоступна/не найден). */
@@ -513,10 +567,13 @@ export async function getSkillMerged(userId: string, id: string): Promise<SkillR
  * Идемпотентно залить курируемый стартовый набор в ОБЩУЮ библиотеку (Фаза 1, boot-seed). Каждый
  * элемент — канонический content_md (как `serializeLearnedSkill`). Перезаписываем ТОЛЬКО если в общей
  * библиотеке нет навыка с этим id ИЛИ сид-версия НОВЕЕ (не затираем то, что мог улучшить promote).
- * Возвращает число записанных. Сбой отдельного навыка не валит остальные (best-effort).
+ * Возвращает число записанных В БД (не в память процесса — T-F8). Сбой отдельного навыка не валит остальные (best-effort).
  */
 export async function seedSharedSkills(mdContents: readonly string[]): Promise<number> {
   let written = 0;
+  // T-F8 (ревью 2026-09-24): «засеяно» считаем ТОЛЬКО по реальным записям в БД. Навык, легший лишь в
+  // память процесса, после рестарта исчезнет — это не засев, и молчать о нём нельзя.
+  const memoryOnly: string[] = [];
   for (const md of mdContents) {
     try {
       const { frontmatter } = parseSkillMd(md);
@@ -525,15 +582,25 @@ export async function seedSharedSkills(mdContents: readonly string[]): Promise<n
       if (!id) continue;
       const existing = await getSkill(SHARED_USER_ID, id);
       if (existing && existing.version >= seedVer) continue; // в общей уже свежее — не трогаем
-      if (await saveSkill(SHARED_USER_ID, md)) {
-        await writeSkillFile(id, md);
-        written += 1;
+      const saved = await saveSkill(SHARED_USER_ID, md);
+      if (!saved) continue;
+      if (!saved.persisted) {
+        memoryOnly.push(id);
+        continue;
       }
+      await writeSkillFile(id, md);
+      written += 1;
     } catch (e) {
       log.warn("seedSharedSkills: пропуск навыка", e instanceof Error ? e.message : String(e));
     }
   }
   if (written > 0) log.info(`общая библиотека навыков: засеяно ${written}`);
+  if (memoryOnly.length > 0) {
+    log.warn("общая библиотека навыков: НЕ записаны в БД — живут только в памяти процесса и пропадут при рестарте", {
+      count: memoryOnly.length,
+      ids: memoryOnly.slice(0, 20),
+    });
+  }
   return written;
 }
 

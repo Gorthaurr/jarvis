@@ -67,6 +67,8 @@ export interface Task {
    *  прогресс), но НЕ содержательная §20-работа: исключается из active()/activeForUser()/recentTerminal()/
    *  scope — иначе «Да ты молодец» регистрировалось задачей и участвовало в scope-решениях след. реплик. */
   conversational?: boolean;
+  /** T-F1: задача dev-сессии (текст-драйвер/смоук) — невидима «что я сделал» владельца, не персистится. */
+  dev?: boolean;
 }
 
 /**
@@ -83,6 +85,8 @@ export type PersistedTask = Omit<Task, "cancel" | "steer">;
 export type TaskControlKind =
   | "cancel" // «отмени», «отставить» — прервать задачу (cancel-флаг)
   | "stop_tts" // «стоп», «заткнись», «тихо» — оборвать TTS, задача живёт
+  | "kill" // W0: «вырубись», «выключись», «выруби себя» — остановить ВСЁ и замолчать (рефлекс, $0, без модели)
+  | "silence" // W0: «тишина» — как kill, но молча и надолго (до следующего явного «Джарвис»)
   | "pause" // «потом доделаешь», «пауза» — приостановить с возможностью resume
   | "resume" // «продолжи», «дальше» — возобновить с текущего шага
   | "status" // «что делаешь», «как там» — отчёт о текущем прогрессе
@@ -366,6 +370,13 @@ export function stepLabelFor(toolName: string, input: Record<string, unknown>): 
     }
     case "screen_capture":
       return "Смотрю на экран";
+    case "screen_selection": {
+      // §режим выделения: чип §20 иначе показал бы «Работаю…» — ровно та жалоба, ради которой метка вводилась.
+      const op = s(input.op);
+      if (op === "start") return "Прошу обвести область";
+      if (op === "clear") return "Снимаю выделение";
+      return "Смотрю на выделенную область";
+    }
     case "file_view":
       return "Смотрю файл";
     case "job_status":
@@ -388,6 +399,16 @@ export function stepLabelFor(toolName: string, input: Record<string, unknown>): 
       return "Ищу элемент на экране";
     case "ui_invoke":
       return "Нажимаю элемент";
+    case "act": {
+      // W4 «Руки»: метка по глаголу и цели — чип §20 показывает «Нажимаю «Отправить»», а не «Работаю…».
+      const verb = s(input.do) || "click";
+      const t = input.target;
+      const name = typeof t === "string" ? t : t && typeof t === "object" ? s((t as { text?: unknown }).text) : "";
+      const tail = name ? ` «${name.slice(0, 30)}»` : "";
+      if (verb === "type" || verb === "set") return `Печатаю${name ? ` в${tail}` : ""}`;
+      if (verb === "key") return `Нажимаю ${s(input.combo) || "клавишу"}`;
+      return `Нажимаю${tail || " элемент"}`;
+    }
     case "input_click":
     case "input_mouse":
       return "Кликаю";

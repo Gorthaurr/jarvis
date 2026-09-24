@@ -82,7 +82,10 @@ class CtrlTtsStream implements TtsStream {
 class CtrlTtsProvider implements ITtsProvider {
   readonly live = false;
   last: CtrlTtsStream | null = null;
-  synthesize(): TtsStream {
+  /** Что реально ушло в синтез (W0-тесты: «принято в очередь» ≠ «звучит»). */
+  texts: string[] = [];
+  synthesize(text: string): TtsStream {
+    this.texts.push(text);
     this.last = new CtrlTtsStream();
     return this.last;
   }
@@ -384,13 +387,21 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
         await flush();
       }
     };
-    return { pipe, stt, onUserTurn, advance, say };
+    return { pipe, stt, tts, onUserTurn, advance, say };
   }
 
   it("без обращения «Джарвис» до пробуждения — игнор (агент не зовётся)", async () => {
     const { onUserTurn, say } = setup(1_000);
     await say("открой блокнот");
     expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  // B-F12 (ревью 2026-09-24): пре-ролл локального wake приносит в STT звук ДО «Джарвис» (обрывок ТВ).
+  // Проверяем ПЕТЛЁЙ: до мозга доходит только команда после обращения, а не «что открой ютуб».
+  it("B-F12: обрывок фона перед «Джарвис» не приклеивается к команде — мозг получает «открой ютуб»", async () => {
+    const { onUserTurn, say } = setup(1_000);
+    await say("…что Джарвис, открой ютуб");
+    expect(onUserTurn).toHaveBeenLastCalledWith("открой ютуб", expect.anything());
   });
 
   it("«Джарвис» будит; дальше в окне можно без обращения", async () => {
@@ -420,6 +431,69 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
     advance(2_000); // > окна, активности не было
     await say("ещё раз"); // без «Джарвис» → игнор
     expect(onUserTurn).toHaveBeenCalledTimes(calls);
+  });
+
+  // ── W0 (2026-09-09): проактивная речь НЕ открывает окно разговора ──────────────────────────────
+  // Живой лог 2026-09-06 15:50:41→42: «онбординг: приветствие произнесено» → следующая фраза
+  // ТЕЛЕВИЗОРА («Обратите внимание на формулировку Путина…») ушла в модель как задача, и ещё пять
+  // за минуту. Реверт: верни безусловное awake=true в startTts/armFollowup — тесты упадут.
+
+  /** Докрутить последний TTS-стрим до конца (speak_done для drive-речи). */
+  async function finishTts(tts: CtrlTtsProvider) {
+    tts.last!.push(0, true);
+    tts.last!.finish();
+    await flush();
+  }
+
+  it("W0: приветствие/проактив через speak() НЕ открывает окно — следующая реплика без «Джарвис» игнорируется", async () => {
+    const { pipe, tts, onUserTurn, say } = setup(10_000);
+    pipe.speak("Доброе утро, сэр.");
+    await finishTts(tts);
+    await say("обратите внимание на формулировку"); // ТВ говорит сразу после приветствия
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("W0: напоминание/брифинг через speakQueued (дефолт proactive) НЕ открывает окно", async () => {
+    const { pipe, tts, onUserTurn, say } = setup(10_000);
+    expect(pipe.speakQueued("Через двадцать минут созвон, сэр.", true)).toBe(true);
+    await finishTts(tts);
+    await say("нет, сценарий"); // разговор с человеком в комнате
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("W0: итог ЗАДАЧИ ВЛАДЕЛЬЦА (origin user-turn) окно открывает — он ждёт ответа", async () => {
+    const { pipe, tts, onUserTurn, say } = setup(10_000);
+    expect(pipe.speakQueued("Отправил Кате, сэр.", false, { origin: "user-turn" })).toBe(true);
+    await finishTts(tts);
+    await say("спасибо, а теперь открой почту");
+    expect(onUserTurn).toHaveBeenLastCalledWith("спасибо, а теперь открой почту", expect.anything());
+  });
+
+  it("W0: проактив ПОСРЕДИ открытого окна его не продлевает", async () => {
+    const { pipe, tts, onUserTurn, advance, say } = setup(1_000);
+    await say("Джарвис, привет"); // окно открыто, t=0
+    advance(800);
+    pipe.speak("Напоминаю: таблетки."); // проактив на t=800 — окно НЕ сдвигается
+    await finishTts(tts);
+    advance(400); // t=1200: >1000 от реплики владельца
+    const calls = onUserTurn.mock.calls.length;
+    await say("и что дальше");
+    expect(onUserTurn).toHaveBeenCalledTimes(calls); // окно истекло, проактив его не продлил
+  });
+
+  it("W0 quiet(): окно закрывается сразу, очередь озвучки придержана до истечения срока", async () => {
+    const { pipe, tts, onUserTurn, advance, say } = setup(10_000);
+    await say("Джарвис, привет"); // окно открыто
+    pipe.quiet(5_000);
+    const calls = onUserTurn.mock.calls.length;
+    await say("а теперь открой блокнот"); // без «Джарвис» — окно закрыто
+    expect(onUserTurn).toHaveBeenCalledTimes(calls);
+    const before = tts.texts.length;
+    expect(pipe.speakQueued("Напоминание: созвон.", true)).toBe(true); // принято, но не звучит
+    expect(tts.texts.length).toBe(before);
+    advance(5_001);
+    pipe.drainPending(); // срок вышел — дренаж (в бою его дёргает таймер quiet)
+    expect(tts.texts.length).toBe(before + 1);
   });
 
   // Акустика «строгий wake в шуме» (#1/#2): фон/видео/второй голос затапливали пайплайн через катящееся
@@ -1082,5 +1156,271 @@ describe("VoicePipeline — earcon раздумья на sync-first (§P1, фо�
     } finally {
       setEnv(prev);
     }
+  });
+});
+
+describe("W1 (2026-09-09): локальный wake клиента и мягкий гейт диктора", () => {
+  const PROFILE: VoiceProfile = { name: "Антон", data: new Uint8Array([1]), createdAt: 0 };
+
+  function setupWake(conversationWindowMs = 1_000) {
+    let clock = 0;
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs,
+      followupMs: 1_000_000,
+      now: () => clock,
+    });
+    const say = async (text: string) => {
+      pipe.onWake();
+      const before = onUserTurn.mock.calls.length;
+      stt.last!.emit({ text, final: true });
+      await flush();
+      if (onUserTurn.mock.calls.length > before && tts.last) {
+        tts.last.push(0, true);
+        tts.last.finish();
+        await flush();
+      }
+    };
+    return { pipe, onUserTurn, say, advance: (ms: number) => { clock += ms; } };
+  }
+
+  it("wake_local от клиента: реплика БЕЗ «Джарвис» в тексте принимается как обращение (STT ослышался слово)", async () => {
+    const { pipe, onUserTurn, say } = setupWake();
+    pipe.onVadEvent("wake_local");
+    await say("открой блокнот"); // облако не расслышало «Джарвис» — локальный детектор его слышал
+    expect(onUserTurn).toHaveBeenLastCalledWith("открой блокнот", expect.objectContaining({ viaWake: true }));
+  });
+
+  it("окно локального wake протухает: спустя 9 с реплика без обращения — игнор", async () => {
+    const { pipe, onUserTurn, say, advance } = setupWake(1_000);
+    pipe.onVadEvent("wake_local");
+    advance(9_000);
+    await say("открой блокнот");
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  function setupSpeaker(score: number) {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const verifier = new MockSpeakerVerifier({ ready: true, threshold: 0.5, match: () => ({ name: "Антон", score }) });
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      turnDetector: alwaysEndpointTurn(),
+      speaker: { verifier, profiles: () => [PROFILE] },
+    });
+    const turn = async (text: string) => {
+      pipe.onWake();
+      stt.last!.emit({ text, final: false });
+      pipe.onAudioFrame(new Int16Array([10, 20, 30, 40]).buffer);
+      pipe.onVadEvent("speech_end");
+      await flush();
+      await flush();
+    };
+    return { onUserTurn, turn, pipe };
+  }
+
+  it("мягкий гейт: ЧУЖОЙ по биометрии, но с явным «Джарвис» — принимается (ложное отклонение владельца стоит одно слово)", async () => {
+    const { onUserTurn, turn } = setupSpeaker(0.2);
+    await turn("Джарвис, какая погода");
+    expect(onUserTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("мягкий гейт: ЧУЖОЙ без обращения — по-прежнему игнор (ТВ в окне разговора не проходит)", async () => {
+    const { onUserTurn, turn } = setupSpeaker(0.2);
+    await turn("какая погода");
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("мягкий гейт: ЧУЖОЙ по биометрии, но клиент услышал «Джарвис» локально — принимается", async () => {
+    const { onUserTurn, turn, pipe } = setupSpeaker(0.2);
+    pipe.onVadEvent("wake_local");
+    await turn("какая погода");
+    expect(onUserTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("strict-режим (JARVIS_SPEAKER_GATE_MODE=strict): чужой с «Джарвис» — игнор, как раньше", async () => {
+    const prev = process.env.JARVIS_SPEAKER_GATE_MODE;
+    process.env.JARVIS_SPEAKER_GATE_MODE = "strict";
+    try {
+      const { onUserTurn, turn } = setupSpeaker(0.2);
+      await turn("Джарвис, какая погода");
+      expect(onUserTurn).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) delete process.env.JARVIS_SPEAKER_GATE_MODE;
+      else process.env.JARVIS_SPEAKER_GATE_MODE = prev;
+    }
+  });
+});
+
+describe("W2: первая фраза разговора сразу — пайплайн озвучивает и преамбулу, и финал, ничего дважды", () => {
+  it("sentence(преамбула) → sentence(финал) → done(финал): в синтез ушли ровно две фразы", async () => {
+    // Так ведёт себя петля на разговорном ходе с инструментом: преамбулу стримит step-0 (eager),
+    // финал после инструмента терминал отдаёт через sink.sentence, done несёт полный текст финала.
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn: vi.fn(async () => ({ voice: "фолбэк" })),
+      onUserTurnStream: async (_t, sink) => {
+        sink.sentence("Сейчас проверю погоду.");
+        await flush();
+        sink.sentence("В Москве плюс пять.");
+        sink.done("В Москве плюс пять.");
+      },
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      followupMs: 50,
+    });
+    pipe.onWake();
+    stt.last!.emit({ text: "какая погода в москве", final: true });
+    for (let i = 0; i < 4 && tts.texts.length < 2; i++) {
+      await flush();
+      tts.last?.push(0, true);
+      tts.last?.finish();
+      await flush();
+    }
+    expect(tts.texts).toEqual(["Сейчас проверю погоду.", "В Москве плюс пять."]);
+  });
+});
+
+// ── Ревью 2026-09-24 (T-F6/B-F1): служебный ack промоушена («Берусь, сэр») — проактив ──────────────────
+// Раньше ack шёл обычным done() хода и открывал 8-секундное окно разговора на КАЖДОЙ фоновой задаче: всё, что звучало
+// в комнате (ТВ, собеседник), принималось за команду. Реверт: убери ветку origin === "proactive" в done() → падает.
+describe("VoicePipeline — ack промоушена не продлевает окно разговора", () => {
+  // Окно открывает САМО обращение владельца («Джарвис, …»); ack «Берусь, сэр» (через ~1,5 с, на фоновой задаче)
+  // его НЕ продлевает — раньше продлевал на каждой задаче, и ТВ в эти секунды становился командой.
+  function setupStream(origin: "proactive" | undefined) {
+    let clock = 0;
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurnStream = vi.fn(async (_t: string, sink: { done: (f: string, o?: { origin?: "user-turn" | "proactive" }) => void }) => {
+      clock += 800; // модель думала 0,8 с, потом ответ/ack
+      sink.done(origin ? "Берусь, сэр." : "Нашёл, сэр.", origin ? { origin } : undefined);
+    });
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn: vi.fn(async () => ({ voice: "" })),
+      onUserTurnStream,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs: 1_000,
+      followupMs: 1_000_000,
+      now: () => clock,
+    });
+    const say = async (text: string) => {
+      pipe.onWake();
+      const before = onUserTurnStream.mock.calls.length;
+      stt.last!.emit({ text, final: true });
+      await flush();
+      if (onUserTurnStream.mock.calls.length > before && tts.last) {
+        tts.last.push(0, true);
+        tts.last.finish();
+        await flush();
+      }
+    };
+    return { say, onUserTurnStream, advance: (ms: number) => (clock += ms) };
+  }
+
+  it("ack-проактив: реплика без «Джарвис» после окна владельца не принимается", async () => {
+    const { say, onUserTurnStream, advance } = setupStream("proactive");
+    await say("Джарвис, найди отчёт за сентябрь"); // t=0 окно; ack на t=800
+    advance(400); // t=1200: окно от обращения (1 с) истекло, ack его не продлил
+    await say("обратите внимание на формулировку");
+    expect(onUserTurnStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("обычный ответ хода окно продлевает — продолжение без «Джарвис» принимается", async () => {
+    const { say, onUserTurnStream, advance } = setupStream(undefined);
+    await say("Джарвис, найди отчёт за сентябрь");
+    advance(400);
+    await say("и открой его");
+    expect(onUserTurnStream).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("VoicePipeline — датчики для «стоп/тише = замолчи» (ревью 2026-09-24, B-F2)", () => {
+  it("msSinceBargeIn считает от последнего перебивания; до него — бесконечность", () => {
+    let clock = 1_000;
+    const pipe = new VoicePipeline({
+      stt: new CtrlSttProvider(),
+      tts: new CtrlTtsProvider(),
+      onUserTurn: vi.fn(async () => ({ voice: "" })),
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      now: () => clock,
+    });
+    expect(pipe.msSinceBargeIn()).toBe(Number.POSITIVE_INFINITY);
+    pipe.onVadEvent("barge_in");
+    clock += 1_200;
+    expect(pipe.msSinceBargeIn()).toBe(1_200);
+    expect(pipe.isClientPlaying()).toBe(false);
+  });
+});
+
+// Контроль-1 №8 (ревью 2026-09-24): микрофон выключен посреди реплики — обрубок «напиши Кате, что» не исполняем.
+// Реверт: убери ветку speech_cancel в onVadEvent — событие уйдёт в speech_end-путь, агент получит обрубок.
+describe("VoicePipeline — speech_cancel (mute посреди фразы)", () => {
+  it("interim накоплен, пришёл speech_cancel → агент не вызывается, поздний финал тоже игнорируется", async () => {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({ stt, tts, onUserTurn, sendSpeakChunk: () => {}, sendClientState: () => {}, turnDetector: alwaysEndpointTurn() });
+    pipe.onWake();
+    pipe.onVadEvent("speech_start");
+    stt.last!.emit({ text: "Джарвис, напиши Кате, что", final: false });
+    pipe.onAudioFrame(new Int16Array([10, 20, 30, 40]).buffer);
+    pipe.onVadEvent("speech_cancel");
+    stt.last?.emit({ text: "Джарвис, напиши Кате, что", final: true });
+    await flush();
+    await flush();
+    expect(onUserTurn).not.toHaveBeenCalled();
+    expect(pipe.state).toBe("idle");
+  });
+});
+
+// Контроль-1 №9 (ревью 2026-09-24): междометие в окне локального wake не съедает окно и не уходит командой.
+// Реверт: убери `&& !isNoiseOnly(t)` в ветке localWakeActive (gateWake) — «хм» уйдёт агенту.
+describe("VoicePipeline — окно локального wake и междометия", () => {
+  it("wake_local → «хм» игнорируется, следующая реплика без «Джарвис» всё ещё адресована", async () => {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs: 1_000,
+      followupMs: 1_000_000,
+      now: () => 0,
+    });
+    const say = async (text: string) => {
+      pipe.onWake();
+      stt.last!.emit({ text, final: true });
+      await flush();
+    };
+    pipe.onVadEvent("wake_local");
+    await say("хм");
+    expect(onUserTurn).not.toHaveBeenCalled();
+    await say("открой ютуб");
+    expect(onUserTurn).toHaveBeenLastCalledWith("открой ютуб", expect.anything());
   });
 });

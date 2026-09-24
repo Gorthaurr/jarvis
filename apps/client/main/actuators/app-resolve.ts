@@ -33,6 +33,13 @@
  *
  * PS — чистый ASCII (транслит по char-кодам), цель/режим через ENV (анти-инъекция). String.raw —
  * чтобы бэкслеши путей не съелись JS-эскейпами; в скрипте нет ни backtick, ни ${...}.
+ *
+ * 🔴 АРГУМЕНТЫ ЯРЛЫКА (ревью 2026-09-24, T-F5, живой провал «открой дискорд»): ярлык читался без
+ * `.Arguments`, а «Discord.lnk» = `Update.exe --processStart Discord.exe` (Squirrel: Discord/Slack/Teams
+ * classic). Голый Update.exe тут же выходил с ошибкой → «не удалось запустить». Теперь аргументы и рабочая
+ * папка ярлыка уходят в Start-Process; Update.exe БЕЗ --processStart — апдейтер, а не приложение (штраф);
+ * при дубле ярлыков выигрывает тот, чей РЕАЛЬНЫЙ exe (цель или --processStart) совпадает с запросом;
+ * исход сверяется по процессу реального приложения (Update.exe сам выходит сразу после хэндоффа).
  */
 import { spawn } from "node:child_process";
 import { createLogger } from "@jarvis/shared";
@@ -55,6 +62,8 @@ export interface SmartLaunchResult {
   /** dry-run: appid Steam-игры и имена exe из папки установки (диагностика резолва). */
   appid?: string;
   hints?: string;
+  /** Аргументы ярлыка, с которыми ушёл запуск (T-F5: Update.exe --processStart Discord.exe). */
+  args?: string;
 }
 
 /** Честная ошибка запуска: not_found (не нашли что запускать) | launch_failed (нашли, но не стартовало). */
@@ -83,7 +92,7 @@ function Lev($a,$b){ $n=$a.Length;$m=$b.Length; if($n -eq 0){return $m}; if($m -
 $q=$env:JARVIS_Q
 if(-not $q){ Write-Output 'RESOLVE:FAIL reason=empty'; exit 1 }
 $qn=Norm $q
-function Cand($target,$kind,$display,$source,$hint,$score,$appid){ [pscustomobject]@{ target=$target;kind=$kind;display=$display;source=$source;hint=$hint;score=$score;appid=$appid } }
+function Cand($target,$kind,$display,$source,$hint,$score,$appid,$largs,$wd){ [pscustomobject]@{ target=$target;kind=$kind;display=$display;source=$source;hint=$hint;score=$score;appid=$appid;largs=$largs;wd=$wd } }
 $cands=@()
 # Библиотеки Steam (корень + libraryfolders.vdf). JARVIS_STEAM_ROOT подменяет корень — так сверка
 # запуска игры проверяется настоящим прогоном на временной библиотеке, без установленной игры.
@@ -181,12 +190,20 @@ else {
     # Служебный ярлык (удалить/справка/сайт) — не приложение: сильный штраф, но не запрет.
     $penalty=0; if($bn -match $junkName){ $penalty=45 }
     if($d -le 2){
-      $tp=$wsh.CreateShortcut($lnk.FullName).TargetPath
+      $sc=$wsh.CreateShortcut($lnk.FullName)
+      $tp=$sc.TargetPath
       if($tp -and (Test-Path $tp)){
         $tn=[IO.Path]::GetFileNameWithoutExtension($tp).ToLower()
         # Рубеж 1: деинсталлятор в цели — кандидат не рассматривается ВООБЩЕ.
         if($tn -notmatch $badTarget){
-          $cands+=Cand $tp 'exe' $lnk.BaseName "StartMenu(d=$d)" ([IO.Path]::GetFileNameWithoutExtension($tp)) (90-$d*10-$penalty)
+          # T-F5: аргументы и рабочая папка ярлыка — часть цели (Squirrel: Update.exe --processStart X.exe).
+          $la=([string]$sc.Arguments).Trim()
+          $real=[IO.Path]::GetFileNameWithoutExtension($tp)
+          if($la -match '--processStart(?:=|\s+)"?([^"\s]+?\.exe)'){ $real=[IO.Path]::GetFileNameWithoutExtension($Matches[1]) }
+          elseif($tn -eq 'update'){ $penalty+=30 }
+          # Дубль ярлыков: предпочитаем тот, чей реальный exe совпадает с запросом (а не случайный порядок обхода).
+          $bonus=0; if((Norm $real) -eq $qn){ $bonus=4 }
+          $cands+=Cand $tp 'exe' $lnk.BaseName "StartMenu(d=$d)" $real (90-$d*10-$penalty+$bonus) $null $la ([string]$sc.WorkingDirectory)
         }
       }
     }
@@ -202,10 +219,13 @@ if($best.kind -eq 'exe' -and ([IO.Path]::GetFileNameWithoutExtension($best.targe
   Write-Output ('RESOLVE:FAIL reason=uninstaller-blocked q='+$q+' target='+$best.target); exit 1
 }
 function SayOk($b,$verified){ Write-Output ("LAUNCH:OK target={0} | kind={1} | display={2} | source={3} | verified={4}" -f $b.target,$b.kind,$b.display,$b.source,$verified) }
+# Аргументы ярлыка в маркере: разделитель маркера '|' внутри них заменяем, чтобы разбор не поехал.
+$bargs=([string]$best.largs) -replace '\|','/'
 if($env:JARVIS_DRYRUN -eq '1'){
   # hints в dry-run — чтобы вывод пути «манифест -> installdir -> exe» проверялся тестом БЕЗ запуска игры.
   $dh=@(SteamGameHints $best.appid) -join ','
-  Write-Output ("RESOLVE:OK target={0} | kind={1} | display={2} | source={3} | appid={4} | hints={5}" -f $best.target,$best.kind,$best.display,$best.source,$best.appid,$dh); exit 0
+  if($best.kind -eq 'exe' -and $best.hint){ $dh=$best.hint }
+  Write-Output ("RESOLVE:OK target={0} | kind={1} | display={2} | source={3} | appid={4} | hints={5} | args={6}" -f $best.target,$best.kind,$best.display,$best.source,$best.appid,$dh,$bargs); exit 0
 }
 $waitMs=[int]($env:JARVIS_WAIT_MS); if($waitMs -le 0){ $waitMs=1500 }
 # Ожидание игры: Steam ещё поднимает бутстрап -> процесс/RunningAppID появляются НЕ мгновенно. Потолок
@@ -213,10 +233,17 @@ $waitMs=[int]($env:JARVIS_WAIT_MS); if($waitMs -le 0){ $waitMs=1500 }
 $steamWaitMs=[int]($env:JARVIS_STEAM_WAIT_MS); if($steamWaitMs -le 0){ $steamWaitMs=12000 }
 try {
   if($best.kind -eq 'exe'){
-    $p=Start-Process -FilePath $best.target -PassThru
+    # T-F5: аргументы/рабочая папка ярлыка. -ArgumentList только непустой (пустая строка = ошибка валидации PS).
+    $sp=@{ FilePath=$best.target; PassThru=$true }
+    if($best.largs){ $sp.ArgumentList=$best.largs }
+    if($best.wd -and (Test-Path -LiteralPath $best.wd)){ $sp.WorkingDirectory=$best.wd }
+    # Лончер (Update.exe) уходит сразу после хэндоффа — исход сверяем по процессу РЕАЛЬНОГО приложения.
+    $real=[string]$best.hint; $watchReal=($real -and $real -ne [IO.Path]::GetFileNameWithoutExtension($best.target))
+    $beforeReal=0; if($watchReal){ $beforeReal=CountProcs @($real) }
+    $p=Start-Process @sp
     if(-not $p){ Write-Output 'LAUNCH:FAIL reason=no-process'; exit 1 }
     Start-Sleep -Milliseconds $waitMs
-    if(Get-Process -Id $p.Id -EA SilentlyContinue){ Write-Output ("LAUNCH:OK target={0} | kind=exe | pid={1} | display={2} | source={3} | verified=process" -f $best.target,$p.Id,$best.display,$best.source) }
+    if(Get-Process -Id $p.Id -EA SilentlyContinue){ Write-Output ("LAUNCH:OK target={0} | kind=exe | pid={1} | display={2} | source={3} | verified=process | args={4}" -f $best.target,$p.Id,$best.display,$best.source,$bargs) }
     else {
       # Процесс вышел. Для СТАБ-ЛОНЧЕРОВ (UWP/Store-приложения: Калькулятор/calc, Камера, Фото и т.п.)
       # exe МГНОВЕННО отдаёт управление реальному приложению и выходит с кодом 0 — это УСПЕШНЫЙ хэндофф,
@@ -225,8 +252,15 @@ try {
       $ec=$null; try{ $ec=$p.ExitCode }catch{}
       # Стаб-лончер отдал управление реальному приложению: хэндофф состоялся, но САМ запуск приложения
       # мы не наблюдали — честно помечаем handoff, а не выдаём за подтверждённый процесс.
-      if($ec -eq 0){ Write-Output ("LAUNCH:OK target={0} | kind=exe | pid={1} | display={2} | source={3} | verified=handoff" -f $best.target,$p.Id,$best.display,$best.source) }
-      else { Write-Output ("LAUNCH:FAIL reason=process-exited-immediately exit={0}" -f $ec) }
+      if($ec -eq 0){
+        $how='handoff'
+        if($watchReal){
+          $deadline=(Get-Date).AddMilliseconds(8000)
+          do { if((CountProcs @($real)) -gt $beforeReal){ $how='process'; break }; Start-Sleep -Milliseconds 400 } while((Get-Date) -lt $deadline)
+        }
+        Write-Output ("LAUNCH:OK target={0} | kind=exe | pid={1} | display={2} | source={3} | verified={4} | args={5}" -f $best.target,$p.Id,$best.display,$best.source,$how,$bargs)
+      }
+      else { Write-Output ("LAUNCH:FAIL reason=process-exited-immediately exit={0} args={1}" -f $ec,$bargs) }
     }
   } else {
     $hints=@(); if($best.hint){ $hints+=$best.hint }
@@ -338,6 +372,7 @@ export async function smartLaunch(
           verified: kv.verified || undefined,
           appid: kv.appid || undefined,
           hints: kv.hints || undefined,
+          args: kv.args || undefined,
         });
         return;
       }

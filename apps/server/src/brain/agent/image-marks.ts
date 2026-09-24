@@ -8,8 +8,15 @@
 export const FILE_VIEW_MARK = "[file_view]";
 /** Маркер скриншота — первая строка текста lookAtScreen (dispatch.ts берёт ОТСЮДА, не своей копией). */
 export const SCREEN_CAPTURE_MARK = "Снимок рабочего экрана";
+/**
+ * Маркер кадра ВЫДЕЛЕННОЙ ОБЛАСТИ (§режим выделения 2026-09-03). Класс тот же, что у скриншота —
+ * экран живёт, кадр устаревает, — но заглушка свёртки должна звать НЕ screen_capture, а взгляд на
+ * выделение: область у владельца одна, и просить «сними экран целиком» вместо неё значит терять то,
+ * на что он показывал.
+ */
+export const SELECTION_VIEW_MARK = "[выделенная область]";
 
-export type ImageClass = "doc" | "screenshot" | "other";
+export type ImageClass = "doc" | "screenshot" | "selection" | "other";
 
 /**
  * Класс image-блоков одного tool_result по его текстовым блокам: документ (file_view), скриншот
@@ -21,6 +28,7 @@ export function classifyImageBlocks(blocks: ReadonlyArray<{ type: string; text?:
   for (const b of blocks) {
     if (b.type !== "text" || typeof b.text !== "string") continue;
     if (isFileViewMark(b.text)) return "doc";
+    if (b.text.startsWith(SELECTION_VIEW_MARK)) return "selection"; // кроп области владельца — свой бюджет
     if (b.text.startsWith(SCREEN_CAPTURE_MARK)) cls = "screenshot";
   }
   return cls;
@@ -58,4 +66,14 @@ export function parseFileViewMark(text: string): FileViewMark | null {
     out.pageCount = Number(m[3]);
   }
   return out;
+}
+
+/** Первая строка текстового блока рядом с кадром выделенной области. */
+export function formatSelectionViewMark(detail: string): string {
+  return `${SELECTION_VIEW_MARK} ${detail}`;
+}
+
+/** Кадр выделенной области (для заглушки свёртки: звать screen_selection, а не screen_capture). */
+export function isSelectionViewMark(text: string): boolean {
+  return text.startsWith(SELECTION_VIEW_MARK);
 }

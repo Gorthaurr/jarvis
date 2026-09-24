@@ -13,18 +13,25 @@
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
  */
-import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, powerMonitor, session } from "electron";
+import { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeImage, powerMonitor, screen, session } from "electron";
 import { join } from "node:path";
 import { createLogger, envInt, env as readEnv } from "@jarvis/shared";
 import type { ClientState, TaskControl, DemoEvent, SkillSaved, SkillStep, ClientSettings } from "@jarvis/protocol";
 
 import { existsSync } from "node:fs";
 import { Transport } from "./transport/index.js";
-import { dispatch } from "./actuators/index.js";
+import { dispatch, ownerPresenceNow } from "./actuators/index.js";
+import { noteOwnerInput } from "./actuators/input-mark.js";
 import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
+import { guardedDispatch } from "./actuators/commit-guard.js";
+import { createSherpaHearing } from "./hearing/sherpa-hearing.js";
 import { setActBridge } from "./actuators/code-runner.js";
 import * as tier0 from "./tier0/index.js";
 import { monitors } from "./monitors.js";
+import { selectionStore } from "./selection/store.js";
+import { type SelectionWiring, wireSelection } from "./selection/wiring.js";
+import { selectionOverlay } from "./selection/overlay.js";
+import { selectionClear, selectionStart } from "./actuators/selection.js";
 import { startGsiListener } from "./sensors/gsi-listener.js";
 import { settingsStore } from "./settings-store.js";
 import { identityStore } from "./identity-store.js";
@@ -45,18 +52,50 @@ const PROTOCOL_ERROR_TITLES: Record<string, string> = {
   account_blocked: "Аккаунт заблокирован",
 };
 import { AudioCoordinator } from "./audio/index.js";
+import { MicControl } from "./audio/mic-control.js";
+import { registerPttHotkey } from "./audio/ptt-hotkey.js";
+import { wireRendererGuard } from "./obs/renderer-guard.js";
+import { installProcessGuard } from "./obs/process-guard.js";
 import { sidecar } from "./actuators/sidecar-client.js";
 import { browserController } from "./actuators/browser-cdp.js";
 import { buildSystemProfile, detectInstalledApps, formatProfileSummary } from "./sensors/system-profiler.js";
 import { captureAmbient } from "./sensors/system-snapshot.js";
+import { UsageProfile } from "./sensors/usage-profile.js";
 import { Sensors } from "./sensors/index.js";
 import { runSkill } from "./skill-runner/index.js";
 import { createClientActuator } from "./skill-runner/client-actuator.js";
 import { IPC } from "./ipc-contract.js";
 import type { ConfirmResultPayload, SkillRecState, SettingsPatch } from "./ipc-contract.js";
 import { disposeClientFileLog, initClientFileLog } from "./obs/file-log.js";
+import { clearOwnerQuit, markOwnerQuit } from "./owner-quit.js";
 
 const log = createLogger("main");
+
+/**
+ * Ревью 2026-09-24 (H-L2): аварийный выход — дослать хвост durable-лога и погасить детей best-effort,
+ * затем ненулевой код (его видит хранитель супервизора). before-quit при app.exit не срабатывает.
+ */
+function hardExit(code: number): void {
+  isQuitting = true;
+  try {
+    sidecar().stop();
+    transport?.stop();
+    usageProfileInst?.flush(); // H-W1: минуты фокуса не теряются и на аварийном выходе
+  } catch {
+    /* выходим в любом случае (в т.ч. если сбой случился ещё до инициализации модуля) */
+  }
+  disposeClientFileLog();
+  app.exit(code);
+}
+// Ревью 2026-09-24 (H-L2): необработанные ошибки main больше не уходят в модальный диалог Electron и тишину
+// лога: фатальное — exit(1) (хранитель поднимет), шум сети/потерянные промисы — лог (см. obs/process-guard.ts).
+installProcessGuard({
+  on: (ev, cb) => void process.on(ev, cb),
+  streams: [process.stdout, process.stderr],
+  log,
+  flush: () => disposeClientFileLog(),
+  exit: (code) => hardExit(code),
+});
 
 // §10: Джарвис говорит сам (онбординг/проактивность) без жеста пользователя.
 // Без этого Chromium держит AudioContext в suspended — голос молчит.
@@ -96,16 +135,19 @@ let isQuitting = false;
 // §0.6 mic-kill-switch (адверс-ревью 2026-07-28 [2]): main ПОМНИТ волю владельца «микрофон выключен».
 // Раньше запись голоса (voiceEnrollStart → activate) открывала гейт НАВСЕГДА при взведённом mute в UI —
 // красная кнопка врала «не слышит», а кадры уходили в облако. Теперь после done/cancel записи гейт
-// восстанавливается по этому флагу.
-let micKillSwitch = false;
+// восстанавливается по этому флагу. Ревью 2026-09-24 (B-F8): включение кнопкой ПОСЛЕ «выключить» —
+// push-to-talk (см. audio/mic-control.ts); стартовая синхронизация renderer гейт не открывает.
+const mic = new MicControl(() => audio);
 /** Идёт запись голосового отпечатка (гейт открыт ВРЕМЕННО) — чтобы вернуть mute на любом её исходе. */
 let voiceEnrollInFlight = false;
 /** Вернуть гейт микрофона в состояние, выбранное владельцем (после временного открытия на запись голоса). */
 function restoreMicMute(reason: string): void {
   voiceEnrollInFlight = false;
-  if (micKillSwitch && audio) {
+  if (mic.killSwitchOn && audio) {
     audio.mute();
     log.info("§0.6 гейт микрофона закрыт обратно (mic-kill-switch владельца)", { reason });
+  } else {
+    audio?.release(); // W1: снять удержание записи — при локальном wake гейт вернётся к «закрыт до „Джарвис“»
   }
 }
 /** 16×16 иконка трея (синий орб) — data-URL, без файловых зависимостей (работает и в dev, и в упаковке). */
@@ -178,6 +220,30 @@ function createWindow(): void {
   });
 
   win.loadFile(join(__dirname, "../renderer/index.html"));
+  // Ревью 2026-09-24 (H-L2): захват микрофона и голос живут в renderer — его падение/зависание больше не
+  // делает Джарвиса молча глухим: reload с бэкоффом, серия — перезапуск процесса (obs/renderer-guard.ts).
+  const w = win;
+  wireRendererGuard({
+    onGone: (cb) => void w.webContents.on("render-process-gone", (_e, details) => cb(details.reason)),
+    onUnresponsive: (cb) => void w.on("unresponsive", cb),
+    onResponsive: (cb) => void w.on("responsive", cb),
+    reload: () => {
+      if (!w.isDestroyed()) w.webContents.reload();
+    },
+    crashRenderer: () => {
+      if (!w.isDestroyed()) w.webContents.forcefullyCrashRenderer();
+    },
+    relaunch: (args) => app.relaunch({ args }),
+    exit: (code) => hardExit(code),
+    isQuitting: () => isQuitting,
+    // Плеер умер вместе с renderer — «звук играет» сниматься иначе некому (сервер держал бы очередь озвучки).
+    onRendererLost: () => {
+      audio?.setPlaybackActive(false);
+      transport?.sendPlaybackState(false);
+    },
+    argv: process.argv.slice(1),
+    log,
+  });
   // §живёт-сам: крестик = спрятать в трей (слух/сенсоры живут), НЕ завершение. Выход — меню трея.
   win.on("close", (e) => {
     if (!isQuitting) {
@@ -251,6 +317,15 @@ function startTransport(): void {
     onMicState: (open) => win?.webContents.send(IPC.micState, open),
     onBargeIn: () => win?.webContents.send(IPC.bargeIn),
   });
+  // W1: локальный слух (sherpa KWS «Джарвис» + Silero VAD) грузится асинхронно; нет моделей/пакета →
+  // остаёмся на заглушках (гейт открыт постоянно, wake по тексту облака), клиент не падает.
+  if (process.env.JARVIS_LOCAL_WAKE !== "0") {
+    void createSherpaHearing({ onWake: (keyword) => log.info("локальный wake «Джарвис»", { keyword }) })
+      .then((h) => {
+        if (h) audio?.setEngines({ wake: h.wake, vad: h.vad });
+      })
+      .catch((e) => log.warn("слух: ошибка инициализации", { error: e instanceof Error ? e.message : String(e) }));
+  }
 
   // speak.chunk (TTS) → renderer для воспроизведения; client.state → орб + аудио-гейт.
   transport.on("speak", (c) => {
@@ -270,6 +345,7 @@ function startTransport(): void {
     if (sensors) transport?.sendContext(sensors.snapshot()); // §9: свежий контекст занятости на (ре)коннекте
     void sendEnvProfile(); // §9: отдать агенту авто-профиль окружения (браузер/приложения)
     void sendAmbient(); // §контекст: живой снимок «что открыто и где» сразу на (ре)коннекте
+    selectionOnConnected?.(); // §выделение: рамка пережила обрыв — сервер должен знать о ней (с её возрастом)
     // §15: досылаем сохранённые язык/контекст серверу (робастно к оффлайн-сейву/реконнекту).
     const snap = settingsStore.snapshot();
     // 2026-09-02: выбор модели — тем же сообщением; сервер отвечает models.catalog с тем, что применилось.
@@ -496,14 +572,10 @@ function registerIpc(): void {
   ipcMain.on(IPC.audioPlayed, (_e, gen: number, ts: number) => {
     if (typeof gen === "number" && typeof ts === "number") transport?.sendAudioPlayed(gen, ts);
   });
-  ipcMain.on(IPC.activate, () => {
-    micKillSwitch = false; // владелец явно включил слух
-    audio?.activate();
-  });
-  ipcMain.on(IPC.mute, () => {
-    micKillSwitch = true; // §0.6: main помнит волю владельца — enroll/прочие пути не откроют гейт «навсегда»
-    audio?.mute();
-  });
+  // Владелец явно включил слух; включение кнопкой после «выключить» = push-to-talk (B-F8, mic-control.ts).
+  ipcMain.on(IPC.activate, () => void mic.activate());
+  // §0.6: main помнит волю владельца — enroll/прочие пути не откроют гейт «навсегда».
+  ipcMain.on(IPC.mute, () => mic.mute());
   // Запись/повтор навыков демонстрацией (§8).
   ipcMain.on(IPC.skillStart, (_e, name: string) => void startSkillRecording(name));
   ipcMain.on(IPC.skillStop, () => void stopSkillRecording());
@@ -516,7 +588,7 @@ function registerIpc(): void {
   // иначе UI («Микрофон выключен») врал бы, а кадры уходили в облако навсегда.
   ipcMain.on(IPC.voiceEnrollStart, (_e, name: string) => {
     voiceEnrollInFlight = true;
-    audio?.activate();
+    audio?.activate({ hold: true }); // W1: запись идёт вне хода — idle сервера гейт не закрывает
     transport?.sendVoiceEnrollStart(name);
   });
   ipcMain.on(IPC.voiceEnrollCancel, () => {
@@ -576,8 +648,65 @@ let envSummary: string | undefined;
 let envApps: string[] = [];
 let envGames: string[] = [];
 let envInstalled: Array<{ name: string; exe?: string; uri?: string; cli?: boolean }> = [];
+// W4.2: накопитель фокуса (минуты по процессу переднего окна) — durable в userData; топ едет в client.env.usage.
+let usageProfileInst: UsageProfile | undefined;
+function usageProfile(): UsageProfile {
+  if (!usageProfileInst) {
+    let base = process.cwd();
+    try {
+      base = app.getPath("userData");
+    } catch {
+      /* до app.ready — мягкий фолбэк */
+    }
+    usageProfileInst = new UsageProfile(join(base, "usage-profile.json"));
+  }
+  return usageProfileInst;
+}
 let envBuiltAt = 0;
 const ENV_TTL_MS = 6 * 3_600_000;
+/**
+ * §РЕЖИМ ВЫДЕЛЕНИЯ (2026-09-03): владелец обводит кусок экрана и говорит о нём «вот тут недочёт».
+ *
+ * Здесь три проводки: (1) результат окна-оверлея → координатор выделения; (2) любое изменение
+ * области → сервер (client.selection), чтобы Джарвис КАЖДЫЙ ход знал, на что показывают, без
+ * tool-call; (3) глобальная клавиша — обвести можно и молча, руками, в том числе поверх игры.
+ *
+ * Клавиша настраивается JARVIS_SELECTION_HOTKEY (пусто = не регистрировать вовсе). Занята другой
+ * программой → ЧЕСТНЫЙ WARN: молча «зарегистрированный» и не работающий хоткей — обещание, которого
+ * нет (голосовая команда при этом работает).
+ */
+function setupSelection(): void {
+  // Логика — в selection/wiring.ts (тестируется на подделках); здесь только Electron-примитивы.
+  const wiring = wireSelection({
+    store: selectionStore,
+    overlay: selectionOverlay,
+    sendSelection: (sel, ageMs, drawing) => transport?.sendSelection(sel, ageMs, drawing),
+    displays: () => screen.getAllDisplays().map((d) => d.bounds),
+    onDisplaysChanged: (cb) => {
+      screen.on("display-added", () => cb("display-added"));
+      screen.on("display-removed", () => cb("display-removed"));
+      screen.on("display-metrics-changed", () => cb("display-metrics-changed"));
+    },
+    onOverlayDone: (cb) => ipcMain.on("selection:done", (e, rect: { x: number; y: number; w: number; h: number } | null) => cb(e.sender.id, rect)),
+    registerHotkey: (accel, cb) => globalShortcut.register(accel, cb),
+    // force: клавиша — явная воля владельца рисовать (в т.ч. перерисовать только что обведённое).
+    start: () => selectionStart(0, { force: true }),
+    clear: (o) => selectionClear(o),
+    hotkey: readEnv("JARVIS_SELECTION_HOTKEY", "Control+Alt+X"),
+    onConnected: (cb) => {
+      selectionOnConnected = cb;
+    },
+  });
+  selectionHotkeyActive = wiring.hotkey;
+  selectionWiring = wiring;
+}
+
+/** Зарегистрированная клавиша «обвести область» (null = нет) — уходит серверу в client.env для паспорта. */
+let selectionHotkeyActive: string | null = null;
+let selectionWiring: SelectionWiring | null = null;
+/** Колбэк проводки выделения на (ре)коннект — зовётся из обработчика transport "connected". */
+let selectionOnConnected: (() => void) | null = null;
+
 async function sendEnvProfile(): Promise<void> {
   try {
     if (envSummary === undefined || Date.now() - envBuiltAt > ENV_TTL_MS) {
@@ -595,7 +724,7 @@ async function sendEnvProfile(): Promise<void> {
       envBuiltAt = Date.now();
       log.info("окружение определено (авто)", { summary: envSummary });
     }
-    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled);
+    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled, selectionHotkeyActive, usageProfile().top(20));
   } catch (e) {
     log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
   }
@@ -604,20 +733,30 @@ async function sendEnvProfile(): Promise<void> {
 // §контекст системы: ЖИВОЙ снимок «что открыто и на каком мониторе» — отдельно от статичного
 // окружения, обновляется периодически (отдельный таймер, НЕ на горячем sensors-такте). Так Джарвис
 // каждый ход знает, что запущено и где (фикс two-monitor слепоты), без tool-call и round-trip.
+/** Период снимка ПК; им же считается фокус в накопителе W4.2. */
+const AMBIENT_TICK_MS = 12_000;
 let ambientTimer: ReturnType<typeof setInterval> | undefined;
 let emptyAmbientStreak = 0; // А8: пустой снимок N раз подряд = мёртвый сенсор, а не «нечего показать»
 async function sendAmbient(): Promise<void> {
   try {
     const { summary, foreground } = await captureAmbient();
+    const p = ownerPresenceNow();
+    // W4.2: минуты фокуса по процессу — единственный честный источник «самых частых программ» (см. usage-profile.ts).
+    // Ревью 2026-09-24 (H-W1): только пока владелец за ПК и экран не заблокирован — иначе счёт шёл за ночь
+    // с открытым браузером и за окна, которые двигал сам Джарвис.
+    usageProfile().tickFocus(foreground?.process, AMBIENT_TICK_MS, { presence: p.state, locked: sensors?.snapshot().locked ?? false });
     // А5 (ревью 2026-07-10): живая ЗАНЯТОСТЬ пользователя — из уже собираемого (fg-окно + idle),
     // ноль новых проб. Одной строкой в снимок (модель знает занятость ДО действия, а не постфактум
     // через denied:USER_BUSY) и в сенсоры §9 (гейт проактива «не мешать в игре» оживает).
     sensors?.setActiveApp(foreground?.process ?? "unknown");
     sensors?.setFullscreen(Boolean(foreground?.fullscreen));
-    const idleSec = powerMonitor.getSystemIdleTime();
-    const presence =
-      `Пользователь: ${idleSec < 60 ? "за ПК" : `отошёл (~${Math.round(idleSec / 60)} мин)`}` +
-      `${foreground?.fullscreen ? `; полноэкранно: ${foreground.process}` : ""}.`;
+    // 🔴 Присутствие считаем БЕЗ собственного ввода Джарвиса (разбор «Доты» 2026-09-02): сырой
+    // системный idle сбрасывается нашим же SendInput, и на каждой GUI-задаче снимок утверждал
+    // «владелец за ПК», даже если его нет в комнате. Не знаем — так и пишем: выдуманное присутствие
+    // модель использует как объяснение своих провалов («ввод не отдают — вы за компьютером»).
+    const presenceWord =
+      p.state === "at_pc" ? "за ПК" : p.state === "away" ? `отошёл (~${p.idleMin} мин)` : "не знаю (последний ввод — мой)";
+    const presence = `Пользователь: ${presenceWord}${foreground?.fullscreen ? `; полноэкранно: ${foreground.process}` : ""}.`;
     const combined = [summary, presence].filter((s) => s && s.trim()).join(" ");
     if (summary) {
       emptyAmbientStreak = 0;
@@ -633,7 +772,7 @@ async function sendAmbient(): Promise<void> {
   if (!ambientTimer) {
     // 12с (было 30с): контекст должен быть СВЕЖИМ — открыл вкладку/включил звук → Джарвис видит почти
     // сразу, без уточнений. Снимок лёгкий (EnumWindows + WASAPI-пик + вкладки), фон, unref.
-    ambientTimer = setInterval(() => void sendAmbient(), 12_000);
+    ambientTimer = setInterval(() => void sendAmbient(), AMBIENT_TICK_MS);
     ambientTimer.unref?.();
   }
 }
@@ -644,6 +783,9 @@ const TAKEOVER_IDLE_MS = 1500;
 let userActive = false;
 let userIdleTimer: ReturnType<typeof setTimeout> | undefined;
 function noteUserInput(): void {
+  // 🔴 Достоверное присутствие владельца (ревью 2026-09-02): сайдкар уже отличил живой ввод от нашей
+  // синтетики — сигнал иммунен к маскировке нашими же кликами, в отличие от глобального idle.
+  noteOwnerInput();
   if (!userActive) {
     userActive = true;
     transport?.sendTakeover(true); // пользователь взял управление → агент уступает
@@ -729,6 +871,7 @@ function createTray(): void {
           label: "Выйти (остановить Джарвиса)",
           click: () => {
             isQuitting = true;
+            markOwnerQuit(app.getPath("userData")); // хранитель в супервизоре не поднимет клиент обратно
             app.quit();
           },
         },
@@ -769,6 +912,7 @@ if (gotSingleInstanceLock) void app.whenReady().then(bootstrap);
 
 function bootstrap(): void {
   initClientFileLog(); // §наблюдаемость (аудит 2026-07-28): durable-лог клиента — «вчера не слышал» больше не слеп
+  clearOwnerQuit(app.getPath("userData")); // клиент снова запущен — прошлое «Выйти» больше не действует
   registerIpc();
   startGsiListener(); // §Волна3 (3.4): локальный приёмник JSON-пушей игр/программ (GSI) — сенсор kind:"gsi"
   createWindow();
@@ -776,10 +920,22 @@ function bootstrap(): void {
   applyAutostart();
   startTransport();
   startSidecar();
+  setupSelection(); // §режим выделения: горячая клавиша, приём рамки из оверлея, отправка её серверу
+  // Ревью 2026-09-24 (B-F8): запасной путь при промахе локального «Джарвис» — глобальный push-to-talk.
+  registerPttHotkey({
+    register: (accel, cb) => globalShortcut.register(accel, cb),
+    onPress: () => {
+      if (audio?.pushToTalk("hotkey") === false) {
+        win?.webContents.send(IPC.display, { title: "Микрофон выключен", markdown: "Push-to-talk не открывает выключенный микрофон — включите его кнопкой в окне." });
+      }
+    },
+    log,
+  });
   // jarvis SDK (среда исполнения «1 раунд = вся задача»): поднимаем loopback-мост актуаторов и отдаём
   // его code-runner'у, чтобы python-скрипт модели драйвил актуаторы ОДНИМ скриптом (jarvis.*), не бегая
   // в LLM между шагами. Сбой не критичен (обычный code_run/актуаторы работают) — jarvis-скрипт честно упадёт.
-  void startActBridge(dispatch)
+  // W0: рискованный коммит (Enter в мессенджере/банке/1С) с моста — честный отказ, не исполнение (см. commit-guard).
+  void startActBridge(guardedDispatch(dispatch))
     .then((bridge) => {
       actBridge = bridge;
       setActBridge({ port: bridge.port, token: bridge.token });
@@ -798,10 +954,13 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true; // штатный quit (вкл. системный shutdown) не должен блокироваться close-to-tray
+  globalShortcut.unregisterAll(); // §выделение: отдаём горячую клавишу системе
+  selectionOverlay.hideAll("quit"); // прозрачные окна поверх экрана не переживают приложение
   transport?.stop();
   sidecar().stop();
   void actBridge?.stop(); // jarvis SDK: гасим loopback-мост актуаторов
   void browserController().close(); // §6: гасим управляемый браузер (не оставляем висеть)
   tray?.destroy();
+  usageProfileInst?.flush(); // H-W1: дебаунс записи 30 с — без флаша последние минуты фокуса терялись на выходе
   disposeClientFileLog(); // дослать хвост durable-лога
 });

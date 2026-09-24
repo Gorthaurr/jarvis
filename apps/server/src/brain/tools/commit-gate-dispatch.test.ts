@@ -78,14 +78,49 @@ describe("GUI — коммит в опасном процессе на пере�
   it("input_key Enter при Telegram на переднем плане — спрашивает; в notepad — нет", async () => {
     const sendAction = vi.fn<Send>(okSend);
     const c = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "Telegram", approved: false });
-    const r = await dispatchTool("input_key", { key: "enter" }, c);
+    const r = await dispatchTool("input_key", { combo: "enter" }, c);
     expect(c.confirm).toHaveBeenCalledTimes(1);
     expect(r.declined).toBe(true);
     expect(sendAction).not.toHaveBeenCalled();
     const c2 = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "notepad" });
-    await dispatchTool("input_key", { key: "enter" }, c2);
+    await dispatchTool("input_key", { combo: "enter" }, c2);
     expect(c2.confirm).not.toHaveBeenCalled();
     expect(sendAction).toHaveBeenCalledTimes(1);
+  });
+
+  // Контроль-2 №4: признак «владелец одобрил» едет клиенту ТОЛЬКО после вопроса; аргумент модели перекрывается.
+  // Реверт: убери `commitApproved = true` после одобрения — первый ассерт упадёт; убери перекрытие — второй.
+  it("act: commitApproved=true только после «да» владельца; модель сама себе одобрить не может", async () => {
+    const sent: ActionCommand[] = [];
+    const sendAction = vi.fn<Send>(async (cmd) => {
+      sent.push(cmd);
+      return { commandId: "c", ok: true, durationMs: 1 };
+    });
+    const sess = { sendAction } as unknown as ToolContext["session"];
+    await dispatchTool("act", { app: "Telegram", do: "key", combo: "Enter" }, makeCtx({ session: sess, approved: true }));
+    await dispatchTool("act", { app: "notepad", do: "key", combo: "Enter", commitApproved: true }, makeCtx({ session: sess }));
+    expect((sent[0] as { commitApproved?: boolean }).commitApproved).toBe(true);
+    expect((sent[1] as { commitApproved?: boolean }).commitApproved).toBe(false);
+  });
+
+  // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter; в мессенджере уходил человеку мимо вопроса.
+  it("печать с переводом строки в Telegram (input_type и act do:type) — спрашивает; без перевода строки и в notepad — нет", async () => {
+    const sendAction = vi.fn<Send>(okSend);
+    const sess = { sendAction } as unknown as ToolContext["session"];
+    const c = makeCtx({ session: sess, foreground: "Telegram", approved: false });
+    const r1 = await dispatchTool("input_type", { text: "буду в семь\n" }, c);
+    const r2 = await dispatchTool("act", { app: "Telegram", do: "type", target: "Сообщение", text: "ок\r\n" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(2);
+    expect(r1.declined).toBe(true);
+    expect(r2.declined).toBe(true);
+    expect(sendAction).not.toHaveBeenCalled();
+    const c2 = makeCtx({ session: sess, foreground: "Telegram" });
+    await dispatchTool("input_type", { text: "буду в семь" }, c2);
+    const c3 = makeCtx({ session: sess, foreground: "notepad" });
+    await dispatchTool("input_type", { text: "строка 1\nстрока 2" }, c3);
+    expect(c2.confirm).not.toHaveBeenCalled();
+    expect(c3.confirm).not.toHaveBeenCalled();
+    expect(sendAction).toHaveBeenCalledTimes(2);
   });
 
   it("ui_invoke по handle «Провести» при 1cv8: подпись берётся из последнего ui_snapshot → спрашивает", async () => {
@@ -117,5 +152,27 @@ describe("web_act (невидимый браузер) — по последне�
     await dispatchTool("web_open", { url: "https://docs.example.com/" }, c2);
     await dispatchTool("web_act", { intent: "click", params: { text: "Оплатить" } }, c2);
     expect(c2.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("W4 act — гейт через dispatchTool", () => {
+  it("act do:key Enter при Telegram на переднем плане: отказ → declined, gui.act НЕ уходит клиенту", async () => {
+    const sendAction = vi.fn(okSend);
+    const c = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "Telegram", approved: false });
+    const r = await dispatchTool("act", { do: "key", combo: "Enter" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(r.declined).toBe(true);
+    expect(sendAction).not.toHaveBeenCalled();
+  });
+
+  it("act клик «Отправить» при Telegram — спрашивает, одобрение → gui.act уходит; клик «Настройки» — не спрашивает", async () => {
+    const sendAction = vi.fn(okSend);
+    const c = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "Telegram", approved: true });
+    await dispatchTool("act", { target: "Отправить" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(sendAction).toHaveBeenCalledTimes(1);
+    expect(sendAction.mock.calls[0]?.[0]).toMatchObject({ kind: "gui.act", target: "Отправить" });
+    await dispatchTool("act", { target: "Настройки" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
   });
 });

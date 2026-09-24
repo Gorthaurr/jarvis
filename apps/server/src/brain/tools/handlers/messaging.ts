@@ -14,7 +14,7 @@ import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messag
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
 import type { ConfirmOutcome, ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok } from "../dispatch-util.js";
+import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok, overlayDeniedResult } from "../dispatch-util.js";
 
 /**
  * Подтверждение отправки адресату ОДИН РАЗ (§14, фидбэк пользователя). Если этого адресата уже одобряли
@@ -291,6 +291,17 @@ async function telegramSendLocked(ctx: ToolContext, input: Record<string, unknow
     }
     // verdict === "absent": чат открылся, нашего сообщения в нём нет → отправка действительно не
     // состоялась, фолбэк законен.
+  }
+  // Контроль-10 (telegram-ext-fallback-no-veil-gate): та же дыра, что закрывал контроль-9 у browser_open —
+  // `openTgTab` расширения делает `windows.update{focused:true}` (или создаёт окно) и забирает клавиатуру у окна
+  // рисования: Esc владельца уходит в Telegram. Отправка при этом ещё и необратима.
+  if (ctx.telegramSend && ctx.veilDrawing?.() === true) {
+    const odTg = overlayDeniedResult(
+      { ok: false, error: { code: "overlay_drawing" } },
+      `Не отправил «${to}»: поверх экрана вуаль режима выделения — окно Telegram встало бы поверх окна рисования и ` +
+        `отобрало клавиатуру (владелец не смог бы закрыть рамку по Esc). Это состояние системы: дождись закрытия и повтори.`,
+    );
+    if (odTg) return odTg;
   }
   // Транспортный сбой CDP-пути при доказанном «не ушло» — пробуем расширение (те же транслит-варианты для recall).
   if (ctx.telegramSend) {

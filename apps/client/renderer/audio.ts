@@ -28,9 +28,10 @@ function micMakeupCurve(k = MIC_MAKEUP_GAIN, n = 4096): Float32Array<ArrayBuffer
   return curve;
 }
 
-/** H18: бэкофф ретрая реинита захвата — устройство занято игрой, пробуем пока не отдадут. */
-const RESTART_RETRY_MIN_MS = 1000;
-const RESTART_RETRY_MAX_MS = 30_000;
+/** H18: бэкофф ретрая реинита захвата — устройство занято игрой, пробуем пока не отдадут.
+ *  Экспорт — тот же бэкофф у стартового подъёма микрофона (capture-starter.ts, ревью 2026-09-24 B-F4). */
+export const RESTART_RETRY_MIN_MS = 1000;
+export const RESTART_RETRY_MAX_MS = 30_000;
 
 /** §Волна3 ревью (#18): окно подавления «отставших» аудио-чанков после barge-in/stop (мс). Достаточно
  *  для in-flight WS-чанков отменённой фразы; новая фраза приходит секундами позже (вне окна). */

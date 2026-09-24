@@ -38,7 +38,7 @@ async function run() {
     outfile: resolve(outdir, "main/index.cjs"),
     platform: "node",
     format: "cjs",
-    external: ["electron", "ws"],
+    external: ["electron", "ws", "sherpa-onnx-node"],
   });
 
   // preload: запускается в привилегированном контексте до renderer. Тоже .cjs (CJS).
@@ -60,6 +60,25 @@ async function run() {
     format: "iife",
   });
 
+  // §режим выделения (2026-09-03): окно-оверлей, которым владелец обводит кусок экрана. Свой preload
+  // (узкий мост: режим + результат) и свой renderer — окно живёт поверх всего экрана, полный мост
+  // window.jarvis ему давать незачем.
+  await build({
+    ...common,
+    entryPoints: [resolve(root, "preload/overlay.ts")],
+    outfile: resolve(outdir, "preload/overlay.cjs"),
+    platform: "node",
+    format: "cjs",
+    external: ["electron"],
+  });
+  await build({
+    ...common,
+    entryPoints: [resolve(root, "renderer/overlay.ts")],
+    outfile: resolve(outdir, "renderer/overlay.js"),
+    platform: "browser",
+    format: "iife",
+  });
+
   // расширение «Jarvis Web Hands» (MV3 service-worker): бандлим background.js (+ ./modules/*) в ОДИН
   // файл — Chrome грузит classic SW по пути из манифеста (dist/background.js). Бандл РЕЗОЛВИТ import/export
   // → оборванная ссылка между модулями = ОШИБКА СБОРКИ (node --check её НЕ ловит — был баг tgSendFileInPage).
@@ -77,6 +96,7 @@ async function run() {
   // Статика renderer (включая AudioWorklet — он грузится как отдельный модуль, не бандлится).
   await mkdir(resolve(outdir, "renderer"), { recursive: true });
   await cp(resolve(root, "renderer/index.html"), resolve(outdir, "renderer/index.html"));
+  await cp(resolve(root, "renderer/overlay.html"), resolve(outdir, "renderer/overlay.html"));
   await cp(resolve(root, "renderer/styles.css"), resolve(outdir, "renderer/styles.css"));
   await cp(resolve(root, "renderer/audio-worklet.js"), resolve(outdir, "renderer/audio-worklet.js"));
 

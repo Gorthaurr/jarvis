@@ -6,6 +6,8 @@
  * («Жорвит», «Джаррис», «Жарвес», «Jarves»…), поэтому помимо явных вариантов матчим FUZZY:
  * любой токен в пределах малого расстояния редактирования от «джарвис»/«jarvis». Чистые функции.
  */
+import { looksLikeCommandUtterance } from "../brain/agent/replay-gate.js";
+import { classifyTier } from "../brain/router/index.js";
 
 /** Явные варианты, как STT слышит «Джарвис» (рус/лат) — быстрый путь. Границы — Unicode. */
 const CORE =
@@ -117,8 +119,111 @@ export function isNoiseOnly(text: string): boolean {
   return tokens.every((tok) => NOISE_WORDS.has(tok));
 }
 
-/** Убрать обращение «Джарвис» (с прилегающей пунктуацией), оставив команду. */
+/**
+ * Хвост после обращения, который командой НЕ является: «Открой ютуб, Джарвис, пожалуйста» — команда
+ * ДО обращения, «пожалуйста» после него — вежливость. Такой хвост трактуется как пустой.
+ */
+const COURTESY_TAIL = new Set(["пожалуйста", "спасибо", "плиз", "please", "давай", "быстро", "быстрее", "срочно", "уже"]);
+
+function isCourtesyOnly(text: string): boolean {
+  const tokens = text.toLowerCase().match(TOKEN_RE);
+  if (!tokens || tokens.length === 0) return true;
+  return tokens.every((t) => COURTESY_TAIL.has(t) || NOISE_WORDS.has(t));
+}
+
+/**
+ * Разрезать реплику по ПЕРВОМУ обращению (ревью 2026-09-24, B-F12). Пре-ролл локального wake (1,5 с до
+ * «Джарвис») и сегментация STT тащат в реплику звук ДО обращения — обрывок ТВ/чужой речи. Приклеенный к
+ * команде, он её ломает: «…что Джарвис, открой ютуб» уходило роутеру как «что открой ютуб» — вопрос, а
+ * не действие. null — обращения нет.
+ */
+export function splitAtWake(text: string): { before: string; after: string } | null {
+  for (const m of text.matchAll(TOKEN_RE)) {
+    if (!looksLikeWake(m[0])) continue;
+    const at = m.index ?? 0;
+    return { before: text.slice(0, at), after: text.slice(at + m[0].length) };
+  }
+  return null;
+}
+
+/**
+ * Контроль-1 №3 (ревью 2026-09-24): что стоит ДО «Джарвис» в той же фразе — обрывок пре-ролла или смысл команды?
+ * Первая версия B-F12 сохраняла префикс только с командным глаголом и теряла адресата/время/программу:
+ * «Кате, Джарвис, напиши…» уходило «напиши…» без Кати, «Завтра в девять, Джарвис, напомни…» — без времени.
+ * Обрывок пре-ролла (0,9 с) — это служебные слова («…что», «так вот», «бла бла»); смысл — хоть одно содержательное
+ * слово в короткой (≤ PREFIX_MAX_WORDS) группе. Длиннее — уже не префикс команды, а чужая речь.
+ */
+const PREFIX_FUNCTION_WORDS = new Set([
+  ...NOISE_WORDS,
+  "что", "чтобы", "так", "вот", "это", "то", "как", "но", "да", "нет", "ага", "угу", "он", "она", "оно", "они", "мы",
+  "вы", "ты", "я", "бла", "короче", "значит", "типа", "вообще", "просто", "сказал", "сказала", "говорит", "говорю",
+  "слушай", "смотри", "окей", "ладно", "же", "ли", "бы", "вон", "там", "тут", "его", "её", "их", "ещё", "уже",
+  // Контроль-2 №5: междометия/приветствия/вежливость — не смысл команды («Блин, Джарвис, пауза»).
+  "хорошо", "блин", "понял", "поняла", "привет", "алло", "всё", "все", "спасибо", "ок", "эй", "слышь", "давай",
+  "итак", "кстати", "стоп", "погоди", "подожди", "пожалуйста", "здравствуй", "доброе", "утро", "добрый", "вечер", "день",
+]);
+
+/**
+ * Контроль-2 №5 (ревью 2026-09-24): команда после «Джарвис» сама по себе быстрая (tier0: медиа, громкость, запуск,
+ * сайт) — префикс ей не нужен и только ломает её: «Мама, Джарвис, открой калькулятор» уходило модели вместо
+ * мгновенного запуска. Префикс сохраняем лишь там, где без него команда неполна («Кате, Джарвис, напиши…»).
+ */
+/** Префикс-место («В дискорде», «на ютубе», «в телеге»): это адрес команды, и роутер без него жадно
+ *  принимает «включи демонстрацию» за запуск программы «демонстрация» — место сохраняем всегда. */
+function placePrefix(before: string): boolean {
+  const words = before.toLowerCase().match(TOKEN_RE) ?? [];
+  return words.length >= 2 && words.length <= PREFIX_MAX_WORDS && /^(в|во|на)$/u.test(words[0]!);
+}
+
+function selfSufficient(command: string): boolean {
+  try {
+    return classifyTier(command).tier === "tier0";
+  } catch {
+    return false;
+  }
+}
+const PREFIX_MAX_WORDS = 4;
+function meaningfulPrefix(before: string): boolean {
+  const words = before.toLowerCase().match(TOKEN_RE) ?? [];
+  return words.length > 0 && words.length <= PREFIX_MAX_WORDS && words.some((w) => !PREFIX_FUNCTION_WORDS.has(w));
+}
+
+/** Срезать разделители на стыке с обращением. Концевые «?»/«!»/«.» НЕ трогаем: «?» — признак вопроса для роутера. */
+const cleanAfter = (s: string): string => s.replace(/^[\s,.!?:;—-]+/u, "").replace(/\s+/gu, " ").trim();
+const cleanBefore = (s: string): string => s.replace(/^[\s,.!?:;—-]+/u, "").replace(/[\s,:;—-]+$/u, "").replace(/\s+/gu, " ").trim();
+
+/**
+ * Убрать обращение «Джарвис», оставив команду. Команда — то, что ПОСЛЕ обращения (B-F12: текст до него —
+ * это обрывок, попавший в пре-ролл); если после обращения ничего содержательного нет («открой блокнот,
+ * джарвис», «…, Джарвис, пожалуйста») — команда стоит ДО обращения.
+ * Обращение-ВСТАВКА посреди своей же команды («Поставь напоминание, Джарвис, на пять») начало не теряет:
+ * префикс в той же фразе (не отделён точкой/?/!) и сам похож на команду (глагол-действие) → это одна реплика
+ * владельца. Обрывок фона («…что», «…Путина.») — отбрасывается.
+ */
 export function stripWake(text: string): string {
+  return stripWakeDetailed(text).command;
+}
+
+/** То же, что stripWake, плюс отброшенный текст ДО обращения — пайплайн пишет его в лог (разбор «съел начало»). */
+export function stripWakeDetailed(text: string): { command: string; droppedPrefix?: string } {
+  const parts = splitAtWake(text);
+  if (parts) {
+    const after = cleanAfter(parts.after);
+    const before = cleanBefore(parts.before);
+    if (after && !isCourtesyOnly(after)) {
+      if (!before) return { command: after };
+      const sameSentence = !/[.!?…]\s*$/u.test(parts.before);
+      const keep = looksLikeCommandUtterance(before) || placePrefix(before) || (meaningfulPrefix(before) && !selfSufficient(after));
+      if (sameSentence && keep) return { command: `${before} ${after}` };
+      return { command: after, droppedPrefix: before };
+    }
+    return { command: before };
+  }
+  return { command: stripWakeLegacy(text) };
+}
+
+/** Прежний путь — только если токена-обращения не нашлось (страховка: isWakeAddressed мог сработать по WAKE_RE). */
+function stripWakeLegacy(text: string): string {
   let out = text.replace(WAKE_STRIP_RE, " ");
   // Fuzzy-ослышка («Джаррис, …») не попала в явный regex — срежем такой токен, оставив остальное.
   if (out === text) {

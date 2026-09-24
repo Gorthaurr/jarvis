@@ -129,6 +129,10 @@ const NEUTRAL_TOOLS = new Set([
   // они взводили бы anyMutateSucceeded → «полистал свой код и сдался» проходило бы успехом задачи
   // «почини себя». Сама правка (self_patch) остаётся mutate — она действительно меняет мир.
   "self_weaknesses", "self_code_search", "self_code_read",
+  // §режим выделения (2026-09-03): смотреть на область, обведённую владельцем, — ВОСПРИЯТИЕ. Не verify:
+  // у инструмента три операции (view/start/clear), и как verify его clear/start снимали бы verify-долг
+  // после слепого клика, ничего при этом не сверив. Сверка исхода GUI остаётся за screen_capture/ui_snapshot.
+  "screen_selection",
   // §3.9 зрение на файл: file_view — ЧТЕНИЕ файла с диска (картинка/страница PDF), не сверка GUI
   // (в VERIFY он не входит: экран он не видит, verify-долг слепого действия им не снять) и не дело.
   // Как mutate он взводил бы anyMutateSucceeded → «посмотрел файл и сдался» проходило бы успехом.
@@ -167,6 +171,8 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
 // ui_ground здесь НЕ значится — это чтение (см. NEUTRAL_TOOLS выше).
 const BLIND_MUTATE_TOOLS = new Set([
   "input_click", "input_key", "input_type", "browser_act", "web_act", "app_focus", "ui_invoke",
+  // W4 «Руки»: act — тот же клик/печать; долг снимает ТОЛЬКО его собственная сверка (verified:"met" → observed).
+  "act",
   // Волна 2 (2.4): input_mouse — тот же слепой SendInput (drag/удержание/колесо без обратной связи).
   // window_focus сюда НЕ входит: он самоподтверждается честным readback focused (как system_volume).
   "input_mouse",
@@ -216,6 +222,18 @@ export function claimsObservedResult(text: string): boolean {
  * неподтверждённую отправку совершённой (финальный контроль волны C, HIGH).
  */
 export const OUTBOUND_SEND_TOOLS = new Set(["telegram_send", "telegram_send_voice", "message_send", "order_place", "mail_send"]);
+
+/**
+ * Контроль-6 (C5R-5): нейтральные ПО ЭФФЕКТУ НА ЭКРАН, но делающие durable-ДЕЛО (память/навык/напоминание/
+ * наблюдение/счёт/согласие/инструмент). «Запомнил, а посмотреть под вуалью не смог» — не провал по вуали:
+ * дело сделано, честный give-up про взгляд не обнуляет его.
+ */
+export const DURABLE_NEUTRAL_TOOLS = new Set([
+  "memory_write", "memory_forget", "skill_save", "skill_promote", "tool_create",
+  "set_reminder", "cancel_reminder", "watch_create", "watch_cancel",
+  "consent_revoke", "obligation_add", "obligation_remove",
+]);
+
 
 /** Грубая классификация по тексту ошибки (для будущих специализированных фраз/телеметрии). */
 export function classifyFailure(detail?: string): FailureClass {

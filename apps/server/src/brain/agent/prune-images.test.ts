@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { LlmMessage, ToolResultContent } from "../../integrations/llm.js";
 import { pruneStaleImages } from "./prune-images.js";
-import { formatFileViewMark, SCREEN_CAPTURE_MARK } from "./image-marks.js";
+import { formatFileViewMark, formatSelectionViewMark, SCREEN_CAPTURE_MARK } from "./image-marks.js";
 
 /** user-ход с tool_result file_view: маркерный текст + страница документа (image-блок). */
 function docMsg(id: string, path: string, page?: number, pageCount?: number): LlmMessage {
@@ -43,6 +43,23 @@ function shotMsg(id: string): LlmMessage {
         content: [
           { type: "text", text: `${SCREEN_CAPTURE_MARK} (скрин ${id}):` },
           { type: "image", source: { type: "base64", media_type: "image/png", data: `png-${id}` } },
+        ],
+      },
+    ],
+  };
+}
+
+/** user-ход с tool_result кадра ВЫДЕЛЕННОЙ ОБЛАСТИ (§режим выделения). */
+function selectionMsg(id: string): LlmMessage {
+  return {
+    role: "user",
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: id,
+        content: [
+          { type: "text", text: `${formatSelectionViewMark("640×360 на «Монитор 2» — обведена 40 с назад")} [Это КУСОК экрана…]` },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: `sel-${id}` } },
         ],
       },
     ],
@@ -236,5 +253,22 @@ describe("pruneStaleImages — документы (file_view) отдельно �
     const convo = [docMsg("d1", "C:\\a.pdf", 1, 2), docMsg("d2", "C:\\a.pdf", 2, 2)];
     expect(pruneStaleImages(convo, 1, 1)).toBe(1);
     expect(pruneStaleImages(convo, 1, 1)).toBe(0);
+  });
+
+  it("§выделение: свёрнутый кадр области зовёт ОБРАТНО screen_selection, а не «сними экран целиком»", () => {
+    // Заглушка обязана называть ТОТ инструмент, которым картинку реально вернуть: у выделения это
+    // взгляд на область владельца — совет «сними свежий screen_capture» потерял бы место, о котором речь.
+    // Кроп области — СВОЙ бюджет (ревью: при общем keep=1 «деталь» и «контекст» вытесняли друг друга).
+    const convo = [selectionMsg("a"), shotMsg("b"), shotMsg("c")];
+    expect(pruneStaleImages(convo, 1, 2, 1)).toBe(1); // свёрнут только старый СКРИНШОТ b; кроп a живёт рядом со скрином c
+    expect(imagesIn(convo)).toEqual(["sel-a", "png-c"]);
+    expect(textsIn(convo[1]!).join(" ")).toContain("screen_capture"); // обычному скриншоту — обычная заглушка
+    // Второй кроп сверх своего бюджета — заглушка зовёт ОБРАТНО screen_selection, а не «сними экран целиком».
+    const convo2 = [selectionMsg("a"), selectionMsg("b"), shotMsg("c")];
+    expect(pruneStaleImages(convo2, 1, 2, 1)).toBe(1);
+    const selStub = textsIn(convo2[0]!).join(" ");
+    expect(selStub).toContain('screen_selection{op:"view"}');
+    expect(selStub).not.toContain("screen_capture");
+    expect(imagesIn(convo2)).toEqual(["sel-b", "png-c"]);
   });
 });

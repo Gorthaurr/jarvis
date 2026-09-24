@@ -254,8 +254,18 @@ export interface ScreenProbe {
 export async function probeScreen(which?: string | number, rect?: CaptureRect): Promise<ScreenProbe> {
   // updateMapping:false — сенсорный захват не сдвигает систему координат кликов (ревью Волны 2).
   const shot = await captureScreen(which, { rect, updateMapping: false });
+  return await perceptualHash(shot.image, shot.width, shot.height);
+}
+
+/**
+ * Перцептивный хеш УЖЕ СНЯТОГО кадра (§выделение 2026-09-03 — чтобы не снимать экран дважды: взгляд на
+ * выделенную область сам считает отпечаток из своего же кадра и честно говорит, изменилось ли там
+ * что-то с момента, когда владелец на это показывал).
+ */
+export async function perceptualHash(pngBase64: string, width = 0, height = 0): Promise<ScreenProbe> {
+  // import(), а не require: main собирается в CJS, но юнит-тесты гоняют ESM с vi.mock("electron").
   const { nativeImage } = await import("electron");
-  const img = nativeImage.createFromBuffer(Buffer.from(shot.image, "base64"));
+  const img = nativeImage.createFromBuffer(Buffer.from(pngBase64, "base64"));
   const bitmap = img.resize({ width: 8, height: 8 }).toBitmap(); // BGRA 8×8
   const luma: number[] = [];
   for (let i = 0; i + 3 < bitmap.length && luma.length < 64; i += 4) {
@@ -270,5 +280,7 @@ export async function probeScreen(which?: string | number, rect?: CaptureRect): 
   for (let i = 0; i < luma.length; i += 1) {
     hash = (hash << 1n) | (luma[i]! >= mean ? 1n : 0n);
   }
-  return { hash: hash.toString(16).padStart(16, "0"), mean: Math.round(mean), width: shot.width, height: shot.height };
+  const size = width && height ? { width, height } : img.getSize();
+  return { hash: hash.toString(16).padStart(16, "0"), mean: Math.round(mean), width: size.width, height: size.height };
 }
+

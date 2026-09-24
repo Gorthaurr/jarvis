@@ -6,6 +6,7 @@
 export * from "./name-match.js";
 // Робастный матч кликабельного элемента по тексту (общий browser_act, §6 Фаза 5): без ложных подстрок.
 export * from "./ui-match.js";
+export * from "./commit-risk.js";
 // Каталог моделей мозга (точные id, цены, роли) + наложение выбора пользователя на лестницу тиров.
 export * from "./models.js";
 

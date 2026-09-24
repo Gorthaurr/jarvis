@@ -24,6 +24,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSyn
 // (mkdirSync/appendFileSync — ещё и для durable-инцидентов голосового доклада, см. recordIncident)
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { startClientKeeper } from "./client-keeper.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER_CWD = join(ROOT, "apps", "server");
@@ -412,10 +413,12 @@ async function watchdogTick() {
 }
 
 // ── main ────────────────────────────────────────────────────────────────────────────────────
+let clientKeeper = null; // хранитель клиента (объявлен ДО shutdown-хендлера: сигнал может прийти во время старта)
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 function shutdown() {
   stopping = true;
+  clientKeeper?.stop();
   log("супервизор останавливается — гашу сервер");
   killChildTree();
   try {
@@ -428,4 +431,6 @@ function shutdown() {
 
 await startServer(); // сам решит: спавнить или наблюдать за уже живым
 setInterval(() => void watchdogTick(), HEALTH_EVERY_MS);
+// 2026-09-24: клиент (уши/голос/руки) тоже под присмотром — раньше после перезагрузки он не поднимался вовсе.
+clientKeeper = startClientKeeper({ root: ROOT, env, log, alert });
 log("супервизор запущен", { port: PORT, healthEveryMs: HEALTH_EVERY_MS, watchOnly, envFile });

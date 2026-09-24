@@ -16,7 +16,7 @@
  */
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, err, ok, wrapUntrusted } from "../dispatch-util.js";
-import { formatChannels } from "../../app-channels.js";
+import { formatChannels, formatUsageCoverage } from "../../app-channels.js";
 import { appRecipes, normalizeApp } from "../../../memory/app-recipes.js";
 import { scanSkillContent } from "../../../memory/skill-scan.js";
 import { executeGuardedCode } from "./code.js";
@@ -154,6 +154,12 @@ export function appChannelsList(ctx: ToolContext, input: Record<string, unknown>
   const learnedShown = q ? learned.filter((r) => r.app.includes(normalizeApp(q))) : learned;
 
   const parts: string[] = [];
+  // W4.2: без запроса — сперва ПОКРЫТИЕ частых программ владельца каналами (по минутам фокуса с клиента):
+  // «у Chrome канал есть, у Claude — нет (GUI)». Честно называет дни счёта; данных нет — строки нет.
+  if (!q && ctx.appUsage?.length) {
+    const cov = formatUsageCoverage(ctx.appUsage, curated);
+    if (cov) parts.push(cov);
+  }
   if (curated.length > 0) parts.push(formatChannels(curated, query));
   else if (!q) parts.push("Список установленного пока не пришёл с клиента — курируемых совпадений нет.");
 
@@ -192,7 +198,7 @@ export function appChannelsList(ctx: ToolContext, input: Record<string, unknown>
     }
     return ok(
       `Про «${query ?? "это"}» в реестре ничего нет — ни курируемого рецепта, ни выученного. ` +
-        `Значит остаётся GUI (ui_snapshot → действие → сверка). Если найдёшь программный путь и ПРОВЕРИШЬ его — ` +
+        `Значит остаётся GUI (look{what:"elements"} → act → сверка). Если найдёшь программный путь и ПРОВЕРИШЬ его — ` +
         `запиши через app_channel_learn, чтобы в следующий раз не искать заново.`,
     );
   }

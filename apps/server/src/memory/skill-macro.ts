@@ -86,6 +86,33 @@ export function compileReplayLines(trace: readonly GestureEvent[]): string[] {
         gestures += 1;
         break;
       }
+      case "act": {
+        // W4 «Руки»: act по UIA-handle разрешённых координат не имеет — такой прогон в макрос НЕ компилируется
+        // (частичный макрос опасен, как и клик без координат выше); физический клик/точка — компилируется.
+        const verb = String(ev.input.do ?? "click");
+        const d = ev.data as { screenX?: unknown; screenY?: unknown } | undefined;
+        const x = typeof d?.screenX === "number" ? d.screenX : null;
+        const y = typeof d?.screenY === "number" ? d.screenY : null;
+        if (verb === "key") {
+          const combo = String(ev.input.combo ?? "").trim();
+          if (!combo) break;
+          lines.push(`input.key combo="${esc(combo)}"`);
+          lines.push(`wait ms=${KEY_SETTLE_MS}`);
+          gestures += 1;
+          break;
+        }
+        if (x === null || y === null) return [];
+        lines.push(`input.click x=${Math.round(x)} y=${Math.round(y)} space="screen" method="physical"`);
+        lines.push(`wait ms=${CLICK_SETTLE_MS}`);
+        gestures += 1;
+        if (verb === "type" || verb === "set") {
+          const text = String(ev.input.text ?? "");
+          if (!text) return [];
+          lines.push(`input.type text="${esc(text)}"`);
+          lines.push(`wait ms=${KEY_SETTLE_MS}`);
+        }
+        break;
+      }
       default:
         // Скрины/код/веб и прочее — глаза и мысли модели, в реплей не входят.
         break;

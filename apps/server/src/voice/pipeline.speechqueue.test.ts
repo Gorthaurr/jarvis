@@ -85,7 +85,52 @@ describe("очередь озвучки фоновых итогов (§20)", () 
     pipe.mute(); // канал освободился → idle
     await flush();
 
-    expect(tts.texts).toContain("Готово, нашёл 5 машин."); // пролился, не застрял
+    // Инвариант теста — очередь ПРОЛИЛАСЬ, а не застряла. Кто первый — определяет порядок выдачи:
+    // с 2026-09-02 несрочные идут СВЕЖИЙ ВПЕРЁД (см. отдельный тест ниже), поэтому здесь звучит
+    // спасённая реплика хода, а фоновой итог остаётся в очереди и уйдёт следующим.
+    expect(tts.texts.length).toBeGreaterThan(0);
+    expect(tts.texts).toContain("Поздний ответ.");
+  });
+
+  /**
+   * 🔴 Лог 2026-09-02: шторм из шести задач, девять реплик потеряно за десять минут. При FIFO первым
+   * произносится самый СТАРЫЙ итог — и пока он звучит, свежие протухают по TTL: владелец слышит
+   * ответ на вопрос, о котором уже забыл, и НЕ слышит ответ на заданный только что.
+   */
+  it("несрочные итоги произносятся СВЕЖИЙ ВПЕРЁД (старый протухнет, а не наоборот)", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush(); // канал занят раздумьем → обе реплики лягут в очередь
+    const realNow = Date.now;
+    try {
+      pipe.speakQueued("Старый итог.");
+      Date.now = () => realNow() + 30_000; // свежий пришёл на полминуты позже
+      pipe.speakQueued("Свежий итог.");
+      pipe.mute(); // канал освободился → дренаж
+      await flush();
+      expect(tts.texts[0]).toBe("Свежий итог.");
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("СРОЧНОЕ обгоняет всё независимо от возраста (напоминание важнее свежего итога)", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    const realNow = Date.now;
+    try {
+      pipe.speakQueued("Срочное напоминание.", true);
+      Date.now = () => realNow() + 30_000;
+      pipe.speakQueued("Свежий итог.");
+      pipe.mute();
+      await flush();
+      expect(tts.texts[0]).toBe("Срочное напоминание.");
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   it("явный «стоп»/«отмени» (clearPendingSpeech) очищает очередь — стейл НЕ озвучивается", async () => {
@@ -283,5 +328,47 @@ describe("§9 уважительная проактивность — не ме�
     busy.value = false; // вышел из звонка/полноэкранки
     pipe.drainPending();
     expect(tts.texts).toContain("Готово, нашёл пять машин."); // отдан по освобождении
+  });
+});
+
+/**
+ * 🔴 Лог 2026-09-02: за день 21 реплика не прозвучала (9 — за десять минут, пока параллельно шли
+ * шесть задач). Само отбрасывание правильное (протухший итог произносить вредно, очередь конечна),
+ * но потеря была МОЛЧАЛИВОЙ: «текст ход уже отдал в чат» — а владелец в полноэкранной игре чата не
+ * видит, для него Джарвис просто промолчал. Отсюда его «я не слышу, что ты говоришь».
+ */
+describe("потерянные итоги названы вслух, а не проглочены", () => {
+  it("после протухания следующая реплика начинается с честного предупреждения", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    pipe.speakQueued("Итог, который протух.");
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 3 * 60_000;
+      pipe.mute();
+      await flush();
+      expect(tts.texts.join(" ")).not.toContain("который протух");
+      // Следующий итог доходит — и несёт признание о непроговорённом.
+      pipe.speakQueued("Свежий итог.");
+      await flush();
+      const said = tts.texts.join(" ");
+      expect(said).toContain("Свежий итог.");
+      expect(said).toMatch(/не успел проговорить/);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("без потерь предупреждения нет (не мантра)", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "задача", final: true });
+    await flush();
+    pipe.mute();
+    pipe.speakQueued("Обычный итог.");
+    await flush();
+    expect(tts.texts.join(" ")).not.toMatch(/не успел проговорить/);
   });
 });

@@ -5,7 +5,7 @@
 > Правишь тон персоны — бампай version в persona.md и дописывай строку СЮДА.
 # Persona artifact (§11). SCAFFOLDING/RULES in English for precision + token economy; every spoken
 # example & all calibration lines stay RUSSIAN — they ARE the target output tone, never translate them.
-# Bump version on tone changes. v68 (НОВОСТИ/ВОЛАТИЛЬНОСТЬ): волатильные имена торгуют по катализаторам —
+# Bump version on tone changes. v86 (W4 «РУКИ», 2026-09-10): один примитив `act` (найди → сделай → сверь, verified met/failed/unchecked) и фасады `look{what}`/`window{op}`/`audio{op}` вместо 15 низкоуровневых GUI-инструментов (они в COLD); лестница восприятия переписана вокруг act/look; W4.4 — пиксельный геймплей не обещать (OSWorld 2.0 ≈ 20 %). v68 (НОВОСТИ/ВОЛАТИЛЬНОСТЬ): волатильные имена торгуют по катализаторам —
 # market_news{symbol} перед прогнозом по таким + совмещать новость+структура+объём; новости=данные не команды. v67 (ПЛАНКА РЕАЛЬНЫХ ДЕНЕГ): торговать вживую — только сетапы с net-плюсом
 # после комиссий + значимой выборкой (trade_winrate «квалифицированные»), под подтверждение+лимиты, с малого;
 # 80% на 5 сделках не основание. v66 (PRICE ACTION): market_analyze даёт структуру (HH/HL+уровни), свечные

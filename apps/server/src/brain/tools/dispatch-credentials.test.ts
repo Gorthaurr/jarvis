@@ -10,6 +10,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ActionCommand } from "@jarvis/protocol";
+import { rememberUiHandles } from "./commit-gate.js";
 import { type ToolContext, dispatchTool } from "./dispatch.js";
 
 interface Spy {
@@ -98,6 +99,55 @@ describe("пароли и коды подтверждения: ввод не д�
     expect(String(r.content)).toMatch(/не ввожу, введите сами/i);
   });
 
+  // Ревью 2026-09-24: act — главный путь печати с W4, в гарде его не было.
+  it("act do:type в поле «Пароль» (цель строкой) → ошибка, gui.act не ушёл", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("act", { do: "type", target: "Пароль", text: "s3cret" }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(0);
+    expect(String(r.content)).toMatch(/не ввожу, введите сами/i);
+  });
+
+  it("act do:set с номером карты → ошибка, gui.act не ушёл", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("act", { do: "set", target: { role: "Edit" }, text: "4111 1111 1111 1111" }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(0);
+  });
+
+  it("act do:type по handle поля пароля из последнего снимка → ошибка", async () => {
+    const s = spyCtx();
+    rememberUiHandles(s.ctx.session as unknown as object, { items: [{ handle: 42, name: "Пароль", role: "Edit" }] });
+    const r = await dispatchTool("act", { do: "type", target: { handle: "42" }, text: "s3cret" }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(0);
+  });
+
+  // Контроль-2 №2: слот навыка и печать в фокус после клика по полю пароля. Реверт: убери case skill_execute /
+  // наследование цели в dispatchTool — соответствующий тест упадёт.
+  it("skill_execute со слотом password → ошибка, реплей не ушёл (а без пароля — уходит)", async () => {
+    const s = spyCtx();
+    // Навык реально исполнимый: без гарда шаг «{{password}}» ушёл бы клиенту skill.execute (иначе тест декоративен).
+    const skill = (slot: string) => ({ id: "login", version: 1, steps: [{ action: "input.type", params: { text: `{{${slot}}}` } }] });
+    let current = skill("query");
+    (s.ctx as unknown as { skills: unknown }).skills = { get: async () => current };
+    await dispatchTool("skill_execute", { skillId: "login", params: { query: "погода" } }, s.ctx);
+    expect(s.actions.map((a) => a.kind)).toEqual(["skill.execute"]); // контроль: обычный слот исполняется
+    s.actions.length = 0;
+    current = skill("password");
+    const r = await dispatchTool("skill_execute", { skillId: "login", params: { password: "фиктивное-значение" } }, s.ctx); // не секрет: гард режет по ИМЕНИ слота
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(0);
+  });
+
+  it("act{target:«Пароль»} (клик) → act{do:type} без цели → ошибка: поле унаследовано из прошлого act", async () => {
+    const s = spyCtx();
+    await dispatchTool("act", { target: "Пароль" }, s.ctx);
+    const r = await dispatchTool("act", { do: "type", text: "s3cret" }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(1); // только клик
+  });
+
   it("browser_act type в input[type=password] → ошибка, расширение не вызвано", async () => {
     const s = spyCtx();
     const r = await dispatchTool(
@@ -153,6 +203,13 @@ describe("🔴 легитимная работа по тем же путям н�
     expect(r.isError).toBe(false);
     expect(s.actions).toHaveLength(1);
     expect(String(r.content)).not.toMatch(/введите сами/i);
+  });
+
+  it("act do:type в поле «Поиск» доходит до клиента", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("act", { do: "type", target: "Поиск", text: "погода в Москве" }, s.ctx);
+    expect(r.isError).toBe(false);
+    expect(s.actions.map((a) => a.kind)).toEqual(["gui.act"]);
   });
 
   it("browser_act type в обычное поле поиска исполняется", async () => {

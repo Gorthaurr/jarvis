@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CHANNEL_RECIPES, channelSummary, exeName, formatChannels, type InstalledApp, matchChannels, recipeMatches } from "./app-channels.js";
+import { CHANNEL_RECIPES, TOP_APPS_SEED, channelForProcess, channelSummary, exeName, formatChannels, formatUsageCoverage, type InstalledApp, isGenericExeName, matchChannels, recipeMatches, sanitizeUsage } from "./app-channels.js";
 import { browserUrlBlocked } from "./tools/dispatch-util.js";
 
 const app = (name: string, exe?: string, uri?: string) => ({ name, exe, uri });
@@ -35,7 +35,10 @@ describe("контракт рецептов", () => {
       const forms: Array<{ label: string; app: InstalledApp }> = [];
       const exe0 = r.exe?.[0];
       const uri0 = r.uri?.[0];
-      if (exe0) forms.push({ label: `exe ${exe0}`, app: { name: "из реестра", exe: exe0 } });
+      // H-W1 (ревью 2026-09-24): ОБЩЕЕ имя exe (launcher.exe/browser.exe) одно программу не называет — реестр
+      // даёт к нему настоящее имя программы, и матч идёт по паре «exe + имя». Форма с именем-заглушкой для
+      // такого exe обязана НЕ находиться (иначе Rockstar Launcher снова стал бы HoYoPlay).
+      if (exe0) forms.push({ label: `exe ${exe0}`, app: { name: isGenericExeName(exe0) ? r.app : "из реестра", exe: exe0 } });
       if (uri0) forms.push({ label: `uri ${uri0}`, app: { name: "схема", uri: uri0 } });
       if (r.cmd) forms.push({ label: `cmd ${r.cmd}`, app: { name: r.cmd, cli: true } });
       expect(forms.length, `${r.app}: нечем матчить вообще`).toBeGreaterThan(0);
@@ -305,5 +308,91 @@ describe("выдача модели", () => {
     const text = formatChannels(matchChannels([app("Discord", "discord.exe")]), "discord");
     expect(text).toMatch(/self-bot/i);
     expect(text).toMatch(/бану/i);
+  });
+});
+
+describe("W4.2: рецепты для частых программ владельца + минуты фокуса", () => {
+  const inventory = JSON.parse(
+    readFileSync(new URL("./__fixtures__/installed-real-machine.json", import.meta.url), "utf8"),
+  ) as Array<{ name: string; exe?: string; uri?: string }>;
+  // Клиент присылает и PATH-команды (detectAutomationTools) — на машине владельца git/gh/ollama/psql найдены живьём.
+  const withCli: InstalledApp[] = [...inventory, { name: "git", cli: true }, { name: "gh", cli: true }, { name: "ollama", cli: true }, { name: "psql", cli: true }];
+
+  it("🔴 у КАЖДОЙ программы из сида есть рецепт, и он НАХОДИТСЯ на реальной машине (или это встроенная утилита)", () => {
+    const matched = matchChannels(withCli);
+    const names = new Set(matched.map((m) => m.app));
+    for (const app of TOP_APPS_SEED) {
+      const r = CHANNEL_RECIPES.find((x) => x.app === app);
+      expect(r, `${app}: рецепта нет`).toBeDefined();
+      expect(names.has(app), `${app}: рецепт есть, но на реальной машине не находится`).toBe(true);
+    }
+    expect(TOP_APPS_SEED.length).toBe(20);
+  });
+
+  it("новые рецепты честны: у CapCut/VPN канала НЕТ и они не попадают в строку «каналы есть у»", () => {
+    const matched = matchChannels(withCli);
+    const line = channelSummary(matched);
+    expect(line).not.toMatch(/CapCut|Hiddify/u);
+    expect(matched.find((m) => m.app === "CapCut")?.kind).toBe("none");
+  });
+
+  it("channelForProcess: obs64 → OBS Studio (по exe), chrome → Google Chrome, Telegram → Telegram Desktop, Claude → нет", () => {
+    const matched = matchChannels(withCli);
+    expect(channelForProcess("obs64", matched)?.app).toBe("OBS Studio");
+    expect(channelForProcess("chrome", matched)?.app).toBe("Google Chrome");
+    expect(channelForProcess("Telegram", matched)?.app).toBe("Telegram Desktop");
+    expect(channelForProcess("Claude", matched)).toBeUndefined();
+  });
+
+  it("минуты фокуса упорядочивают паспорт: программа с большим фокусом идёт первой; покрытие называет «канала нет»", () => {
+    const matched = matchChannels(withCli);
+    const usage = sanitizeUsage([{ process: "Telegram", minutes: 25, days: 3 }, { process: "chrome", minutes: 173, days: 3 }, { process: "Claude", minutes: 38, days: 3 }]);
+    const line = channelSummary(matched, usage);
+    expect(line.indexOf("Google Chrome")).toBeGreaterThan(-1);
+    expect(line.indexOf("Google Chrome")).toBeLessThan(line.indexOf("Telegram Desktop"));
+    const cov = formatUsageCoverage(usage, matched);
+    expect(cov).toMatch(/chrome — 173 мин: Google Chrome — канал cli/u);
+    expect(cov).toMatch(/Claude — 38 мин: канала нет/u);
+    expect(cov).toMatch(/за 3 дн\./u);
+  });
+
+  it("sanitizeUsage: мусор отбрасывается, строки капнуты, не больше 30", () => {
+    const out = sanitizeUsage([{ process: " x ".padEnd(80, "y"), minutes: 1.6, days: 2 }, { process: "", minutes: 1, days: 1 }, { process: "z", minutes: "1" }, null, ...Array.from({ length: 40 }, (_, i) => ({ process: `p${i}`, minutes: i, days: 1 }))]);
+    expect(out.length).toBe(30);
+    expect(out[0]).toEqual({ process: " x ".padEnd(80, "y").trim().slice(0, 48), minutes: 2, days: 2 });
+    expect(sanitizeUsage("nope")).toEqual([]);
+  });
+});
+
+// H-W1 (ревью 2026-09-24): покрытие частых программ W4.2 врало в обе стороны — встроенные проводник/блокнот/
+// терминал шли «канала нет → GUI», а Rockstar Games Launcher (Launcher.exe) записывался в HoYoPlay.
+// Реверт-проверки: убрать exe у встроенных → падает первый кейс; убрать гард общего имени в recipeMatches /
+// channelForProcess → падают второй и третий.
+describe("H-W1: процесс переднего окна → канал (встроенные программы, общие имена exe)", () => {
+  it("проводник, блокнот и терминал — встроенные каналы, а не «канала нет → GUI»", () => {
+    const matched = matchChannels([]);
+    expect(channelForProcess("explorer", matched)?.app).toBe("Windows: проводник");
+    expect(channelForProcess("notepad", matched)?.app).toBe("Windows: блокнот");
+    for (const p of ["WindowsTerminal", "cmd", "powershell", "pwsh"]) expect(channelForProcess(p, matched)?.app, p).toBe("Windows: терминал / cmd");
+    const cov = formatUsageCoverage(sanitizeUsage([{ process: "explorer", minutes: 60, days: 2 }, { process: "WindowsTerminal", minutes: 20, days: 2 }]), matched);
+    expect(cov).toMatch(/explorer — 60 мин: Windows: проводник — канал cli/u);
+    expect(cov).toMatch(/WindowsTerminal — 20 мин: Windows: терминал \/ cmd — канал cli/u);
+    expect(cov).not.toMatch(/канала нет/u);
+  });
+
+  it("Rockstar Games Launcher (launcher.exe) НЕ становится HoYoPlay; сам HoYoPlay — по имени из реестра находится", () => {
+    expect(matchChannels([app("Rockstar Games Launcher", "launcher.exe")]).some((m) => m.app.startsWith("HoYoPlay"))).toBe(false);
+    expect(matchChannels([app("HoYoPlay", "launcher.exe")]).some((m) => m.app.startsWith("HoYoPlay"))).toBe(true);
+    expect(matchChannels([app("Some Browser", "browser.exe")]).some((m) => m.app === "Yandex Browser")).toBe(false);
+    expect(matchChannels([app("Yandex (All Users)", "browser.exe")]).some((m) => m.app === "Yandex Browser")).toBe(true);
+  });
+
+  it("процесс с общим именем («Launcher») канал не угадывает — и покрытие говорит это прямо", () => {
+    const matched = matchChannels([app("HoYoPlay", "launcher.exe"), app("Rockstar Games Launcher", "launcher.exe")]);
+    expect(channelForProcess("Launcher", matched)).toBeUndefined();
+    expect(channelForProcess("browser", matched)).toBeUndefined();
+    const cov = formatUsageCoverage(sanitizeUsage([{ process: "Launcher", minutes: 90, days: 3 }]), matched);
+    expect(cov).toMatch(/Launcher — 90 мин: общее имя процесса/u);
+    expect(cov).not.toMatch(/HoYoPlay/u);
   });
 });

@@ -161,9 +161,10 @@ export class AnthropicLlmProvider implements ILlmProvider {
    */
   async completeStream(req: LlmRequest, onDelta: (d: LlmDelta) => void): Promise<LlmResponse> {
     if (!this.live) {
-      const s = stub(req);
-      if (s.text) onDelta({ text: s.text });
-      return s;
+      // W0: текст СТАБА дельтой не отдаём — это не ответ модели, а сообщение о провале; его озвучивает
+      // терминал петли (H2). Иначе FallbackLlmProvider не отличил бы «стаб до первой дельты» от «оборвался
+      // после дельт» и не переключался бы на резерв.
+      return stub(req);
     }
     let acc = "";
     try {
@@ -184,7 +185,7 @@ export class AnthropicLlmProvider implements ILlmProvider {
         };
       }
       const resp = await this.complete(req);
-      if (resp.text) onDelta({ text: resp.text });
+      if (resp.text && !resp.stubbed) onDelta({ text: resp.text }); // W0: стаб дельтой не отдаём (см. выше)
       return resp;
     }
   }
@@ -459,6 +460,20 @@ export function classifyApiError(text: string, status?: number): ApiFailure {
 export function lastApiFailure(): ApiFailure | undefined {
   if (lastApiFailure_ && Date.now() - lastApiFailure_.at <= API_FAILURE_TTL_MS) return lastApiFailure_;
   return undefined;
+}
+
+/**
+ * Тест-хук: записать причину отказа API так же, как это делает реальный вызов (зеркало
+ * subscription-llm). `atMs` — подменить отметку времени: нужно, чтобы проверять СВЕЖЕСТЬ причины
+ * (протухшая причина прошлого сбоя не имеет права выключать живой канал — см. fallback-llm).
+ */
+export function _setApiFailureForTest(text: string, status?: number, atMs?: number): void {
+  lastApiFailure_ = { ...classifyApiError(text, status), ...(atMs === undefined ? {} : { at: atMs }) };
+}
+
+/** Тест-хук: забыть причину (изоляция тестов — иначе класс отказа течёт между кейсами). */
+export function _resetApiFailureForTest(): void {
+  lastApiFailure_ = undefined;
 }
 
 function rememberApiFailure(e: unknown): void {

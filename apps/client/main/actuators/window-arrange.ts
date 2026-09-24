@@ -22,6 +22,8 @@ import { spawn } from "node:child_process";
 import { screen } from "electron";
 import { createLogger } from "@jarvis/shared";
 import { monitors } from "../monitors.js";
+import { assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
+import { arrangeGatedUnderVeil } from "../selection/veil-policy.js";
 
 const log = createLogger("actuator:window-arrange");
 
@@ -140,6 +142,10 @@ export async function arrangeWindow(opts: {
   /** Развернуть на весь целевой монитор после переноса. */
   maximizeAfterMove?: boolean;
 }): Promise<ArrangeResult> {
+  // Контроль-9 (window-arrange-no-point-guard): ранний гейт dispatch отделён от этого места вызовом `listWindows`
+  // (RPC сайдкара, таймаут 8 с) — вуаль успевает открыться внутри окна. SW_RESTORE/SW_MAXIMIZE активируют окно
+  // поверх окна рисования, Esc владельца уходит в чужое приложение, а инструмент возвращал чистый ok.
+  if (arrangeGatedUnderVeil(opts.op)) assertNoDrawingOverlay();
   const env: Record<string, string> = {
     JARVIS_WIN_HWND: String(opts.hwnd),
     JARVIS_WIN_OP: opts.op,
@@ -156,7 +162,12 @@ export async function arrangeWindow(opts: {
     env.JARVIS_WIN_W = String(w);
     env.JARVIS_WIN_H = String(h);
   }
+  // Контроль-10 (arrange-no-postcheck): `run(env)` спавнит PowerShell, который КОМПИЛИРУЕТ C#-сигнатуры через
+  // Add-Type (секунды на холодном старте) и лишь потом делает ShowWindow — окно инжекции на порядок больше того
+  // 8-секундного listWindows, ради которого гард стоит на входе.
+  const tArrange = Date.now();
   const st = parseArrange(await run(env));
+  if (arrangeGatedUnderVeil(opts.op)) assertNoOverlayDuring(tArrange, "Перестановка окна");
   let monitorIndex: number | null = null;
   let monitor = "неизвестно";
   if (!st.minimized && st.rect.w > 0 && st.rect.x > -30000) {

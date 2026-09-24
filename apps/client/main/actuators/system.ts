@@ -8,6 +8,7 @@
  * Блокировка/сон — безопасны и обратимы (без confirm). Выключение/перезагрузка/выход —
  * необратимы, требуют user.confirm на сервере (§4).
  */
+import { noteJarvisInput } from "./input-mark.js";
 import { spawn } from "node:child_process";
 import type { ActionCommand } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
@@ -51,6 +52,9 @@ export interface SystemPlan {
 
 /** Скрипт PowerShell, шлющий media/volume-клавишу через keybd_event (VK фиксирован). */
 function keyScript(vk: number): string {
+  // Медиа/громкость — тоже НАШ ввод: без отметки снимок ПК считал бы владельца присутствующим
+  // (адверс-ревью 2026-09-02, HIGH: реестр собственного ввода был неполон).
+  noteJarvisInput();
   return (
     "$s=Add-Type -Name Kbd -Namespace JarvisWin -PassThru -MemberDefinition " +
     "'[DllImport(\"user32.dll\")] public static extern void keybd_event(byte k,byte sc,uint f,System.UIntPtr e);';" +
@@ -208,8 +212,24 @@ function ps(script: string): SystemPlan {
   return { exe: "powershell", args: ["-NoProfile", "-NonInteractive", "-Command", utf8 + script] };
 }
 
+/**
+ * Ревью 2026-09-24 (B-F2): «пауза/стоп» жмёт медиа-ПЕРЕКЛЮЧАТЕЛЬ (VK_MEDIA_PLAY_PAUSE). В тишине он ЗАПУСКАЛ
+ * стоявшую на паузе музыку — «стоп» включал звук. Жать паузу имеет смысл, только если звук реально идёт (WASAPI
+ * peak). Чистая функция (экспорт для теста).
+ */
+export function pauseKeyNeeded(peak: number): boolean {
+  return Number.isFinite(peak) && peak > 0.001;
+}
+
 /** Исполнить системную команду. Возвращает данные для ActionResult.data. */
-export async function runSystem(cmd: SysCmd): Promise<{ ok: true; stdout?: string; level?: number; muted?: boolean; playing?: boolean; peak?: number }> {
+export async function runSystem(cmd: SysCmd): Promise<{ ok: true; stdout?: string; level?: number; muted?: boolean; playing?: boolean; peak?: number; already?: boolean }> {
+  if (cmd.kind === "system.media" && cmd.op === "pause") {
+    const st = await runSystem({ kind: "system.media", op: "state" });
+    if (!pauseKeyNeeded(st.peak ?? 0)) {
+      log.info("system.media pause: звука нет — клавишу не жму (переключатель запустил бы музыку)");
+      return { ok: true, playing: false, already: true, peak: st.peak };
+    }
+  }
   const plan = planSystem(cmd);
   log.info(`system.${cmd.kind.split(".")[1]}`, { exe: plan.exe });
   const stdout = await exec(plan);

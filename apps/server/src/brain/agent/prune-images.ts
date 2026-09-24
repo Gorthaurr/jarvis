@@ -36,6 +36,15 @@ const STALE_STUB: ToolResultContent = {
   text: "[скриншот устарел и вырезан из контекста — актуальное состояние экрана смотри в более свежем screen_capture]",
 };
 
+/**
+ * Кадр области, на которую показывал владелец (§режим выделения): устаревает так же, как скриншот, но
+ * звать надо взгляд НА ВЫДЕЛЕНИЕ — «сними экран целиком» потеряло бы то место, о котором речь.
+ */
+const SELECTION_STUB: ToolResultContent = {
+  type: "text",
+  text: '[кадр выделенной области устарел и вырезан — актуальный вид смотри свежим screen_selection{op:"view"}]',
+};
+
 /** Картинка НЕ с экрана и НЕ документ (MCP-инструмент): нейтрально, без ложного совета «сними экран». */
 const OTHER_STUB: ToolResultContent = {
   type: "text",
@@ -70,13 +79,13 @@ interface ImageRef {
  * image-блоки внутри tool_result заменить текстовой заглушкой своего класса. Картинки последнего
  * user-хода не трогаются (см. шапку).
  */
-export function pruneStaleImages(convo: LlmMessage[], keep = 2, keepDocs = 2): number {
+export function pruneStaleImages(convo: LlmMessage[], keep = 2, keepDocs = 2, keepSelection = 1): number {
   let lastUserIdx = -1;
   for (let i = 0; i < convo.length; i += 1) {
     const m = convo[i]!;
     if (m.role === "user" && typeof m.content !== "string") lastUserIdx = i;
   }
-  const byClass: Record<ImageClass, ImageRef[]> = { doc: [], screenshot: [], other: [] };
+  const byClass: Record<ImageClass, ImageRef[]> = { doc: [], screenshot: [], selection: [], other: [] };
   convo.forEach((msg, msgIdx) => {
     if (msg.role !== "user" || typeof msg.content === "string") return;
     for (const block of msg.content) {
@@ -106,6 +115,9 @@ export function pruneStaleImages(convo: LlmMessage[], keep = 2, keepDocs = 2): n
     }
   };
   prune(byClass.screenshot, keep, () => STALE_STUB);
+  // Кроп области владельца — свой бюджет: «деталь» и «контекст» (screen_capture) должны уживаться в
+  // контексте вместе, иначе добор одного вырезает другой (пинг-понг view↔capture).
+  prune(byClass.selection, keepSelection, () => SELECTION_STUB);
   prune(byClass.other, keep, () => OTHER_STUB);
   prune(byClass.doc, keepDocs, (r) => docStub(r.marker ?? ""));
   return pruned;

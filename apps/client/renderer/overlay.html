@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Окно живёт ПОВЕРХ всего экрана: прав ему давать нельзя. CSP как у основного renderer. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>Jarvis — выделение области</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        user-select: none;
+        font: 12px/1.3 system-ui, "Segoe UI", sans-serif;
+      }
+      /* Фаза рисования: лёгкая вуаль, чтобы было видно, что режим включён. Фаза рамки — вуали нет. */
+      #veil {
+        position: fixed;
+        inset: 0;
+        background: rgba(6, 8, 12, 0.28);
+        cursor: crosshair;
+        display: none;
+      }
+      #box {
+        position: fixed;
+        display: none;
+        border: 2px solid #4aa3ff;
+        border-radius: 2px;
+        /* Только тонкий контур: рамка ПОПАДАЕТ в собственный screen_capture (замерено — см. overlay.ts),
+           и любое свечение вокруг области уехало бы в OCR/скриншоты как чужой шум. */
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+        background: transparent;
+        pointer-events: none;
+      }
+      /* Прозрачное «окно» внутри вуали — владелец видит выделяемое без затемнения. */
+      #hole {
+        position: fixed;
+        display: none;
+        background: rgba(255, 255, 255, 0.06);
+        pointer-events: none;
+      }
+      #label {
+        position: fixed;
+        display: none;
+        padding: 2px 7px;
+        border-radius: 4px 4px 0 0;
+        background: rgba(74, 163, 255, 0.92);
+        color: #06080c;
+        font-weight: 600;
+        white-space: nowrap;
+        pointer-events: none;
+      }
+      #hint {
+        position: fixed;
+        left: 50%;
+        top: 24px;
+        transform: translateX(-50%);
+        display: none;
+        padding: 7px 14px;
+        border-radius: 8px;
+        background: rgba(10, 12, 18, 0.86);
+        color: #e8eefc;
+        box-shadow: 0 2px 14px rgba(0, 0, 0, 0.5);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="veil"></div>
+    <div id="hole"></div>
+    <div id="box"></div>
+    <div id="label"></div>
+    <div id="hint">Обведите область мышью · Esc — отмена</div>
+    <script src="./overlay.js"></script>
+  </body>
+</html>

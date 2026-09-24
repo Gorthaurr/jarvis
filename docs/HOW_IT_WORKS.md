@@ -21,7 +21,15 @@
 - **Сервер** (мозг, Fastify+WS, порт **8787**): из `apps/server` → `npx tsx src/index.ts` (НЕ `tsx watch` — падает EADDRINUSE).
   Перезапуск: убить PID на 8787 (`taskkill /F /PID <pid>`) → запустить заново. Логи → `server.out.log`/`server.err.log` (редирект).
   Грузит `.env` из корня репо. Проверка живости: `curl http://127.0.0.1:8787/healthz` → `{"ok":true,...}`.
-- **Клиент** (Electron, UI/микрофон): `apps/client` → `node scripts/build.mjs` (esbuild) → `pnpm start` (electron). После правок `.ts` клиента — пересборка. Electron запускать БЕЗ редиректа stdio.
+- **Боевой запуск — супервизор** (задача Windows `JarvisSupervisor` при входе): держит И сервер, И клиент (с 2026-09-24,
+  `infra/client-keeper.mjs`: упал → перезапуск с бэкоффом; «Выйти» из трея → не поднимает до следующего входа; клиент
+  запущен руками → наблюдает). Перезапуск всего: `Stop-ScheduledTask JarvisSupervisor`, добить node/electron, `Start-ScheduledTask`.
+  Вывод клиента → `apps/client/client.out.log`/`client.err.log` (там же фатальные сообщения Chromium).
+- **Клиент руками** (Electron, UI/микрофон): `apps/client` → `node scripts/build.mjs` (esbuild) → `pnpm start` (electron). После правок `.ts` клиента — пересборка.
+  ⚠️ **Из песочницы агента (Claude Code) Electron падает через ~4 с** — GPU-процесс получает ACCESS_DENIED («GPU process
+  isn't usable. Goodbye»), у владельца этого нет. Для тестового запуска из агента — `electron . --disable-gpu-sandbox`;
+  проверку «работает ли у владельца» делать через супервизор, не прямым запуском. У агента своё представление файлов
+  %APPDATA% (лог клиента, записанный агентским запуском, мог «перекрывать» настоящий) — сверять по `client.out.log`.
 - **Расширение** (руки в браузере): загружено в Chrome пользователя. Перечитать с диска после правок `background.js`: `curl -X POST http://127.0.0.1:8787/ext/reload`.
 - **БД**: нативный PostgreSQL + pgvector (`DATABASE_URL`); фолбэк PGlite. Docker НЕ используется.
 - **Тесты**: `apps/server` `npx vitest run` (~613); `apps/client` `npx vitest run`. Typecheck: `npx tsc --noEmit` или `pnpm -r typecheck`.
@@ -54,7 +62,7 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
 
 ### 2d. Логи — источник истины
 `server.out.log`: маршрутизация (`tier`), `tool { name, isError }`, `prompt-кеш (§15)`, `latency:`, дамп ошибок расширения
-(`telegram-file: step: ... | DOM={...}` — там видно состояние webK). Читать через Read/grep (`grep -a`), не PowerShell (кириллица в пути `Автокомп` ломает).
+(`telegram-file: step: ... | DOM={...}` — там видно состояние webK). Читать через Read/grep (`grep -a`), не PowerShell (до 2026-09-23 путь был кириллическим — `Автокомп`; теперь `autokomp`, ASCII).
 
 ---
 
@@ -66,6 +74,18 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
   `app.whenReady().then(...)`, результат писать в файл (не в stdout) и `app.exit(0)`; запуск `npx electron _probe/x.cjs`.
   Так `file_view` прогнан на реальных PDF/PNG/JPG с рабочего стола (PDF через python+PyMuPDF за 255 мс) без
   рестарта живого клиента владельца. Пробу удалять после прогона.
+- **Пробы с ОКНАМИ (оверлей режима выделения, 2026-09-05)** — тот же esbuild-бандл, но с граблями, каждая стоила
+  прогона: (1) класть бандл в `apps/client/dist/main/` — модуль окна грузит `../preload/*.cjs` и `../renderer/*.html`
+  относительно `__dirname`; (2) запускать с `--user-data-dir=<scratchpad>` — иначе конфликт с профилем Chromium
+  живого клиента; (3) зарегистрировать `app.on("window-all-closed", () => {})` — иначе Electron штатно выходит
+  (exit 0, без ошибки) в момент, когда фаза рисования закрывает свои окна, и проба обрывается «ни на чём»;
+  (4) IPC из окна (`ipcMain.on("selection:done", …)`) проводить самому — в бою это делает `setupSelection()` в
+  `main/index.ts`, в пробе его нет, и промис выделения висел бы вечно; (5) протяжку мышью синтезировать через
+  `webContents.executeJavaScript` (dispatchEvent MouseEvent на window) — руки владельца не нужны; (6) читать
+  stdout через PowerShell `| Out-File`, а НЕ `| Select-Object -First N` (тот закрывает трубу, и Electron гибнет
+  на первой же строке); (7) heredoc в Bash спотыкается о TS-шаблоны с бэктиками — пробу и python-патчи писать
+  Write-инструментом в scratchpad. Итог пробы: координаты рамки в экранных DIP на втором мониторе верны, кроп
+  области без рамки, `setContentProtection` на прозрачном окне рамку из захвата НЕ убирает (см. CLAUDE.md).
 - **Индекс Windows** — прямой ADO-запрос из PowerShell (`Search.CollatorDSO`), см. рецепт в `app-channels.ts`.
 - ⚠️ Bash-команда длиннее ~30 КБ падает `ENAMETOOLONG` до исполнения — большие правки писать файлами (Write) и
   python-скриптами в scratchpad, вызывать короткой командой.
@@ -164,7 +184,7 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
 - MV3 SW умирает на длинной операции → keepalive (§7).
 - Гейт диктора по умолчанию может «оглушить» владельца → держим выкл, пока биометрия сырая (§8).
 - my.telegram.org: РФ-IP режет создание app (страна номера≠IP + DNS-блок) → api_id не создать; VPN в Европу делает ХУЖЕ (мисматч).
-- Кириллица: в пути проекта (`Автокомп`) ломает PowerShell-парсинг логов и нативную загрузку sherpa (модель — только ASCII-путь);
+- Кириллица (до переименования 2026-09-23 проект лежал в `Автокомп`, теперь `autokomp`) ломала PowerShell-парсинг логов и нативную загрузку sherpa (модель — только ASCII-путь);
   в curl-теле — Content-Length (писать в файл).
 - Не частить рестартами сервера (флаппинг хендшейков). НЕ закрывать electron/node/sidecar (self-guard).
 - Тестовые команды БЕЗ реальных побочек: `set_reminder`/`telegram_send` создают durable-эффекты (напоминание сработало голосом!) — чищу за собой (`data/reminders.json`).

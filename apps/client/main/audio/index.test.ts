@@ -1,4 +1,6 @@
+import type { Logger } from "@jarvis/shared";
 import { describe, expect, it, vi } from "vitest";
+import type { IVad, VadSignal } from "../vad/index.js";
 import type { IWakeWord } from "../wakeword/index.js";
 import { AudioCoordinator } from "./index.js";
 
@@ -25,7 +27,7 @@ const bargeSpeak = (
   }
 };
 
-function setup(wakeword?: IWakeWord) {
+function setup(wakeword?: IWakeWord, extra: { vad?: IVad; log?: Logger } = {}) {
   const sendFrame = vi.fn();
   const sendVad = vi.fn();
   const onMicState = vi.fn();
@@ -34,8 +36,36 @@ function setup(wakeword?: IWakeWord) {
   const advance = (ms: number): void => {
     clock += ms;
   };
-  const ac = new AudioCoordinator({ sendFrame, sendVad, onMicState, onBargeIn, wakeword, now: () => clock });
+  const ac = new AudioCoordinator({ sendFrame, sendVad, onMicState, onBargeIn, wakeword, now: () => clock, ...extra });
   return { ac, sendFrame, sendVad, onMicState, onBargeIn, advance };
+}
+
+/** Управляемый VAD: тест сам решает, идёт ли речь и какой сигнал выдать на следующем кадре. */
+class ScriptVad implements IVad {
+  speaking = false;
+  private next: VadSignal = null;
+  reset = vi.fn(() => {
+    this.speaking = false;
+  });
+  say(): void {
+    this.speaking = true;
+    this.next = "speech_start";
+  }
+  hush(): void {
+    this.speaking = false;
+    this.next = "speech_end";
+  }
+  process(_pcm: Int16Array): VadSignal {
+    const s = this.next;
+    this.next = null;
+    return s;
+  }
+}
+
+/** Логгер-шпион (телеметрия промаха wake пишет через deps.log). */
+function spyLog(): Logger & { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> } {
+  const l = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: () => l };
+  return l as unknown as Logger & { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn> };
 }
 
 describe("AudioCoordinator (§3, §0.6)", () => {
@@ -239,5 +269,284 @@ describe("AudioCoordinator (§3, §0.6)", () => {
     ac.ingest(loud()); // первый кадр → детект → гейт открыт → кадр уходит
     expect(ac.streaming).toBe(true);
     expect(sendFrame).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("W1 (2026-09-09): локальный wake — гейт закрыт между ходами, пре-ролл, честный mute", () => {
+  /** Wake-детектор, который срабатывает на N-м кадре. */
+  function wakeOnFrame(n: number): IWakeWord & { calls: number } {
+    const w = {
+      ready: true,
+      calls: 0,
+      process: (_p: Int16Array) => {
+        w.calls += 1;
+        return w.calls === n;
+      },
+    };
+    return w;
+  }
+
+  it("до wake кадры в облако НЕ уходят; на wake: audio.vad wake_local + пре-ролл (включая кадры ДО слова) + живой поток", () => {
+    const wake = wakeOnFrame(3);
+    const { ac, sendFrame, sendVad, onMicState } = setup(wake);
+    ac.ingest(loud());
+    ac.ingest(loud());
+    expect(sendFrame).not.toHaveBeenCalled();
+    ac.ingest(loud()); // 3-й кадр — детект
+    expect(sendVad).toHaveBeenCalledWith("wake_local");
+    expect(sendFrame).toHaveBeenCalledTimes(3); // пре-ролл: все три кадра, в т.ч. два ДО срабатывания
+    expect(onMicState).toHaveBeenLastCalledWith(true);
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(4); // дальше — живой поток
+  });
+
+  it("idle сервера ЗАКРЫВАЕТ гейт, когда есть локальный wake (§0.6 по построению); без него — нет (прежнее поведение)", () => {
+    const local = setup(wakeOnFrame(1));
+    local.ac.activate(); // с локальным wake activate() гейт НЕ открывает (слух = детектор на устройстве)
+    local.ac.ingest(loud()); // 1-й кадр — детект → гейт открыт, пре-ролл ушёл
+    expect(local.sendFrame).toHaveBeenCalledTimes(1);
+    local.ac.setServerState("idle"); // ход кончился → гейт закрывается
+    local.ac.ingest(loud());
+    expect(local.sendFrame).toHaveBeenCalledTimes(1); // гейт закрыт — только локальный детектор
+    expect(local.onMicState).toHaveBeenLastCalledWith(false);
+
+    const cloud = setup(); // MockWakeWord (ready=false)
+    cloud.ac.activate();
+    cloud.ac.setServerState("idle");
+    cloud.ac.ingest(loud());
+    expect(cloud.sendFrame).toHaveBeenCalledTimes(1); // как раньше: слушает постоянно
+  });
+
+  it("mute: кадры не доходят даже до локального детектора; activate снимает mute", () => {
+    const wake = wakeOnFrame(1);
+    const { ac, sendFrame } = setup(wake);
+    ac.mute();
+    ac.ingest(loud());
+    expect(wake.calls).toBe(0);
+    expect(sendFrame).not.toHaveBeenCalled();
+    ac.activate();
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("activate({hold}) держит гейт на idle (запись голоса); release() закрывает", () => {
+    const { ac, sendFrame } = setup(wakeOnFrame(999));
+    ac.activate({ hold: true });
+    ac.setServerState("idle");
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1); // удержание — гейт открыт
+    ac.release();
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1); // закрылся
+  });
+
+  it("setEngines: локальный wake появился при простое сервера → открытый гейт закрывается", () => {
+    const { ac, sendFrame } = setup();
+    ac.activate();
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1);
+    ac.setEngines({ wake: wakeOnFrame(999) });
+    ac.ingest(loud());
+    expect(sendFrame).toHaveBeenCalledTimes(1); // больше не стримит
+  });
+});
+
+describe("W1: закрытие гейта по таймеру listening (фон в комнате не даёт серверу дойти до idle)", () => {
+  function wakeOnFrame(n: number): IWakeWord & { calls: number } {
+    const w = {
+      ready: true,
+      calls: 0,
+      process: (_p: Int16Array) => {
+        w.calls += 1;
+        return w.calls === n;
+      },
+    };
+    return w;
+  }
+  /** Кадры каждые 100 мс «живого» времени в течение ms (fake timers двигаются вместе с кадрами). */
+  function feed(ac: AudioCoordinator, ms: number): void {
+    for (let t = 0; t < ms; t += 100) {
+      ac.ingest(loud());
+      vi.advanceTimersByTime(100);
+    }
+  }
+
+  it("сервер завис в listening, а РЕЧИ нет (шорохи) → через 10 с гейт закрывается; новый ход (thinking) отменяет таймер", () => {
+    // Ревью 2026-09-24 (B-F3): прежняя версия этого теста называлась «ТВ держит VAD» и закрепляла закрытие
+    // «несмотря на громкие кадры». Одиночные громкие кадры до онсета VAD не доходят (speaking=false), поэтому
+    // тест и тогда проверял «шорохи», а не речь. Теперь речь явно ДЕРЖИТ гейт (кейсы ниже), а шорохи — нет.
+    vi.useFakeTimers();
+    try {
+      const { ac, sendFrame } = setup(wakeOnFrame(1));
+      ac.ingest(loud()); // wake → гейт открыт
+      expect(sendFrame).toHaveBeenCalledTimes(1);
+      ac.setServerState("listening");
+      vi.advanceTimersByTime(9_000);
+      ac.ingest(loud());
+      expect(sendFrame).toHaveBeenCalledTimes(2); // ещё открыт
+      vi.advanceTimersByTime(1_500);
+      ac.ingest(loud());
+      expect(sendFrame).toHaveBeenCalledTimes(2); // закрылся по таймеру
+
+      // Второй сценарий: listening → thinking (ход пошёл) → таймер снят, гейт живёт.
+      const b = setup(wakeOnFrame(1));
+      b.ac.ingest(loud());
+      b.ac.setServerState("listening");
+      vi.advanceTimersByTime(8_000);
+      b.ac.setServerState("thinking");
+      vi.advanceTimersByTime(5_000);
+      b.ac.ingest(loud());
+      expect(b.sendFrame).toHaveBeenCalledTimes(2); // открыт: ход в работе
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("B-F3: владелец заговорил на 9-й секунде — гейт НЕ закрывается посреди фразы, а через 10 с после её конца", () => {
+    vi.useFakeTimers();
+    try {
+      const vad = new ScriptVad();
+      const { ac, sendFrame, sendVad } = setup(wakeOnFrame(1), { vad });
+      ac.ingest(loud()); // wake → гейт открыт
+      ac.setServerState("listening");
+      vi.advanceTimersByTime(9_000);
+      vad.say(); // речь пошла
+      feed(ac, 6_000); // говорит до 15-й секунды (старый код закрыл бы гейт на 10-й)
+      expect(ac.streaming).toBe(true);
+      vad.hush();
+      ac.ingest(loud()); // кадр с speech_end
+      expect(sendVad).toHaveBeenCalledWith("speech_end");
+      vi.advanceTimersByTime(9_500);
+      expect(ac.streaming).toBe(true); // тишина 9,5 с < 10 с — ждём follow-up
+      vi.advanceTimersByTime(1_000);
+      expect(ac.streaming).toBe(false); // 10 с тишины после конца речи → закрыт
+      const sent = sendFrame.mock.calls.length;
+      ac.ingest(loud());
+      expect(sendFrame.mock.calls.length).toBe(sent);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("B-F3: речь без конца (ТВ) держит гейт не дольше потолка 30 с; закрытие посреди речи досылает серверу speech_end", () => {
+    vi.useFakeTimers();
+    try {
+      const vad = new ScriptVad();
+      const { ac, sendVad } = setup(wakeOnFrame(1), { vad });
+      ac.ingest(loud());
+      ac.setServerState("listening");
+      vad.say();
+      feed(ac, 29_000);
+      expect(ac.streaming).toBe(true); // речь сдвигает дедлайн тишины
+      expect(sendVad).not.toHaveBeenCalledWith("speech_end");
+      feed(ac, 1_500);
+      expect(ac.streaming).toBe(false); // потолок: фон не держит гейт вечно
+      // userSpeaking на сервере не залипает: speech_start ушёл → конец речи досылается при закрытии.
+      expect(sendVad).toHaveBeenCalledWith("speech_end");
+      expect(vad.reset).toHaveBeenCalled(); // VAD сброшен — новая реплика снова даст speech_start
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("B-F3: закрытие гейта посреди речи (любой путь) досылает speech_end", () => {
+  // Контроль-1 №8 (ревью 2026-09-24): mute посреди фразы — ОТМЕНА реплики (speech_cancel), а не её конец: speech_end
+  // исполнил бы обрубок. Реверт: убери ветку speechOpen в mute() — последним уйдёт speech_end, тест упадёт.
+  it("mute() посреди фразы → speech_cancel (не speech_end); после реоткрытия новая реплика снова даёт speech_start", () => {
+    const vad = new ScriptVad();
+    const { ac, sendVad } = setup(undefined, { vad });
+    ac.activate();
+    vad.say();
+    ac.ingest(loud());
+    expect(sendVad).toHaveBeenCalledWith("speech_start");
+    ac.mute();
+    expect(sendVad).toHaveBeenLastCalledWith("speech_cancel");
+    expect(sendVad).not.toHaveBeenCalledWith("speech_end");
+    expect(vad.speaking).toBe(false); // сброшен при закрытии
+    ac.activate();
+    vad.say();
+    ac.ingest(loud());
+    expect(sendVad.mock.calls.filter((c) => c[0] === "speech_start")).toHaveLength(2);
+  });
+
+  it("закрытие без открытой речи speech_end НЕ шлёт (сервер не получает конец того, что не начиналось)", () => {
+    const { ac, sendVad } = setup();
+    ac.activate();
+    ac.mute();
+    expect(sendVad).not.toHaveBeenCalledWith("speech_end");
+  });
+});
+
+describe("B-F12: пре-ролл 0,9 с (45 кадров × 20 мс), а не 1,5 с", () => {
+  it("wake на 51-м кадре → в облако уходят только 45 последних кадров до срабатывания", () => {
+    let n = 0;
+    const wake: IWakeWord = { ready: true, process: () => ++n === 51 };
+    const { ac, sendFrame } = setup(wake);
+    for (let i = 0; i < 51; i += 1) ac.ingest(new Int16Array(320).fill(10));
+    expect(sendFrame).toHaveBeenCalledTimes(45);
+  });
+});
+
+describe("B-F8: push-to-talk и видимость промаха wake", () => {
+  const never = (): IWakeWord => ({ ready: true, process: () => false });
+
+  it("pushToTalk при локальном wake: гейт открыт, серверу wake_local, без речи закрывается через 8 с", () => {
+    vi.useFakeTimers();
+    try {
+      const { ac, sendVad, sendFrame } = setup(never());
+      expect(ac.pushToTalk("hotkey")).toBe(true);
+      expect(ac.streaming).toBe(true);
+      expect(sendVad).toHaveBeenCalledWith("wake_local");
+      ac.ingest(loud());
+      expect(sendFrame).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(8_100);
+      expect(ac.streaming).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("activate({ptt}) — кнопка открывает гейт; обычный activate() при локальном wake — нет (стартовая синхронизация)", () => {
+    const a = setup(never());
+    a.ac.activate();
+    expect(a.ac.streaming).toBe(false);
+    expect(a.sendVad).not.toHaveBeenCalledWith("wake_local");
+    const b = setup(never());
+    b.ac.activate({ ptt: true });
+    expect(b.ac.streaming).toBe(true);
+    // Контроль-1 №9: кнопка открывает микрофон, но НЕ окно адресации (иначе ТВ в первые 8 с — команда). Реверт:
+    // верни `this.pushToTalk("button")` без { address: false } — ассерт упадёт.
+    expect(b.sendVad).not.toHaveBeenCalledWith("wake_local");
+  });
+
+  it("mute главнее PTT: хоткей при выключенном микрофоне гейт не открывает", () => {
+    const { ac, sendVad } = setup(never());
+    ac.mute();
+    expect(ac.pushToTalk("hotkey")).toBe(false);
+    expect(ac.streaming).toBe(false);
+    expect(sendVad).not.toHaveBeenCalledWith("wake_local");
+  });
+
+  it("речь при закрытом гейте без срабатывания wake → один лог «кандидат в промах» (не чаще раза в минуту)", () => {
+    const log = spyLog();
+    const { ac } = setup(never(), { log });
+    const utter = (): void => {
+      for (let i = 0; i < 40; i += 1) ac.ingest(new Int16Array(320).fill(6000)); // 0,8 с речи (кадр 20 мс)
+      for (let i = 0; i < 20; i += 1) ac.ingest(new Int16Array(320).fill(10)); // тишина → конец отрезка
+    };
+    utter();
+    utter();
+    const misses = log.info.mock.calls.filter((c) => String(c[0]).includes("промах KWS"));
+    expect(misses).toHaveLength(1); // второй отрезок — в том же окне троттла
+    expect(misses[0]![1]).toMatchObject({ segments: 1, kwsScore: "sherpa не отдаёт" });
+  });
+
+  it("сплошной фон (> 4 с) промахом не считается", () => {
+    const log = spyLog();
+    const { ac } = setup(never(), { log });
+    for (let i = 0; i < 300; i += 1) ac.ingest(new Int16Array(320).fill(6000)); // 6 с
+    for (let i = 0; i < 20; i += 1) ac.ingest(new Int16Array(320).fill(10));
+    expect(log.info.mock.calls.filter((c) => String(c[0]).includes("промах KWS"))).toHaveLength(0);
   });
 });

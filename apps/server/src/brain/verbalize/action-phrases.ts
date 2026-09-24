@@ -16,8 +16,24 @@ export function cap(s: string): string {
 }
 
 /** Подтверждение успеха tier0 (§11): называет объект (что сделано); «сэр» не в каждом — иначе приедается. */
-export function successPhrase(intent: LocalIntent): string {
+export function successPhrase(intent: LocalIntent, data?: unknown): string {
   switch (intent.kind) {
+    case "selection":
+      // §режим выделения. ЧЕСТНОСТЬ: «снял выделение» говорим ТОЛЬКО если было что снимать —
+      // клиент возвращает cleared:false, когда рамки не было, и выдавать это за действие нельзя.
+      if (intent.op === "clear") {
+        const d = (data as { cleared?: boolean; drawCancelled?: boolean } | undefined) ?? {};
+        if (d.cleared && d.drawCancelled) return "Снял выделение и закрыл режим выделения."; // оба действия — оба звучат
+        if (d.cleared) return pick(["Снял выделение.", "Убрал рамку, сэр."]);
+        if (d.drawCancelled) return "Закрыл режим выделения."; // вуаль погашена — это действие, не «нечего»
+        return "Снимать было нечего — выделения не было.";
+      }
+      {
+        const d = (data as { failed?: boolean; reused?: boolean } | undefined) ?? {};
+        if (d.failed) return "Не смог открыть режим выделения — окно поверх экрана не создалось, сэр.";
+        if (d.reused) return "Область уже обведена, сэр — смотрю туда.";
+      }
+      return pick(["Обводите область, сэр.", "Выделяйте — смотрю туда, куда покажете.", "Обведите нужное место."]);
     case "app.launch":
       return pick([
         `Открыл ${intent.app}.`,
@@ -38,6 +54,9 @@ export function successPhrase(intent: LocalIntent): string {
     case "media":
       switch (intent.op) {
         case "pause":
+          // Ревью 2026-09-24 (B-F2): звука не было — клиент клавишу НЕ жал (переключатель запустил бы музыку).
+          // «Поставил на паузу» тут было бы враньём о несделанном действии.
+          if ((data as { already?: boolean } | undefined)?.already === true) return pick(["Уже тихо, сэр.", "Сейчас ничего не играет."]);
           return pick(["Пауза.", "Поставил на паузу.", "Остановил."]);
         case "play":
           return pick(["Продолжаю.", "Воспроизвожу.", "Поехали."]);
@@ -77,8 +96,14 @@ export function failurePhrase(intent: LocalIntent, code?: string): string {
         ? "не нашёл"
         : code === "disconnected"
           ? "связь с клиентом прервалась"
-          : "не получилось";
+          : // Контроль-8 (tier0-overlay-reason): причина ИЗВЕСТНА системе (открыт режим выделения) — «не получилось»
+            // было пустой отговоркой, которую владелец слышал все 120 с окна рисования, повторяя команду.
+            code === "overlay_drawing"
+            ? "сейчас открыт режим выделения — закройте рамку (Esc) или обведите область, и я повторю"
+            : "не получилось";
   switch (intent.kind) {
+    case "selection":
+      return intent.op === "clear" ? `Не вышло снять выделение: ${reason}.` : `Не вышло включить режим выделения: ${reason}.`;
     case "app.launch":
       return pick([
         `Не вышло открыть ${intent.app}: ${reason}.`,

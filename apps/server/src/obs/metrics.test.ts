@@ -105,6 +105,19 @@ describe("aggregate — агрегаты по событиям (чистая)", 
     expect(s.costUsd).toBeCloseTo(Math.round(expectedCost * 1e6) / 1e6, 9);
   });
 
+  /**
+   * 🔴 Адверс-разбор 2026-09-02 (MED): ход по ПОДПИСКЕ не тарифицируется по токенам, петля это знает
+   * и кладёт 0 — но агрегатор считал цену сам по прайсу API. За 2026-09-02 набежало $2.53 фантомных
+   * трат при 15 реальных обращениях к API против 100 ходов по подписке, и на этих же событиях стоит
+   * `/cogs`. Тест падает, если агрегатор снова начнёт пересчитывать цену вместо начисленной.
+   */
+  it("фактически начисленная стоимость главнее прайса (ход по подписке = $0)", () => {
+    const u = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    const s = aggregate([ev({ model: "claude-opus-5", usage: u, costUsd: 0 }), ev({ model: "claude-opus-5", usage: u })]);
+    expect(s.costUsd).toBeCloseTo(5, 6); // только второй (без отметки) прайсится по модели
+    expect(s.costByModel["claude-opus-5"]).toEqual({ costUsd: 5, requests: 2 });
+  });
+
   it("costByModel: стоимость разрезана по ФАКТИЧЕСКОЙ модели (не Opus-blind)", () => {
     const u = { inputTokens: 1_000_000, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     const s = aggregate([ev({ model: "claude-opus-4-8", usage: u }), ev({ model: "claude-haiku-4-5", usage: u })]);

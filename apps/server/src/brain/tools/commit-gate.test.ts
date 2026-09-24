@@ -52,14 +52,14 @@ describe("assessGuiCommit + parseForegroundProcess", () => {
   const ctx = "Окна: 5 · На переднем плане: 1cv8 «Бухгалтерия предприятия» · Пользователь: за ПК";
   it("процесс из живого снимка парсится; Enter в 1С и вызов «Провести» — коммит; «Печать» — нет", () => {
     expect(parseForegroundProcess(ctx)).toBe("1cv8");
-    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { key: "enter" } })?.what).toMatch(/Enter/u);
+    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { combo: "enter" } })?.what).toMatch(/Enter/u);
     expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "ui_invoke", input: { handle: 7 }, label: "Button Провести и закрыть" })?.what).toMatch(/Провести/u);
     expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "ui_invoke", input: { handle: 7 }, label: "Button Печать" })).toBeNull();
-    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { key: "enter", mode: "up" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { combo: "enter", mode: "up" } })).toBeNull();
   });
   it("Enter в Telegram Desktop — отправка сообщения; в Блокноте — ничего; координатный клик — ничего", () => {
-    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "input_key", input: { key: "Enter" } })?.what).toMatch(/отправка сообщения/u);
-    expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "input_key", input: { key: "enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "input_key", input: { combo: "Enter" } })?.what).toMatch(/отправка сообщения/u);
+    expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "input_key", input: { combo: "enter" } })).toBeNull();
     expect(assessGuiCommit({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } })).toBeNull();
     expect(assessGuiCommit({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "text", text: "Отправить" } } })?.what).toMatch(/Отправить/u);
   });
@@ -72,5 +72,39 @@ describe("assessGuiCommit + parseForegroundProcess", () => {
     rememberWebTarget(session, "https://www.ozon.ru/cart");
     expect(lastWebTarget(session)).toBe("https://www.ozon.ru/cart");
     expect(lastWebTarget({})).toBe("");
+  });
+});
+
+describe("W4 act — тот же §14-гейт, что у input_key/input_click", () => {
+  it("do:key Enter в мессенджере → коммит; do:key Ctrl+S → нет", () => {
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { do: "key", combo: "Enter" } })?.what).toMatch(/отправка сообщения/u);
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { do: "key", combo: "Ctrl+S" } })).toBeNull();
+  });
+
+  it("клик по «Провести»/«Отправить» (строка или {text}) → коммит; печать/set и клик по «Настройки»/в блокноте → нет", () => {
+    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "act", input: { target: "Провести" } })?.what).toMatch(/Провести/u);
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: { text: "Отправить", role: "Button" }, do: "double" } })).not.toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Отправить", do: "type", text: "x" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Настройки" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "act", input: { target: "Отправить" } })).toBeNull();
+  });
+
+  // Ревью 2026-09-24 (контроль-1 №1): app — свободная строка модели; «дискорд»/«Telegram Desktop» окно находили,
+  // а якорный регэксп процесса их не узнавал → Enter уходил человеку без вопроса.
+  // Контроль-2: в почтовом клиенте перевод строки — абзац письма; «3ds Max»/«Zoom Player» — не мессенджеры.
+  it("почта: многострочная печать без вопроса; «3ds Max»/«Zoom Player» не мессенджер, «Zoom» — да", () => {
+    expect(assessGuiCommit({ foregroundProcess: "outlook", tool: "input_type", input: { text: "Добрый день,\nспасибо" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "input_type", input: { text: "ок\n" } })).not.toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "3ds Max", tool: "act", input: { do: "key", combo: "Enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "Zoom Player", tool: "act", input: { do: "key", combo: "Enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "Zoom", tool: "act", input: { do: "key", combo: "Enter" } })).not.toBeNull();
+  });
+
+  it("act{app} судится по имени из app нестрого: «дискорд», «Telegram Desktop», «телега» → коммит; «notepad» → нет", () => {
+    for (const app of ["дискорд", "Telegram Desktop", "телега", "WhatsApp.exe", "1С:Предприятие"]) {
+      expect(assessGuiCommit({ foregroundProcess: "chrome", app, tool: "act", input: { do: "key", combo: "Enter" } }), app).not.toBeNull();
+    }
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", app: "notepad", tool: "act", input: { do: "key", combo: "Enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "Блокнот", tool: "act", input: { target: "Отправить" } })).toBeNull();
   });
 });

@@ -23,9 +23,20 @@ export async function selfWeaknesses(_ctx: ToolContext, input: Record<string, un
   const head =
     `Окно: ${report.windowDays} дн. Задач: ${report.tasks.total}, провалов в работе: ${report.tasks.failed}` +
     (report.tasks.llmUnavailable > 0 ? `, плюс ${report.tasks.llmUnavailable} ходов вообще не дошли до модели (канал был недоступен).` : ".");
-  if (report.weaknesses.length === 0) return ok(`${head} Повторяющихся отказов в телеметрии не нашёл (единичные случаи не считаю слабостью).`);
+  // БЫСТРОТА ПО КАНАЛАМ (запрос владельца 2026-09-02): на резерве раунд стоит секунды, на основном с
+  // prompt-кешем — доли секунды; именно это решает, влезет ли многошаговая задача в потолок времени.
+  const speed = (report.speed ?? [])
+    .map(
+      (x) =>
+        `${x.channel === "subscription" ? "подписка" : "API"}: медиана ${(x.medianMs / 1000).toFixed(1)}с, p90 ${(x.p90Ms / 1000).toFixed(1)}с (раундов ${x.rounds})`,
+    )
+    .join("; ");
+  const speedLine = speed ? `\nБыстрота обращения к модели — ${speed}.` : "";
+  if (report.weaknesses.length === 0) {
+    return ok(`${head} Повторяющихся отказов в телеметрии не нашёл (единичные случаи не считаю слабостью).${speedLine}`);
+  }
   const lines = report.weaknesses.map((w, i) => `${i + 1}. [${w.kind}] ${w.title}${w.samples.length ? ` — напр.: ${w.samples.join(" | ")}` : ""}`);
-  return ok(`${head}\nПовторяющиеся слабости:\n${lines.join("\n")}`);
+  return ok(`${head}${speedLine}\nПовторяющиеся слабости:\n${lines.join("\n")}`);
 }
 
 /** Поиск по своему коду. */

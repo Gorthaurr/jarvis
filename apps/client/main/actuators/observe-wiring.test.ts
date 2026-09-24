@@ -92,3 +92,24 @@ describe("willObserve — один источник правды", () => {
     expect(willObserve({ kind: "app.launch", app: "steam" } as ActionCommand)).toBe(false);
   });
 });
+
+/**
+ * 🔴 Адверс-ревью 2026-09-02 (MED, доказано мутацией): проводка точки действия в снимок «до» не была
+ * покрыта НИЧЕМ — мутант `captureUiFingerprint(plannedClickPoint(cmd))` → `captureUiFingerprint()`
+ * оставлял 452 теста зелёными и tsc чистым, ПОЛНОСТЬЮ выключая сравнение «до/после» на слепом окне
+ * (снимок всегда undefined → вечный weak).
+ */
+describe("точка действия доезжает до снимка «до»", () => {
+  it("координатный клик: снимок «до» снимается по ТОЙ ЖЕ точке, что уйдёт в наблюдение", async () => {
+    await dispatch("p1", { kind: "input.click", target: { by: "coords", x: 640, y: 400, space: "screen" } } as ActionCommand);
+    expect(captureUiFingerprint).toHaveBeenCalledWith({ x: 640, y: 400 });
+    // Точка наблюдения приходит из фактического результата клика (в моке она своя) — важно, что
+    // снимок «до» получил ИМЕННО планируемую точку, иначе сравнивались бы разные области.
+    expect((observeAfterAction.mock.calls[0]?.[0] as { clickPoint?: unknown })?.clickPoint).toBeDefined();
+  });
+
+  it("цель по тексту/роли: точки заранее нет — снимок «до» зовётся без неё (наблюдение честно останется слабым)", async () => {
+    await dispatch("p2", { kind: "input.click", target: { by: "role", role: "Button", name: "Играть" } } as ActionCommand);
+    expect(captureUiFingerprint).toHaveBeenCalledWith(undefined);
+  });
+});

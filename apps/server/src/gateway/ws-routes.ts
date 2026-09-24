@@ -47,6 +47,8 @@ export interface WsRouteDeps {
   /** Нормализация входящего кадра в текст (у server.ts своя реализация). */
   rawToText(raw: unknown): string;
   log: Logger;
+  /** W0: ID расширения Chrome, которому одному разрешён /ext (env JARVIS_EXT_ID). Пусто = не пиннить (WARN). */
+  pinnedExtId?: string;
 }
 
 /** Канал: клиентский (/ws) или расширение (/ext). У них РАЗНЫЙ допустимый Origin. */
@@ -56,10 +58,17 @@ export type WsChannel = "client" | "ext";
  * Допустимо ли происхождение соединения. Пустой Origin = нативный клиент (Node/Electron/тесты):
  * браузер обязан проставлять Origin, поэтому его отсутствие означает «пришли не из страницы».
  */
-export function isAllowedWsOrigin(rawOrigin: unknown, channel: WsChannel): boolean {
+export function isAllowedWsOrigin(rawOrigin: unknown, channel: WsChannel, pinnedExtId?: string): boolean {
   const origin = String(rawOrigin ?? "").trim().toLowerCase();
   if (origin === "") return true;
-  if (channel === "ext") return origin.startsWith("chrome-extension://");
+  if (channel === "ext") {
+    // W0 (2026-09-09): пиннинг ID расширения. Без него /ext принимал ЛЮБОЕ установленное расширение
+    // Chrome — а канал отдаёт cookies.export (все куки расшифрованными) и telegram.send от лица владельца.
+    // JARVIS_EXT_ID задан → только оно; не задан → прежнее правило + WARN с ID при подключении (см. роут).
+    const pinned = (pinnedExtId ?? "").trim().toLowerCase();
+    if (pinned) return origin === `chrome-extension://${pinned}`;
+    return origin.startsWith("chrome-extension://");
+  }
   // Клиентскому каналу браузерное происхождение не нужно ни в каком виде — в том числе
   // chrome-extension:// (у расширения свой канал /ext со своим протоколом).
   return false;
@@ -97,9 +106,24 @@ export function registerWsRoutes(instance: FastifyInstance, deps: WsRouteDeps): 
   instance.get("/ext", { websocket: true }, (connection: unknown, request: unknown) => {
     const ws = connection as RawWsLike;
     const origin = originOf(request);
-    if (!isAllowedWsOrigin(origin, "ext")) {
+    if (!isAllowedWsOrigin(origin, "ext", deps.pinnedExtId)) {
+      if (/^chrome-extension:\/\//iu.test(origin)) {
+        // Чаще всего это НАШЕ расширение с другим ID (распакованное загружено из другой папки). Молча отказать =
+        // «руки в браузере мертвы, а почему — не видно» (24.09 так пролежали сутки). Говорим, что сделать.
+        deps.log.warn("/ext: расширение отклонено пиннингом — если это Jarvis Web Hands, обновите JARVIS_EXT_ID", {
+          пришло: origin.replace(/^chrome-extension:\/\//iu, ""),
+          ожидается: deps.pinnedExtId,
+        });
+      }
       refuse(ws, deps.log, "ext", origin);
       return;
+    }
+    if (!(deps.pinnedExtId ?? "").trim()) {
+      // Не пиннено — говорим, ЧТО именно подключилось, чтобы владелец мог закрепить одной строкой в .env.
+      deps.log.warn("§sec: /ext без пиннинга — любое расширение получает куки и Telegram; закрепите JARVIS_EXT_ID", {
+        origin,
+        extId: origin.replace(/^chrome-extension:\/\//iu, ""),
+      });
     }
     const sock = { send: (d: string) => ws.send(d), close: () => ws.close() };
     deps.ext.attach(sock);

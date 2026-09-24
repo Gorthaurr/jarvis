@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MockLlmProvider } from "../integrations/llm.js";
 import { HashEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { InMemoryEpisodicMemory } from "../memory/episodic.js";
-import { buildGreeting, timeOfDay } from "./greeting.js";
+import { buildGreeting, claimsUnperformedAction, timeOfDay } from "./greeting.js";
 
 const models = { haiku: "h", sonnet: "s", fable: "f" };
 const epis = (): InMemoryEpisodicMemory => new InMemoryEpisodicMemory(new HashEmbeddingProvider());
@@ -46,5 +46,50 @@ describe("buildGreeting (§11 контекстное приветствие)", (
     const userMsg = String(llm.requests[0]?.messages[0]?.content ?? "");
     expect(userMsg).toContain("зал пн/ср/пт"); // курируемые факты профиля — да
     expect(userMsg).not.toContain("настраивали дизайн"); // сырые эпизоды памяти — НЕТ
+  });
+});
+
+// T-F10 (ревью 2026-09-24): приветствие строится БЕЗ инструментов — модель ничего не проверяла. Дворецкий
+// жанр тянет её отчитаться «я проверил — всё спокойно»: это ложный отчёт о работе, которой не было.
+// Реверт-проверка: убрать `if (claimsUnperformedAction(line))` в buildGreeting → выдумка звучит, кейс падает.
+describe("buildGreeting: выдуманные проверки не звучат (T-F10)", () => {
+  const liveLlm = (text: string): MockLlmProvider => {
+    const llm = new MockLlmProvider([{ text }]);
+    (llm as { live: boolean }).live = true;
+    return llm;
+  };
+
+  it("опенер «я проверил почту — всё тихо» отброшен → детерминированный фолбэк без фактов", async () => {
+    const g = await buildGreeting({ llm: liveLlm("Добрый вечер, сэр. Я проверил почту — всё тихо."), episodic: epis(), models }, "u1", {
+      name: "Антон",
+    });
+    expect(g).not.toMatch(/провер/u);
+    expect(g).toMatch(/Джарвис к вашим услугам/u);
+  });
+
+  it("«все системы в норме», «писем нет», «вижу», «2 новых сообщения» — тоже отброшены", async () => {
+    for (const line of [
+      "Доброе утро, сэр. Все системы в норме.",
+      "Добрый день, сэр, новых писем нет.",
+      "Добрый вечер, сэр. Вижу, вы снова за работой.",
+      "Доброе утро, сэр, у вас 2 новых сообщения.",
+      "Добрый вечер, сэр. Заглянул в календарь — вечер свободен.",
+    ]) {
+      const g = await buildGreeting({ llm: liveLlm(line), episodic: epis(), models }, "u1", { name: "Антон" });
+      expect(g, line).toMatch(/Джарвис к вашим услугам/u);
+    }
+  });
+
+  it("АНТИ-ОВЕРФИТ: честный живой опенер без заявлений о действиях проходит как есть", async () => {
+    for (const line of ["Доброе утро, сэр. Сегодня зал по плану?", "Добрый вечер, сэр. Чем займёмся?", "Доброй ночи, сэр. Не засиживайтесь."]) {
+      const g = await buildGreeting({ llm: liveLlm(line), episodic: epis(), models }, "u1", { name: "Антон", facts: ["зал пн/ср/пт"] });
+      expect(g).toBe(line);
+    }
+  });
+
+  it("claimsUnperformedAction: границы слова по \p{L}, «проверка» (существительное) — не заявление", () => {
+    expect(claimsUnperformedAction("Я проверила новости")).toBe(true);
+    expect(claimsUnperformedAction("Готов к проверке, сэр")).toBe(false);
+    expect(claimsUnperformedAction("Доброе утро, сэр")).toBe(false);
   });
 });

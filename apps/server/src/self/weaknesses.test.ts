@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collectWeaknesses, normalizeLogMessage, weaknessesFromLogs, weaknessesFromMetrics } from "./weaknesses.js";
+import { collectWeaknesses, normalizeLogMessage, speedByChannel, weaknessesFromLogs, weaknessesFromMetrics } from "./weaknesses.js";
 
 describe("weaknessesFromMetrics", () => {
   it("повторяющаяся деградация становится слабостью, единичная — нет", () => {
@@ -126,5 +126,43 @@ describe("отказ канала модели ≠ провал работы", (
     const { tasks } = weaknessesFromMetrics(events);
     expect(tasks.failed).toBe(1);
     expect(tasks.llmUnavailable).toBe(0);
+  });
+});
+
+/**
+ * 🔴 «Нужно прям проверять быстроту» (владелец, 2026-09-02, на время работы от подписки). Per-round
+ * строки телеметрии несли токены, но НЕ время и НЕ канал — измерить скорость было нечем, а канал
+ * приходилось гадать по имени модели. Медиана и p90, а не среднее: одно 40-секундное «думание» на
+ * max-эффорте сдвинуло бы среднее так, что цифра перестала бы описывать типичный шаг.
+ */
+describe("speedByChannel — быстрота обращения к модели по каналам", () => {
+  const round = (channel: string, latencyMs: number) => ({ type: "round", channel, latencyMs });
+
+  it("режет по каналам и считает медиану/p90", () => {
+    const r = speedByChannel([
+      round("subscription", 4000), round("subscription", 5000), round("subscription", 6000), round("subscription", 20000),
+      round("api", 400), round("api", 600),
+    ]);
+    const sub = r.find((x) => x.channel === "subscription")!;
+    expect(sub.rounds).toBe(4);
+    expect(sub.medianMs).toBe(5000);
+    expect(sub.p90Ms).toBe(20000); // хвост виден отдельно — среднее его бы размазало
+    expect(r.find((x) => x.channel === "api")!.rounds).toBe(2);
+  });
+
+  it("длинный хвост виден в p90, а медиана остаётся типичным шагом (среднее размазало бы оба)", () => {
+    const fast = Array.from({ length: 8 }, () => round("subscription", 5000));
+    const r = speedByChannel([...fast, round("subscription", 40000), round("subscription", 40000)]);
+    const sub = r[0]!;
+    expect(sub.medianMs).toBe(5000); // типичный шаг
+    expect(sub.p90Ms).toBe(40000); // и отдельно — сколько стоит каждый десятый шаг
+  });
+
+  it("строки без времени/канала (записаны до правки) пропускаются молча — по ним врать нечем", () => {
+    expect(speedByChannel([{ type: "round" }, { type: "round", latencyMs: 5000 }, { type: "round", channel: "api" }])).toEqual([]);
+  });
+
+  it("не-раундовые строки не считаются", () => {
+    expect(speedByChannel([{ type: "process_health", latencyMs: 5000, channel: "api" }])).toEqual([]);
   });
 });

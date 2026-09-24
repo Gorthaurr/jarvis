@@ -44,6 +44,8 @@ interface TypedField {
  * ref остаётся немым, и берст логин-формы гардом не разбирается вовсе.
  */
 export type RefHintResolver = (ref: string) => string | undefined;
+/** Подпись UIA-элемента по handle из последнего look{elements}/ui_snapshot — handle сам по себе немой. */
+export type HandleHintResolver = (handle: unknown) => string | undefined;
 
 // Поле пароля. Пишем целыми словами: «pass» отдельно матчит passenger/passport, а урок денилистов
 // проекта — либо точная форма, либо сломанная легитимная работа. `type="password"` ловится тем же.
@@ -88,6 +90,37 @@ function hintsFromTarget(target: unknown): string[] {
   return [t.name, t.role].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
 }
 
+/**
+ * Ревью 2026-09-24: `act` — ГЛАВНЫЙ путь печати в GUI с W4, а в гарде его не было: «act{do:"type",
+ * target:"Пароль", text:…}» печатал пароль мимо красной линии §0 (тот самый забытый sibling call-site, о котором
+ * предупреждает шапка dispatchTool). Цель act — строка (видимый текст элемента) или объект {text, role,
+ * automationId, handle}; всё это — признаки поля. Без target act печатает в поле с фокусом → признаков нет.
+ */
+function hintsFromActTarget(target: unknown, handleHint?: HandleHintResolver): string[] {
+  if (typeof target === "string") return target.trim() ? [target] : [];
+  const t = asRecord(target);
+  if (!t) return [];
+  const out = [t.text, t.name, t.role, t.automationId].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  if (t.handle !== undefined && handleHint) {
+    const h = handleHint(t.handle);
+    if (h) out.push(h);
+  }
+  return out;
+}
+
+/**
+ * Контроль-2 №2: цель последнего act сессии. Горячий путь «act{target:"Пароль"} (клик) → act{do:"type"} без цели»
+ * печатал в поле пароля без единого признака поля — гард только предупреждал. Печать без цели наследует подпись
+ * поля из прошлого act (фокус там и остался).
+ */
+const lastActTargets = new WeakMap<object, unknown>();
+export function rememberActTarget(session: object | undefined, target: unknown): void {
+  if (session && target !== undefined) lastActTargets.set(session, target);
+}
+export function lastActTarget(session: object | undefined): unknown {
+  return session ? lastActTargets.get(session) : undefined;
+}
+
 function field(text: unknown, hints: string[]): TypedField[] {
   return typeof text === "string" && text.length > 0 ? [{ text, hints }] : [];
 }
@@ -115,7 +148,12 @@ function stepFields(raw: unknown, shape: "browser" | "native", refHint?: RefHint
 }
 
 /** Все места ввода текста этого вызова. Экспорт — для юнит-тестов формы аргументов. */
-export function collectTypedFields(tool: string, input: Record<string, unknown>, refHint?: RefHintResolver): TypedField[] {
+export function collectTypedFields(
+  tool: string,
+  input: Record<string, unknown>,
+  refHint?: RefHintResolver,
+  handleHint?: HandleHintResolver,
+): TypedField[] {
   // browser_act допускает и плоскую форму (params отсутствует) — берём то же, что берёт хендлер.
   const params = asRecord(input.params) ?? input;
   switch (tool) {
@@ -125,6 +163,15 @@ export function collectTypedFields(tool: string, input: Record<string, unknown>,
       return String(input.op ?? "") === "write" ? field(input.text, []) : [];
     case "ui_invoke":
       return String(input.pattern ?? "") === "setValue" ? field(input.value, hintsFromTarget(input.target)) : [];
+    // Контроль-2 №2: значения слотов навыка печатаются в поля реплея — имя слота («password») и есть признак поля.
+    case "skill_execute": {
+      const params = asRecord(input.params);
+      return params ? Object.entries(params).flatMap(([k, v]) => field(v, [k])) : [];
+    }
+    case "act": {
+      const verb = String(input.do ?? "click");
+      return verb === "type" || verb === "set" ? field(input.text, hintsFromActTarget(input.target, handleHint)) : [];
+    }
     case "browser_act":
     case "web_act":
       return String(input.intent ?? "") === "type" ? field(params.text, hintsFromParams(params, refHint)) : [];
@@ -187,9 +234,10 @@ export function checkCredentialInput(
   tool: string,
   input: Record<string, unknown>,
   refHint?: RefHintResolver,
+  handleHint?: HandleHintResolver,
 ): CredentialVerdict {
   let note: string | undefined;
-  for (const f of collectTypedFields(tool, input, refHint)) {
+  for (const f of collectTypedFields(tool, input, refHint, handleHint)) {
     const hint = f.hints.join(" ");
     if (carriesCardNumber(f.text) || CARD_FIELD_RE.test(hint)) {
       return {

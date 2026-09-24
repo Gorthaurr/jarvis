@@ -49,3 +49,13 @@ describe("WorkingMemory — персист контекста", () => {
     expect(mem.recentTurns().length).toBe(1); // ничего не затёрли
   });
 });
+
+describe("W0 (2026-09-09): пустые реплики", () => {
+  it("pushTurn с пустым/пробельным текстом НЕ пишет в историю (тихий финал отменённой задачи)", () => {
+    const mem = new WorkingMemory();
+    mem.pushTurn("user", "отмени");
+    mem.pushTurn("assistant", "");
+    mem.pushTurn("assistant", "   ");
+    expect(mem.recentTurns().map((t) => t.text)).toEqual(["отмени"]);
+  });
+});
