@@ -316,6 +316,12 @@ export interface ProgressState {
   // §8 МАКРОС: id навыка, сохранённого В ЭТОЙ задаче (skill_save в петле или self-learn после) —
   // адресат дозаписи авто-реплея жестов (generic: любое UIA-слепое приложение, не только recall-путь).
   savedSkillId: string | null;
+  /**
+   * Контроль-1 №5 (ревью 2026-09-24): авто-реплей вспомненного навыка РЕАЛЬНО ушёл на клиент. Такой навык — не
+   * «случайно всплывший по шумному косинусу»: это его шаги и исполнялись, значит исход — его (иначе провальный
+   * макрос с косинусом 0,84–0,9 не копил бы fail_count и слепо реплеился бы вечно).
+   */
+  macroReplayed: boolean;
   // §8: задача потребовала самостоятельного research (web_search/web_fetch) — «не знал как, нашёл сам».
   // Такой приём ценно сохранить навыком даже на короткой траектории (иначе каждый раз гуглим заново).
   wasResearched: boolean;
@@ -492,6 +498,7 @@ function initProgressState(): ProgressState {
     toolTrajectory: [],
     skillSavedInLoop: false,
     savedSkillId: null,
+    macroReplayed: false,
     wasResearched: false,
     semanticTitleSet: false,
     gestureTrace: [],

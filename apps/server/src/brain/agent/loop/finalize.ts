@@ -95,7 +95,8 @@ export function recordTaskMetrics(ctx: LoopCtx, o: LoopOutcome): void {
   // навык из recall) либо, на пути реплея, ложный кредит успеха.
   // T-F3 (ревью 2026-09-24): исход кредитуем только УВЕРЕННО вспомненному навыку. Шумный recall e5 (sim 0.82–0.88 на
   // чужие задачи) раньше начислял исход не тому навыку — плохой навык не подавлялся, хороший штрафовался.
-  if (!deps.devSession && confidentRecall(recalled) && recalled && !recalled.fromShared && deps.skills?.recordOutcome && !st.exit.cancelled && !st.exit.limited && !st.exit.timedOut && !st.exit.llmStubbed && !st.exit.queueTimedOut && !st.exit.channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
+  // Контроль-1 №5: и навыку, чей авто-реплей реально исполнялся (порог реплея 0,84 ниже порога «уверенного» 0,9).
+  if (!deps.devSession && (confidentRecall(recalled) || st.progress.macroReplayed) && recalled && !recalled.fromShared && deps.skills?.recordOutcome && !st.exit.cancelled && !st.exit.limited && !st.exit.timedOut && !st.exit.llmStubbed && !st.exit.queueTimedOut && !st.exit.channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
     void deps.skills.recordOutcome(deps.userId, recalled.id, taskOk).catch((e) =>
       log.debug("recordOutcome навыка пропущен", e instanceof Error ? e.message : String(e)),
     );

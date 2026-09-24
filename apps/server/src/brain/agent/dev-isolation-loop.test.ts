@@ -187,3 +187,43 @@ describe("T-F3: исход и макрос — только уверенно в�
     expect(macros).toEqual(["sk-noise"]);
   });
 });
+
+// Контроль-1 №5 (ревью 2026-09-24): реплей разрешён с сырого косинуса 0,84, а исход кредитовался только с 0,9 —
+// провальный макрос в этом зазоре не копил fail_count и слепо реплеился при каждой такой команде.
+// Реверт: убери `|| st.progress.macroReplayed` в loop/finalize.ts — outcomes будет пуст.
+describe("исход получает навык, чей авто-реплей реально исполнялся", () => {
+  it("recall 0,86 (ниже «уверенного» 0,9), макрос ушёл на клиент → исход записан этому навыку", async () => {
+    const tasks = new TaskManager();
+    const outcomes: Array<{ id: string; ok: boolean }> = [];
+    const skills = {
+      list: async () => [],
+      get: async () => null,
+      save: async () => null,
+      recall: async () => ({
+        id: "sk-macro",
+        name: "Поставить видео на паузу пробелом",
+        when: "просят поставить видео на паузу",
+        procedure: "нажми пробел",
+        version: 2,
+        recallSim: 0.95,
+        recallSimRaw: 0.86,
+        steps: [
+          { action: "input.key", params: { combo: "space" } },
+          { action: "wait", params: { ms: 400 } },
+        ],
+      }),
+      recordOutcome: async (_u: string, id: string, ok: boolean) => {
+        outcomes.push({ id, ok });
+      },
+    } as unknown as AgentDeps["skills"];
+    const s = session();
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "v1", name: "screen_capture", input: {} }] },
+      { text: "Видео на паузе, сэр — видно на экране." },
+    ]);
+    await handleUserText(s, "поставь видео на паузу пробелом", deps(llm, tasks, { skills }), undefined, { viaWake: true });
+    const kinds = (s.sendAction as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as ActionCommand).kind);
+    expect(kinds).toContain("skill.execute"); // реплей реально ушёл — иначе ассерт ниже ничего не доказывает
+    expect(outcomes.map((o) => o.id)).toEqual(["sk-macro"]);
+  });
+});

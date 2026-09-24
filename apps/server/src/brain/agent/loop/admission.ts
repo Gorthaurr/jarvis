@@ -111,6 +111,8 @@ export async function runReplay(ctx: LoopCtx, recalled: RecalledSkill, replaySte
       { kind: "skill.execute", skillId: recalled.id, version: recalled.version, steps: replaySteps, params: {} },
       REPLAY_MACRO_SERVER_TIMEOUT_MS,
     );
+    // Вуаль шаги не пустила (не вина навыка — как отказ ввода); иначе шаги этого навыка реально исполнялись.
+    if (res.error?.code !== "overlay_drawing") st.progress.macroReplayed = true;
     // Контроль-4: шаги ДО остановки исполнены (мутации!) — врезка обязана их назвать, иначе модель
     // (и «доделай» по журналу) повторит напечатанное/отправленное. Метка «УЖЕ ВЫПОЛНЕНЫ» — сигнал для
     // секции «СДЕЛАНО» чекпойнта.
