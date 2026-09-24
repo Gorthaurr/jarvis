@@ -7,6 +7,14 @@ import { compileReplayLines } from "../../../memory/skill-macro.js";
 import { metrics } from "../../../obs/metrics.js";
 import { costUsd } from "../../../obs/pricing.js";
 
+/** Порог сырого косинуса, с которого вспомненный навык считается «той же задачей» (исход и макрос — ему). */
+export const CONFIDENT_RECALL_RAW_COS = 0.9;
+
+/** Уверенный recall: есть сырой косинус и он ≥ порога. Лексический recall (без косинуса) уверенным не считается. */
+export function confidentRecall(r: { recallSimRaw?: number } | null | undefined): boolean {
+  return typeof r?.recallSimRaw === "number" && r.recallSimRaw >= CONFIDENT_RECALL_RAW_COS;
+}
+
 export async function maybeSelfLearn(ctx: LoopCtx, o: LoopOutcome): Promise<void> {
   const { deps, tier, st, taskId, recalled, sys, convo, toolCtx } = ctx;
   const { taskOk } = o;
@@ -16,7 +24,8 @@ export async function maybeSelfLearn(ctx: LoopCtx, o: LoopOutcome): Promise<void
   // `maskedFailure`. Итог: на флуд-провале рефлексия на Opus утверждала «Задача решена за N шагов» и
   // сохраняла навык из траектории, которая НЕ привела к результату — recall потом подсовывал бы её.
   // `taskOk` — единственный полный список; новый флаг больше не забудется.
-  if (taskOk && st.progress.finalText && st.honesty.anyToolSucceeded && learnWorthy && !recalled && !st.progress.skillSavedInLoop && deps.skills) {
+  // T-F1: смоук агента не учит навыки владельца.
+  if (!deps.devSession && taskOk && st.progress.finalText && st.honesty.anyToolSucceeded && learnWorthy && !recalled && !st.progress.skillSavedInLoop && deps.skills) {
     const learnedId = await selfLearnSkill({
       deps,
       sys,
@@ -84,7 +93,9 @@ export function recordTaskMetrics(ctx: LoopCtx, o: LoopOutcome): void {
   // Ревью 2026-09-02: отказ АРЕНДЫ ВВОДА — тот же класс «не дали работать», что queueTimedOut: навык
   // не запускался ни на шаг, а получал бы −1 (три параллельные задачи за мышь стирали бы исправный
   // навык из recall) либо, на пути реплея, ложный кредит успеха.
-  if (recalled && !recalled.fromShared && deps.skills?.recordOutcome && !st.exit.cancelled && !st.exit.limited && !st.exit.timedOut && !st.exit.llmStubbed && !st.exit.queueTimedOut && !st.exit.channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
+  // T-F3 (ревью 2026-09-24): исход кредитуем только УВЕРЕННО вспомненному навыку. Шумный recall e5 (sim 0.82–0.88 на
+  // чужие задачи) раньше начислял исход не тому навыку — плохой навык не подавлялся, хороший штрафовался.
+  if (!deps.devSession && confidentRecall(recalled) && recalled && !recalled.fromShared && deps.skills?.recordOutcome && !st.exit.cancelled && !st.exit.limited && !st.exit.timedOut && !st.exit.llmStubbed && !st.exit.queueTimedOut && !st.exit.channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
     void deps.skills.recordOutcome(deps.userId, recalled.id, taskOk).catch((e) =>
       log.debug("recordOutcome навыка пропущен", e instanceof Error ? e.message : String(e)),
     );
@@ -95,8 +106,11 @@ export function recordTaskMetrics(ctx: LoopCtx, o: LoopOutcome): void {
   // (игра/canvas) после первого успешного прогона получает макрос, и следующий recall исполняет его
   // за секунды без LLM-раундов. Успешный прогон ЧЕРЕЗ сам макрос жестов не оставляет (LLM только
   // сверял глазами) → перезаписи/version-churn нет.
-  const macroTargetId = recalled && !recalled.fromShared ? recalled.id : st.progress.savedSkillId;
-  if (taskOk && macroTargetId && deps.skills?.attachReplay && st.progress.gestureTrace.length > 0) {
+  // T-F3: макрос вписывается в навык, сохранённый В ЭТОЙ задаче, или в уверенно вспомненный свой. Раньше целью был
+  // любой recall — и жесты «напиши реферат» (клики в чат, набор текста) оседали слепым реплеем в чужих навыках.
+  const macroTargetId =
+    st.progress.savedSkillId ?? (recalled && !recalled.fromShared && confidentRecall(recalled) ? recalled.id : undefined);
+  if (!deps.devSession && taskOk && macroTargetId && deps.skills?.attachReplay && st.progress.gestureTrace.length > 0) {
     const lines = compileReplayLines(st.progress.gestureTrace);
     if (lines.length > 0) {
       const skillsRef = deps.skills;

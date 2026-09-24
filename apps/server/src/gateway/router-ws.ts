@@ -379,7 +379,10 @@ export function makeSessionContext(
   // §5 resume + персист: память диалога СКОУПЛЕНА на Session (переживает reconnect) И грузится С ДИСКА
   // по userId (переживает рестарт сервера/клиента) — иначе «забывал, о чём говорили». На новой сессии
   // поднимается из data/memory/<user>.json, дальше авто-сохраняется (см. working-store).
-  const memory = session.scoped("workingMemory", () => loadWorkingMemory(session.userId));
+  // T-F1 (ревью 2026-09-24): dev-сессия (текст-драйвер/смоук) живёт на СВОЕЙ памяти — не читает и не пишет
+  // рабочую память владельца (раньше реплики драйвера оседали в ней на 12 ч и исполнялись «от имени» владельца).
+  const isDev = isDevSession(clientVersion);
+  const memory = session.scoped("workingMemory", () => (isDev ? new WorkingMemory() : loadWorkingMemory(session.userId)));
   // H10: async-контур (§20) СКОУПЛЕН на Session (как workingMemory/toolActivation) → ПЕРЕЖИВАЕТ reconnect.
   // Раньше makeSessionContext создавал новый мьютекс/семафор/набор на КАЖДЫЙ коннект: команда на новом ctx
   // захватывала input-lease с ПОЛНЫМИ пермитами конкурентно с осиротевшей задачей старого ctx (в resume-grace
@@ -421,6 +424,7 @@ export function makeSessionContext(
       language: getProfile(session.userId).language,
     },
     tasks: brain.tasks, // общий реестр: «отмени» из UI мутирует флаг задачи в петле (§20)
+    devSession: isDev, // T-F1: изоляция dev-сессии (память, задачи, самообучение, рефлексы)
     // Волна C: чекпойнт прерванной задачи → честное «продолжи». DEV-ГЕЙТ обязателен (правило проекта
     // для всего, что ПОТРЕБЛЯЕТ накопленное владельцем): слот один на пользователя, и утренний прогон
     // текст-драйвера иначе перетёр бы недоделку владельца своей — а его «доделай» доводило бы смоук.

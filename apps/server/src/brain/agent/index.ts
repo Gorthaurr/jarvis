@@ -279,7 +279,7 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
  */
 function queuedPreTask(session: Session, goal: string, deps: AgentDeps): Task | undefined {
   if (!deps.tasks) return undefined;
-  const task = deps.tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal });
+  const task = deps.tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal, ...(deps.devSession ? { dev: true } : {}) });
   deps.tasks.markQueued(task.taskId);
   return task;
 }
@@ -457,7 +457,7 @@ async function runAgentLoop(
   const isConversational = opts?.conversational === true;
   const tasks = deps.tasks ?? new TaskManager();
   // W0: задача могла быть зарегистрирована заранее (queued за семафором) — переводим в running, не плодим вторую.
-  const task = opts?.preTask ?? tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal: text, conversational: isConversational });
+  const task = opts?.preTask ?? tasks.create({ userId: deps.userId, sessionId: session.sessionId, goal: text, conversational: isConversational, ...(deps.devSession ? { dev: true } : {}) });
   if (opts?.preTask) tasks.start(task.taskId);
   const taskId = task.taskId;
 

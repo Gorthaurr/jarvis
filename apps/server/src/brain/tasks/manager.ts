@@ -28,6 +28,8 @@ export interface CreateTaskOpts {
   /** Б6: разговорный ход (вопрос/комплимент/smalltalk) — техническая задача для механики петли, но НЕ
    *  содержательная §20-работа: не всплывает в active()/scope/«сделал?» и не рулится как фоновая. */
   conversational?: boolean;
+  /** T-F1: задача dev-сессии (драйвер/смоук) — не всплывает в «что я сделал» владельца и не пишется на диск. */
+  dev?: boolean;
 }
 
 /** TTL по умолчанию для sweep: терминальные задачи живут 10 минут (§20-отчётность). */
@@ -77,6 +79,7 @@ export class TaskManager {
       cancel: { cancelled: false },
       steer: { pending: [] },
       ...(opts.conversational ? { conversational: true } : {}),
+      ...(opts.dev ? { dev: true } : {}),
     };
     this.tasks.set(task.taskId, task);
     this.onChange?.();
@@ -336,7 +339,7 @@ export class TaskManager {
   recentTerminal(userId: string, opts: { limit?: number; maxAgeMs?: number; now?: number } = {}): Task[] {
     const { limit = 5, maxAgeMs = Number.POSITIVE_INFINITY, now = this.now() } = opts;
     return [...this.tasks.values()]
-      .filter((t) => t.userId === userId && isTerminalState(t.state) && isSubstantiveTask(t))
+      .filter((t) => t.userId === userId && isTerminalState(t.state) && isSubstantiveTask(t) && !t.dev)
       .filter((t) => now - (t.finishedAt ?? t.startedAt) <= maxAgeMs)
       .sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt))
       .slice(0, Math.max(0, limit));
@@ -369,6 +372,7 @@ export class TaskManager {
   toJSON(): { tasks: PersistedTask[] } {
     const tasks: PersistedTask[] = [];
     for (const t of this.tasks.values()) {
+      if (t.dev) continue; // T-F1: смоук агента не переживает рестарт и не попадает в память «что я сделал»
       const { cancel, ...rest } = t;
       tasks.push(rest);
     }

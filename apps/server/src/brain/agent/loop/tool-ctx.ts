@@ -28,6 +28,7 @@ export function makeToolCtx(deps: AgentDeps, session: Session, opts: LoopOpts | 
           ...(r.revision !== undefined ? { revision: r.revision } : {}),
         })),
     productMode: deps.productMode, // self_* — инструменты владельца машины, не арендатора
+    devSession: deps.devSession, // T-F1: смоук агента не пишет в память владельца
     dynamicTools: deps.dynamicTools,
     skills: deps.skills,
     market: deps.market, // §трейдинг: рыночные данные + анализ (только чтение)

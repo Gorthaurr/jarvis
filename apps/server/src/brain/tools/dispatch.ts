@@ -136,6 +136,8 @@ export interface ToolContext {
    * («24 из 34 ходов не дошли до модели») и предложили «почини себя».
    */
   productMode?: boolean;
+  /** T-F1 (ревью 2026-09-24): вызов из dev-сессии (смоук агента) — в долговременную память владельца не пишем. */
+  devSession?: boolean;
   /** Реестр самописных инструментов (§8+ саморасширение). */
   dynamicTools?: DynamicToolStore;
   /** §15 ленивая загрузка: набор подгруженных холодных инструментов (tool_load его мутирует). */
@@ -1002,6 +1004,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   // Схема инструмента (§8) объявляет поле `content`; принимаем и `text` для совместимости.
   const text = String(input.content ?? input.text ?? "").trim();
   if (!text) return err("memory_write: пустой content");
+  if (ctx.devSession) return ok("Dev-сессия: в долговременную память владельца не записываю (запись пропущена).");
   // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
   const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, {
@@ -1013,6 +1016,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
 }
 
 async function memoryForget(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
+  if (ctx.devSession) return ok("Dev-сессия: память владельца не трогаю (забывание пропущено).");
   // Аудит контекста 2026-07-20: честное забывание. Схема объявляет `query`; принимаем content/text
   // для совместимости. Помечает stale близкие эпизоды (обратимо) + чистит совпадающий факт профиля.
   const q = String(input.query ?? input.content ?? input.text ?? "").trim();

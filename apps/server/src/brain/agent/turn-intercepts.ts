@@ -269,6 +269,8 @@ export function fireReflexes(t: TurnCtx): null {
   // «мой брат…», «у меня аллергия…») → фоновая рефлексия на дешёвом тире (fire-and-forget, ход не
   // ждёт). Диагноз: facts:0 за 15 дней — сама модель memory_write не звала; это зеркало самообучения
   // навыков, но для фактов о владельце. Кап/дедуп/выключатель — внутри модуля.
+  // T-F1: реплики dev-сессии (смоук агента) — не речь владельца: ни фактов о нём, ни напоминаний из них.
+  if (deps.devSession) return null;
   if (hasStableFactMarker(clean)) {
     void reflectFactFromUtterance({
       llm: deps.llm,
