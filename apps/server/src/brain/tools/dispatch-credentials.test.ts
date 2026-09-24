@@ -135,7 +135,7 @@ describe("пароли и коды подтверждения: ввод не д�
     expect(s.actions.map((a) => a.kind)).toEqual(["skill.execute"]); // контроль: обычный слот исполняется
     s.actions.length = 0;
     current = skill("password");
-    const r = await dispatchTool("skill_execute", { skillId: "login", params: { password: "s3cret" } }, s.ctx);
+    const r = await dispatchTool("skill_execute", { skillId: "login", params: { password: "фиктивное-значение" } }, s.ctx); // не секрет: гард режет по ИМЕНИ слота
     expect(r.isError).toBe(true);
     expect(s.actions).toHaveLength(0);
   });
