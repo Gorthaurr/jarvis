@@ -76,7 +76,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   тир (`looksHardReasoning` → fable, биржа → fable).
 - `brain/tools/` — `dispatch.ts` (тонкий маршрутизатор) + `handlers/*` (browser, messaging, info, skills, code, act,
   self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`.
-- `brain/persona/persona.md` — системный промпт (v87, бампать version при правке), `modes.ts`, `emotion.ts`.
+- `brain/persona/persona.md` — системный промпт (v88, бампать version при правке), `modes.ts`, `emotion.ts`.
 - `brain/tasks/` — реестр задач §20 (durable `data/tasks.json`), scope (правка vs новая), control, narrate.
 - `brain/` ещё: `app-channels.ts` (каналы программ + частота W4.2), `capabilities.ts` (паспорт возможностей),
   `profile.ts`, `consent.ts`, `response-cache.ts`, `knowledge/`, `trading/`, `mcp/`.
