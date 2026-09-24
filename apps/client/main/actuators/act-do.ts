@@ -16,6 +16,7 @@ import { DrawingOverlayError } from "../selection/overlay-error.js";
 import type { FoundTarget } from "./act-find.js";
 import { invoke } from "./ground.js";
 import { click, pressKey, typeText } from "./input.js";
+import { PASTE_FROM_CHARS, pasteText } from "./paste-text.js";
 
 const log = createLogger("actuator:act-do");
 
@@ -49,9 +50,17 @@ export interface ActParams {
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/** Физический клик по handle или точке (правый/двойной — только так: UIA-паттерна для них нет). */
+/**
+ * Физический клик (правый/двойной — только так: UIA-паттерна для них нет). Ревью 2026-09-24 (H-A1): цель, найденная
+ * ТОЧКОЙ (координаты/OCR), кликается В ЭТУ ТОЧКУ — клик по handle = центр элемента, а под точкой мог оказаться
+ * крупный родитель. По handle — только цель из снапшота (у неё точки нет, центр элемента и есть цель).
+ */
 async function physicalClick(f: FoundTarget, p: ActParams, opts: { button?: "left" | "right" | "middle"; count?: number }): Promise<ActDone> {
-  const target = f.handle ? ({ by: "handle", handle: f.handle } as const) : f.point ? ({ by: "coords", x: f.point.x, y: f.point.y, space: "screen" } as const) : null;
+  const target = f.point
+    ? ({ by: "coords", x: f.point.x, y: f.point.y, space: "screen" } as const)
+    : f.handle
+      ? ({ by: "handle", handle: f.handle } as const)
+      : null;
   if (!target) throw new Error(`«${f.name}»: ни handle, ни точки — кликнуть физически нечем`);
   const r = await click(target, "physical", p.restoreCursor, opts);
   const how = opts.button === "right" ? "правый клик" : (opts.count ?? 1) > 1 ? "двойной клик" : "физический клик";
@@ -66,8 +75,14 @@ async function doClick(f: FoundTarget, p: ActParams): Promise<ActDone> {
       return { did: `UIA invoke «${f.name}»`, physical: false };
     } catch (e) {
       if (e instanceof DrawingOverlayError) throw e;
+      // Ревью 2026-09-24 (H-T2): ТАЙМАУТ invoke ≠ «не сработал». Invoke Win32-кнопки блокирует до закрытия модального
+      // окна, которое сам и открыл; сайдкар исполняет мутации строго по очереди — «фолбэк» физическим кликом встал
+      // бы в очередь и нажал бы ещё раз после закрытия диалога. Исход неизвестен — второго клика нет.
+      if (/timeout|таймаут/i.test(msg(e))) {
+        throw new ActPartialError(`UIA invoke «${f.name}» ушёл, ответа нет (${msg(e).slice(0, 80)}) — исход неизвестен, не повторяй вслепую`);
+      }
       // invoke бросает ДО инжекции (паттерн не поддержан / элемент пропал) — повтор физическим кликом законен.
-      log.debug("act: invoke не удался — физический клик по handle", msg(e));
+      log.debug("act: invoke не удался — физический клик", msg(e));
       const r = await physicalClick(f, p, {});
       return { ...r, did: `${r.did} (UIA invoke не поддержан: ${msg(e).slice(0, 80)})` };
     }
@@ -82,7 +97,9 @@ async function doType(f: FoundTarget, p: ActParams): Promise<ActDone> {
   if (!target) throw new Error(`«${f.name}»: некуда кликнуть перед печатью (нет handle/точки)`);
   const r = await click(target, p.physical ? "physical" : "silent", p.restoreCursor);
   try {
-    await typeText(text);
+    // Ревью 2026-09-24 (H-T1): длинный текст — вставкой, иначе печать выходит за бюджет act и повторяется моделью.
+    if (text.length >= PASTE_FROM_CHARS) await pasteText(text);
+    else await typeText(text);
   } catch (e) {
     if (e instanceof DrawingOverlayError) throw e;
     throw new ActPartialError(`клик в «${f.name}» ушёл, печать не удалась: ${msg(e)} — исход неизвестен, не повторяй вслепую`);

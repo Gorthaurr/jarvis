@@ -32,7 +32,9 @@ export interface CommitDenial {
  * ЧИСТАЯ политика: нужно ли отказать команде `cmd`, если на переднем плане процесс `foreground`.
  * `via` — откуда пришла команда (для текста ошибки).
  */
-export function assessClientCommit(cmd: ActionCommand, foreground: string | null, via: "bridge" | "replay"): CommitDenial | null {
+export function assessClientCommit(cmd: ActionCommand, foregroundNow: string | null, via: "bridge" | "replay"): CommitDenial | null {
+  // Ревью 2026-09-24 (H-S1): act с app САМ фокусирует это окно — программа коммита та, что в app, а не текущий передний план.
+  const foreground = cmd.kind === "gui.act" && cmd.app?.trim() ? cmd.app.trim() : foregroundNow;
   if (!foreground) return null;
   const what = commitOf(cmd);
   if (!what) return null;

@@ -47,12 +47,24 @@ function describe(v: ActVerify): string {
 }
 
 /**
+ * Ревью 2026-09-24 (H-V1): признак, видимый ДО действия, исход не доказывает («Настройки» на вкладке «Настройки»,
+ * кнопка «Принять», которая и была). Проверяем его один раз до действия: наступил уже → итоговое «met» не
+ * засчитывается (вердикт unchecked с объяснением). Сенсор не смог ответить → считаем, что не было (не мешаем сверке).
+ */
+export async function precheckVerify(verify: ActVerify | undefined, deadline: number): Promise<boolean> {
+  const cond = verify ? verifyCondition(verify) : null;
+  if (!cond || deadline - Date.now() < VERIFY_MIN_MS * 4) return false;
+  const r = await waitFor(cond, VERIFY_MIN_MS, VERIFY_POLL_MS);
+  return r.met === true && r.unknown !== true;
+}
+
+/**
  * Сверить исход: наблюдение-дельта всегда; признак — если задан. `deadline` — абсолютное время конца бюджета
  * act: ожидание признака клампится к остатку, чтобы серверный потолок не превратил успех в таймаут.
  */
 export async function verifyOutcome(
   verify: ActVerify | undefined,
-  ctx: { before?: UiFingerprint; clickPoint?: { x: number; y: number }; deadline: number },
+  ctx: { before?: UiFingerprint; clickPoint?: { x: number; y: number }; deadline: number; preMet?: boolean },
 ): Promise<ActVerdict> {
   const observation = await observeAfterAction({ settleMs: 350, clickPoint: ctx.clickPoint, before: ctx.before });
   const cond = verify ? verifyCondition(verify) : null;
@@ -72,6 +84,13 @@ export async function verifyOutcome(
   const timeoutMs = Math.min(want, left);
   const r = await waitFor(cond, timeoutMs, VERIFY_POLL_MS);
   const label = describe(verify!);
+  if (r.met && ctx.preMet) {
+    return {
+      verified: "unchecked",
+      detail: `признак (${label}) был виден ещё ДО действия — исход он не доказывает; выбери меняющийся признак (новый текст или gone:true)`,
+      observation,
+    };
+  }
   if (r.met) return { verified: "met", detail: `признак наступил (${label}) за ${r.elapsedMs} мс: ${r.detail}`, observation };
   if (r.unknown) return { verified: "unchecked", detail: `сенсор не смог проверить признак (${label}): ${r.detail}`, observation };
   return {

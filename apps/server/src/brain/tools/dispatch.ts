@@ -688,11 +688,22 @@ async function dispatchToolCore(
   // W4 «Руки»: act судится тем же гейтом — do:key Enter ≡ input_key, клик по подписи-коммиту ≡ input_click по тексту.
   if (name === "ui_invoke" || name === "input_key" || name === "input_click" || name === "act") {
     const sessObj = ctx.session as unknown as object;
+    // Ревью 2026-09-24 (H-S1): act с `app` САМ фокусирует это окно ПОСЛЕ гейта — судить по текущему переднему
+    // плану значило пропустить «act{app:"Telegram", target:"Отправить"}» при Chrome спереди без вопроса владельцу.
+    // Программа act — та, что в `app`; подпись цели по handle — из последнего снапшота (как у ui_invoke).
+    const actApp = name === "act" && typeof input.app === "string" && input.app.trim() ? input.app.trim() : null;
+    const actHandle =
+      name === "act" && input.target && typeof input.target === "object" ? (input.target as { handle?: unknown }).handle : undefined;
     const risk = assessGuiCommit({
-      foregroundProcess: parseForegroundProcess(ctx.systemContext?.() ?? ""),
+      foregroundProcess: actApp ?? parseForegroundProcess(ctx.systemContext?.() ?? ""),
       tool: name,
       input,
-      label: name === "ui_invoke" ? uiHandleLabel(sessObj, input.handle) : undefined,
+      label:
+        name === "ui_invoke"
+          ? uiHandleLabel(sessObj, input.handle)
+          : name === "act"
+            ? uiHandleLabel(sessObj, typeof actHandle === "string" ? Number(actHandle) : actHandle)
+            : undefined,
     });
     if (risk) {
       if (!ctx.confirm) return err(`${name}: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);

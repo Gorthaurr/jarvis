@@ -18,12 +18,13 @@ const st = vi.hoisted(() => ({
   snapshotCalls: 0,
   ocr: { text: "", lines: [] as Array<{ text: string; x: number; y: number; w: number; h: number }>, mapping: { boundsX: 0, boundsY: 0, scale: 0.5 } as { boundsX: number; boundsY: number; scale: number } | undefined },
   ocrCalls: 0,
-  groundAt: async (_x: number, _y: number): Promise<{ handle: string }> => ({ handle: "77" }),
+  groundAt: async (_x: number, _y: number): Promise<{ handle: string; bbox?: { x: number; y: number; w: number; h: number } }> => ({ handle: "77", bbox: { x: 0, y: 0, w: 80, h: 30 } }),
   invoke: vi.fn(async (_t: unknown, _p: string, _v?: string): Promise<void> => undefined),
   click: vi.fn(async (_t: unknown, _m?: string, _r?: boolean, _o?: unknown): Promise<{ screenX: number; screenY: number } | undefined> => undefined),
   typeText: vi.fn(async (_t: string): Promise<void> => undefined),
   pressKey: vi.fn(async (_c: string): Promise<void> => undefined),
-  wait: async (): Promise<{ met: boolean; elapsedMs: number; polls: number; detail: string; unknown?: boolean }> => ({ met: true, elapsedMs: 120, polls: 1, detail: "видно «Отправлено»" }),
+  pasteText: vi.fn(async (_t: string): Promise<void> => undefined),
+  wait: async (_timeoutMs?: number): Promise<{ met: boolean; elapsedMs: number; polls: number; detail: string; unknown?: boolean }> => ({ met: true, elapsedMs: 120, polls: 1, detail: "видно «Отправлено»" }),
   waitCalls: [] as unknown[],
   observation: { via: "a11y", text: "+ появилось «Отправлено»", delta: true, changed: true } as unknown,
   focusWindow: async (_o: unknown): Promise<{ focused: boolean; hwnd: number; title: string }> => ({ focused: true, hwnd: 1, title: "Telegram" }),
@@ -46,7 +47,7 @@ vi.mock("./sensors-cheap.js", () => ({
   },
   waitFor: async (cond: unknown, timeoutMs: number) => {
     st.waitCalls.push({ cond, timeoutMs });
-    return st.wait();
+    return st.wait(timeoutMs);
   },
 }));
 vi.mock("./input.js", () => ({
@@ -54,6 +55,7 @@ vi.mock("./input.js", () => ({
   typeText: (t: string) => st.typeText(t),
   pressKey: (c: string) => st.pressKey(c),
 }));
+vi.mock("./paste-text.js", () => ({ PASTE_FROM_CHARS: 80, pasteText: (t: string) => st.pasteText(t) }));
 vi.mock("./observe.js", () => ({
   captureUiFingerprint: async () => ({ lines: ["Button: Отправить"] }),
   observeAfterAction: async () => st.observation,
@@ -75,12 +77,14 @@ beforeEach(() => {
   st.snapshotCalls = 0;
   st.ocr = { text: "", lines: [], mapping: { boundsX: 0, boundsY: 0, scale: 0.5 } };
   st.ocrCalls = 0;
-  st.groundAt = async () => ({ handle: "77" });
+  st.groundAt = async () => ({ handle: "77", bbox: { x: 0, y: 0, w: 80, h: 30 } });
   st.invoke.mockReset();
   st.click.mockReset();
   st.typeText.mockReset();
   st.pressKey.mockReset();
-  st.wait = async () => ({ met: true, elapsedMs: 120, polls: 1, detail: "видно «Отправлено»" });
+  // Предпроверка (500 мс, до действия) — признака ещё нет; сверка после действия — признак наступил.
+  st.wait = async (timeoutMs?: number) =>
+    (timeoutMs ?? 0) <= 500 ? { met: false, elapsedMs: 500, polls: 1, detail: "ещё нет" } : { met: true, elapsedMs: 120, polls: 1, detail: "видно «Отправлено»" };
   st.waitCalls = [];
   st.observation = { via: "a11y", text: "+ появилось «Отправлено»", delta: true, changed: true };
   st.focusWindow = async () => ({ focused: true, hwnd: 1, title: "Telegram" });
@@ -95,7 +99,7 @@ describe("act — поиск по снапшоту UIA", () => {
     expect(r.found).toMatchObject({ via: "snapshot", name: "Отправить", role: "Button", handle: "11" });
     expect(r.verified).toBe("met");
     expect(st.click).not.toHaveBeenCalled();
-    expect(st.waitCalls[0]).toMatchObject({ cond: { kind: "text", text: "Отправлено", gone: false }, timeoutMs: 4000 });
+    expect(st.waitCalls).toContainEqual(expect.objectContaining({ cond: expect.objectContaining({ kind: "text", text: "Отправлено", gone: false }), timeoutMs: 4000 }));
   });
 
   it("две РАВНЫЕ кнопки «Отправить» → ошибка с кандидатами, ничего не нажато", async () => {
@@ -130,7 +134,7 @@ describe("act — ступень OCR и точка", () => {
     let at: { x: number; y: number } | null = null;
     st.groundAt = async (x, y) => {
       at = { x, y };
-      return { handle: "77" };
+      return { handle: "77", bbox: { x: 0, y: 0, w: 80, h: 30 } };
     };
     const r = await act({ kind: "gui.act", target: "Играть" }, OPTS);
     expect(at).toEqual({ x: 240, y: 120 });
@@ -245,5 +249,59 @@ describe("чистые функции", () => {
     expect(verifyCondition({ element: { role: "Window", name: "Сохранить" }, gone: true })).toEqual({ kind: "ui", role: "Window", name: "Сохранить", nameMode: "substring", gone: true });
     expect(verifyCondition({ title: "Блокнот" })).toEqual({ kind: "window", titleContains: "Блокнот", gone: false });
     expect(verifyCondition({ timeoutMs: 3000 })).toBeNull();
+  });
+});
+
+
+/** Ревью 2026-09-24: дефекты act, найденные до первого живого прогона (H-A1, H-A2, H-T1, H-T2, H-V1). */
+describe("act — фиксы ревью 2026-09-24", () => {
+  it("H-A1: под точкой крупный контейнер → физический клик В ТОЧКУ, не invoke по handle и не центр контейнера", async () => {
+    st.groundAt = async () => ({ handle: "99", bbox: { x: 0, y: 0, w: 1343, h: 756 } });
+    st.click.mockResolvedValue({ screenX: 500, screenY: 400 });
+    const r = await act({ kind: "gui.act", target: { x: 500, y: 400, space: "screen" } }, OPTS);
+    expect(st.invoke).not.toHaveBeenCalled();
+    expect(st.click.mock.calls[0]?.[0]).toEqual({ by: "coords", x: 500, y: 400, space: "screen" });
+    expect(r.found?.note ?? "").toMatch(/контейнер/);
+  });
+
+  it("H-A1: invoke по handle не поддержан → физический фолбэк кликает в найденную ТОЧКУ, а не в центр элемента", async () => {
+    st.invoke.mockRejectedValueOnce(new Error("не поддерживает InvokePattern"));
+    st.click.mockResolvedValue({ screenX: 500, screenY: 400 });
+    await act({ kind: "gui.act", target: { x: 500, y: 400, space: "screen" } }, OPTS);
+    expect(st.click).toHaveBeenCalledTimes(1);
+    expect(st.click.mock.calls[0]?.[0]).toEqual({ by: "coords", x: 500, y: 400, space: "screen" });
+  });
+
+  it("H-A2: на переднем плане окно самого Джарвиса (pid = наш) → честный отказ, ничего не нажато", async () => {
+    const realPid = process.pid;
+    Object.defineProperty(process, "pid", { value: 1, configurable: true }); // мок снапшота отдаёт pid 1
+    try {
+      await expect(act({ kind: "gui.act", target: "Отправить" }, OPTS)).rejects.toThrow(/окно самого Джарвиса/);
+      expect(st.invoke).not.toHaveBeenCalled();
+      expect(st.click).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, "pid", { value: realPid, configurable: true });
+    }
+  });
+
+  it("H-T2: invoke упал по ТАЙМАУТУ → исход неизвестен (ActPartialError), второго физического клика нет", async () => {
+    st.invoke.mockRejectedValueOnce(new Error("sidecar timeout op=invoke"));
+    await expect(act({ kind: "gui.act", target: "Отправить" }, OPTS)).rejects.toBeInstanceOf(ActPartialError);
+    expect(st.click).not.toHaveBeenCalled();
+  });
+
+  it("H-T1: длинный текст вставляется (paste), а не печатается посимвольно", async () => {
+    const long = "а".repeat(300);
+    st.click.mockResolvedValue({ screenX: 1, screenY: 1 });
+    await act({ kind: "gui.act", target: { text: "Поиск", role: "Edit" }, do: "type", text: long }, OPTS);
+    expect(st.pasteText).toHaveBeenCalledWith(long);
+    expect(st.typeText).not.toHaveBeenCalled();
+  });
+
+  it("H-V1: признак был виден ещё ДО действия → итог unchecked, а не «подтверждено»", async () => {
+    st.wait = async () => ({ met: true, elapsedMs: 50, polls: 1, detail: "видно «Настройки»" });
+    const r = await act({ kind: "gui.act", target: "Отправить", verify: { text: "Настройки" } }, OPTS);
+    expect(r.verified).toBe("unchecked");
+    expect(r.detail).toMatch(/ДО действия/);
   });
 });

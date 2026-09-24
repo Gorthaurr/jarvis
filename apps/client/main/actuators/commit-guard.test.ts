@@ -74,6 +74,9 @@ describe("W4 act — клиентский рубеж (SDK-мост / репле�
     expect(assessClientCommit({ kind: "gui.act", target: "Отправить", do: "type", text: "x" }, "Telegram", "bridge")).toBeNull();
     expect(assessClientCommit({ kind: "gui.act", target: "Настройки" }, "Telegram", "bridge")).toBeNull();
     expect(assessClientCommit({ kind: "gui.act", target: "Отправить" }, "notepad", "bridge")).toBeNull();
+    // H-S1 (ревью 2026-09-24): act с app судится по программе в app — Chrome спереди не прикрывает отправку в Telegram.
+    expect(assessClientCommit({ kind: "gui.act", target: "Отправить", app: "Telegram" }, "chrome", "bridge")).not.toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", target: "Отправить", app: "notepad" }, "Telegram", "bridge")).toBeNull();
   });
 
   it("guardedDispatch: act «Отправить» при Telegram → denied без dispatch; act «Настройки» проходит", async () => {

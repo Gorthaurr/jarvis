@@ -84,10 +84,25 @@ function toScreen(x: number, y: number, space?: "screen"): { x: number; y: numbe
   return m ? { x: m.boundsX + x / m.scale, y: m.boundsY + y / m.scale } : { x, y };
 }
 
-/** Ступень «точка»: элемент под точкой → handle; ничего нет → сама точка (физический путь). */
+/**
+ * Ревью 2026-09-24 (H-A1): сайдкар отдаёт под точкой actionable-предка, а если такого нет — САМ элемент, и в
+ * играх/Electron это контейнер на пол-окна (живая проба: Group 1343×756 без имени). Клик по его handle =
+ * клик в ЦЕНТР контейнера, а не в найденную точку, с отчётом «нажал». Крупный элемент под точкой — не кнопка:
+ * берём только саму точку. Порог в физических пикселях (bbox сайдкара) — с запасом на масштаб 150–200 %.
+ */
+export const MAX_ACTIONABLE_W = 600;
+export const MAX_ACTIONABLE_H = 300;
+export function looksLikeContainer(bbox: { w: number; h: number } | undefined): boolean {
+  return !!bbox && (bbox.w > MAX_ACTIONABLE_W || bbox.h > MAX_ACTIONABLE_H);
+}
+
+/** Ступень «точка»: элемент под точкой → handle; ничего нет или это контейнер → сама точка (физический путь). */
 async function findAtPoint(p: { x: number; y: number }, via: "point" | "ocr", name: string): Promise<FoundTarget> {
   try {
     const g = await groundAtPoint(p.x, p.y);
+    if (looksLikeContainer(g.bbox)) {
+      return { via, name, point: p, note: `под точкой контейнер ${g.bbox.w}×${g.bbox.h}, не кнопка: действие пойдёт физическим кликом в саму точку` };
+    }
     return { via, handle: g.handle, name, point: p };
   } catch (e) {
     log.debug("act-find: под точкой нет UIA-элемента — физический путь", e instanceof Error ? e.message : String(e));
@@ -98,6 +113,11 @@ async function findAtPoint(p: { x: number; y: number }, via: "point" | "ocr", na
 /** Ступень «снапшот»: лучший по баллу; равных ≥2 → ошибка с кандидатами; ничего → null + что видно. */
 async function findInSnapshot(q: Query): Promise<{ found: FoundTarget | null; seen: string[]; truncated: boolean }> {
   const snap = await uiSnapshot(undefined, SNAPSHOT_MAX_ITEMS);
+  // Ревью 2026-09-24 (H-A2): без app поиск идёт в ПЕРЕДНЕМ окне, а в текстовом чате им становится окно самого
+  // Джарвиса — act жал бы его кнопки. Своё окно целью не бывает: честно просим указать, в какой программе искать.
+  if (snap.pid === process.pid) {
+    throw new ActFindError("На переднем плане окно самого Джарвиса — укажи app (в какой программе искать цель); свои кнопки я не нажимаю.");
+  }
   const scored = snap.items.map((it) => ({ it, s: scoreItem(it, q) })).filter((x) => x.s > 0);
   const seen = snap.items.slice(0, CANDIDATE_CAP).map(label);
   if (scored.length === 0) return { found: null, seen, truncated: snap.truncated };

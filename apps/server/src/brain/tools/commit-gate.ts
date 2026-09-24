@@ -140,7 +140,9 @@ export function assessGuiCommit(a: {
     }
     if (verb !== "click" && verb !== "double") return null;
     const t = a.input.target;
-    const text = typeof t === "string" ? t : t && typeof t === "object" ? String((t as { text?: unknown }).text ?? "") : "";
+    const own = typeof t === "string" ? t : t && typeof t === "object" ? String((t as { text?: unknown }).text ?? "") : "";
+    // H-S1: цель по handle судится подписью элемента из последнего снапшота (label) — иначе «Отправить» по handle шло мимо гейта.
+    const text = own.trim() ? own : (a.label ?? "");
     return text && COMMIT_WORDS_RE.test(text) ? mk(`клик «${text.trim().slice(0, 60)}»`) : null;
   }
   const target = (a.input.target && typeof a.input.target === "object" ? (a.input.target as Record<string, unknown>) : {}) as Record<string, unknown>;

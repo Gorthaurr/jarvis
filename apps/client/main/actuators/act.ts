@@ -18,7 +18,7 @@ import type { ActionCommand } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
 import { type FoundTarget, findTarget } from "./act-find.js";
 import { type ActDone, performAct } from "./act-do.js";
-import { type ActVerdict, verifyOutcome } from "./act-verify.js";
+import { type ActVerdict, precheckVerify, verifyOutcome } from "./act-verify.js";
 import { focusApp } from "./apps.js";
 import { captureUiFingerprint } from "./observe.js";
 import { focusWindow } from "./windows.js";
@@ -75,9 +75,10 @@ export async function act(cmd: ActCommand, opts: { restoreCursor: boolean }): Pr
   log.info("act", { verb, via: found?.via, name: found?.name, app: focused });
   // Снимок «до» — база дельты; на UIA-слепом окне OCR той же области, что и «после» (нужна точка).
   const before = await captureUiFingerprint(found?.point);
+  const preMet = await precheckVerify(cmd.verify, deadline); // H-V1: признак, видимый ДО действия, исход не доказывает
   const done = await performAct(found, verb, { text: cmd.text, combo: cmd.combo, physical: cmd.physical, restoreCursor: opts.restoreCursor });
   const clickPoint = found?.point ?? (done.screenX !== undefined && done.screenY !== undefined ? { x: done.screenX, y: done.screenY } : undefined);
-  const verdict = await verifyOutcome(cmd.verify, { before, clickPoint, deadline });
+  const verdict = await verifyOutcome(cmd.verify, { before, clickPoint, deadline, preMet });
   return {
     ...(found ? { found: { via: found.via, name: found.name, role: found.role, handle: found.handle, note: found.note } } : {}),
     ...(focused ? { focused } : {}),

@@ -13,7 +13,16 @@
  */
 import type { ActionResult } from "@jarvis/protocol";
 import type { ToolResult } from "../dispatch.js";
-import { type PostActionObservation, applyVeil, capResultBody, err, formatObservationBlock, ok, stripVeilFields } from "../dispatch-util.js";
+import {
+  type PostActionObservation,
+  applyVeil,
+  capResultBody,
+  err,
+  formatObservationBlock,
+  ok,
+  stripVeilFields,
+  wrapUntrusted,
+} from "../dispatch-util.js";
 
 interface ActData {
   found?: { via?: string; name?: string; role?: string; handle?: string; note?: string };
@@ -43,6 +52,13 @@ export function verdictLine(verified: ActData["verified"], detail: string | unde
 /** Успех/частичный провал act → ToolResult; прочие ошибки (поиск, фокус, вуаль, канал) → null (generic-путь). */
 export function actResult(result: ActionResult): ToolResult | null {
   if (!result.ok) {
+    // Ревью 2026-09-24 (H-T1): синтетический ТАЙМАУТ act не значит «не сделано» — клиент мог ещё печатать/кликать.
+    // Как у skill_execute/input_batch: исход неизвестен, иначе модель повторит и в поле окажется текст дважды.
+    if (result.error?.code === "timeout") {
+      const out = err(`act: время вышло (${result.error.message ?? "timeout"}). ИСХОД НЕИЗВЕСТЕН — действие могло уйти; сверь состояние (look) перед повтором.`);
+      out.uncertain = true;
+      return out;
+    }
     if (result.error?.code !== "runtime" || result.stepActionInjected !== true) return null;
     const out = err(`act: ${result.error.message} ИСХОД НЕИЗВЕСТЕН — не повторяй вслепую, сверь состояние.`);
     out.uncertain = true;
@@ -52,7 +68,10 @@ export function actResult(result: ActionResult): ToolResult | null {
   const { observation, ...rest } = raw;
   const head = JSON.stringify(stripVeilFields(rest as Record<string, unknown>));
   const obs = observation && typeof observation.text === "string" ? `\n${formatObservationBlock(observation, "Наблюдение сразу после действия")}` : "";
-  const out = ok(capResultBody(`${head}\n${verdictLine(raw.verified, raw.detail)}${obs}`));
+  // Ревью 2026-09-24 (H-S2, M11): имя найденной цели, заголовок окна и detail (там сырой OCR экрана) — текст ЭКРАНА,
+  // влияемый чужой страницей/сообщением. Он идёт в <untrusted_content>; снаружи — только наш вердикт.
+  const facts = wrapUntrusted("act", `${head}${raw.detail ? `\nпояснение сенсора: ${raw.detail}` : ""}`);
+  const out = ok(capResultBody(`${verdictLine(raw.verified, undefined)}\n${facts}${obs}`));
   out.data = rest;
   const obsStrong = Boolean(observation) && observation?.weak !== true;
   out.observed = raw.verified === "met" || (raw.verified === "unchecked" && obsStrong);
