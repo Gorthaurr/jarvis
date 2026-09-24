@@ -534,3 +534,30 @@ describe("эхо ошибки канала не выдаём за ответ м�
     expect(classifySubscriptionError(LIMIT).human).toMatch(/лимит подписки/);
   });
 });
+
+// T-F13 (ревью 2026-09-24): каждый ход по подписке писал полный транскрипт в ~/.claude/projects/*sdk-cwd —
+// 569 сессий, 45 МБ, засоряли историю Claude Code владельца. SDK умеет не персистить (persistSession).
+// Реверт-проверка: убрать `persistSession: false` из опций run()/warmup() → кейсы падают.
+describe("SubscriptionLlmProvider: транскрипты хода не пишутся на диск (T-F13)", () => {
+  it("рабочий вызов отдаёт SDK persistSession: false", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(sdk.lastOptions?.persistSession).toBe(false);
+  });
+
+  it("сессия задачи (sessionKey) — тоже без персиста", async () => {
+    const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, sessionKey: "task-1" });
+    expect(sdk.lastOptions?.persistSession).toBe(false);
+  });
+
+  it("прогрев поднимает CLI с ТЕМИ ЖЕ опциями — persistSession: false", async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test"; // warmup работает только у живого канала
+    const startup = vi.fn(async (_opts?: unknown) => ({ close: () => {} }));
+    const sdk = Object.assign(fakeSdk([]), { startup });
+    await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).warmup();
+    expect(startup).toHaveBeenCalledTimes(1);
+    const arg = startup.mock.calls[0]?.[0] as unknown as { options: Record<string, unknown> };
+    expect(arg.options.persistSession).toBe(false);
+  });
+});

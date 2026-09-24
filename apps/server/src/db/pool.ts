@@ -32,7 +32,14 @@ interface EmbeddedPg {
 let backend: QueryClient | null = null;
 let embedded: EmbeddedPg | null = null;
 let closeBackend: (() => Promise<void>) | null = null;
-let initTried = false;
+/**
+ * ОДИН промис инициализации на всех (ревью 2026-09-24, T-F8). Был флаг `initTried`: первый вызов
+ * ставил его и ждал подъёма PGlite/пула, а КОНКУРЕНТНЫЕ вызовы видели флаг и получали `backend`, который
+ * ещё null, — то есть «БД нет». На boot так и вышло: сид общей библиотеки шёл параллельно с прогревом
+ * recall/бэкфиллом, все 11 навыков легли в память процесса, а лог рапортовал «засеяно 11». Теперь все
+ * ждут ОДИН и тот же подъём; провал инициализации по-прежнему не ретраится (промис с null).
+ */
+let initPromise: Promise<QueryClient | null> | null = null;
 let databaseUrl: string | undefined;
 
 /** Тест-сем: внедрить клиент (PGlite) для интеграционных тестов БД. Приоритет над бэкендом. */
@@ -61,9 +68,12 @@ function pgliteDataDir(url: string): string {
 async function getBackend(): Promise<QueryClient | null> {
   if (testClient) return testClient;
   if (backend) return backend;
-  if (initTried) return backend;
-  initTried = true;
+  if (!initPromise) initPromise = initBackend();
+  return initPromise;
+}
 
+/** Собственно подъём бэкенда — зовётся РОВНО один раз (см. initPromise). */
+async function initBackend(): Promise<QueryClient | null> {
   if (!databaseUrl) {
     log.warn("DATABASE_URL не задан — БД-операции работают в no-op режиме");
     return null;
@@ -170,7 +180,7 @@ export async function closeDb(): Promise<void> {
     backend = null;
     embedded = null;
     closeBackend = null;
-    initTried = false;
+    initPromise = null;
     dbReadyCache = null; // сброс health-кэша — иначе stale ready пережил бы закрытие
   }
 }

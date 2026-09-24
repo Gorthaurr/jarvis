@@ -343,3 +343,119 @@ describe("ambient: сигнал, не прозвучавший из очеред
     expect(tts2.texts).toEqual(["Вам письмо от Германа."]);
   });
 });
+
+// ── отмена УЖЕ НАЧАТОГО синтеза (ревью 2026-09-24, B-F5) ────────────
+
+/**
+ * Стрим «как Yandex»: чанк отдаётся только по команде теста, а после cancel() НЕ приходит НИЧЕГО — ни
+ * чанк, ни onDone, ни onError (так устроен `YandexHttpStream`: `_cancelled` глушит все колбэки).
+ * TestTtsStream выше этого не умеет — он зовёт onDone и после отмены, и именно поэтому прогон не
+ * видел дефект: исход «не прозвучало» приходил из onDone мока, которого в бою нет.
+ */
+class HeldTtsStream implements TtsStream {
+  private chunkCb?: (c: TtsChunk) => void;
+  private doneCb?: () => void;
+  private _cancelled = false;
+  onChunk(cb: (c: TtsChunk) => void): void {
+    this.chunkCb = cb;
+  }
+  onError(): void {}
+  onDone(cb: () => void): void {
+    this.doneCb = cb;
+  }
+  cancel(): void {
+    this._cancelled = true;
+  }
+  get cancelled(): boolean {
+    return this._cancelled;
+  }
+  /** Синтез готов: отдаём чанк — но только если нас не отменили (как в бою). */
+  emitChunk(): void {
+    if (this._cancelled) return;
+    this.chunkCb?.({ audio: new ArrayBuffer(8), seq: 0, last: true });
+    this.doneCb?.();
+  }
+}
+class HeldTtsProvider implements ITtsProvider {
+  readonly live = false;
+  readonly texts: string[] = [];
+  readonly streams: HeldTtsStream[] = [];
+  synthesize(text: string): TtsStream {
+    this.texts.push(text);
+    const s = new HeldTtsStream();
+    this.streams.push(s);
+    return s;
+  }
+}
+
+describe("B-F5: отменённый синтез сообщает «не прозвучало», даже если стрим после отмены молчит", () => {
+  it("speakQueued(retriable) → синтез начат → dispose (сокет закрылся) → onOutcome(false) ровно один раз", async () => {
+    const tts = new HeldTtsProvider();
+    const pipe = new VoicePipeline({
+      stt: new SilentSttProvider(),
+      tts,
+      onUserTurn: async () => ({ voice: "" }),
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      followupMs: 50,
+    });
+    const onOutcome = vi.fn();
+    expect(pipe.speakQueued("Пора пить таблетки", true, { retriable: true, onOutcome })).toBe(true);
+    expect(tts.texts).toEqual(["Пора пить таблетки"]); // канал свободен → синтез начат сразу
+    expect(onOutcome).not.toHaveBeenCalled(); // ни байта ещё не ушло
+
+    pipe.dispose(); // обрыв WS: пайплайн умер посреди синтеза
+    expect(onOutcome).toHaveBeenCalledTimes(1);
+    expect(onOutcome).toHaveBeenLastCalledWith(false);
+
+    tts.streams[0]!.emitChunk(); // отменённый стрим молчит, а если бы и ответил — исход уже закрыт
+    expect(onOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it("напоминание, чей синтез оборвал закрывшийся сокет, снова ждёт доставки и звучит в следующей сессии", async () => {
+    const tts = new HeldTtsProvider();
+    const pipe = new VoicePipeline({
+      stt: new SilentSttProvider(),
+      tts,
+      onUserTurn: async () => ({ voice: "" }),
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      followupMs: 50,
+    });
+    const svc = new ReminderService(new ReminderStore(tempDir()));
+    await svc.start();
+    svc.registerSpeaker("s1", "u1", urgentSpeaker(pipe));
+
+    svc.add({ sessionId: "s1", userId: "u1", text: "Позвонить маме", fireAt: Date.now() + 1000 });
+    vi.advanceTimersByTime(1000);
+    expect(tts.texts).toEqual(["Позвонить маме"]); // синтез НАЧАТ, звука ещё нет
+    expect(svc.list("u1")).toHaveLength(0); // источник пометил «принято»
+
+    pipe.dispose(); // лог 24.09 12:18:31: «доставлено» в закрытый сокет
+    svc.unregisterSpeaker("s1");
+    expect(svc.list("u1").map((r) => r.text)).toEqual(["Позвонить маме"]); // честно: не прозвучало
+
+    const tts2 = new TestTtsProvider();
+    svc.registerSpeaker("s2", "u1", urgentSpeaker(makePipe(tts2)));
+    await settle();
+    expect(tts2.texts).toEqual(["Позвонить маме"]);
+  });
+
+  it("АНТИ-ОВЕРФИТ: первый чанк уже ушёл клиенту → отмена исход не переписывает (прозвучало)", () => {
+    const tts = new HeldTtsProvider();
+    const pipe = new VoicePipeline({
+      stt: new SilentSttProvider(),
+      tts,
+      onUserTurn: async () => ({ voice: "" }),
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      followupMs: 50,
+    });
+    const onOutcome = vi.fn();
+    pipe.speakQueued("Забрать посылку", true, { retriable: true, onOutcome });
+    tts.streams[0]!.emitChunk();
+    expect(onOutcome).toHaveBeenLastCalledWith(true);
+    pipe.dispose();
+    expect(onOutcome).toHaveBeenCalledTimes(1); // false поверх true не приходит
+  });
+});

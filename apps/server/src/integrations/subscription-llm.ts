@@ -487,7 +487,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
         applySandboxEnv(env);
         // Прогревать нужно ТЕМИ ЖЕ опциями, с какими пойдёт рабочий вызов: иначе прогреется не тот
         // подпроцесс (другой cwd/набор настроек), и первый настоящий ход всё равно заплатит стартом.
-        const warm = (await start({ options: { env, settingSources: [], strictMcpConfig: true, cwd: sdkSandboxDir() } })) as
+        const warm = (await start({ options: { env, settingSources: [], strictMcpConfig: true, cwd: sdkSandboxDir(), persistSession: false } })) as
           | { close?: () => void }
           | undefined;
         // 🔴 Хендл прогрева ОДНОРАЗОВЫЙ и жёстко связан с опциями, которыми его создали, а у нас
@@ -582,6 +582,11 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       settingSources: [],
       strictMcpConfig: true,
       cwd: sdkSandboxDir(),
+      // T-F13 (ревью 2026-09-24): НЕ писать транскрипт хода в ~/.claude/projects/*sdk-cwd. Каждый ход по
+      // подписке оставлял там полный JSONL (569 сессий, 45 МБ) — засорял историю Claude Code владельца
+      // (resume/поиск по сессиям). Нам транскрипт не нужен: сессия живёт одной query() на задачу и не
+      // возобновляется (resume не используем). sdk.d.ts: «When false, disables session persistence to disk».
+      persistSession: false,
       // W2: с ключом сессии цикл живёт всю задачу (наш хендлер отдаёт результаты петли); без ключа —
       // разовый вызов: SDK возвращает первый ход и останавливается, как в волне G.
       maxTurns: key ? SESSION_MAX_TURNS : 1,

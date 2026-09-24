@@ -419,11 +419,18 @@ function splitFrontmatter(content: string): { frontmatter: SkillFrontmatter; bod
 
 // ── CRUD (pg; no-op без БД) ──────────────────────────────────
 
+/**
+ * Результат сохранения навыка. `persisted` — запись РЕАЛЬНО легла в БД (ревью 2026-09-24, T-F8): без этого
+ * признака вызывающий не отличал «сохранил» от «положил в память процесса» (БД ещё поднималась или запрос
+ * упал), и сид общей библиотеки рапортовал «засеяно 11» при нуле строк в таблице.
+ */
+export type SavedSkillRecord = SkillRecord & { persisted: boolean };
+
 /** Сохранить навык: пересчитать steps из content_md и записать (§8). */
 export async function saveSkill(
   userId: string,
   contentMd: string,
-): Promise<SkillRecord | null> {
+): Promise<SavedSkillRecord | null> {
   const parsed = parseSkillMd(contentMd);
   const id = String(parsed.frontmatter.id ?? "");
   const version = Number(parsed.frontmatter.version ?? 1);
@@ -464,7 +471,7 @@ export async function saveSkill(
       log.debug("saveSkill: БД нет — навык сохранён в памяти процесса (фолбэк)");
     }
   }
-  return record;
+  return { ...record, persisted: res !== null };
 }
 
 /** Прочитать навык по id (null если БД недоступна/не найден). */
@@ -560,10 +567,13 @@ export async function getSkillMerged(userId: string, id: string): Promise<SkillR
  * Идемпотентно залить курируемый стартовый набор в ОБЩУЮ библиотеку (Фаза 1, boot-seed). Каждый
  * элемент — канонический content_md (как `serializeLearnedSkill`). Перезаписываем ТОЛЬКО если в общей
  * библиотеке нет навыка с этим id ИЛИ сид-версия НОВЕЕ (не затираем то, что мог улучшить promote).
- * Возвращает число записанных. Сбой отдельного навыка не валит остальные (best-effort).
+ * Возвращает число записанных В БД (не в память процесса — T-F8). Сбой отдельного навыка не валит остальные (best-effort).
  */
 export async function seedSharedSkills(mdContents: readonly string[]): Promise<number> {
   let written = 0;
+  // T-F8 (ревью 2026-09-24): «засеяно» считаем ТОЛЬКО по реальным записям в БД. Навык, легший лишь в
+  // память процесса, после рестарта исчезнет — это не засев, и молчать о нём нельзя.
+  const memoryOnly: string[] = [];
   for (const md of mdContents) {
     try {
       const { frontmatter } = parseSkillMd(md);
@@ -572,15 +582,25 @@ export async function seedSharedSkills(mdContents: readonly string[]): Promise<n
       if (!id) continue;
       const existing = await getSkill(SHARED_USER_ID, id);
       if (existing && existing.version >= seedVer) continue; // в общей уже свежее — не трогаем
-      if (await saveSkill(SHARED_USER_ID, md)) {
-        await writeSkillFile(id, md);
-        written += 1;
+      const saved = await saveSkill(SHARED_USER_ID, md);
+      if (!saved) continue;
+      if (!saved.persisted) {
+        memoryOnly.push(id);
+        continue;
       }
+      await writeSkillFile(id, md);
+      written += 1;
     } catch (e) {
       log.warn("seedSharedSkills: пропуск навыка", e instanceof Error ? e.message : String(e));
     }
   }
   if (written > 0) log.info(`общая библиотека навыков: засеяно ${written}`);
+  if (memoryOnly.length > 0) {
+    log.warn("общая библиотека навыков: НЕ записаны в БД — живут только в памяти процесса и пропадут при рестарте", {
+      count: memoryOnly.length,
+      ids: memoryOnly.slice(0, 20),
+    });
+  }
   return written;
 }
 

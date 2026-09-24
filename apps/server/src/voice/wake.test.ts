@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isNoiseOnly, isWakeAddressed, stripWake, wakeNearMissScore } from "./wake.js";
+import { isNoiseOnly, isWakeAddressed, stripWake, stripWakeDetailed, wakeNearMissScore } from "./wake.js";
 
 describe("wakeNearMissScore — near-miss обращения (Б5, форензика 2026-07-10)", () => {
   it("живой случай «Дарья, запусти поиск в доте» — near-miss ≤4 (кандидат second-chance)", () => {
@@ -63,6 +63,25 @@ describe("wake word «Джарвис»", () => {
     expect(stripWake("Джарвис, открой блокнот")).toBe("открой блокнот");
     expect(stripWake("открой блокнот, джарвис")).toBe("открой блокнот");
     expect(stripWake("Джарвис")).toBe("");
+  });
+
+  // B-F12 (ревью 2026-09-24): пре-ролл 1,5 с локального wake тащит в реплику звук ДО «Джарвис».
+  // Реверт-проверка: вернуть в stripWake прежнее «вырезать обращение, остальное склеить» → кейсы падают.
+  it("B-F12: обрывок ДО обращения отрезается — командой остаётся то, что после «Джарвис»", () => {
+    expect(stripWake("…что Джарвис, открой ютуб")).toBe("открой ютуб");
+    expect(stripWake("так вот он и сказал. Джарвис, поставь паузу")).toBe("поставь паузу");
+    expect(stripWake("бла бла Джаррис, включи свет")).toBe("включи свет"); // fuzzy-ослышка — тот же разрез
+    expect(stripWake("Ну, Джарвис, который час?")).toBe("который час?"); // «?» — признак вопроса, не трогаем
+  });
+
+  it("B-F12: обращение в КОНЦЕ (или только вежливость после него) — команда стоит ДО обращения", () => {
+    expect(stripWake("открой ютуб, Джарвис")).toBe("открой ютуб");
+    expect(stripWake("Открой ютуб, Джарвис, пожалуйста")).toBe("Открой ютуб");
+  });
+
+  it("B-F12: отброшенный префикс отдаётся отдельно — пайплайн пишет его в лог", () => {
+    expect(stripWakeDetailed("…что Джарвис, открой ютуб")).toEqual({ command: "открой ютуб", droppedPrefix: "…что" });
+    expect(stripWakeDetailed("Джарвис, открой ютуб")).toEqual({ command: "открой ютуб" });
   });
 });
 

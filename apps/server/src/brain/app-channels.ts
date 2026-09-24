@@ -180,6 +180,9 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
   {
     app: "Windows: проводник",
     aliases: ["проводник", "explorer", "папка"],
+    // exe — чтобы процесс переднего окна «explorer» узнавался (H-W1, ревью 2026-09-24): без него W4.2 писал
+    // «канала нет → GUI» про проводник, у которого канал есть всегда.
+    exe: ["explorer.exe"],
     builtin: true,
     kind: "cli",
     howTo:
@@ -191,6 +194,7 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
   {
     app: "Windows: блокнот",
     aliases: ["блокнот", "notepad"],
+    exe: ["notepad.exe"], // H-W1: см. проводник
     builtin: true,
     kind: "cli",
     howTo:
@@ -202,6 +206,8 @@ export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
   {
     app: "Windows: терминал / cmd",
     aliases: ["терминал", "консоль", "командная строка", "cmd", "powershell"],
+    // H-W1: процессы окна терминала (Windows Terminal, его хост OpenConsole, классическая консоль, оболочки).
+    exe: ["windowsterminal.exe", "wt.exe", "openconsole.exe", "conhost.exe", "cmd.exe", "powershell.exe", "pwsh.exe"],
     builtin: true,
     kind: "cli",
     howTo:
@@ -1045,10 +1051,31 @@ export function exeName(path: string): string {
   return leaf.trim().toLowerCase();
 }
 
+/**
+ * ОБЩИЕ имена exe (H-W1, ревью 2026-09-24): `launcher.exe` — это и HoYoPlay, и Rockstar Games Launcher, и
+ * десятки других лаунчеров; `browser.exe` — не только Яндекс. Одно такое имя НЕ называет программу:
+ * Rockstar Launcher записывался в «HoYoPlay», и модель получала чужой рецепт (hyp-global://) для чужого
+ * окна. По такому имени матчим ТОЛЬКО с доп. признаком — URI-схемой или именем программы из реестра.
+ */
+export const GENERIC_EXE_NAMES: ReadonlySet<string> = new Set([
+  "launcher.exe", "browser.exe", "app.exe", "client.exe", "game.exe", "main.exe", "start.exe",
+  "setup.exe", "update.exe", "updater.exe", "player.exe", "run.exe", "service.exe",
+]);
+
+/** Общее ли имя exe/процесса (с «.exe» или без, в любом регистре). ЧИСТАЯ функция. */
+export function isGenericExeName(nameOrProcess: string): boolean {
+  const n = exeName(nameOrProcess);
+  return GENERIC_EXE_NAMES.has(n.endsWith(".exe") ? n : `${n}.exe`);
+}
+
 /** Подходит ли рецепт установленному приложению. ЧИСТАЯ функция. */
 export function recipeMatches(r: ChannelRecipe, app: InstalledApp): boolean {
   const exe = app.exe ? exeName(app.exe) : "";
-  if (exe && r.exe?.some((e) => e.toLowerCase() === exe)) return true;
+  if (exe && r.exe?.some((e) => e.toLowerCase() === exe)) {
+    // H-W1: общее имя exe программу не называет — нужен второй признак (URI-схема ниже или имя из реестра).
+    if (!GENERIC_EXE_NAMES.has(exe)) return true;
+    if (app.name && queryMatches(app.name, r.app, ...(r.aliases ?? []))) return true;
+  }
   if (app.uri && r.uri?.some((u) => u.toLowerCase() === app.uri?.toLowerCase())) return true;
   // 🔴 cmd матчится ДВУМЯ способами (адверс-ревью 2026-09-01, HIGH). Раньше требовалось `app.name ===
   // r.cmd` — форма, в которой клиент присылает ТОЛЬКО детектированные PATH-команды (TOOL_SPECS).
@@ -1082,6 +1109,9 @@ export function matchChannels(installed: readonly InstalledApp[]): MatchedChanne
   for (const r of CHANNEL_RECIPES) if (r.builtin || r.service) best.set(r.app, { ...r, installedAs: r.app });
   for (const app of installed) {
     for (const r of CHANNEL_RECIPES) {
+      // Встроенные/сервисы уже в списке; матчить их по установленному незачем — иначе запись реестра вида
+      // {name:"search:", exe:"explorer.exe"} переписывала бы им «как называется на машине» (H-W1).
+      if (r.builtin || r.service) continue;
       if (!recipeMatches(r, app)) continue;
       const prev = best.get(r.app);
       if (!prev || KIND_RANK[r.kind] < KIND_RANK[prev.kind]) best.set(r.app, { ...r, installedAs: app.name });
@@ -1101,6 +1131,9 @@ export function matchChannels(installed: readonly InstalledApp[]): MatchedChanne
 export function channelForProcess(process: string, matched: readonly MatchedChannel[]): MatchedChannel | undefined {
   const p = process.trim().toLowerCase();
   if (!p) return undefined;
+  // H-W1: у процесса есть только имя (ни пути, ни издателя) — общее «launcher» программу не называет.
+  // Честное «не опознан» лучше чужого рецепта (Rockstar Launcher → HoYoPlay).
+  if (isGenericExeName(p)) return undefined;
   const byExe = matched.find((m) => m.exe?.some((e) => e.toLowerCase() === `${p}.exe` || e.toLowerCase() === p));
   if (byExe) return byExe;
   return matched.find((m) => !m.builtin && !m.service && queryMatches(p, m.app, m.installedAs, ...(m.aliases ?? [])));
@@ -1124,7 +1157,13 @@ export function formatUsageCoverage(usage: readonly AppUsage[], matched: readonl
   const days = Math.max(...rows.map((u) => u.days));
   const lines = rows.map((u) => {
     const ch = channelForProcess(u.process, matched);
-    const tail = !ch ? "канала нет → GUI (look/act)" : ch.kind === "none" ? `${ch.app}: канала НЕТ (см. рецепт)` : `${ch.app} — канал ${ch.kind}`;
+    const tail = !ch
+      ? isGenericExeName(u.process)
+        ? "общее имя процесса — какая это программа, по имени не понять (канал не угадываю)" // H-W1
+        : "канала нет → GUI (look/act)"
+      : ch.kind === "none"
+        ? `${ch.app}: канала НЕТ (см. рецепт)`
+        : `${ch.app} — канал ${ch.kind}`;
     return `• ${u.process} — ${u.minutes} мин: ${tail}`;
   });
   return `ЧАСТЫЕ ПРОГРАММЫ ВЛАДЕЛЬЦА (минуты фокуса за ${days} дн., счёт клиента):\n${lines.join("\n")}`;

@@ -707,7 +707,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
 }
 
 /** Минимальный контракт «сырого» ws-сокета, который нам нужен. */
-interface RawWs {
+export interface RawWs {
   send(data: string): void;
   close(code?: number, reason?: string): void;
   on(event: "message", cb: (data: unknown) => void): void;
@@ -895,7 +895,8 @@ function onConnection(
 }
 
 /** Выполнить handshake и поднять сессию (§5). Возвращает контекст или null. */
-async function doHandshake(
+/** @internal Экспорт для теста порядка H7 (gateway/handshake-h7.test.ts); в бою зовётся только из onConnection. */
+export async function doHandshake(
   env: Envelope<Hello>,
   sock: SessionSocket,
   ws: RawWs,
@@ -961,6 +962,16 @@ async function doHandshake(
   // ПРОДУКТОВЫЙ РЕЖИМ: лимиты плана в SpendGuard + durable kill-switch + план/статус для server.hello.
   // При мастер-флаге 0 → undefined, и server.hello остаётся ровно тремя полями.
   const productUser = await brain.product?.afterProvision(userId);
+
+  // H7 — ЗДЕСЬ, а не только в .then вызывающего (ревью 2026-09-24, B-F5). Сокет мог закрыться, пока
+  // мы ждали БД/профиль выше. Всё, что ниже, синхронно: createOrResume (resume перепривязал бы ЖИВУЮ
+  // сессию к мёртвому сокету), makeSessionContext (регистрация спикеров = flushPending отложенных
+  // напоминаний/наблюдений/ambient в закрытый сокет — источник помечал их «доставленными») и приветствие.
+  // Проверка после — уже поздно: флаш успевал случиться (лог 24.09 12:18:31).
+  if (ws.readyState !== WS_OPEN) {
+    log.warn("handshake: сокет закрылся, пока ждали БД — сессию не поднимаю, отложенное не трогаю (H7)", { userId });
+    return null;
+  }
 
   const { session, resumed } = registry.createOrResume(userId, sock, hello.resumeSessionId);
 
@@ -1081,6 +1092,12 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
   }
   // Небольшая задержка — чтобы renderer успел подписаться на speak.chunk/transcript.
   const t = setTimeout(() => {
+    // B-F5 (ревью 2026-09-24): за задержку сокет мог закрыться — приветствие в мёртвый канал не звучит,
+    // а кулдаун А6 (от факта ПРОИЗНЕСЁННОГО) сжёгся бы зря: следующий коннект молчал бы 6 часов.
+    if (!session.channelUp()) {
+      log.info("онбординг: канал закрыт до приветствия — не здороваюсь");
+      return;
+    }
     // Приветствие ТОЛЬКО озвучивается (ambient). НЕ шлём ui.display/transcript — иначе на
     // каждое переподключение копится карточка-спам (НЕ чат-бот, §концепт). Контекст — best-effort.
     const p = getProfile(session.userId);
@@ -1090,6 +1107,10 @@ function startOnboarding(ctx: SessionContext, session: Session, brain: BrainProv
       { name: p.displayName, facts: p.facts },
     )
       .then((line) => {
+        if (!session.channelUp()) {
+          log.info("онбординг: канал закрылся, пока собиралось приветствие — не здороваюсь");
+          return;
+        }
         ctx.voice.speak(line);
         void setLastGreeted(session.userId); // кулдаун А6 — от факта ПРОИЗНЕСЁННОГО приветствия
         log.info("онбординг: приветствие произнесено");

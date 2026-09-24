@@ -32,7 +32,7 @@ import {
   reduce,
 } from "./state.js";
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
-import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWake, wakeNearMissScore } from "./wake.js";
+import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWakeDetailed, wakeNearMissScore } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
@@ -230,6 +230,13 @@ export class VoicePipeline {
   private ctx: VoiceContext = initialContext();
   private sttStream: SttStream | null = null;
   private ttsStream: TtsStream | null = null;
+  /**
+   * Незакрытые исходы синтезов (ревью 2026-09-24, B-F5). `cancelTts` делает gen++ — ни один чанк этих
+   * синтезов клиенту уже не уйдёт, а Yandex-стрим после cancel() глушит ВСЕ колбэки (onDone/onError не
+   * придут). Раньше исход такой реплики не сообщался никогда: напоминание, чей синтез оборвался (барж-ин,
+   * закрытый сокет → dispose), навсегда оставалось «доставленным». Здесь cancelTts закрывает их `false`.
+   */
+  private readonly pendingSettles = new Set<(spoken: boolean) => void>();
   /** Активная пофразная говорящая сессия (§10 realtime); null вне стримингового ответа. */
   private phraseSpeaker: PhraseSpeaker | null = null;
   /** Таймер прекеш-филлера (§10): «Секунду, сэр.» пока Opus думает. */
@@ -455,7 +462,10 @@ export class VoicePipeline {
       this.lastAcceptViaWake = true; // §P0: явное обращение — ходу положены слепые жесты
       this.pendingSecondChance = null; // штатное обращение перекрывает висящий переспрос
       this.localWakeUntil = 0;
-      const c = stripWake(t);
+      // B-F12 (ревью 2026-09-24): команда — ПОСЛЕ обращения; текст до него (обрывок ТВ из пре-ролла)
+      // отбрасывается с записью в лог, чтобы «съел начало фразы» читалось из лога, а не дедукцией.
+      const { command: c, droppedPrefix } = stripWakeDetailed(t);
+      if (droppedPrefix) this.log.info("wake: текст до обращения отброшен (пре-ролл/фон)", { dropped: droppedPrefix.slice(0, 60) });
       cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
     } else if (this.localWakeActive()) {
       // W1: клиент услышал «Джарвис» ЛОКАЛЬНО (sherpa KWS), а облачный STT само слово ослышался или
@@ -1560,8 +1570,10 @@ export class VoicePipeline {
     const settle = (spoken: boolean): void => {
       if (outcomeSent) return;
       outcomeSent = true;
+      this.pendingSettles.delete(settle);
       onOutcome?.(spoken);
     };
+    if (onOutcome) this.pendingSettles.add(settle); // B-F5: отмена синтеза обязана сообщить «не прозвучало»
     // Джарвис заговорил → окно активного разговора (продолжение без wake word) — но ТОЛЬКО если это
     // ответ владельцу. Проактив (W0) окна не открывает и не продлевает: иначе после приветствия/
     // напоминания 8 секунд любой звук в комнате был командой (лог 2026-09-06).
@@ -1610,6 +1622,9 @@ export class VoicePipeline {
 
   private cancelTts(): void {
     this.gen += 1; // инвалидируем все колбэки текущего оборота (barge-in/stop)
+    // B-F5: после gen++ ни один чанк начатых синтезов клиенту не уйдёт → их реплики НЕ прозвучали.
+    // Уже прозвучавшие (первый чанк ушёл) закрыты `true` и из набора выбыли — их не трогаем.
+    for (const settle of [...this.pendingSettles]) settle(false);
     this.clearFillerTimer(); // §10: отложенный филлер тоже отменяем (barge-in во время раздумья)
     this.clearThinkEarcon(); // §P1: earcon раздумья на оборванном ходе не нужен
     // Волна B (контрольное ревью): barge-in/стоп = клиент ГЛУШИТ плеер (renderer playback.stop()).

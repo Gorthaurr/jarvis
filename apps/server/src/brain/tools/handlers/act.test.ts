@@ -37,7 +37,7 @@ describe("act → gui.act → ToolResult", () => {
   });
 
   it("H-T1: таймаут act → «исход неизвестен» (uncertain), а не обычная ошибка «не сделано»", async () => {
-    const { ctx } = ctxWith((cmd) => ({ commandId: cmd.commandId ?? "c", ok: false, durationMs: 60000, error: { code: "timeout", message: "нет ответа за 60000ms" } }) as ActionResult);
+    const { ctx } = ctxWith(() => ({ commandId: "c", ok: false, durationMs: 60000, error: { code: "timeout", message: "нет ответа за 60000ms" } }) as ActionResult);
     const r = await dispatchTool("act", { target: "Настройки" }, ctx);
     expect(r.isError).toBe(true);
     expect(r.uncertain).toBe(true);

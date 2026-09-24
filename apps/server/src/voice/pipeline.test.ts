@@ -396,6 +396,14 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
     expect(onUserTurn).not.toHaveBeenCalled();
   });
 
+  // B-F12 (ревью 2026-09-24): пре-ролл локального wake приносит в STT звук ДО «Джарвис» (обрывок ТВ).
+  // Проверяем ПЕТЛЁЙ: до мозга доходит только команда после обращения, а не «что открой ютуб».
+  it("B-F12: обрывок фона перед «Джарвис» не приклеивается к команде — мозг получает «открой ютуб»", async () => {
+    const { onUserTurn, say } = setup(1_000);
+    await say("…что Джарвис, открой ютуб");
+    expect(onUserTurn).toHaveBeenLastCalledWith("открой ютуб", expect.anything());
+  });
+
   it("«Джарвис» будит; дальше в окне можно без обращения", async () => {
     const { onUserTurn, say } = setup(1_000);
     await say("Джарвис, который час");

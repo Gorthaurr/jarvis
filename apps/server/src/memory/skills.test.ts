@@ -537,7 +537,8 @@ describe("§мультитенант: общая библиотека навык
     expect((await sp.promote!(u, "replay-x")).reason).toBe("not_learned");
   });
 
-  it("seedSharedSkills идемпотентен (та же версия не перезаписывает) + засеянное видно любому юзеру", async () => {
+  it("seedSharedSkills без БД: «засеяно» 0 (в таблицу не легло), но навык видно любому юзеру из памяти процесса", async () => {
+    // Идемпотентность и счёт РЕАЛЬНЫХ записей — против настоящей БД в skills-seed.test.ts (T-F8).
     const md = serializeLearnedSkill({
       id: "learned__seed-demo",
       name: "Демо сид навык",
@@ -545,8 +546,8 @@ describe("§мультитенант: общая библиотека навык
       when: "когда нужен демо сид навык",
       procedure: "шаг процедуры",
     });
-    expect(await seedSharedSkills([md])).toBe(1);
-    expect(await seedSharedSkills([md])).toBe(0); // версия не новее → пропуск (идемпотентность)
+    expect(await seedSharedSkills([md])).toBe(0); // БД нет → в таблицу не записано, врать «засеяно 1» нельзя
+    expect(await seedSharedSkills([md])).toBe(0);
     const sp = createSkillProvider();
     const r = await sp.recall("u-seed-reader", "когда нужен демо сид навык");
     expect(r?.id).toBe("learned__seed-demo");
