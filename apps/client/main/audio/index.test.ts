@@ -451,7 +451,9 @@ describe("W1: закрытие гейта по таймеру listening (фон 
 });
 
 describe("B-F3: закрытие гейта посреди речи (любой путь) досылает speech_end", () => {
-  it("mute() посреди фразы → speech_end; после реоткрытия новая реплика снова даёт speech_start", () => {
+  // Контроль-1 №8 (ревью 2026-09-24): mute посреди фразы — ОТМЕНА реплики (speech_cancel), а не её конец: speech_end
+  // исполнил бы обрубок. Реверт: убери ветку speechOpen в mute() — последним уйдёт speech_end, тест упадёт.
+  it("mute() посреди фразы → speech_cancel (не speech_end); после реоткрытия новая реплика снова даёт speech_start", () => {
     const vad = new ScriptVad();
     const { ac, sendVad } = setup(undefined, { vad });
     ac.activate();
@@ -459,7 +461,8 @@ describe("B-F3: закрытие гейта посреди речи (любой 
     ac.ingest(loud());
     expect(sendVad).toHaveBeenCalledWith("speech_start");
     ac.mute();
-    expect(sendVad).toHaveBeenLastCalledWith("speech_end");
+    expect(sendVad).toHaveBeenLastCalledWith("speech_cancel");
+    expect(sendVad).not.toHaveBeenCalledWith("speech_end");
     expect(vad.speaking).toBe(false); // сброшен при закрытии
     ac.activate();
     vad.say();

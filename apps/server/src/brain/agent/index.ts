@@ -91,7 +91,7 @@ export async function handleUserText(
   const scopeEnabled = (process.env.JARVIS_TASK_SCOPE ?? "1") !== "0";
   // HIGH-3 (ревью 2026-07-10): активная задача — по USERID, не sessionId: после reconnect sessionId
   // новый, и scope/steer/дубль-гейт не видели живую задачу старой сессии (реплики плодили дубли).
-  const activeTask = scopeEnabled ? deps.tasks?.activeForUser(deps.userId)[0] : undefined;
+  const activeTask = scopeEnabled ? deps.tasks?.activeForUser(deps.userId, undefined, deps.devSession === true)[0] : undefined;
   // Машинный реэнтри (watch-action) — всегда ОТДЕЛЬНОЕ дело со свежим контекстом: scope/steer/дубль-гейты
   // калиброваны под ЖИВУЮ речь (STT-шум/правки/повторы) и к сгенерированному поручению неприменимы.
   const machineTurn = meta?.origin === "watch-action";

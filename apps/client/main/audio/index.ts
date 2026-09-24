@@ -349,6 +349,13 @@ export class AudioCoordinator {
     this.preroll = [];
     this.playbackActive = false; // звук гасится вместе с mute → снимаем barge-окно
     this.resetBargeSustain(); // окно закрыто — счётчик устойчивости не должен пережить разрыв (ревью #close)
+    // Контроль-1 №8 (ревью 2026-09-24): выключили посреди фразы — это ОТМЕНА реплики, а не её конец. speech_end (его
+    // досылает closeGate) исполнил бы обрубок «напиши Кате, что…»; speech_cancel сбрасывает речь и ход без эндпоинта.
+    if (this.speechOpen && this.gateOpen) {
+      this.speechOpen = false;
+      this.deps.sendVad("speech_cancel");
+      this.log.info("mute посреди речи — серверу speech_cancel (обрубок не исполнять)");
+    }
     this.closeGate("mute");
   }
 

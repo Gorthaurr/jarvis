@@ -1372,3 +1372,24 @@ describe("VoicePipeline — датчики для «стоп/тише = замо
     expect(pipe.isClientPlaying()).toBe(false);
   });
 });
+
+// Контроль-1 №8 (ревью 2026-09-24): микрофон выключен посреди реплики — обрубок «напиши Кате, что» не исполняем.
+// Реверт: убери ветку speech_cancel в onVadEvent — событие уйдёт в speech_end-путь, агент получит обрубок.
+describe("VoicePipeline — speech_cancel (mute посреди фразы)", () => {
+  it("interim накоплен, пришёл speech_cancel → агент не вызывается, поздний финал тоже игнорируется", async () => {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({ stt, tts, onUserTurn, sendSpeakChunk: () => {}, sendClientState: () => {}, turnDetector: alwaysEndpointTurn() });
+    pipe.onWake();
+    pipe.onVadEvent("speech_start");
+    stt.last!.emit({ text: "Джарвис, напиши Кате, что", final: false });
+    pipe.onAudioFrame(new Int16Array([10, 20, 30, 40]).buffer);
+    pipe.onVadEvent("speech_cancel");
+    stt.last?.emit({ text: "Джарвис, напиши Кате, что", final: true });
+    await flush();
+    await flush();
+    expect(onUserTurn).not.toHaveBeenCalled();
+    expect(pipe.state).toBe("idle");
+  });
+});

@@ -664,7 +664,7 @@ export function makeSessionContext(
     tts: providers.tts,
     ttsVoiceId: providers.voiceId,
     // Б5 second-chance (форензика 2026-07-10): near-miss обращения при живой задаче → «Вы мне, сэр?».
-    hasActiveTask: () => brain.tasks.activeForUser(session.userId).length > 0,
+    hasActiveTask: () => brain.tasks.activeForUser(session.userId, undefined, isDev).length > 0,
     // §10 realtime: прекеш-филлер «Секунду, сэр.» маскировал пол латентности Opus, НО на
     // каждую реплику (включая болтовню) звучал как деферрал «погоди, занят» → Джарвис будто
     // отделывается, а не разговаривает (фидбэк пользователя). С быстрым STT (deepgram) пауза

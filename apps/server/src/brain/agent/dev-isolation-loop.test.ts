@@ -227,3 +227,40 @@ describe("исход получает навык, чей авто-реплей �
     expect(outcomes.map((o) => o.id)).toEqual(["sk-macro"]);
   });
 });
+
+// Контроль-1 №7 (ревью 2026-09-24): у драйвера и владельца один userId — задачи не должны смешиваться.
+// Реверт: sameScope в tasks/manager.ts → всегда true — тесты упадут (драйвер правит и отменяет задачу владельца).
+describe("задачи смоук-драйвера и владельца не смешиваются", () => {
+  it("реестр: активные/отмена разделены по dev; без признака — прежнее поведение (все)", () => {
+    const tasks = new TaskManager();
+    const owner = tasks.create({ userId: "u1", sessionId: "live", goal: "задача владельца" });
+    const smoke = tasks.create({ userId: "u1", sessionId: "drv", goal: "смоук", dev: true });
+    tasks.start(owner.taskId);
+    tasks.start(smoke.taskId);
+    expect(tasks.activeForUser("u1", undefined, false).map((t) => t.taskId)).toEqual([owner.taskId]);
+    expect(tasks.activeForUser("u1", undefined, true).map((t) => t.taskId)).toEqual([smoke.taskId]);
+    expect(tasks.activeForUser("u1")).toHaveLength(2);
+    expect(tasks.cancelUser("u1", true).map((t) => t.taskId)).toEqual([smoke.taskId]);
+    expect(tasks.get(owner.taskId)?.state).not.toBe("cancelled");
+    expect(tasks.hasAnyActive("u1", true)).toBe(false);
+    expect(tasks.hasAnyActive("u1", false)).toBe(true);
+  });
+
+  it("правка на ходу из dev-сессии не впрыскивается в живую задачу владельца", async () => {
+    const tasks = new TaskManager();
+    const owner = tasks.create({ userId: "u1", sessionId: "live", goal: "открой дискорд и зайди в голосовой" });
+    tasks.start(owner.taskId);
+    const llm = new MockLlmProvider([{ text: "Открыл ютуб, сэр." }]);
+    await handleUserText(session(), "нет, не то, вместо этого открой ютуб", deps(llm, tasks, { devSession: true }));
+    expect(tasks.get(owner.taskId)?.steer?.pending ?? []).toHaveLength(0);
+  });
+
+  it("skill_save / app_channel_learn из dev-сессии в навыки/каналы владельца не пишут", async () => {
+    const { dispatchTool } = await import("../tools/dispatch.js");
+    const save = vi.fn(async () => null);
+    const ctx = { userId: "u1", devSession: true, skills: { save }, session: session() } as never;
+    const r = await dispatchTool("skill_save", { name: "x", when: "y", procedure: "z" }, ctx);
+    expect(r.isError).toBe(false);
+    expect(save).not.toHaveBeenCalled();
+  });
+});

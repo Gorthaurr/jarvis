@@ -340,7 +340,7 @@ export function interceptEchoGate(t: TurnCtx): AgentReply | null {
   // hasAnyActive (вкл. скрытые разговорные и при выключенном scope): при ЛЮБОЙ живой задаче гейт молчит —
   // реплика может относиться к ней, пусть решают штатные пути §20/модель.
   const postTermMs = postTerminalGateMs();
-  if (!activeTask && postTermMs > 0 && deps.tasks && !deps.tasks.hasAnyActive(deps.userId)) {
+  if (!activeTask && postTermMs > 0 && deps.tasks && !deps.tasks.hasAnyActive(deps.userId, deps.devSession === true)) {
     const nowMs = Date.now();
     const recentTerm = deps.tasks.recentTerminal(deps.userId, { limit: 3, maxAgeMs: postTermMs, now: nowMs });
     // Эхо-статус — ТОЛЬКО при ЕДИНСТВЕННОМ свежем терминале, и он успешен (ревью: при двух свежих
@@ -376,7 +376,7 @@ export async function interceptResume(t: TurnCtx): Promise<AgentReply | null> {
   // Гейт по ВИДИМЫМ задачам (activeForUser), а не hasAnyActive (финальный контроль волны C): скрытая
   // РАЗГОВОРНАЯ задача (Б6) глушила перехват, а §20-control её тоже не видит — обещанное «доделай»
   // падало в ХОЛОДНУЮ петлю мимо журнала. Видимая задача по-прежнему уводит фразу в pause/resume §20.
-  if (!machineTurn && deps.checkpoints && (deps.tasks?.activeForUser(deps.userId).length ?? 0) === 0 && resumeKind.isResume) {
+  if (!machineTurn && deps.checkpoints && (deps.tasks?.activeForUser(deps.userId, undefined, deps.devSession === true).length ?? 0) === 0 && resumeKind.isResume) {
     const pending = deps.checkpoints.peek(deps.userId);
     // ⚠️ КОЛЛИЗИЯ С ПЛЕЕРОМ: голое «продолжи»/«продолжай»/«возобнови» — это ЕЩЁ И tier0-команда
     // «сними видео с паузы» (router MEDIA_PATTERNS). Красть её у плеера можно только тогда, когда мы

@@ -40,6 +40,15 @@ const DEFAULT_SWEEP_TTL_MS = 10 * 60 * 1000;
  * по полям задачи. Без внешних зависимостей и без таймеров: течение времени и
  * чистка управляются явными вызовами progress/sweep с инъецированным now.
  */
+/**
+ * Контроль-1 №7 (ревью 2026-09-24): у смоук-драйвера и владельца один userId (DEV_USER). Без разделения драйвер
+ * правил «⚡ПОПРАВКОЙ» живую задачу владельца, «отмени» одного снимало задачи другого, а реплика владельца уходила
+ * в смоук-задачу, чьи действия исполняет фейковый драйвер. `dev` не задан — прежнее поведение (все задачи).
+ */
+function sameScope(t: Task, dev: boolean | undefined): boolean {
+  return dev === undefined || Boolean(t.dev) === dev;
+}
+
 export class TaskManager {
   /** taskId → задача. Map сохраняет порядок вставки (полезно для list/active). */
   private readonly tasks = new Map<string, Task>();
@@ -199,10 +208,10 @@ export class TaskManager {
    * «Отменить поиск», убивать пришлось кнопками UI). Пользователь один: «останови всё, что
    * делаешь» = все его задачи, из какой бы сессии они ни стартовали.
    */
-  cancelUser(userId: string): Task[] {
+  cancelUser(userId: string, dev?: boolean): Task[] {
     const cancelled: Task[] = [];
     for (const task of this.tasks.values()) {
-      if (task.userId !== userId || isTerminalState(task.state)) continue;
+      if (task.userId !== userId || isTerminalState(task.state) || !sameScope(task, dev)) continue;
       task.cancel.cancelled = true;
       task.state = "cancelled";
       task.finishedAt = this.now();
@@ -351,17 +360,17 @@ export class TaskManager {
    * (баг: фоновая задача в полёте не попадала в контекст). excludeId — таск ТЕКУЩЕГО хода (не он сам).
    * Свежие первыми. Чистая выборка.
    */
-  activeForUser(userId: string, excludeId?: string): Task[] {
+  activeForUser(userId: string, excludeId?: string, dev?: boolean): Task[] {
     return [...this.tasks.values()]
-      .filter((t) => t.userId === userId && isActiveState(t.state) && t.taskId !== excludeId && !t.conversational)
+      .filter((t) => t.userId === userId && isActiveState(t.state) && t.taskId !== excludeId && !t.conversational && sameScope(t, dev))
       .sort((a, b) => b.startedAt - a.startedAt);
   }
 
   /** Есть ли у пользователя ЛЮБАЯ активная задача, ВКЛЮЧАЯ скрытые разговорные (Б6). Для решения «есть ли
    *  что отменять»: cancel-команду перехватываем только если реально есть задача (иначе «отмени напоминание»
    *  без §20-задачи должно дойти до агента, а не съедаться «Нет активной задачи») — интеграционное ревью #6. */
-  hasAnyActive(userId: string): boolean {
-    for (const t of this.tasks.values()) if (t.userId === userId && isActiveState(t.state)) return true;
+  hasAnyActive(userId: string, dev?: boolean): boolean {
+    for (const t of this.tasks.values()) if (t.userId === userId && isActiveState(t.state) && sameScope(t, dev)) return true;
     return false;
   }
 

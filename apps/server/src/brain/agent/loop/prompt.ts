@@ -25,7 +25,7 @@ export async function buildPrompt(input: PromptInput) {
   // «что делал?». Оба блока — в НЕкешируемый хвост промпта (кеш §15 не трогаем).
   const nowMs = Date.now();
   const recentTasks = [
-    formatActiveTasks(tasks.activeForUser(deps.userId, taskId), nowMs),
+    formatActiveTasks(tasks.activeForUser(deps.userId, taskId, deps.devSession === true), nowMs),
     // windowMs → блок явно называет ГРАНИЦЫ памяти: «не вижу» не должно превращаться в «этого не было»
     // (живой провал 2026-07-25 — категоричное «я не отправлял» о вчерашней реальной отправке).
     formatRecentTasks(tasks.recentTerminal(deps.userId, { limit: 5, maxAgeMs: RECENT_TASKS_WINDOW_MS }), nowMs, RECENT_TASKS_WINDOW_MS),

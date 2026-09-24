@@ -113,7 +113,7 @@ describe("tier0 app.launch не нашёл цель → ход уходит мо
       const spoken: string[] = [];
       const llm = new MockLlmProvider([{ text: "Запустил Дискорд через Update.exe, сэр." }]);
       const sink = { sentence: vi.fn(), display: vi.fn(), done: vi.fn() };
-      const d = { ...deps(llm), speakResult: (r: { voice: string }) => spoken.push(r.voice), bgTasks: new Set<Promise<unknown>>() };
+      const d = { ...deps(llm), speakResult: (r: { voice: string }) => spoken.push(r.voice), bgTasks: new Set<Promise<void>>() };
       const reply = await handleUserText(s, "открой дискорд", d, sink);
       expect(reply.voice).toMatch(/Секунду/u); // промоушен случился
       await vi.waitFor(() => expect(spoken.some((v) => /Update\.exe/u.test(v))).toBe(true), { timeout: 3000 });

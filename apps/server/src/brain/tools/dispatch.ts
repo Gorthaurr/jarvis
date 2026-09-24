@@ -429,9 +429,12 @@ async function dispatchToolCore(
   if (ctx.productMode && SELF_TOOLS.has(name))
     return err("самодиагностика и самоправка доступны только владельцу этой машины — в облачном режиме они выключены");
   switch (name) {
+    // Контроль-1 №7: смоук-драйвер не переучивает программные каналы владельца (как memory_write/навыки).
     case "app_channel_learn":
+      if (ctx.devSession) return ok("Dev-сессия: канал программы у владельца не запоминаю (пропущено).");
       return appChannelLearn(ctx, input);
     case "app_channel_forget":
+      if (ctx.devSession) return ok("Dev-сессия: каналы владельца не трогаю (пропущено).");
       return appChannelForget(ctx, input);
     case "app_channels":
       // Реестр программных каналов: курируемые рецепты (brain/app-channels.ts) + ВЫУЧЕННЫЕ самим
@@ -543,9 +546,11 @@ async function dispatchToolCore(
     }
     // Самообучение (§8 HERMES): Джарвис сам сохраняет навык-процедуру после сложной задачи.
     case "skill_save":
+      if (ctx.devSession) return ok("Dev-сессия: навык владельцу не сохраняю (пропущено).");
       return skillSave(ctx, input);
     // §мультитенант: поднять свой выученный навык в ОБЩУЮ библиотеку (виден всем).
     case "skill_promote":
+      if (ctx.devSession) return ok("Dev-сессия: в общую библиотеку не поднимаю (пропущено).");
       return skillPromote(ctx, input);
     // Напоминания (§9): durable-таймер + проактивная озвучка (set/cancel/list).
     case "set_reminder":

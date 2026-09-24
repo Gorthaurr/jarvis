@@ -909,7 +909,20 @@ export class VoicePipeline {
   }
 
   /** VAD-событие от клиента. */
-  onVadEvent(state: "speech_start" | "speech_end" | "barge_in" | "wake_local"): void {
+  onVadEvent(state: "speech_start" | "speech_end" | "barge_in" | "wake_local" | "speech_cancel"): void {
+    if (state === "speech_cancel") {
+      // Контроль-1 №8 (ревью 2026-09-24): микрофон выключен посреди реплики — недоговорённое не исполняем.
+      // Речь кончилась (userSpeaking не залипает — B-F3), накопленный interim выбрасываем; ход в прослушивании
+      // закрываем без эндпоинта (close_stt, поздний финал в idle игнорируется). Идущий ход (thinking/speaking)
+      // не трогаем: его реплика была ДОГОВОРЕНА раньше.
+      this.userSpeaking = false;
+      this.clearSilenceTimer();
+      this.interim = "";
+      this.localWakeUntil = 0;
+      if (this.ctx.state === "listening") this.dispatch({ type: "mute" });
+      this.log.info("микрофон выключен посреди реплики — недоговорённое в работу не отдаю");
+      return;
+    }
     if (state === "wake_local") {
       // W1: локальный детектор клиента услышал «Джарвис». Окно «эта реплика адресована» — короткое:
       // хватает на пре-ролл + саму команду; протухает само, если владелец замолчал.
