@@ -25,6 +25,32 @@ const KILL_QUIET_MS = 60_000;
 const SILENCE_QUIET_MS = 10 * 60_000;
 
 /**
+ * B-F2 (ревью 2026-09-24): сколько после barge-in реплика ещё считается сказанной «поверх речи Джарвиса».
+ * Владелец перебил — синтез оборван, пайплайн уже в listening, а его «стоп» доезжает из STT через 1–2 с.
+ * Раньше в этот момент «Джарвис не говорит и задач нет» → «стоп» уходил в роутер → медиаклавиша play/pause
+ * (переключатель — мог ЗАПУСТИТЬ музыку), а «замолчи» — в модель задачей.
+ */
+const RECENT_BARGE_MS = 3_000;
+
+/**
+ * Необязательные датчики пайплайна (есть в VoicePipeline с ревью 2026-09-24; старые/тестовые фейки — без них):
+ * клиент ещё ДОИГРЫВАЕТ реплику (синтез кончился раньше звука) и сколько мс назад был barge-in.
+ */
+interface SpeechProbe {
+  state: string;
+  isClientPlaying?: () => boolean;
+  msSinceBargeIn?: () => number;
+}
+
+/** Занят ли канал речью Джарвиса: говорит, клиент ещё играет или только что перебили. */
+export function jarvisSpeechBusy(voice: SpeechProbe): boolean {
+  if (voice.state === "speaking") return true;
+  if (voice.isClientPlaying?.() === true) return true;
+  const since = voice.msSinceBargeIn?.();
+  return typeof since === "number" && since >= 0 && since < RECENT_BARGE_MS;
+}
+
+/**
  * Откуда пришла команда управления: голосом (handleControlUtterance по голосовому вводу), из текст-канала
  * (dev.text / вкладка «Чат», §22) или из UI (task.control — кнопка на карточке задачи).
  */
@@ -183,7 +209,9 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     // Живой прогон 2026-09-02: в тишине «тише» и «сделай тише» не делали ВООБЩЕ ничего (ни действия, ни
     // ответа), а синонимы «потише»/«убавь громкость» работали — необъяснимая капризность. Пропускаем
     // такую реплику дальше в роутер, где она честно отработает как команда громкости.
-    if (ctx.voice.state !== "speaking" && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false;
+    // B-F2: «говорит» = не только state==="speaking": после barge-in (≤3 с) и пока клиент доигрывает реплику
+    // «стоп/тише» — это «замолчи», а не медиаклавиша или громкость.
+    if (!jarvisSpeechBusy(ctx.voice) && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false;
     ctx.voice.onVadEvent("barge_in");
     ctx.voice.clearPendingSpeech(); // пользователь хочет тишины — не озвучивать отложенные фоновые итоги
     ctx.session.send("client.state", { state: "idle" });

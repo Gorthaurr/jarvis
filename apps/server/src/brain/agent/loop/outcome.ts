@@ -59,9 +59,29 @@ export function computeOutcome(ctx: LoopCtx) {
   // навыку — успех, «доделай» гасит журнал при нуле выполненных действий).
   // Контроль-5 (V4-1): + честный give-up после раунда, остановленного вуалью, без единого дела.
   const overlayDeniedFailure = (st.honesty.overlayDeniedAny || st.honesty.veilGaveUp) && !st.honesty.anyMutateSucceeded && !veilOutcomeVerified;
-  const taskOk =
+  // Ревью 2026-09-24 (T-F7): действие ПРОБОВАЛИ (mutate), ни одна попытка не удалась, durable-дела нейтральным
+  // инструментом тоже нет — это провал, даже когда модель ЧЕСТНО сказала «не выполнено» (содержательная фраза
+  // мимо masked-failure: тот ловит только полое «Готово»). Раньше такой ход писался ok:true / done — и в метриках,
+  // и в самодиагностике он выглядел успехом. Разговорный ход «дела» не обещал — его не трогаем. Реплику модели
+  // терминал НЕ подменяет (она честная) — меняется только запись об исходе.
+  // «Исход неизвестен» (фоновое задание запущено, отправка без подтверждения) и частично исполненная процедура —
+  // не «ни одна не удалась»: там что-то УШЛО, и объявлять ход провалом значило бы звать «доделай» на дубль.
+  const mutationsAllFailed =
+    opts?.conversational !== true &&
+    st.honesty.anyMutateAttempted &&
+    !st.honesty.anyMutateSucceeded &&
+    !st.honesty.anyDurableNeutralSucceeded &&
+    st.honesty.uncertainCalls.size === 0 &&
+    st.honesty.partialCalls.size === 0 &&
+    !veilOutcomeVerified &&
+    !overlayPartialOutcome;
+  const okBeforeMutations =
     !st.exit.failed && !st.exit.limited && !st.exit.timedOut && !st.exit.cancelled && !maskedFailure && !st.exit.llmStubbed && !st.exit.runawayStuck && !st.exit.floodStuck && !st.exit.queueTimedOut && !st.exit.channelLost && !inputDeniedFailure && !overlayDeniedFailure && (!capExhausted || capAnswered);
-  return { capExhausted, capAnswered, injectedVerified, veilOutcomeVerified, overlayPartialOutcome, durableNeutralDone, maskedFailure, inputDeniedFailure, overlayDeniedFailure, taskOk };
+  const taskOk = okBeforeMutations && !mutationsAllFailed;
+  // Провал ТОЛЬКО по T-F7 (иначе ход дошёл бы до успешного терминала): реестр задач переводит его в failed сам —
+  // терминалы провала выше по таблице ставят failed своими причинами.
+  const allMutationsFailed = okBeforeMutations && mutationsAllFailed;
+  return { capExhausted, capAnswered, injectedVerified, veilOutcomeVerified, overlayPartialOutcome, durableNeutralDone, maskedFailure, inputDeniedFailure, overlayDeniedFailure, allMutationsFailed, taskOk };
 }
 
 export type LoopOutcome = ReturnType<typeof computeOutcome>;

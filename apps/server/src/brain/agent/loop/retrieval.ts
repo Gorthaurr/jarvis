@@ -1,10 +1,36 @@
 // W3 «Петля»: retrieval фактов + recall навыка + каталог навыков (параллельно, под таймаутами).
-import { log, withTimeout } from "./util.js";
+import { log, suppressSkillHint, withTimeout } from "./util.js";
 import type { AgentDeps, ReplySink } from "../types.js";
 import { memoryMinScore } from "../../../memory/episodic.js";
 import { type RecalledSkill, formatSkillCatalog } from "../../../memory/skills.js";
+import { hasCommandVerb } from "../../router/index.js";
 
-export async function retrieveContext(deps: AgentDeps, text: string, sink: ReplySink | undefined) {
+/**
+ * Ревью 2026-09-24 (T-F2): порог СЫРОГО косинуса для подсказки навыка в промпт. Строже реплея (0.84): у реплея
+ * есть второй порог (гибрид ≥0.92) и командный глагол, а подсказка раньше шла на ЛЮБОЙ recall ≥0.82 — живой лог:
+ * sim 0.84–1.0 на «нет, не надо», и приказ «ИСПОЛНИ» уводил модель в браузер. 0.86 — выше задокументированной
+ * полосы шума e5-small (несвязанные 0.82–0.85), на уровне живых легитимных попаданий (0.856+ в форензике).
+ */
+export const SKILL_HINT_MIN_RAW_COS = 0.86;
+
+/**
+ * Причина НЕ подсказывать recall'нутый навык (null — подсказка уместна). Реплей-гейт не трогаем: у него свои
+ * пороги, и recall как таковой (для реплея и учёта исхода) остаётся — режется только блок в промпте.
+ */
+export function skillHintBlockReason(s: RecalledSkill, text: string, conversational?: boolean): string | null {
+  if (conversational) return "разговорный ход — процедура-навык в промпт не идёт";
+  if (!hasCommandVerb(text)) return "в реплике нет командного глагола";
+  const raw = s.recallSimRaw ?? s.recallSim;
+  if (raw === undefined) return "лексический recall без семантической уверенности";
+  if (raw < SKILL_HINT_MIN_RAW_COS) return `сырой косинус ${raw.toFixed(3)} < ${SKILL_HINT_MIN_RAW_COS}`;
+  return null;
+}
+
+/**
+ * `gate.conversational` — разговорный ход (вопрос/реакция): навык не подсказываем. Необязателен — без него
+ * работают гейты по тексту и порогу (проводку из loop/context.ts добавляет интегратор, см. notes ревью).
+ */
+export async function retrieveContext(deps: AgentDeps, text: string, sink: ReplySink | undefined, gate?: { conversational?: boolean }) {
   // Retrieval (§8 факты из эпизодической памяти) + recall навыка (§8 HERMES) — оба
   // НЕОБЯЗАТЕЛЬНЫ, под жёстким таймаутом (§10: лучше ответить без них, чем повесить ход на
   // медленной БД) и НЕЗАВИСИМЫ → гоним ПАРАЛЛЕЛЬНО. Раньше шли серией (до ~2с+2с лишней
@@ -41,9 +67,8 @@ export async function retrieveContext(deps: AgentDeps, text: string, sink: Reply
   const recallTimeoutMs = sink
     ? ioTimeoutMs
     : Math.max(ioTimeoutMs, Math.min(10_000, Number.parseInt(process.env.JARVIS_RECALL_TIMEOUT_MS ?? "", 10) || 2_500));
-  // Б6: recall навыка на разговорном ходе НАМЕРЕННО оставлен — вопрос вроде «как отправить X» тоже
-  // conversational, но выигрывает от процедуры; главную стоимость болтовни ($0.19 у «да ты молодец»)
-  // режет кап tool-раундов (HARD_STEP_CAP=3) и не-регистрация §20-задачей, а не отказ от дешёвого e5.
+  // Б6: recall навыка на разговорном ходе оставлен (дешёвый e5), но с ревью 2026-09-24 (T-F2) его ПОДСКАЗКА
+  // в промпт на разговорном ходе/реплике без команды/шумном косинусе не идёт — см. skillHintBlockReason.
   const recallP: Promise<RecalledSkill | null> = deps.skills
     ? withTimeout(deps.skills.recall(deps.userId, text), recallTimeoutMs).catch((e) => {
         log.debug("recall навыка пропущен (таймаут/ошибка)", e instanceof Error ? e.message : String(e));
@@ -55,8 +80,15 @@ export async function retrieveContext(deps: AgentDeps, text: string, sink: Reply
   const catalogP: Promise<Array<{ name: string; when: string }>> = deps.skills?.learnedCatalog
     ? withTimeout(deps.skills.learnedCatalog(deps.userId), ioTimeoutMs).catch(() => [])
     : Promise.resolve([]);
-  const [facts, recalled, catalog] = await Promise.all([factsP, recallP, catalogP]);
-  if (recalled) log.info("recall навыка (§8)", { id: recalled.id, version: recalled.version });
-  const skillCatalog = !recalled ? formatSkillCatalog(catalog) : "";
+  const [facts, found, catalog] = await Promise.all([factsP, recallP, catalogP]);
+  // Своя копия на ход: метка «без подсказки» — по идентичности объекта, кеш провайдера её не унаследует.
+  const recalled = found ? { ...found } : null;
+  const hintBlocked = recalled ? skillHintBlockReason(recalled, text, gate?.conversational) : null;
+  if (recalled && hintBlocked) {
+    suppressSkillHint(recalled);
+    log.info("recall навыка (§8): подсказка в промпт НЕ идёт (T-F2)", { id: recalled.id, reason: hintBlocked });
+  } else if (recalled) log.info("recall навыка (§8)", { id: recalled.id, version: recalled.version });
+  // Каталог — при промахе recall ИЛИ когда подсказку не дали: модель видит навыки по именам и решает сама.
+  const skillCatalog = !recalled || hintBlocked ? formatSkillCatalog(catalog) : "";
   return { facts, recalled, skillCatalog };
 }

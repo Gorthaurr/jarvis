@@ -114,10 +114,11 @@ describe("agent-loop (§7, §8)", () => {
       list: async () => [],
       get: async () => null,
       save: async () => null,
-      recall: async () => ({ id: "tg", ownerId: "u-1", name: "Отправить Герману", when: "написать Herman", procedure: "шаги...", version: 1 }),
+      // T-F2 (ревью 2026-09-24): подсказка навыка — только уверенному recall (сырой косинус ≥0.86) на КОМАНДУ.
+      recall: async () => ({ id: "tg", ownerId: "u-1", name: "Отправить Герману", when: "написать Herman", procedure: "шаги...", version: 1, recallSim: 0.93, recallSimRaw: 0.9 }),
       learnedCatalog: async () => [{ name: "Отправить Герману", when: "написать Herman" }],
     };
-    await handleUserText(session, "что там по работе нужно", await makeDeps(llm, { skills }));
+    await handleUserText(session, "напиши Герману по работе", await makeDeps(llm, { skills }));
     const req = llm.requests[0];
     expect(req?.systemSkill ?? "").toContain("шаги..."); // процедура в кеш-блоке
     expect(req?.systemDynamic ?? "").not.toContain("Твои выученные навыки"); // каталог НЕ инжектится (recall попал)
@@ -1202,9 +1203,10 @@ describe("agent-loop (§7, §8)", () => {
       when: "прислать отчёт в телеграм",
       procedure: "1. собрать данные\n2. отправить через telegram_send",
       version: 2,
+      recallSimRaw: 0.9, // T-F2: подсказка — только уверенному recall
     }));
     const deps = await makeDeps(llm, { skills: fakeSkills({ recall }) });
-    await handleUserText(session, "пришли отчёт в телеграм", deps);
+    await handleUserText(session, "отправь отчёт в телеграм", deps);
     expect(recall).toHaveBeenCalled();
     // §15-фикс: навык вшивается в КЕШИРУЕМЫЙ systemSkill (свой брейкпоинт), а НЕ в некешируемую
     // динамику — чтобы на повторных ходах задачи он читался из кеша, а не слался заново.
@@ -1266,6 +1268,7 @@ describe("agent-loop (§7, §8)", () => {
         ] as SkillStep[],
         needsReview: false,
         recallSim: sim,
+        recallSimRaw: 0.9, // T-F2: сырой косинус выше порога подсказки (0.86) — реплей режет ГИБРИДНЫЙ порог 0.92
       }));
     // (а) sim 0.85 < порога 0.92 — ровно диапазон ложных реплеев форензики (мат → «закрыть приложение» 0.831)
     {

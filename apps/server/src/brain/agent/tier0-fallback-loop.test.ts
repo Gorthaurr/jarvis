@@ -1,7 +1,8 @@
 /**
  * Причина №1 из USER_SCENARIOS_2026-09-02: tier0 «открой/запусти X» с неизвестным именем умирал честным
  * «не нашёл» БЕЗ отката в модель — «запусти тесты»-класс не работал вовсе. Проверяем ПЕТЛЁЙ:
- * app.launch → not_found → модель получает ход; прочие коды ошибок (timeout) — прежний терминал без модели.
+ * app.launch → not_found → модель получает ход. Ревью 2026-09-24 (T-F5): ЛЮБОЙ провал запуска (timeout,
+ * launch_failed) тоже уходит модели — с причиной во врезке контекста; фраза без модели называет причину.
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand } from "@jarvis/protocol";
@@ -17,11 +18,11 @@ import { failurePhrase } from "../verbalize/action-phrases.js";
 import { type AgentDeps, handleUserText } from "./index.js";
 import { SelectionSlot } from "./selection-context.js";
 
-function session(code: "not_found" | "timeout" | "overlay_drawing") {
+function session(code: "not_found" | "timeout" | "overlay_drawing" | "launch_failed") {
   const sendAction = vi.fn((cmd: ActionCommand) =>
     Promise.resolve(
       cmd.kind === "app.launch"
-        ? { commandId: "c", ok: false, error: { code, message: code === "not_found" ? "не нашёл" : code === "overlay_drawing" ? "Поверх экрана открыт оверлей режима выделения" : "превышен таймаут" }, durationMs: 1 }
+        ? { commandId: "c", ok: false, error: { code, message: code === "not_found" ? "не нашёл" : code === "overlay_drawing" ? "Поверх экрана открыт оверлей режима выделения" : code === "launch_failed" ? "не удалось запустить «дискорд»: process-exited-immediately exit=0" : "превышен таймаут" }, durationMs: 1 }
         : { commandId: "c", ok: true, durationMs: 1 },
     ),
   );
@@ -65,13 +66,38 @@ describe("tier0 app.launch не нашёл цель → ход уходит мо
     expect(phrase).not.toMatch(/не получилось/u);
   });
 
-  it("другой код провала (timeout) → прежний честный терминал БЕЗ модели", async () => {
+  it("T-F5: таймаут запуска → тоже ход модели, и во врезке — «исход неизвестен, сверь окна, вслепую не повторяй»", async () => {
+    // Реверт: верни в runLocalIntent условие `code === "not_found"` — модель не вызовется (llm.requests пуст).
     const { session: s } = session("timeout");
-    const llm = new MockLlmProvider([{ text: "модель не должна вызываться" }]);
+    const llm = new MockLlmProvider([{ text: "Сверю, открылось ли, сэр." }]);
     const reply = await handleUserText(s, "открой тикетов", deps(llm));
-    expect(llm.requests).toHaveLength(0);
-    expect(reply.voice).toMatch(/тикетов/iu); // варианты фразы провала: «Тикетов открыть не удалось» / «Не смог запустить тикетов»
-    expect(reply.voice).toMatch(/не дождался/u);
+    expect(llm.requests.length).toBeGreaterThanOrEqual(1);
+    const ctxText = JSON.stringify(llm.requests[0]?.messages ?? []);
+    expect(ctxText).toContain("timeout");
+    expect(ctxText).toMatch(/Исход НЕИЗВЕСТЕН/u);
+    expect(reply.voice).toContain("Сверю");
+  });
+
+  it("T-F5: «открой дискорд» — ярлык запустился и сразу закрылся (launch_failed) → модель получает причину и доводит", async () => {
+    const { session: s, sendAction } = session("launch_failed");
+    const llm = new MockLlmProvider([{ text: "Ярлык Дискорда пустой, сэр — запускаю через Update.exe с --processStart." }]);
+    const reply = await handleUserText(s, "открой дискорд", deps(llm));
+    expect(sendAction).toHaveBeenCalledTimes(1);
+    expect(llm.requests.length).toBeGreaterThanOrEqual(1);
+    // Причина — в контексте хода модели (служебной врезкой), а не выброшена.
+    expect(JSON.stringify(llm.requests[0]?.messages ?? [])).toContain("process-exited-immediately");
+    expect(reply.voice).toContain("processStart");
+  });
+
+  it("T-F5: без модели (фоновый путь озвучивает voice как есть) фраза провала НАЗЫВАЕТ причину, а не «не получилось»", async () => {
+    // Реверт: верни `failurePhrase(intent, code)` в runLocalIntent — прозвучит «не получилось».
+    const { session: s } = session("launch_failed");
+    const spoken: string[] = [];
+    const llm = new MockLlmProvider([]);
+    await handleUserText(s, "открой дискорд", { ...deps(llm), speakResult: (r) => spoken.push(r.voice) });
+    await vi.waitFor(() => expect(spoken.length).toBe(1), { timeout: 2000 });
+    expect(spoken[0]).toMatch(/сразу закрылась/u);
+    expect(spoken[0]).not.toMatch(/не получилось/u);
   });
 });
 

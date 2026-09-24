@@ -17,11 +17,10 @@ describe("classifyTaskControl (§20)", () => {
   });
 
   it("stop_tts: оборвать только озвучку", () => {
-    expect(classifyTaskControl("заткнись").kind).toBe("stop_tts");
     expect(classifyTaskControl("тихо").kind).toBe("stop_tts");
-    expect(classifyTaskControl("помолчи").kind).toBe("stop_tts");
-    expect(classifyTaskControl("замолчи").kind).toBe("stop_tts");
     expect(classifyTaskControl("хватит говорить").kind).toBe("stop_tts");
+    // B-F2: «замолчи» внутри длинной фразы — по-прежнему только озвучка (рефлекс — для короткой команды).
+    expect(classifyTaskControl("замолчи и выключи музыку на ютубе").kind).toBe("stop_tts");
     expect(classifyTaskControl("не говори").kind).toBe("stop_tts");
     expect(classifyTaskControl("хватит говорить")).toMatchObject({ confidence: "high" });
   });
@@ -82,9 +81,9 @@ describe("classifyTaskControl (§20)", () => {
     // «стоп» рядом со словом про задачу — TTS или задача? → low
     const ambiguousStop = classifyTaskControl("стоп задачу");
     expect(ambiguousStop.confidence).toBe("low");
-    // «хватит» без «говорить» — двусмысленно → low
-    const bareHvatit = classifyTaskControl("хватит уже");
-    expect(bareHvatit.confidence).toBe("low");
+    // «хватит» С СОДЕРЖАНИЕМ, но без «говорить» — двусмысленно → low (голое «хватит [уже]» — kill, см. B-F2)
+    const hvatitWithContent = classifyTaskControl("хватит на сегодня");
+    expect(hvatitWithContent.confidence).toBe("low");
   });
 
   it("устойчивость к регистру и пунктуации", () => {
@@ -124,6 +123,23 @@ describe("W0 рефлекс kill/silence (2026-09-09, лог «Джарвис, �
     expect(classifyTaskControl("Джарвис, тишина").kind).toBe("silence");
     expect(classifyTaskControl("полная тишина").kind).toBe("silence");
     expect(classifyTaskControl("в комнате наступила полная тишина и покой").kind).toBe("none");
+  });
+
+  it("B-F2 (ревью 2026-09-24): «заткнись/замолчи/помолчи» и «да замолчи ты уже» — рефлекс silence, а не задача модели", () => {
+    // Реверт: убери эти слова из SILENCE_WORDS (или счёт без филлеров) — тест упадёт (stop_tts → в модель при молчащем Джарвисе).
+    for (const phrase of ["заткнись", "замолчи", "помолчи", "да замолчи ты уже", "Джарвис, заткнись!", "замолчи, тебе говорю"]) {
+      expect(classifyTaskControl(phrase), phrase).toMatchObject({ kind: "silence", confidence: "high" });
+    }
+    // «не молчи» — просьба говорить, не рефлекс тишины.
+    expect(classifyTaskControl("не молчи").kind).not.toBe("silence");
+  });
+
+  it("B-F2: голое «хватит» (с филлерами) — kill-рефлекс; «хватит» с содержанием — нет", () => {
+    for (const phrase of ["хватит", "хватит уже", "да хватит!", "всё, хватит", "Джарвис, хватит"]) {
+      expect(classifyTaskControl(phrase), phrase).toMatchObject({ kind: "kill", confidence: "high" });
+    }
+    expect(classifyTaskControl("хватит говорить").kind).toBe("stop_tts");
+    expect(classifyTaskControl("хватит на сегодня музыки").kind).not.toBe("kill");
   });
 
   it("kill берёт верх над cancel-словом в той же фразе («прекрати и вырубись» — это про самого Джарвиса)", () => {

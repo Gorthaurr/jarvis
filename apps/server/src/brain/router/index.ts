@@ -16,6 +16,8 @@
  */
 import { type Tier, foldText } from "@jarvis/shared";
 import type { MediaOp, VolumeOp } from "@jarvis/protocol";
+import { looksLikeCommandUtterance } from "../agent/replay-gate.js";
+import { type ReactionKind, classifyReaction } from "./reaction.js";
 
 /** Результат классификации: тир + (для tier0) распознанный локальный интент. */
 export interface RouteDecision {
@@ -30,6 +32,9 @@ export interface RouteDecision {
   /** ТРИВИАЛЬНАЯ социальная реплика (приветствие/благодарность/трёп) — кандидат на LEAN-промпт (§econ): полная
    *  персона (~33К) тут избыточна, «привет» её не требует. Агент под флагом `JARVIS_LEAN_SMALLTALK` шлёт ядро. */
   smalltalk?: boolean;
+  /** Ревью 2026-09-24 (T-F6): короткая реакция без команды («нет», «хорошо», «понял»). «affirm» — согласие: после
+   *  вопроса Джарвиса оно может ПОДТВЕРЖДАТЬ предложенное действие — агент решает по рабочей памяти. */
+  reaction?: ReactionKind;
 }
 
 /** Локальные интенты tier0 — обрабатываются без LLM (§7). */
@@ -206,7 +211,15 @@ export function classifyTier(text: string): RouteDecision {
     // ПОЗИТИВНЫЙ гейт (ревью: блоклист императивов неполон): lean лишь если ВЕСЬ остаток после снятия соц-
     // паттернов — вежливость/связки. «спасибо, добавь молоко» / «круто, посоветуй фильм» → есть содержательное
     // слово → НЕ pureSocial → полная персона (как при флаге off). «как дела» → остаток пуст → pureSocial.
-    return { tier: "haiku", reason: "явный трёп/приветствие", conversational: true, ...(isPureSocial(trimmed) ? { smalltalk: true } : {}) };
+    // T-F6: «ок/ага» — тоже реакция; флаг нужен агенту (согласие после вопроса Джарвиса подтверждает действие).
+    const socialReaction = classifyReaction(stripWakeAndFiller(trimmed), hasCommandVerb);
+    return {
+      tier: "haiku",
+      reason: "явный трёп/приветствие",
+      conversational: true,
+      ...(isPureSocial(trimmed) ? { smalltalk: true } : {}),
+      ...(socialReaction ? { reaction: socialReaction } : {}),
+    };
   }
   // 2.5) ВОПРОС vs ДЕЙСТВИЕ (корень жалобы «каждый вопрос воспринимает как задачу»): вопрос («какая столица?»,
   //   «сколько…», «что такое…») и рассуждение/совет («объясни/сравни/как лучше») — это РАЗГОВОР: отвечаем
@@ -225,6 +238,13 @@ export function classifyTier(text: string): RouteDecision {
       conversational: true,
       reason: isHard ? "рассуждение/разбор — разговор (синхронно, не задача)" : "вопрос — разговор (синхронно, не задача)",
     };
+  }
+  // 2.6) Ревью 2026-09-24 (T-F6): короткая РЕАКЦИЯ без командного глагола («нет, не надо», «хорошо», «понял»,
+  //   «вообще хорошо сейчас стало») — разговор, а не задача: раньше она падала в fallback «задача-действие»
+  //   (чип, «Берусь, сэр», ответ через 5 с). Позитивный allowlist — см. reaction.ts.
+  const reaction = classifyReaction(stripWakeAndFiller(trimmed), hasCommandVerb);
+  if (reaction) {
+    return { tier: "haiku", conversational: true, reaction, reason: "короткая реакция без команды — разговор, не задача" };
   }
   // 2.7) Волна 1 (эпизод 2026-07-10): ГЕЙТ СОДЕРЖАТЕЛЬНОСТИ. STT-обрывок («в dot'е.» — повтор, у
   //   которого Deepgram потерял начало и уронил слово в латиницу) раньше уходил в fallback ниже и
@@ -302,7 +322,8 @@ const MEDIA_LOC = String.raw`(?:\s+(?:на|в)\s+[\p{L}\p{N}-]+)?`;
 const MEDIA_PATTERNS: ReadonlyArray<readonly [RegExp, LocalIntent]> = [
   [/^(пауза|на паузу|поставь на паузу|поставь паузу|приостанови|останови|стоп)$/iu, { kind: "media", op: "pause" }],
   // «останови/выключи МУЗЫКУ (на ютубе)» — пауза с ОБЯЗАТЕЛЬНЫМ объектом (голое «выключи» — не медиа!).
-  [new RegExp(String.raw`^(?:останови|приостанови|выключи|поставь на паузу)${MEDIA_OBJ_REQ}${MEDIA_LOC}$`, "iu"), { kind: "media", op: "pause" }],
+  // Ревью 2026-09-24 (T-F6): разговорные «выруби/вырубай/отруби музыку» — то же самое (раньше гоняли полный LLM-ход).
+  [new RegExp(String.raw`^(?:останови|приостанови|выключи|выруби|вырубай|отруби|отрубай|поставь на паузу)${MEDIA_OBJ_REQ}${MEDIA_LOC}$`, "iu"), { kind: "media", op: "pause" }],
   [/^(продолжи|возобнови|продолжай|плей|играй|воспроизведи)$/iu, { kind: "media", op: "play" }],
   // «продолжи видео на ютубе», «возобнови музыку» — однозначные resume-глаголы + объект/локация.
   // «продолжу/продолжим» — частая STT-вариация команды (живой случай 2026-07-02).
@@ -321,7 +342,7 @@ const MEDIA_PATTERNS: ReadonlyArray<readonly [RegExp, LocalIntent]> = [
   ],
   [/^(громче|погромче|сделай\s+(?:по)?громче|прибавь(?:\s+(?:громкость|звук))?)$/iu, { kind: "volume", op: "up" }],
   [/^(тише|потише|сделай\s+(?:по)?тише|убавь(?:\s+(?:громкость|звук))?)$/iu, { kind: "volume", op: "down" }],
-  [/^(без звука|выключи звук|включи звук|верни звук|заглуши|mute|мьют)$/iu, { kind: "volume", op: "mute" }],
+  [/^(без звука|выключи звук|выруби звук|вырубай звук|отруби звук|отрубай звук|включи звук|верни звук|заглуши|mute|мьют)$/iu, { kind: "volume", op: "mute" }],
 ];
 /** «громкость 30», «поставь громкость на 50%» → set level 0..100. */
 const VOLUME_SET_RE = /^(?:поставь\s+|сделай\s+|выстави\s+|установи\s+)?громкость(?:\s+на)?\s+(\d{1,3})\s*%?$/iu;
@@ -709,6 +730,14 @@ const ACTION_VERB_RE = word(
 );
 function looksLikeAction(text: string): boolean {
   return ACTION_VERB_RE.test(text);
+}
+
+/**
+ * T-F6/T-F2: есть ли в реплике командный глагол — объединение детекторов роутера и гейта реплея (reaction.ts,
+ * гейт подсказки навыка в loop/retrieval.ts). Объединение, а не один список: каждый в отдельности неполон.
+ */
+export function hasCommandVerb(text: string): boolean {
+  return IMPERATIVE_RE.test(text) || looksLikeAction(text) || looksLikeCommandUtterance(text);
 }
 
 // Частица «ли» — почти всегда вопрос («законно ЛИ парсить», «можно ЛИ», «успею ЛИ»). Ловим где угодно.

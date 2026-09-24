@@ -1,5 +1,5 @@
 // W3 «Петля»: раунд инструментов: аренда, диспатч, результат, классификация каждого вызова, закрытие раунда.
-import { log, PARALLEL_READONLY_TOOLS } from "./util.js";
+import { log, notifyToolRound, PARALLEL_READONLY_TOOLS } from "./util.js";
 import type { LoopCtx } from "./context.js";
 import { dispatchTool } from "../../tools/dispatch.js";
 import { noteToolCall, applySuccessEffects, applyRoundFlags } from "./tool-classify.js";
@@ -7,6 +7,12 @@ import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
 import { isBlindMutate } from "../error-voice.js";
 import { canonicalToolCall, canonicalToolName } from "@jarvis/tools";
+
+/**
+ * B-F6: tool_result вызова, снятого отменой владельца (не «ошибка инструмента»). Последовательный вызов не исполнялся
+ * вовсе; параллельное ЧТЕНИЕ могло успеть уйти (allowlist без побочных эффектов) — его результат отброшен.
+ */
+export const CANCELLED_RESULT = "Отменено владельцем — вызов не исполнен (или его результат чтения отброшен), ничего не изменено.";
 
 /** Факты одного раунда инструментов — прежние локальные переменные цикла, теперь один объект для фаз. */
 export interface RoundResult {
@@ -66,7 +72,9 @@ export function canonicalUse(tu: LlmResponse["toolUses"][number]): LlmResponse["
 }
 
 export function prefetchReadonly(ctx: LoopCtx, resp: LlmResponse) {
-  const { toolCtx } = ctx;
+  const { toolCtx, task } = ctx;
+  // B-F6: отменили, пока модель думала, — не запускаем даже чтения (раунд закроется честными «отменено»).
+  if (task.cancel.cancelled) return null;
   // §Волна2 (2.2): раунд целиком из ЯВНО READ-ONLY вызовов → диспатчим ПАРАЛЛЕЛЬНО: wall-clock =
   // max, не сумма (research-раунды в 2-3× быстрее). Любой прочий вызов в раунде → строго
   // последовательный путь как раньше (порядок побочных эффектов свят — fs_write→fs_read не
@@ -150,7 +158,8 @@ export function closeRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult):
   const answered = new Set(round.resultBlocks.map((b) => (b.type === "tool_result" ? b.tool_use_id : "")));
   for (const tu of resp.toolUses) {
     if (!answered.has(tu.id)) {
-      round.resultBlocks.push({ type: "tool_result", tool_use_id: tu.id, content: "отменено пользователем", is_error: true });
+      // B-F6: честно — вызов НЕ исполнялся (журнал чекпойнта и модель не должны читать это как попытку с ошибкой).
+      round.resultBlocks.push({ type: "tool_result", tool_use_id: tu.id, content: CANCELLED_RESULT, is_error: true });
     }
   }
   // Контроль-4: признаки вуали считаются ПО РАУНДУ, а не по одному вызову. Один overlay_drawing среди
@@ -177,6 +186,7 @@ export function closeRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult):
 
 export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<RoundResult> {
   const { st, toolCtx, showStatus } = ctx;
+  notifyToolRound(ctx.sink); // T-F6: sync-first промотирует ход в фон по ФАКТУ первого tool_use
   // Пошёл tool-use → это настоящая многошаговая задача: показываем прогресс (§20). Для содержательной
   // задачи чип УЖЕ показан на старте (выше); здесь — страховка + путь для conversational-хода, реально
   // делающего многошаговую работу инструментами (напр. «что у меня в памяти про X, разверни в план»).
@@ -186,6 +196,10 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
   const round = newRound();
   const prefetched = prefetchReadonly(ctx, resp);
   for (const raw of resp.toolUses) {
+    // B-F6 (ревью 2026-09-24): отмена проверяется ПЕРЕД КАЖДЫМ вызовом, а не только перед GUI (аренда ввода).
+    // Раньше «вырубись» посреди раунда останавливал лишь клики: отправка человеку, code_run, fs_delete из того
+    // же раунда исполнялись ПОСЛЕ «Остановил». Недоисполненные вызовы закроет closeRound честным «отменено».
+    if (ctx.task.cancel.cancelled) break;
     const tu = canonicalUse(raw); // W4 фасады: дальше по циклу — каноническое имя/вход; id — тот же (tool_result парен)
     const gate = await acquireForTool(ctx, tu, round);
     if (gate === "break") break;
