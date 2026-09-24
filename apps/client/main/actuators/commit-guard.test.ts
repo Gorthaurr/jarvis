@@ -5,7 +5,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
-import { assertReplayCommitAllowed, assessClientCommit, guardedDispatch } from "./commit-guard.js";
+import { assertActCommitAllowed, assertReplayCommitAllowed, assertReplayTypeAllowed, assessClientCommit, guardedDispatch } from "./commit-guard.js";
 
 const ok = (commandId: string): ActionResult => ({ commandId, ok: true, durationMs: 1 });
 
@@ -88,6 +88,34 @@ describe("W4 act — клиентский рубеж (SDK-мост / репле�
     expect(assessClientCommit({ kind: "gui.act", do: "type", target: "Сообщение", text: "ок\r" }, "discord", "replay")).not.toBeNull();
     expect(assessClientCommit({ kind: "input.type", text: "строка 1\nстрока 2" }, "notepad", "bridge")).toBeNull();
     expect(assessClientCommit({ kind: "gui.act", do: "type", target: "Сообщение", text: "ок" }, "Telegram", "bridge")).toBeNull();
+  });
+
+  // Контроль-2 №3: мост пропускал input.type мимо гейта — jarvis.write("привет\n") уходил в Telegram без вопроса.
+  // Реверт: убери input.type из условия guardedDispatch — dispatch будет вызван.
+  it("guardedDispatch: печать с переводом строки через мост при Telegram → denied; без перевода — проходит", async () => {
+    const dispatch = vi.fn(async (id: string, _c: ActionCommand) => ok(id));
+    const g = guardedDispatch(dispatch, async () => "Telegram");
+    const r = await g("c1", { kind: "input.type", text: "привет\n" });
+    expect(r.error?.code).toBe("denied");
+    expect(dispatch).not.toHaveBeenCalled();
+    await g("c2", { kind: "input.type", text: "привет" });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("реплей: шаг input.type с переводом строки в мессенджере — отказ; в блокноте — нет", async () => {
+    await expect(assertReplayTypeAllowed("ок\r\n", async () => "discord")).rejects.toThrow(/§14/u);
+    await expect(assertReplayTypeAllowed("строка 1\nстрока 2", async () => "notepad")).resolves.toBeUndefined();
+  });
+
+  // Контроль-2 №4: act{app:"tele"} фокусирует Telegram, а сервер по подстроке программу не узнал — клиент судит по
+  // РЕАЛЬНО сфокусированному процессу. Реверт: return в начале assertActCommitAllowed — первый ассерт не бросит.
+  it("act-коммит без подтверждения сервера в реально сфокусированном мессенджере — отказ; одобренный/не коммит/блокнот — нет", async () => {
+    const enter = { kind: "gui.act", app: "tele", do: "key", combo: "Enter" } as ActionCommand;
+    await expect(assertActCommitAllowed(enter, async () => "Telegram")).rejects.toThrow(/Ничего не нажато.*app: «Telegram»/u);
+    await expect(assertActCommitAllowed({ ...enter, commitApproved: true } as ActionCommand, async () => "Telegram")).resolves.toBeUndefined();
+    await expect(assertActCommitAllowed({ kind: "gui.act", app: "tele", target: "Настройки" } as ActionCommand, async () => "Telegram")).resolves.toBeUndefined();
+    await expect(assertActCommitAllowed(enter, async () => "notepad")).resolves.toBeUndefined();
+    await expect(assertActCommitAllowed({ kind: "gui.act", app: "general", target: "Отправить" } as ActionCommand, async () => "Discord")).rejects.toThrow(/§14/u);
   });
 
   it("guardedDispatch: act «Отправить» при Telegram → denied без dispatch; act «Настройки» проходит", async () => {

@@ -88,6 +88,21 @@ describe("GUI — коммит в опасном процессе на пере�
     expect(sendAction).toHaveBeenCalledTimes(1);
   });
 
+  // Контроль-2 №4: признак «владелец одобрил» едет клиенту ТОЛЬКО после вопроса; аргумент модели перекрывается.
+  // Реверт: убери `commitApproved = true` после одобрения — первый ассерт упадёт; убери перекрытие — второй.
+  it("act: commitApproved=true только после «да» владельца; модель сама себе одобрить не может", async () => {
+    const sent: ActionCommand[] = [];
+    const sendAction = vi.fn<Send>(async (cmd) => {
+      sent.push(cmd);
+      return { commandId: "c", ok: true, durationMs: 1 };
+    });
+    const sess = { sendAction } as unknown as ToolContext["session"];
+    await dispatchTool("act", { app: "Telegram", do: "key", combo: "Enter" }, makeCtx({ session: sess, approved: true }));
+    await dispatchTool("act", { app: "notepad", do: "key", combo: "Enter", commitApproved: true }, makeCtx({ session: sess }));
+    expect((sent[0] as { commitApproved?: boolean }).commitApproved).toBe(true);
+    expect((sent[1] as { commitApproved?: boolean }).commitApproved).toBe(false);
+  });
+
   // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter; в мессенджере уходил человеку мимо вопроса.
   it("печать с переводом строки в Telegram (input_type и act do:type) — спрашивает; без перевода строки и в notepad — нет", async () => {
     const sendAction = vi.fn<Send>(okSend);

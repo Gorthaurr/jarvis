@@ -20,6 +20,7 @@ import { type FoundTarget, findTarget } from "./act-find.js";
 import { type ActDone, performAct } from "./act-do.js";
 import { type ActVerdict, precheckVerify, verifyOutcome } from "./act-verify.js";
 import { focusApp } from "./apps.js";
+import { assertActCommitAllowed } from "./commit-guard.js";
 import { captureUiFingerprint } from "./observe.js";
 import { focusWindow } from "./windows.js";
 
@@ -77,6 +78,7 @@ export async function act(cmd: ActCommand, opts: { restoreCursor: boolean }): Pr
   // Снимок «до» — база дельты; на UIA-слепом окне OCR той же области, что и «после» (нужна точка).
   const before = await captureUiFingerprint(found?.point);
   const preMet = await precheckVerify(cmd.verify, deadline); // H-V1: признак, видимый ДО действия, исход не доказывает
+  await assertActCommitAllowed(cmd); // контроль-2 №4: §14 по реально сфокусированному процессу, ДО действия
   const done = await performAct(found, verb, { text: cmd.text, combo: cmd.combo, physical: cmd.physical, restoreCursor: opts.restoreCursor });
   const clickPoint = found?.point ?? (done.screenX !== undefined && done.screenY !== undefined ? { x: done.screenX, y: done.screenY } : undefined);
   const verdict = await verifyOutcome(cmd.verify, { before, clickPoint, deadline, preMet });

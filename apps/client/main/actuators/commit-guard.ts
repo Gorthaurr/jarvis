@@ -95,7 +95,8 @@ export type DispatchLike = (commandId: string, cmd: ActionCommand) => Promise<Ac
  */
 export function guardedDispatch(dispatch: DispatchLike, fg: () => Promise<string | null> = foregroundProcess): DispatchLike {
   return async (commandId, cmd) => {
-    if (cmd.kind === "input.key" || cmd.kind === "gui.act") {
+    // Контроль-2 №3: input.type тоже — печать с переводом строки = Enter (jarvis.write("привет\n") в Telegram).
+    if (cmd.kind === "input.key" || cmd.kind === "gui.act" || cmd.kind === "input.type") {
       const denial = assessClientCommit(cmd, await fg(), "bridge");
       if (denial) {
         log.warn("§14 гейт коммита на мосту SDK: отказ", { kind: cmd.kind, process: denial.process });
@@ -104,6 +105,35 @@ export function guardedDispatch(dispatch: DispatchLike, fg: () => Promise<string
     }
     return dispatch(commandId, cmd);
   };
+}
+
+/** Контроль-2 №3: реплей шага input.type с переводом строки в мессенджере/банке/1С — отказ, как у Enter. */
+export async function assertReplayTypeAllowed(text: string, fg: () => Promise<string | null> = foregroundProcess): Promise<void> {
+  const denial = assessClientCommit({ kind: "input.type", text }, await fg(), "replay");
+  if (denial) {
+    log.warn("§14 гейт в реплее навыка: печать с переводом строки — отказ", { process: denial.process });
+    throw new Error(denial.message);
+  }
+}
+
+/**
+ * Контроль-2 №4 (ревью 2026-09-24): act{app} фокусирует окно по ПОДСТРОКЕ заголовка/процесса («tele», «general»,
+ * «Катя»), и сервер по такой строке программу не узнавал — Enter уходил человеку без вопроса. Судим по процессу,
+ * который РЕАЛЬНО на переднем плане в момент коммита. Сервер уже спросил владельца → `commitApproved`, не мешаем.
+ * Отказ честный и подсказывает путь: назвать программу точно — тогда сервер спросит владельца.
+ */
+export async function assertActCommitAllowed(cmd: ActionCommand, fg: () => Promise<string | null> = foregroundProcess): Promise<void> {
+  if (cmd.kind !== "gui.act" || cmd.commitApproved === true) return;
+  const what = commitOf(cmd);
+  if (!what) return;
+  const proc = await fg();
+  const risk = proc ? riskyProcessCategory(proc) : null;
+  if (!proc || !risk) return;
+  log.warn("§14: act-коммит в рискованной программе без подтверждения — отказ", { process: proc, app: cmd.app });
+  throw new Error(
+    `§14: ${what} в программе ${proc} (${risk.human}) — необратимая отправка без подтверждения владельца. ` +
+      `Ничего не нажато. Повтори act с app: «${proc}» — тогда я спрошу владельца.`,
+  );
 }
 
 /** Для реплея навыка: бросает Error с честным текстом, если шаг — рискованный коммит. */

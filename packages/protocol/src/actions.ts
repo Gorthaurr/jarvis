@@ -197,6 +197,12 @@ type ActionCommandKind =
       combo?: string;
       verify?: ActVerify;
       physical?: boolean;
+      /**
+       * Контроль-2 №4 (ревью 2026-09-24): §14-подтверждение владельца на этот коммит УЖЕ получено сервером. Ставит
+       * ТОЛЬКО сервер (аргумент модели перекрывается). Без него клиент перед коммитом сверяет РЕАЛЬНО сфокусированный
+       * процесс: `app` — подстрока («tele», «general»), и сервер по ней программу мог не узнать.
+       */
+      commitApproved?: boolean;
     }
   // §Волна2 (2.4): nameMode="substring" — матч имени по вхождению; automationId — устойчивый id элемента.
   | { kind: "ui.ground"; query: { role: string; name?: string; nameMode?: "exact" | "substring"; automationId?: string } } // -> handle/bbox в ActionResult.data

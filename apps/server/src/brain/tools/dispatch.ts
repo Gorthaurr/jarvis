@@ -696,6 +696,7 @@ async function dispatchToolCore(
   // снимка ПК; в невидимом браузере (web_act) — по хосту последнего web_open. Координатный клик и
   // безымянный селектор не судятся (осознанный предел). Отказ → declined (петля не считает сделанным).
   // W4 «Руки»: act судится тем же гейтом — do:key Enter ≡ input_key, клик по подписи-коммиту ≡ input_click по тексту.
+  let commitApproved = false; // контроль-2 №4: едет в gui.act — клиент не перепроверяет то, что владелец уже одобрил
   if (name === "ui_invoke" || name === "input_key" || name === "input_click" || name === "act" || name === "input_type") {
     const sessObj = ctx.session as unknown as object;
     // Ревью 2026-09-24 (H-S1): act с `app` САМ фокусирует это окно ПОСЛЕ гейта — судить по текущему переднему
@@ -720,6 +721,7 @@ async function dispatchToolCore(
       if (!ctx.confirm) return err(`${name}: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
       const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
       if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} в ${risk.where}`), gate.outcome);
+      commitApproved = true;
     }
   }
   if (name === "web_open" && typeof input.url === "string") rememberWebTarget(ctx.session as unknown as object, input.url);
@@ -755,7 +757,8 @@ async function dispatchToolCore(
 
   // §бесшумный-ввод: origin проставляет СЕРВЕР (не модель) — реактивный ход = "user" (физ.ввод НЕ гейтить),
   // проактивные каналы (когда начнут гнать актуаторы) = "proactive". Перекрываем любой origin из аргументов модели.
-  const command = { kind, ...input, origin: ctx.origin ?? "user" } as ActionCommand;
+  // commitApproved у act — только серверный (аргумент модели перекрывается; иначе модель сама «одобрила» бы отправку).
+  const command = { kind, ...input, origin: ctx.origin ?? "user", ...(kind === "gui.act" ? { commitApproved } : {}) } as ActionCommand;
   const result = await ctx.session.sendAction(command, actionTimeoutMs(kind));
   // W4 «Руки»: у act ТРИ исхода сверки (met/failed/unchecked) + частичное исполнение — свой хендлер, чтобы
   // observed/uncertain ставились по СМЫСЛУ вердикта, а не по одному лишь fused-наблюдению.

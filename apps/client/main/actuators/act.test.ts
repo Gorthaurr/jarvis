@@ -29,6 +29,7 @@ const st = vi.hoisted(() => ({
   observation: { via: "a11y", text: "+ появилось «Отправлено»", delta: true, changed: true } as unknown,
   focusWindow: async (_o: unknown): Promise<{ focused: boolean; hwnd: number; title: string }> => ({ focused: true, hwnd: 1, title: "Telegram" }),
   focusApp: async (_a: string): Promise<{ resolved: string; focused: boolean }> => ({ resolved: "x", focused: false }),
+  fg: null as string | null, // процесс на переднем плане для §14-рубежа act (контроль-2 №4)
 }));
 
 vi.mock("./ground.js", () => ({
@@ -60,7 +61,10 @@ vi.mock("./observe.js", () => ({
   captureUiFingerprint: async () => ({ lines: ["Button: Отправить"] }),
   observeAfterAction: async () => st.observation,
 }));
-vi.mock("./windows.js", () => ({ focusWindow: (o: unknown) => st.focusWindow(o) }));
+vi.mock("./windows.js", () => ({
+  focusWindow: (o: unknown) => st.focusWindow(o),
+  listWindows: async () => (st.fg ? [{ foreground: true, process: st.fg }] : []),
+}));
 vi.mock("./apps.js", () => ({ focusApp: (a: string) => st.focusApp(a) }));
 
 import { act } from "./act.js";
@@ -311,6 +315,19 @@ describe("act — фиксы ревью 2026-09-24", () => {
   it("do:type без цели: печать упала посреди → ActPartialError (часть могла уйти), не молчаливый провал", async () => {
     st.typeText.mockRejectedValueOnce(new Error("сайдкар лёг"));
     await expect(act({ kind: "gui.act", do: "type", text: "привет" }, OPTS)).rejects.toBeInstanceOf(ActPartialError);
+  });
+
+  // Контроль-2 №4: проводка рубежа в самом act. Реверт: убери вызов assertActCommitAllowed в act.ts — Enter нажмётся.
+  it("app «tele» сфокусировал Telegram, Enter без подтверждения сервера → отказ ДО нажатия; с подтверждением — нажимает", async () => {
+    st.fg = "Telegram";
+    try {
+      await expect(act({ kind: "gui.act", app: "tele", do: "key", combo: "Enter" }, OPTS)).rejects.toThrow(/§14.*Ничего не нажато/u);
+      expect(st.pressKey).not.toHaveBeenCalled();
+      await act({ kind: "gui.act", app: "Telegram", do: "key", combo: "Enter", commitApproved: true }, OPTS);
+      expect(st.pressKey).toHaveBeenCalledWith("Enter");
+    } finally {
+      st.fg = null;
+    }
   });
 
   it("H-V1: признак был виден ещё ДО действия → итог unchecked, а не «подтверждено»", async () => {

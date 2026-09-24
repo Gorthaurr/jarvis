@@ -22,6 +22,10 @@ vi.mock("../actuators/apps.js", () => ({
   launchApp: (app: unknown) => launchApp(app),
   focusApp: vi.fn(async () => undefined),
 }));
+let fgProc: string | null = null; // контроль-2 №3: процесс на переднем плане для §14-гейта реплея
+vi.mock("../actuators/windows.js", () => ({
+  listWindows: async () => (fgProc ? [{ foreground: true, process: fgProc }] : []),
+}));
 vi.mock("../actuators/ground.js", () => ({
   invoke: vi.fn(async () => undefined),
   ground: vi.fn(async () => undefined),
@@ -32,6 +36,21 @@ import { createClientActuator } from "./client-actuator.js";
 function step(action: string, extra: Partial<SkillStep> = {}): SkillStep {
   return { action, ...extra };
 }
+
+// Контроль-2 №3: шаг input.type с переводом строки в мессенджере = Enter мимо §14. Реверт: убери
+// assertReplayTypeAllowed в client-actuator — typeText будет вызван.
+describe("createClientActuator — перевод строки в реплее", () => {
+  it("input.type «ок\\n» при Telegram спереди → отказ, печати нет; без перевода — печатает", async () => {
+    typeText.mockClear();
+    fgProc = "Telegram";
+    const act = createClientActuator({ isProactive: false, userActiveNow: () => false });
+    await expect(act.executeStep(step("input.type", { params: { text: "ок\n" } }))).rejects.toThrow(/§14/u);
+    expect(typeText).not.toHaveBeenCalled();
+    await act.executeStep(step("input.type", { params: { text: "ок" } }));
+    expect(typeText).toHaveBeenCalledTimes(1);
+    fgProc = null;
+  });
+});
 
 describe("createClientActuator — USER_BUSY-гейт физ.ввода (§H5)", () => {
   beforeEach(() => {
