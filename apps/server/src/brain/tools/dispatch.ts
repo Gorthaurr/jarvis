@@ -399,7 +399,12 @@ export async function dispatchTool(
   // W4 фасады: look/window/audio → канонический инструмент и здесь (dispatchTool зовут не только из петли:
   // реплей, watch-runner, тесты). Незнакомый what/op остаётся именем фасада → честное «Неизвестный инструмент».
   const { name, input } = canonicalToolCall(rawName, rawInput);
-  const cred = checkCredentialInput(name, input, (ref) => refFieldHint(ctx, ref));
+  const cred = checkCredentialInput(
+    name,
+    input,
+    (ref) => refFieldHint(ctx, ref),
+    (handle) => uiHandleLabel(ctx.session as unknown as object, typeof handle === "string" ? Number(handle) : handle),
+  );
   if (cred.block) return err(cred.block);
   const out = await dispatchToolCore(name, input, ctx);
   if (cred.note && !out.isError) appendToolNote(out, cred.note);
@@ -686,7 +691,7 @@ async function dispatchToolCore(
   // снимка ПК; в невидимом браузере (web_act) — по хосту последнего web_open. Координатный клик и
   // безымянный селектор не судятся (осознанный предел). Отказ → declined (петля не считает сделанным).
   // W4 «Руки»: act судится тем же гейтом — do:key Enter ≡ input_key, клик по подписи-коммиту ≡ input_click по тексту.
-  if (name === "ui_invoke" || name === "input_key" || name === "input_click" || name === "act") {
+  if (name === "ui_invoke" || name === "input_key" || name === "input_click" || name === "act" || name === "input_type") {
     const sessObj = ctx.session as unknown as object;
     // Ревью 2026-09-24 (H-S1): act с `app` САМ фокусирует это окно ПОСЛЕ гейта — судить по текущему переднему
     // плану значило пропустить «act{app:"Telegram", target:"Отправить"}» при Chrome спереди без вопроса владельцу.

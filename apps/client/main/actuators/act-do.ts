@@ -107,6 +107,23 @@ async function doType(f: FoundTarget, p: ActParams): Promise<ActDone> {
   return { did: `напечатал ${text.length} симв. в «${f.name}»`, screenX: r?.screenX, screenY: r?.screenY, physical: Boolean(p.physical) };
 }
 
+/**
+ * type БЕЗ цели: печать в поле, где УЖЕ стоит фокус (после Ctrl+K/Ctrl+L, поиска, открытого клавишей, игрового чата).
+ * Ревью 2026-09-24: раньше для этого нужен был холодный input_type (tool_load = лишний раунд). Кликать некуда —
+ * клика нет; окно для печати выбирает `app` act (фокус ДО печати). Упала посреди — часть символов могла уйти.
+ */
+async function doTypeFocused(p: ActParams): Promise<ActDone> {
+  const text = p.text ?? "";
+  try {
+    if (text.length >= PASTE_FROM_CHARS) await pasteText(text);
+    else await typeText(text);
+  } catch (e) {
+    if (e instanceof DrawingOverlayError) throw e;
+    throw new ActPartialError(`печать в поле с фокусом не удалась: ${msg(e)} — часть текста могла уйти, исход неизвестен, не повторяй вслепую`);
+  }
+  return { did: `напечатал ${text.length} симв. в поле с фокусом`, physical: true };
+}
+
 /** UIA-паттерн по handle (set/toggle/select/expand): без handle честно нельзя — паттерны только у элементов. */
 async function doPattern(f: FoundTarget, pattern: "setValue" | "toggle" | "select" | "expand", value?: string): Promise<ActDone> {
   if (!f.handle) throw new Error(`«${f.name}»: для ${pattern} нужен UIA-элемент (handle), а найдена только точка на экране`);
@@ -120,6 +137,10 @@ export async function performAct(found: FoundTarget | undefined, verb: ActVerb, 
     if (!p.combo) throw new Error("do:key без combo");
     await pressKey(p.combo);
     return { did: `нажал «${p.combo}»`, physical: true };
+  }
+  if (verb === "type" && !found) {
+    if (!p.text) throw new Error("do:type без text");
+    return doTypeFocused(p);
   }
   if (!found) throw new Error(`do:${verb} без цели (target)`);
   switch (verb) {

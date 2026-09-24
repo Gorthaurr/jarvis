@@ -63,7 +63,8 @@ function validate(cmd: ActCommand): void {
   const verb = cmd.do ?? "click";
   if (verb === "key" && !cmd.combo?.trim()) throw new Error("act do:key без combo");
   if ((verb === "type" || verb === "set") && !cmd.text) throw new Error(`act do:${verb} без text`);
-  if (verb !== "key" && cmd.target === undefined) throw new Error(`act do:${verb} без target`);
+  // key и type без цели законны: клавиша — в фокус; печать — в поле, где уже стоит фокус (после Ctrl+K/Ctrl+L).
+  if (verb !== "key" && verb !== "type" && cmd.target === undefined) throw new Error(`act do:${verb} без target`);
 }
 
 export async function act(cmd: ActCommand, opts: { restoreCursor: boolean }): Promise<ActOutcome> {

@@ -52,14 +52,14 @@ describe("assessGuiCommit + parseForegroundProcess", () => {
   const ctx = "Окна: 5 · На переднем плане: 1cv8 «Бухгалтерия предприятия» · Пользователь: за ПК";
   it("процесс из живого снимка парсится; Enter в 1С и вызов «Провести» — коммит; «Печать» — нет", () => {
     expect(parseForegroundProcess(ctx)).toBe("1cv8");
-    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { key: "enter" } })?.what).toMatch(/Enter/u);
+    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { combo: "enter" } })?.what).toMatch(/Enter/u);
     expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "ui_invoke", input: { handle: 7 }, label: "Button Провести и закрыть" })?.what).toMatch(/Провести/u);
     expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "ui_invoke", input: { handle: 7 }, label: "Button Печать" })).toBeNull();
-    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { key: "enter", mode: "up" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "1cv8", tool: "input_key", input: { combo: "enter", mode: "up" } })).toBeNull();
   });
   it("Enter в Telegram Desktop — отправка сообщения; в Блокноте — ничего; координатный клик — ничего", () => {
-    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "input_key", input: { key: "Enter" } })?.what).toMatch(/отправка сообщения/u);
-    expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "input_key", input: { key: "enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "input_key", input: { combo: "Enter" } })?.what).toMatch(/отправка сообщения/u);
+    expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "input_key", input: { combo: "enter" } })).toBeNull();
     expect(assessGuiCommit({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } })).toBeNull();
     expect(assessGuiCommit({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "text", text: "Отправить" } } })?.what).toMatch(/Отправить/u);
   });

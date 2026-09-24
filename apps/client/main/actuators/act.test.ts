@@ -298,6 +298,21 @@ describe("act — фиксы ревью 2026-09-24", () => {
     expect(st.typeText).not.toHaveBeenCalled();
   });
 
+  it("do:type БЕЗ цели → печать в поле с фокусом: ни поиска, ни клика; без text — ошибка; прочие глаголы без цели — ошибка", async () => {
+    const r = await act({ kind: "gui.act", app: "Discord", do: "type", text: "general" }, OPTS);
+    expect(st.snapshotCalls).toBe(0);
+    expect(st.click).not.toHaveBeenCalled();
+    expect(st.typeText).toHaveBeenCalledWith("general");
+    expect(r.did).toMatch(/в поле с фокусом/u);
+    await expect(act({ kind: "gui.act", do: "type" }, OPTS)).rejects.toThrow(/без text/u);
+    await expect(act({ kind: "gui.act", do: "click" }, OPTS)).rejects.toThrow(/без target/u);
+  });
+
+  it("do:type без цели: печать упала посреди → ActPartialError (часть могла уйти), не молчаливый провал", async () => {
+    st.typeText.mockRejectedValueOnce(new Error("сайдкар лёг"));
+    await expect(act({ kind: "gui.act", do: "type", text: "привет" }, OPTS)).rejects.toBeInstanceOf(ActPartialError);
+  });
+
   it("H-V1: признак был виден ещё ДО действия → итог unchecked, а не «подтверждено»", async () => {
     st.wait = async () => ({ met: true, elapsedMs: 50, polls: 1, detail: "видно «Настройки»" });
     const r = await act({ kind: "gui.act", target: "Отправить", verify: { text: "Настройки" } }, OPTS);

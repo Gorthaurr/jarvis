@@ -110,7 +110,7 @@ export function parseForegroundProcess(systemContext: string): string | null {
  */
 export function assessGuiCommit(a: {
   foregroundProcess: string | null;
-  tool: "ui_invoke" | "input_key" | "input_click" | "act";
+  tool: "ui_invoke" | "input_key" | "input_click" | "act" | "input_type";
   input: Record<string, unknown>;
   label?: string;
 }): CommitRisk | null {
@@ -124,8 +124,16 @@ export function assessGuiCommit(a: {
     what,
     summary: `Необратимое действие в программе ${where}: ${what}.`,
   });
+  // Ревью 2026-09-24: перевод строки в печатаемом тексте — это Enter (синтетический \r/\n мессенджер читает как
+  // «отправить»). «act{do:"type", text:"привет\n"}» в Telegram уходил человеку МИМО вопроса владельца.
+  const typedNewline = (t: unknown): boolean => typeof t === "string" && /[\r\n]/u.test(t);
+  if (a.tool === "input_type") {
+    return typedNewline(a.input.text) ? mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит") : null;
+  }
   if (a.tool === "input_key") {
-    const key = String(a.input.key ?? "").toLowerCase();
+    // Ревью 2026-09-24: поле схемы input_key — `combo`. Гейт читал `key`, которого модель не шлёт, и Enter в мессенджере
+    // уходил БЕЗ вопроса владельцу (тесты кормили тем же неверным полем — фикстура била мимо). `key` оставлен как синоним.
+    const key = String(a.input.combo ?? a.input.key ?? "").toLowerCase();
     const mode = String(a.input.mode ?? "");
     if (/enter|return/u.test(key) && mode !== "up") return mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение");
     return null;
@@ -137,6 +145,9 @@ export function assessGuiCommit(a: {
     if (verb === "key") {
       const combo = String(a.input.combo ?? "").toLowerCase();
       return /enter|return/u.test(combo) ? mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение") : null;
+    }
+    if (verb === "type" && typedNewline(a.input.text)) {
+      return mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит");
     }
     if (verb !== "click" && verb !== "double") return null;
     const t = a.input.target;

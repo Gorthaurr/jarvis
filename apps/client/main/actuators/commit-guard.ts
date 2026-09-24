@@ -53,16 +53,20 @@ export function assessClientCommit(cmd: ActionCommand, foregroundNow: string | n
 
 /**
  * Что в команде похоже на коммит: клавиша-коммит (input.key / act do:key) или клик по подписи-коммиту
- * (act по тексту «Отправить»/«Оплатить» — W4). Остальное (печать, set, toggle) само ничего не отправляет.
+ * (act по тексту «Отправить»/«Оплатить» — W4). Печать с переводом строки — тоже коммит: синтетический \r/\n
+ * мессенджер читает как Enter (ревью 2026-09-24). Остальное (обычная печать, set, toggle) само ничего не отправляет.
  */
+const NEWLINE_RE = /[\r\n]/u;
 function commitOf(cmd: ActionCommand): string | null {
   if (cmd.kind === "input.key") {
     if (cmd.mode === "up") return null; // отпускание клавиши ничего не коммитит
     return isCommitKeyCombo(cmd.combo) ? `«${cmd.combo}»` : null;
   }
+  if (cmd.kind === "input.type") return NEWLINE_RE.test(cmd.text ?? "") ? "печать с переводом строки (= Enter)" : null;
   if (cmd.kind !== "gui.act") return null;
   const verb = cmd.do ?? "click";
   if (verb === "key") return cmd.combo && isCommitKeyCombo(cmd.combo) ? `«${cmd.combo}»` : null;
+  if (verb === "type") return NEWLINE_RE.test(cmd.text ?? "") ? "печать с переводом строки (= Enter)" : null;
   if (verb !== "click" && verb !== "double") return null;
   const t = cmd.target;
   const text = typeof t === "string" ? t : t && typeof t === "object" ? String(t.text ?? "") : "";

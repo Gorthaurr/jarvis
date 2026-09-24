@@ -78,14 +78,34 @@ describe("GUI — коммит в опасном процессе на пере�
   it("input_key Enter при Telegram на переднем плане — спрашивает; в notepad — нет", async () => {
     const sendAction = vi.fn<Send>(okSend);
     const c = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "Telegram", approved: false });
-    const r = await dispatchTool("input_key", { key: "enter" }, c);
+    const r = await dispatchTool("input_key", { combo: "enter" }, c);
     expect(c.confirm).toHaveBeenCalledTimes(1);
     expect(r.declined).toBe(true);
     expect(sendAction).not.toHaveBeenCalled();
     const c2 = makeCtx({ session: { sendAction } as unknown as ToolContext["session"], foreground: "notepad" });
-    await dispatchTool("input_key", { key: "enter" }, c2);
+    await dispatchTool("input_key", { combo: "enter" }, c2);
     expect(c2.confirm).not.toHaveBeenCalled();
     expect(sendAction).toHaveBeenCalledTimes(1);
+  });
+
+  // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter; в мессенджере уходил человеку мимо вопроса.
+  it("печать с переводом строки в Telegram (input_type и act do:type) — спрашивает; без перевода строки и в notepad — нет", async () => {
+    const sendAction = vi.fn<Send>(okSend);
+    const sess = { sendAction } as unknown as ToolContext["session"];
+    const c = makeCtx({ session: sess, foreground: "Telegram", approved: false });
+    const r1 = await dispatchTool("input_type", { text: "буду в семь\n" }, c);
+    const r2 = await dispatchTool("act", { app: "Telegram", do: "type", target: "Сообщение", text: "ок\r\n" }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(2);
+    expect(r1.declined).toBe(true);
+    expect(r2.declined).toBe(true);
+    expect(sendAction).not.toHaveBeenCalled();
+    const c2 = makeCtx({ session: sess, foreground: "Telegram" });
+    await dispatchTool("input_type", { text: "буду в семь" }, c2);
+    const c3 = makeCtx({ session: sess, foreground: "notepad" });
+    await dispatchTool("input_type", { text: "строка 1\nстрока 2" }, c3);
+    expect(c2.confirm).not.toHaveBeenCalled();
+    expect(c3.confirm).not.toHaveBeenCalled();
+    expect(sendAction).toHaveBeenCalledTimes(2);
   });
 
   it("ui_invoke по handle «Провести» при 1cv8: подпись берётся из последнего ui_snapshot → спрашивает", async () => {

@@ -79,6 +79,14 @@ describe("W4 act — клиентский рубеж (SDK-мост / репле�
     expect(assessClientCommit({ kind: "gui.act", target: "Отправить", app: "notepad" }, "Telegram", "bridge")).toBeNull();
   });
 
+  // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter — мессенджер отправит без вопроса владельцу.
+  it("печать с \\n/\\r в мессенджере (input.type и act do:type) — отказ; в блокноте и без перевода строки — пропуск", () => {
+    expect(assessClientCommit({ kind: "input.type", text: "буду в семь\n" }, "Telegram", "bridge")?.message).toMatch(/перевод/u);
+    expect(assessClientCommit({ kind: "gui.act", do: "type", target: "Сообщение", text: "ок\r" }, "discord", "replay")).not.toBeNull();
+    expect(assessClientCommit({ kind: "input.type", text: "строка 1\nстрока 2" }, "notepad", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", do: "type", target: "Сообщение", text: "ок" }, "Telegram", "bridge")).toBeNull();
+  });
+
   it("guardedDispatch: act «Отправить» при Telegram → denied без dispatch; act «Настройки» проходит", async () => {
     const dispatch = vi.fn(async (id: string, _c: ActionCommand) => ok(id));
     const g = guardedDispatch(dispatch, async () => "Telegram");
