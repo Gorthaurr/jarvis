@@ -29,7 +29,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   Гард — поведением, не грепом по исходнику. Проводку между механизмами — ПЕТЛЁЙ (`handleUserText`), не чистой функцией.
 - **Живой смоук обязателен** для звука, GUI, расширения: «тесты зелёные, живьём не проверено» ≠ «сделано».
   Сам тестирую текстом (`_jarvis_cmd.mjs`), владельца голосом не прошу.
-- **Агенты**: ≤ 3 на воркфлоу, ≤ 2 раунда ревью (лимит подписки общий с мозгом Джарвиса). Инкремент: ревью → PR → merge.
+- **Агенты**: ≤ 3 на воркфлоу, ≤ 2 раунда ревью (лимит подписки общий). Инкремент: ревью → PR → merge.
 - **Один флаг — одно решение**: новый `JARVIS_*` только с удалением старого (их ~270, цель < 100).
 - Реверт-мутации — только из сохранённой копии, НИКОГДА `git checkout/stash` на рабочем дереве.
 
@@ -42,9 +42,9 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
   под супервизором — `apps/client/client.{out,err}.log`. ⚠️ Electron из песочницы агента падает на GPU (артефакт среды
   агента) — «работает ли у владельца» проверять через супервизор.
-- Текст-драйвер: `node _jarvis_cmd.mjs "реплика" ...` (dev-сессия; клиентские действия в нём — фейк). `JARVIS_WS_URL`
-  для изолированного инстанса. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
-- Тесты: `apps/server` `npx vitest run` (~3000), `apps/client` `npx vitest run` (~765), `packages/*`, `node --test
+- Текст-драйвер: `node _jarvis_cmd.mjs "реплика"` (dev-сессия, действия клиента в нём — фейк; `JARVIS_WS_URL` —
+  другой инстанс). Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
+- Тесты: `apps/server` `npx vitest run` (~3030), `apps/client` `npx vitest run` (~780), `packages/*`, `node --test
   infra/client-keeper.test.mjs`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутационная таблица петли:
   `node apps/server/scripts/mutate-loop.cjs`. Длины функций: `node apps/server/scripts/fn-lengths.mjs`.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
@@ -57,8 +57,8 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   `HOT_TOOL_CEILING` (60). Новый инструмент — схема здесь + хендлер на сервере (+ актуатор на клиенте).
 - `packages/shared` — логгер (+ file-sink), `AsyncMutex`/`Semaphore`, `name-match` (тёзки/транслит), модели и цены, commit-risk.
 - `packages/userbots` — Telegram (GramJS) / VK отправители.
-- `apps/extension` — Chrome MV3 (руки в реальных вкладках владельца; собирается клиентским `build.mjs`; после правок —
-  reload в `chrome://extensions` + живой смоук). `apps/sidecar-win` — C# (UIA, OCR, окна, ввод). `apps/mobile` — скелет.
+- `apps/extension` — Chrome MV3 (руки во вкладках владельца; сборка клиентским `build.mjs`; после правок — reload
+  в `chrome://extensions` + смоук). `apps/sidecar-win` — C# (UIA, OCR, окна, ввод). `apps/mobile` — скелет.
 
 ## Сервер (`apps/server/src`)
 - `gateway/` — `server.ts` (boot, провайдеры), `router-ws.ts` (сессия: пайплайн, agentDeps, dispatch кадров),
@@ -72,8 +72,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   терминалов), `finalize.ts`. Рядом: `checkpoint*.ts` (журнал прерванной задачи), `mask-observations.ts`,
   `prune-images.ts`, `replay-gate.ts`, `thinking-policy.ts`, `error-voice.ts` (эффекты инструментов:
   mutate/verify/neutral, BLIND_MUTATE, OUTBOUND_SEND_TOOLS).
-- `brain/router/` — tier0 ($0, без LLM: медиа, громкость, запуск, консьерж), вопрос vs действие (`conversational`),
-  тир (`looksHardReasoning` → fable, биржа → fable).
+- `brain/router/` — tier0 ($0: медиа, громкость, запуск, консьерж), вопрос vs действие, тир (рассуждение/биржа → fable).
 - `brain/tools/` — `dispatch.ts` (тонкий маршрутизатор) + `handlers/*` (browser, messaging, info, skills, code, act,
   self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`.
 - `brain/persona/persona.md` — системный промпт (v88, бампать version при правке), `modes.ts`, `emotion.ts`.
@@ -112,13 +111,15 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт по тиру (haiku medium / sonnet high / fable max);
   thinking всегда adaptive; до `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` только персона (кеш CLI между задачами); `persistSession:false`.
 - **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`), ack «Берусь» окно не
-  продлевает; реакции («нет, не надо») — разговор (`router/reaction.ts`), «да» на свежий вопрос — согласие-действие; «заткнись/замолчи/хватит» — перестать говорить (stop_tts+hush: задачи живы, в тишине
-  реплика проглатывается), «тишина/молчи» — режим тишины, «вырубись» — стоп всего (`tasks/control.ts`); goal-check —
-  при мутации или заявке «сделал»; подсказка навыка — команде при сыром косинусе ≥ 0.86; исход — навыку, чей макрос шёл.
+  продлевает; реакции («нет, не надо») — разговор (`router/reaction.ts`), «да» на свежий вопрос — согласие-действие;
+  «заткнись/замолчи» — перестать говорить (задачи живы; в тишине глотается, с командой — идёт дальше), «тишина/помолчи
+  час» — режим тишины, «вырубись» — стоп всего, голое «хватит» — модели (`tasks/control.ts`); goal-check — при мутации
+  или своей заявке «открыл…» первым словом; подсказка навыка — команде при raw ≥ 0.86; исход — навыку, чей макрос шёл.
 - **Dev-сессия изолирована** (`AgentDeps.devSession`): своя память; задачи `dev` не в истории/на диске и отделены от
   задач владельца (`activeForUser/cancelUser(…, dev)`); без самообучения/memory_write/skill_save/рефлексов.
-- **Гейты §0/§14**: act{type|set} — под гардом паролей/карт; Enter и печать с `\n` в мессенджере/банке/1С — вопрос
-  владельцу; имя программы в `act.app` судится нестрого (`shared/commit-risk.ts riskyAppCategory`).
+- **Гейты §0/§14**: act{type|set}, слоты skill_execute — под гардом паролей/карт; Enter и печать с `\n` в мессенджере/
+  банке/1С — вопрос владельцу (почта — нет); act-коммит без `commitApproved` (ставит только сервер после «да»)
+  клиент сверяет с РЕАЛЬНО сфокусированным процессом; мост и реплей — тот же рубеж (`commit-guard.ts`).
 - **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается
   (`gate-closer.ts`); mute посреди фразы → VAD `speech_cancel` (обрубок не исполняется); PTT — Ctrl+Alt+J (окно
   адресации), кнопка микрофона — только открывает гейт; микрофон повторяется 1→30 с; renderer-guard.
@@ -127,8 +128,8 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Работаем **по подписке**, API не оплачиваем (2026-09-09). Резерв/основной — Claude-only, мульти-провайдер не берём.
 - Античит-гард НЕ ставим (риск бана принят владельцем). Умный дом, печать, сканер — не делаем.
 - Алерты — голосом Джарвиса + toast, без Telegram-бота. Пульт — нативный Android + свой relay. Инсталлер — делаем.
-- GUI-протоколы — ПОКАЗОМ и быстро; первые приложения: Dota 2 (меню), Discord, OBS, Telegram Desktop (веб-Telegram
-  не открывать); частые программы Джарвис выводит сам (W4.2 `usage-profile`).
+- GUI-протоколы — ПОКАЗОМ и быстро: Dota 2 (меню), Discord, OBS, Telegram Desktop (веб-Telegram не открывать);
+  частые программы Джарвис выводит сам (W4.2).
 - Продуктовый каркас — только за мастер-флагом; дефолт = сегодняшний режим владельца.
 
 ## Грабли (проверено болью)
