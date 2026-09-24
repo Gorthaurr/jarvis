@@ -48,7 +48,7 @@ describe("goal-check — только для действий", () => {
   });
 
   // Контроль-1 №10 (ревью 2026-09-24): действие, где модель только ЧИТАЛА экран, а в финале заявила «Открыл…» —
-  // сверять есть что. Реверт: верни условие `|| !st.honesty.anyMutateAttempted` без ACTION_CLAIM_RE — раундов будет 3.
+  // сверять есть что. Реверт: верни условие `|| !st.honesty.anyMutateAttempted` без claimsOwnAction — раундов будет 3.
   it("действие без единой мутации, но финал заявляет сделанное («Открыл…») → goal-check сверяет с целью", async () => {
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "l1", name: "look", input: { what: "elements" } }] },
@@ -58,6 +58,26 @@ describe("goal-check — только для действий", () => {
     ]);
     await handleUserText(session(), "переключи вывод звука на наушники", deps(llm));
     expect(llm.requests.length).toBeGreaterThanOrEqual(4); // был goal-check-раунд
+  });
+
+  // Контроль-2 №1: ответ из прочитанного с причастием («открыт до 20:00») или цитатой («Я отправила…») — не заявка
+  // о сделанном. Реверт: верни регэксп с `открыт|запущен|готово` и `\p{L}*` — лишний раунд, ответ потерян.
+  it("чтение с причастием/цитатой в ответе («открыт до 20:00») → ответ доходит, goal-check не вмешивается", async () => {
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "s1", name: "web_search", input: { query: "МФЦ часы работы" } }] },
+      { toolUses: [{ id: "f1", name: "web_fetch", input: { url: "https://example.com/mfc" } }] },
+      { text: "МФЦ на Тверской открыт до 20:00, сэр, без перерыва." },
+      { text: "Задача выполнена, сэр." },
+    ]);
+    const reply = await handleUserText(session(), "найди, до скольки работает МФЦ на Тверской", deps(llm));
+    expect(reply.voice).toMatch(/МФЦ на Тверской открыт/u);
+    expect(llm.requests).toHaveLength(3);
+  });
+
+  it("claimsOwnAction: своё действие первым словом — да; причастие, чужое лицо, цитата — нет", async () => {
+    const { claimsOwnAction } = await import("./loop/nudge-policy.js");
+    for (const t of ["Открыл настройки звука, сэр.", "Готово, переключил вывод на наушники.", "Я запустил Доту."]) expect(claimsOwnAction(t), t).toBe(true);
+    for (const t of ["МФЦ открыт до 20:00.", "Режиссёр сделал ставку на звук.", "Катя пишет: «Я открыла и отправила».", "Сервер запущен."]) expect(claimsOwnAction(t), t).toBe(false);
   });
 
   it("действие (мутация): goal-check по-прежнему сверяет с исходной целью", async () => {

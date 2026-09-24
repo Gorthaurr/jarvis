@@ -121,7 +121,7 @@ export async function handleUserText(
       deps.pendingClarify = { key: decision.local.key };
       return finishReply({ voice: decision.local.question });
     }
-    const t0: Tier0Reply = await runTier0(session, decision.local, deps, sink, clean);
+    const t0: Tier0Reply = await runTier0(session, decision.local, deps, sink, { goal: clean, freshContext, viaWake: meta?.viaWake, machine: machineTurn });
     if (!t0.fallbackToLlm) return finishReply(t0);
     priorFailure = t0.fallbackNote;
     // Приложение по имени не нашлось → модель решает, что это было («тесты», «стрим», «сервер») — как
@@ -234,7 +234,15 @@ function confirmationAware(decision: RouteDecision, memory: AgentDeps["memory"])
  * по-дворецки и исполняем фоновой микро-задачей, когда аренда освободится. Без
  * асинхронного канала — честно ждём аренду и исполняем инлайн (корректность > задержки).
  */
-async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, sink?: ReplySink, goal?: string): Promise<Tier0Reply> {
+/** Ход модели, если быстрый путь не закрыл реплику после промоушена: цель и признаки хода (контроль-2 №2). */
+export interface Tier0Followup {
+  goal: string;
+  freshContext?: boolean;
+  viaWake?: boolean;
+  machine?: boolean;
+}
+
+async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, sink?: ReplySink, followup?: Tier0Followup): Promise<Tier0Reply> {
   const arbiter = deps.inputArbiter;
   // §20/realtime: с голосовым каналом ВСЕГДА в фон, даже если аренда свободна. Иначе медленное
   // действие (browser.open висел 12с на CDP-таймауте) держит пайплайн в «думаю», где микрофон
@@ -276,10 +284,13 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
         // Контроль-1 №4 (ревью 2026-09-24): провал быстрого пути ПОСЛЕ промоушена. exe-запуск ждёт ~1,5 с сверки, так
         // что голосовое «открой дискорд» почти всегда промотируется — и T-F5 («провал запуска — модели») тут не
         // работал: владелец слышал «Не смог запустить», модель не звалась. Отдаём ход модели в фоне с причиной провала.
-        if (reply.fallbackToLlm && goal && !deps.isClosed?.()) {
+        if (reply.fallbackToLlm && followup && !deps.isClosed?.()) {
           log.info("tier0 после промоушена не закрыт детерминированно — передаю модели в фоне", { kind: local.kind });
+          const { goal, ...turn } = followup;
           const preTask = queuedPreTask(session, goal, deps);
-          startBackgroundTask(() => runAgentLoop(session, goal, "sonnet", deps, undefined, { priorFailure: (reply as Tier0Reply).fallbackNote, preTask }), deps, { bounded: true, preTask });
+          // Контроль-2 №2: признаки хода (viaWake/machine/freshContext) — как на обычном пути. Без них undefined читался
+          // бы как «явное обращение», и реплике из окна разговора разрешался слепой реплей макроса (§P0).
+          startBackgroundTask(() => runAgentLoop(session, goal, "sonnet", deps, undefined, { ...turn, priorFailure: (reply as Tier0Reply).fallbackNote, preTask }), deps, { bounded: true, preTask });
           return;
         }
         deps.memory.pushTurn("assistant", reply.voice);

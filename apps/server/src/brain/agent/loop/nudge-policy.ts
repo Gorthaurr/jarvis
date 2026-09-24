@@ -130,9 +130,24 @@ export function verifyNudge(ctx: LoopCtx, resp: LlmResponse): boolean {
   return false;
 }
 
-/** Финал заявляет СОВЕРШЁННОЕ действие (а не ответ из прочитанного). «Нашёл» сюда не входит — это ответ. */
-const ACTION_CLAIM_RE =
-  /(?<![\p{L}])(запущен|запустил|открыл|открыт|включил|выключил|поставил|отправил|закрыл|нажал|переключил|настроил|удалил|перенёс|перенес|сохранил|установил|сделал|готово)\p{L}*/iu;
+/**
+ * Финал заявляет СВОЁ совершённое действие («Открыл настройки звука, сэр», «Готово, переключил вывод»), а не отвечает
+ * прочитанным. Контроль-2 №1: первая версия ловила причастия и состояния («МФЦ открыт до 20:00», «запущен»), чужие
+ * формы («режиссёр сделал», «открыла») и цитаты чужих сообщений — и goal-check снова выбрасывал готовый ответ.
+ * Теперь: глагол Джарвиса о себе (прош. время, муж. род) ПЕРВЫМ словом первой фразы, после служебных «я/уже/готово»;
+ * цитаты в кавычках не смотрим. «Нашёл» сюда не входит — это ответ.
+ */
+const CLAIM_VERBS = new Set([
+  "запустил", "открыл", "включил", "выключил", "поставил", "отправил", "закрыл", "нажал", "переключил", "настроил",
+  "удалил", "перенёс", "перенес", "сохранил", "установил", "сделал",
+]);
+const CLAIM_LEAD = new Set(["я", "уже", "всё", "все", "готово", "сэр", "хорошо", "так", "итак", "ок", "окей"]);
+export function claimsOwnAction(text: string): boolean {
+  const first = text.replace(/«[^»]*»|"[^"]*"/gu, " ").split(/[.!?…\n]/u)[0] ?? "";
+  const words = first.toLowerCase().match(/[\p{L}]+/gu) ?? [];
+  const head = words.find((w) => !CLAIM_LEAD.has(w));
+  return head !== undefined && CLAIM_VERBS.has(head);
+}
 
 export function goalCheck(ctx: LoopCtx, resp: LlmResponse, snap: RoundSnapshot): boolean {
   const { text, st, convo, pushSystemNote, opts } = ctx;
@@ -143,7 +158,7 @@ export function goalCheck(ctx: LoopCtx, resp: LlmResponse, snap: RoundSnapshot):
   // Контроль-1 №10: ход без единой мутации, чей финал ЗАЯВЛЯЕТ действие («Открыл настройки звука» после двух чтений
   // экрана) — сверять как раз есть что: verify-нудж молчит (слепой мутации не было), masked-failure тоже (фраза не
   // полая). Пропускаем только ход без мутаций И без заявки о сделанном (ответ из прочитанного).
-  if (opts?.conversational === true || (!st.honesty.anyMutateAttempted && !ACTION_CLAIM_RE.test(resp.text || ""))) return false;
+  if (opts?.conversational === true || (!st.honesty.anyMutateAttempted && !claimsOwnAction(resp.text || ""))) return false;
   const { gateStoppedPrevRound } = snap;
   // §адаптация к цели (кап 1, только многошаговые): модель закрывает ход — сверяем с ИСХОДНОЙ
   // задачей. Ловит деградацию цели до подцели: «запусти поиск в доте» при незапущенной Доте →

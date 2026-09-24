@@ -124,6 +124,59 @@ describe("tier0 app.launch не нашёл цель → ход уходит мо
     }
   });
 
+  // Контроль-2 №2: фоновый ход после промоушена обязан нести признаки хода. Реплика из окна разговора (viaWake:false)
+  // не даёт права на слепой реплей макроса (§P0). Реверт: убери `...turn` в bg.then (runTier0) — уйдёт skill.execute.
+  it("после промоушена реплика без «Джарвис» (viaWake:false) не получает слепой реплей макроса", async () => {
+    vi.stubEnv("JARVIS_SYNC_PROMOTE_MS", "20");
+    try {
+      const sendAction = vi.fn(
+        (cmd: ActionCommand) =>
+          new Promise((res) =>
+            setTimeout(
+              () =>
+                res(
+                  cmd.kind === "app.launch"
+                    ? { commandId: "c", ok: false, error: { code: "launch_failed", message: "process-exited-immediately" }, durationMs: 60 }
+                    : { commandId: "c", ok: true, durationMs: 1 },
+                ),
+              cmd.kind === "app.launch" ? 60 : 1,
+            ),
+          ),
+      );
+      const s = { sessionId: "s1", userId: "u1", sendAction, send: vi.fn(), requestConfirm: vi.fn() } as unknown as Session;
+      const skills = {
+        list: async () => [],
+        get: async () => null,
+        save: async () => null,
+        recall: async () => ({
+          id: "sk-discord",
+          name: "Открыть дискорд и зайти в канал",
+          when: "просят открыть дискорд",
+          procedure: "…",
+          version: 1,
+          recallSim: 0.97,
+          recallSimRaw: 0.9,
+          steps: [
+            { action: "input.key", params: { combo: "ctrl+k" } },
+            { action: "wait", params: { ms: 300 } },
+          ],
+        }),
+        recordOutcome: async () => undefined,
+      } as unknown as AgentDeps["skills"];
+      const llm = new MockLlmProvider([{ text: "Не смог открыть Дискорд, сэр: ярлык сразу закрылся." }]);
+      const spoken: string[] = [];
+      const sink = { sentence: vi.fn(), display: vi.fn(), done: vi.fn() };
+      const d = { ...deps(llm), skills, speakResult: (r: { voice: string }) => spoken.push(r.voice), bgTasks: new Set<Promise<void>>() };
+      await handleUserText(s, "открой дискорд", d, sink, { viaWake: false });
+      await vi.waitFor(() => expect(spoken.length).toBeGreaterThan(0), { timeout: 3000 });
+      const kinds = sendAction.mock.calls.map((c) => (c[0] as ActionCommand).kind);
+      expect(kinds).toContain("app.launch");
+      expect(kinds).not.toContain("skill.execute");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("T-F5: без модели (фоновый путь озвучивает voice как есть) фраза провала НАЗЫВАЕТ причину, а не «не получилось»", async () => {
     // Реверт: верни `failurePhrase(intent, code)` в runLocalIntent — прозвучит «не получилось».
     const { session: s } = session("launch_failed");
