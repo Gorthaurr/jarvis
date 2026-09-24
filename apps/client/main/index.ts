@@ -63,6 +63,7 @@ import { createClientActuator } from "./skill-runner/client-actuator.js";
 import { IPC } from "./ipc-contract.js";
 import type { ConfirmResultPayload, SkillRecState, SettingsPatch } from "./ipc-contract.js";
 import { disposeClientFileLog, initClientFileLog } from "./obs/file-log.js";
+import { clearOwnerQuit, markOwnerQuit } from "./owner-quit.js";
 
 const log = createLogger("main");
 
@@ -817,6 +818,7 @@ function createTray(): void {
           label: "Выйти (остановить Джарвиса)",
           click: () => {
             isQuitting = true;
+            markOwnerQuit(app.getPath("userData")); // хранитель в супервизоре не поднимет клиент обратно
             app.quit();
           },
         },
@@ -857,6 +859,7 @@ if (gotSingleInstanceLock) void app.whenReady().then(bootstrap);
 
 function bootstrap(): void {
   initClientFileLog(); // §наблюдаемость (аудит 2026-07-28): durable-лог клиента — «вчера не слышал» больше не слеп
+  clearOwnerQuit(app.getPath("userData")); // клиент снова запущен — прошлое «Выйти» больше не действует
   registerIpc();
   startGsiListener(); // §Волна3 (3.4): локальный приёмник JSON-пушей игр/программ (GSI) — сенсор kind:"gsi"
   createWindow();

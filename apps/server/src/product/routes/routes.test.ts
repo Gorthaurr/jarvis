@@ -17,7 +17,9 @@ import { openProductTestDb } from "../test-db.js";
 import type { ProductRouteDeps } from "./deps.js";
 import { registerProductRoutes } from "./index.js";
 
-const NOW = Date.UTC(2026, 8, 10, 12, 0, 0);
+// Реальные часы: токены чеканятся по инъектированному now(), а проверяются SQL-ом по часам БД (now()). Зашитая
+// дата делала тест «бомбой времени» — access-токен (1 ч) истекал через час после неё, и с 2026-09-10 13:00 всё = 401.
+const NOW = Date.now();
 const INSTALL = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
 describe("продуктовые роуты (Fastify inject + PGlite)", () => {

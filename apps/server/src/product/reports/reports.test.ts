@@ -39,8 +39,10 @@ describe("отчёты продукта (PGlite)", () => {
     await ins(U2, NOW - 3600_000, "t3", "claude-sonnet-4-6", 30_000);
     await query("insert into usage_quota (user_id, period, cost_micro, llm_quota_micro, warned_80_at) values ($1, $2, 320000, 400000, now())", [U1, PERIOD]);
     // оплата: инвойс + платёж U1 за basic
-    const inv = await query<{ id: string }>("insert into invoices (user_id, plan_id, amount_minor, currency, status, provider, provider_ref, paid_at) values ($1,'basic',150000,'RUB','paid','fake','ref-1', now()) returning id", [U1]);
-    await query("insert into payments (invoice_id, provider, provider_payment_id, amount_minor, currency, status) values ($1,'fake','pay-1',150000,'RUB','succeeded')", [inv?.rows[0]?.id]);
+    const inv = await query<{ id: string }>("insert into invoices (user_id, plan_id, amount_minor, currency, status, provider, provider_ref, paid_at) values ($1,'basic',150000,'RUB','paid','fake','ref-1', $2) returning id", [U1, new Date(NOW - 86_400_000).toISOString()]);
+    // Время платежа — от NOW, не now() БД: отчёт считает окно от NOW, и платёж «сегодня по часам БД» выпадал из окна
+    // зашитой даты (бомба времени: тест позеленел бы только в день NOW).
+    await query("insert into payments (invoice_id, provider, provider_payment_id, amount_minor, currency, status, created_at) values ($1,'fake','pay-1',150000,'RUB','succeeded',$2)", [inv?.rows[0]?.id, new Date(NOW - 86_400_000).toISOString()]);
   });
 
   afterAll(async () => {

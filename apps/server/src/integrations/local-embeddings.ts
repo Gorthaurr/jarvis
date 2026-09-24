@@ -13,10 +13,31 @@
  * Честность по сбою: модель не загрузилась/инференс упал → embed возвращает null (пустой retrieval),
  * НЕ молчаливый мусор. Память честно деградирует, а не врёт похожестью случайных векторов.
  */
+import { rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { EmbeddingKind, IEmbeddingProvider } from "./openai-embeddings.js";
 
 const log: Logger = createLogger("embeddings-local");
+
+/**
+ * Каталог весов — ВНЕ node_modules (2026-09-24). Раньше transformers.js держал кеш в
+ * `node_modules/.pnpm/@huggingface+transformers/.cache`: `pnpm install --force` 23.09 его снёс, пере-докачка
+ * легла битым файлом (тот же размер, другой sha256 → «Protobuf parsing failed»), и эмбеддер МОЛЧА умер —
+ * retrieval, recall навыков, семантический кэш и дубль-гейт стали пустыми. ASCII-путь рядом с моделями слуха
+ * (`~/.jarvis/models`, sherpa не читает кириллицу). env JARVIS_MODELS_DIR переопределяет корень.
+ */
+export function embedderCacheDir(): string {
+  const root = process.env.JARVIS_MODELS_DIR?.trim() || join(homedir(), ".jarvis", "models");
+  return join(root, "hf");
+}
+
+/** Признак БИТОГО файла модели в кеше (усечён/испорчен при докачке) — лечится удалением и повторной загрузкой. */
+export function looksLikeCorruptModel(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /protobuf parsing failed|invalid (onnx )?model|corrupt|unexpected end of|failed to load model|is not a valid/i.test(msg);
+}
 
 /** Нестрогий тип feature-extraction pipeline (SDK динамический). */
 type FeatureExtractor = (
@@ -43,6 +64,8 @@ export class LocalEmbeddingProvider implements IEmbeddingProvider {
   readonly live = true;
   private pipePromise: Promise<FeatureExtractor> | null = null;
   private failedUntil = 0; // 0 = здоров; иначе — молчим до этого момента (мс), потом ретрай
+  /** Самолечение битого кеша — ОДИН раз на процесс (иначе битое зеркало гоняло бы 470 МБ по кругу). */
+  private healedCorruptCache = false;
 
   constructor() {
     // Конструктор зовётся на boot (createGateway) — ПОСЛЕ loadEnv, env уже доступен.
@@ -84,22 +107,42 @@ export class LocalEmbeddingProvider implements IEmbeddingProvider {
       const dtype = process.env.JARVIS_EMBED_DTYPE || "fp32";
       // HF из РФ часто недоступен напрямую — зеркало (как в whisper-stt.ts).
       mod.env.remoteHost = process.env.HF_ENDPOINT || "https://hf-mirror.com";
+      const cacheDir = embedderCacheDir();
+      mod.env.cacheDir = cacheDir;
       // Цепочка устройств: заданное → фолбэки. Нативный CPU-EP onnxruntime-node на НЕКОТОРЫХ Windows
       // НЕ грузится («The operating system cannot run %1»), но DirectML грузится; на Linux-сервере
       // штатно работает cpu. Первое успешно-инициализированное устройство выигрывает.
       const chain = [...new Set([want, "cpu", "dml", "webgpu"])];
-      let lastErr: unknown;
-      for (const device of chain) {
-        try {
-          const pipe = await mod.pipeline("feature-extraction", model, { device, dtype });
-          if (device === want) log.info(`эмбеддер готов: ${model} @ ${device}/${dtype}`);
-          else log.warn(`эмбеддер: устройство "${want}" не поднялось, работаю на "${device}"`);
-          return pipe;
-        } catch (e) {
-          lastErr = e;
+      const tryChain = async (): Promise<{ pipe?: FeatureExtractor; err?: unknown }> => {
+        let lastErr: unknown;
+        for (const device of chain) {
+          try {
+            const pipe = await mod.pipeline("feature-extraction", model, { device, dtype });
+            if (device === want) log.info(`эмбеддер готов: ${model} @ ${device}/${dtype}`, { cacheDir });
+            else log.warn(`эмбеддер: устройство "${want}" не поднялось, работаю на "${device}"`);
+            return { pipe };
+          } catch (e) {
+            lastErr = e;
+            // Битый файл одинаково не грузится ни одним устройством — не гоняем цепочку зря.
+            if (looksLikeCorruptModel(e)) break;
+          }
         }
+        return { err: lastErr ?? new Error("нет доступного устройства для эмбеддера") };
+      };
+      let res = await tryChain();
+      if (!res.pipe && looksLikeCorruptModel(res.err) && !this.healedCorruptCache) {
+        this.healedCorruptCache = true;
+        const modelDir = join(cacheDir, ...model.split("/"));
+        log.warn("эмбеддер: файл модели в кеше битый — удаляю и качаю заново", { modelDir });
+        try {
+          rmSync(modelDir, { recursive: true, force: true });
+        } catch (e) {
+          log.warn("эмбеддер: не смог удалить битый кеш", e instanceof Error ? e.message : String(e));
+        }
+        res = await tryChain();
       }
-      throw lastErr ?? new Error("нет доступного устройства для эмбеддера");
+      if (res.pipe) return res.pipe;
+      throw res.err;
     })();
     return this.pipePromise;
   }
