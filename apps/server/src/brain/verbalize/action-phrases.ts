@@ -54,6 +54,9 @@ export function successPhrase(intent: LocalIntent, data?: unknown): string {
     case "media":
       switch (intent.op) {
         case "pause":
+          // Ревью 2026-09-24 (B-F2): звука не было — клиент клавишу НЕ жал (переключатель запустил бы музыку).
+          // «Поставил на паузу» тут было бы враньём о несделанном действии.
+          if ((data as { already?: boolean } | undefined)?.already === true) return pick(["Уже тихо, сэр.", "Сейчас ничего не играет."]);
           return pick(["Пауза.", "Поставил на паузу.", "Остановил."]);
         case "play":
           return pick(["Продолжаю.", "Воспроизвожу.", "Поехали."]);

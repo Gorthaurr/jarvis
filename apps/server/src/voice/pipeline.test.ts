@@ -1296,3 +1296,79 @@ describe("W2: первая фраза разговора сразу — пайп
     expect(tts.texts).toEqual(["Сейчас проверю погоду.", "В Москве плюс пять."]);
   });
 });
+
+// ── Ревью 2026-09-24 (T-F6/B-F1): служебный ack промоушена («Берусь, сэр») — проактив ──────────────────
+// Раньше ack шёл обычным done() хода и открывал 8-секундное окно разговора на КАЖДОЙ фоновой задаче: всё, что звучало
+// в комнате (ТВ, собеседник), принималось за команду. Реверт: убери ветку origin === "proactive" в done() → падает.
+describe("VoicePipeline — ack промоушена не продлевает окно разговора", () => {
+  // Окно открывает САМО обращение владельца («Джарвис, …»); ack «Берусь, сэр» (через ~1,5 с, на фоновой задаче)
+  // его НЕ продлевает — раньше продлевал на каждой задаче, и ТВ в эти секунды становился командой.
+  function setupStream(origin: "proactive" | undefined) {
+    let clock = 0;
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurnStream = vi.fn(async (_t: string, sink: { done: (f: string, o?: { origin?: "user-turn" | "proactive" }) => void }) => {
+      clock += 800; // модель думала 0,8 с, потом ответ/ack
+      sink.done(origin ? "Берусь, сэр." : "Нашёл, сэр.", origin ? { origin } : undefined);
+    });
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn: vi.fn(async () => ({ voice: "" })),
+      onUserTurnStream,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs: 1_000,
+      followupMs: 1_000_000,
+      now: () => clock,
+    });
+    const say = async (text: string) => {
+      pipe.onWake();
+      const before = onUserTurnStream.mock.calls.length;
+      stt.last!.emit({ text, final: true });
+      await flush();
+      if (onUserTurnStream.mock.calls.length > before && tts.last) {
+        tts.last.push(0, true);
+        tts.last.finish();
+        await flush();
+      }
+    };
+    return { say, onUserTurnStream, advance: (ms: number) => (clock += ms) };
+  }
+
+  it("ack-проактив: реплика без «Джарвис» после окна владельца не принимается", async () => {
+    const { say, onUserTurnStream, advance } = setupStream("proactive");
+    await say("Джарвис, найди отчёт за сентябрь"); // t=0 окно; ack на t=800
+    advance(400); // t=1200: окно от обращения (1 с) истекло, ack его не продлил
+    await say("обратите внимание на формулировку");
+    expect(onUserTurnStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("обычный ответ хода окно продлевает — продолжение без «Джарвис» принимается", async () => {
+    const { say, onUserTurnStream, advance } = setupStream(undefined);
+    await say("Джарвис, найди отчёт за сентябрь");
+    advance(400);
+    await say("и открой его");
+    expect(onUserTurnStream).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("VoicePipeline — датчики для «стоп/тише = замолчи» (ревью 2026-09-24, B-F2)", () => {
+  it("msSinceBargeIn считает от последнего перебивания; до него — бесконечность", () => {
+    let clock = 1_000;
+    const pipe = new VoicePipeline({
+      stt: new CtrlSttProvider(),
+      tts: new CtrlTtsProvider(),
+      onUserTurn: vi.fn(async () => ({ voice: "" })),
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      now: () => clock,
+    });
+    expect(pipe.msSinceBargeIn()).toBe(Number.POSITIVE_INFINITY);
+    pipe.onVadEvent("barge_in");
+    clock += 1_200;
+    expect(pipe.msSinceBargeIn()).toBe(1_200);
+    expect(pipe.isClientPlaying()).toBe(false);
+  });
+});

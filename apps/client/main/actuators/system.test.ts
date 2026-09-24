@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planSystem } from "./system.js";
+import { pauseKeyNeeded, planSystem } from "./system.js";
 
 describe("system actuator (§6) — построение команд (анти-инъекция)", () => {
   it("lock → rundll32 LockWorkStation", () => {
@@ -88,5 +88,15 @@ describe("system actuator (§6) — построение команд (анти-
     expect(ru.args.at(-1)).toContain("00000419"); // RU раскладка
     const tg = planSystem({ kind: "system.layout", lang: "toggle" });
     expect(tg.args.at(-1)).toContain("0x419"); // toggle решает по текущей
+  });
+});
+
+
+describe("pauseKeyNeeded (ревью 2026-09-24, B-F2): «стоп» в тишине не жмёт переключатель", () => {
+  it("звук идёт → жать; тишина/мусор → не жать", () => {
+    expect(pauseKeyNeeded(0.2)).toBe(true);
+    expect(pauseKeyNeeded(0)).toBe(false);
+    expect(pauseKeyNeeded(0.0005)).toBe(false);
+    expect(pauseKeyNeeded(Number.NaN)).toBe(false);
   });
 });

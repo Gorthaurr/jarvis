@@ -251,7 +251,8 @@ export function terminalSuccess(ctx: LoopCtx, o: LoopOutcome, env: TerminalEnv):
   // Журнал недоделки гасит только УСПЕХ: ревью 2026-09-02 показало, что «доделай», упершееся в
   // занятый ввод, стирало журнал 18-раундовой работы — и следующее «доделай» получало «нечего
   // возобновлять», хотя система сама только что объявила заход неуспешным.
-  if (opts?.resumeFrom && !inputDeniedFailure && !overlayDeniedFailure) deps.checkpoints?.clearIf(deps.userId, opts.resumeFrom.taskId);
+  // T-F7 (ревью 2026-09-24): все попытки действия провалились — это НЕ успех продолжения, журнал не гасим.
+  if (opts?.resumeFrom && !inputDeniedFailure && !overlayDeniedFailure && !o.allMutationsFailed) deps.checkpoints?.clearIf(deps.userId, opts.resumeFrom.taskId);
   // 🔴 «Ввод не дали и ничего не сделано» — в РЕЕСТР это идёт провалом (разбор «Доты» 2026-09-02):
   // ход, вслух сказавший «Задача не выполнена», лежал как state:"done".
   // Реплику модели НЕ подменяем (она несёт подробности и частичный результат), но ДОПОЛНЯЕМ честной
@@ -311,7 +312,7 @@ export function terminalSuccess(ctx: LoopCtx, o: LoopOutcome, env: TerminalEnv):
   // ...и ЗАПИСЫВАЕМ тоже только разговорный ход (симметрично гарду на lookup выше): ответ на команду
   // в кэше — мина, даже если инструментов в том ходе не было (модель могла лишь ПЕРЕСПРОСИТЬ, и этот
   // переспрос с числами/состоянием оседал как «готовый ответ» на любую будущую такую команду).
-  if (deps.responseCache && st.progress.toolTrajectory.length === 0 && opts?.conversational === true && !opts?.selectionAtStart && !deps.selection?.get()) {
+  if (deps.responseCache && st.progress.toolTrajectory.length === 0 && opts?.conversational === true && !opts?.reaction && !opts?.selectionAtStart && !deps.selection?.get()) {
     void deps.responseCache.store(deps.userId, text, spokenFinal);
   }
   return terminal(spokenFinal);

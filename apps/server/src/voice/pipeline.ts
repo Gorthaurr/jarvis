@@ -80,8 +80,9 @@ export interface ReplySink {
   sentence(text: string): void;
   /** Карточка подробностей (§21). */
   display(card: { title?: string; markdown: string }): void;
-  /** Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). */
-  done(full: string): void;
+  /** Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). origin "proactive" — служебный
+   *  ack промоушена: окно разговора не открывает (ревью 2026-09-24, T-F6/B-F1; контракт — brain/agent/types.ts). */
+  done(full: string, opts?: { origin?: "user-turn" | "proactive" }): void;
 }
 
 /** Задержка перед филлером (§10): если реальная реплика подоспела раньше — филлер не нужен. */
@@ -925,6 +926,7 @@ export class VoicePipeline {
       return;
     }
     if (state === "barge_in") {
+      this.lastBargeInAt = this.now(); // B-F2: «стоп» в ближайшие секунды после перебивания — это «замолчи»
       this.userSpeaking = true;
       // H11: сообщаем редьюсеру, жив ли синтез. В listening (follow-up открыт STT) cancel_tts бампнул бы
       // gen и убил бы STT-стрим текущего хода → follow-up потерян; пусть шлёт cancel_tts только если есть
@@ -1228,7 +1230,14 @@ export class VoicePipeline {
    * последней). Барежит gen-инвалидацию (barge-in/stop): поздние фразы/чанки глохнут.
    * При ошибке brain — деградация на короткую реплику (без зависания в speaking).
    */
+  /** Момент последнего barge_in (мс) — для B-F2. */
+  private lastBargeInAt = 0;
+
   private async runAgentStreaming(text: string, myGen: number, meta?: UserTurnMeta): Promise<void> {
+    // Состояние окна ДО хода: если ход закончится служебным ack промоушена (origin proactive), окно
+    // возвращается к нему — ack не открывает и не продлевает разговор (ревью 2026-09-24, T-F6/B-F1).
+    const prevAwake = this.awake;
+    const prevActiveAt = this.lastActiveAt;
     // Джарвис заговорит → окно активного разговора (продолжение без wake word), как в startTts.
     // Это ОТВЕТ на ход владельца → origin user-turn (W0: проактив окна не открывает).
     this.lastSpeechOrigin = "user-turn";
@@ -1278,7 +1287,12 @@ export class VoicePipeline {
         if (myGen !== this.gen) return;
         this.deps.sendDisplay?.(d);
       },
-      done: (full) => {
+      done: (full, opts) => {
+        if (opts?.origin === "proactive") {
+          this.lastSpeechOrigin = "proactive"; // armFollowup на speak_done окно не переоткроет
+          this.awake = prevAwake;
+          this.lastActiveAt = prevActiveAt;
+        }
         if (myGen !== this.gen) {
           // Ход инвалидирован (перебивание/стоп/реконнект). speaker.speechStarted=true → часть реплики
           // владелец УЖЕ слышал: озвучивать её заново целиком нельзя (см. salvageCancelledReply).
@@ -1411,6 +1425,16 @@ export class VoicePipeline {
     this.markSpeakerBusy();
     this.lastChunkSentAt = this.now();
     this.deps.sendSpeakChunk(chunk);
+  }
+
+  /** B-F2 (ревью 2026-09-24): клиент ещё играет речь Джарвиса — для task-control «стоп/тише = замолчи». */
+  isClientPlaying(): boolean {
+    return this.clientPlaybackBusy();
+  }
+
+  /** B-F2: сколько мс прошло с последнего перебивания (∞ — не было). */
+  msSinceBargeIn(): number {
+    return this.lastBargeInAt ? this.now() - this.lastBargeInAt : Number.POSITIVE_INFINITY;
   }
 
   /** Занят ли динамик клиента ПРЯМО СЕЙЧАС (со стейл-фолбэком: сигнал старше окна = не верим). */

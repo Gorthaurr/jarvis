@@ -57,8 +57,12 @@ export interface ReplySink {
   sentence(text: string): void;
   /** Карточка подробностей (§21). */
   display(card: { title?: string; markdown: string }): void;
-  /** Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). */
-  done(full: string): void;
+  /**
+   * Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). origin "proactive" — служебная фраза
+   * (ack промоушена «Берусь, сэр»): окно разговора она НЕ открывает и не продлевает (ревью 2026-09-24, T-F6/B-F1 —
+   * иначе на каждой фоновой задаче 8 с всё, что звучит в комнате, принималось за команду).
+   */
+  done(full: string, opts?: { origin?: "user-turn" | "proactive" }): void;
 }
 
 /** Зависимости агента (инъекция для тестируемости и разделения слоёв). */
@@ -240,6 +244,9 @@ export interface AgentDeps {
 export interface LoopOpts {
   freshContext?: boolean;
   conversational?: boolean;
+  /** Ревью 2026-09-24 (T-F6): ход — короткая реакция («нет, не надо», «хорошо»): ответ в кэш ответов не кладётся
+   *  (он зависит от предыдущей реплики, а кэш — от текста). */
+  reaction?: boolean;
   smalltalk?: boolean;
   suppressStepStream?: boolean;
   viaWake?: boolean;

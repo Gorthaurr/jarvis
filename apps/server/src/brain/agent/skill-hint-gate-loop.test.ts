@@ -100,3 +100,12 @@ describe("skillHintBlockReason — чистые гейты", () => {
     expect(formatRecalledSkill(b)).toContain(SKILL.procedure);
   });
 });
+
+describe("T-F2 проводка: разговорный ход с командным инфинитивом тоже без подсказки навыка", () => {
+  // Раньше гейт conversational проверялся только чистой функцией: context.ts не передавал флаг в retrieveContext,
+  // и вопрос «как включить музыку в браузере?» (командный инфинитив) получал навык с приказом действовать.
+  it("вопрос «как включить музыку в браузере?» + уверенный recall → блока нет", async () => {
+    const req = await run("как включить музыку в браузере?", SKILL);
+    expect(req?.systemSkill ?? "").toBe("");
+  });
+});

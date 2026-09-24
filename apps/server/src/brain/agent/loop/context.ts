@@ -56,7 +56,8 @@ export async function buildLoopContext(base: LoopBase): Promise<LoopCtx> {
   // клик выстрелил через 236с очереди по давно изменившемуся экрану).
   const arbiter = deps.inputArbiter;
   const lease = makeLeaseHelpers({ st, arbiter, task, session, cfg });
-  const { facts, recalled, skillCatalog } = await retrieveContext(deps, text, sink);
+  // T-F2 (ревью 2026-09-24): на разговорном ходе (вопрос/реакция) подсказку навыка не рисуем — там не ждут «дела».
+  const { facts, recalled, skillCatalog } = await retrieveContext(deps, text, sink, { conversational: opts?.conversational === true });
   const sys = await buildPrompt({ deps, opts, tasks, taskId, recalled, facts, skillCatalog });
   const buildToolSet = makeToolSetBuilder(deps);
   ({ tools: st.arsenal.tools, systemTools: st.arsenal.systemTools } = buildToolSet());

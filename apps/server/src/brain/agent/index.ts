@@ -188,6 +188,7 @@ export async function handleUserText(
   const reply = await runAgentLoop(session, clean, tier, deps, sink, {
     freshContext,
     conversational: decision.conversational === true,
+    reaction: decision.reaction !== undefined,
     selectionAtStart,
     smalltalk: decision.smalltalk === true,
     viaWake: meta?.viaWake,
@@ -440,7 +441,7 @@ async function runActionSyncFirst(
   // задача идёт в фоне, звук комнаты без «Джарвис» уходил бы в петлю как команда. Пайплайн читает второй
   // аргумент done (контракт ReplySink расширяет интегратор — см. notes ревью); без него поведение прежнее.
   log.info("sync-first: промоушен в фон", { why: outcome.why, capMs, floorMs });
-  (sink.done as DoneWithOrigin)(verbalize(promoteAck()), { origin: "proactive" });
+  sink.done(verbalize(promoteAck()), { origin: "proactive" });
   const bg = loopP
     .then((reply) => {
       deps.memory.pushTurn("assistant", reply.voice);
@@ -474,7 +475,6 @@ const PROMOTE_FLOOR_MS = 1_500;
 /** tier0 (без модели): «открой X» — прежний таймер 1,5 с, раунда модели тут нет. */
 const TIER0_PROMOTE_DEFAULT_MS = 1_500;
 /** T-F6: done с происхождением речи (контракт ReplySink в types.ts его пока не знает — см. notes ревью). */
-type DoneWithOrigin = (full: string, opts?: { origin?: "user-turn" | "proactive" }) => void;
 /** Короткие ack промоушена — ротация, чтобы не было заученной отбивки (персона: «variety is mandatory»). */
 const PROMOTE_ACKS = ["Берусь, сэр.", "Сию минуту.", "Занимаюсь.", "Сейчас сделаю.", "Принял, делаю.", "Есть, сэр."] as const;
 let promoteAckIdx = 0;
