@@ -29,21 +29,23 @@ describe("MicControl + AudioCoordinator: кнопка микрофона = push-
     expect(wakeLocals()).toBe(0);
   });
 
-  it("выключил → включил кнопкой: гейт открыт, серверу wake_local (реплика без «Джарвис» будет принята)", () => {
+  // Контроль-1 №9 (ревью 2026-09-24): кнопка открывает микрофон, но НЕ окно адресации — иначе реплика ТВ в первые
+  // 8 с после включения уходила командой (да ещё «явным обращением» с правом на слепой реплей). Обращение — «Джарвис»;
+  // окно адресации без слова — только у хоткея (его жмут ровно чтобы сказать).
+  it("выключил → включил кнопкой: гейт открыт (облачный STT услышит «Джарвис»), окна адресации нет", () => {
     const { audio, mic, wakeLocals } = rig();
     mic.mute();
     expect(mic.killSwitchOn).toBe(true);
     expect(mic.activate()).toBe(true);
     expect(audio.streaming).toBe(true);
-    expect(wakeLocals()).toBe(1);
+    expect(wakeLocals()).toBe(0);
   });
 
   it("включил кнопкой при мёртвом захвате, а позже onUp досылает activate — push-to-talk не повторяется", () => {
-    const { mic, wakeLocals } = rig();
+    const { mic } = rig();
     mic.mute(); // стартовая синхронизация «выключен»
-    mic.activate(); // клик «включить» (захват ещё не поднят)
-    mic.activate(); // onUp после подъёма захвата
-    expect(wakeLocals()).toBe(1);
+    expect(mic.activate()).toBe(true); // клик «включить» (захват ещё не поднят)
+    expect(mic.activate()).toBe(false); // onUp после подъёма захвата — уже не жест владельца
   });
 });
 

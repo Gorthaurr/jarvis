@@ -1393,3 +1393,34 @@ describe("VoicePipeline — speech_cancel (mute посреди фразы)", () 
     expect(pipe.state).toBe("idle");
   });
 });
+
+// Контроль-1 №9 (ревью 2026-09-24): междометие в окне локального wake не съедает окно и не уходит командой.
+// Реверт: убери `&& !isNoiseOnly(t)` в ветке localWakeActive (gateWake) — «хм» уйдёт агенту.
+describe("VoicePipeline — окно локального wake и междометия", () => {
+  it("wake_local → «хм» игнорируется, следующая реплика без «Джарвис» всё ещё адресована", async () => {
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const onUserTurn = vi.fn(async () => ({ voice: "Готово." }));
+    const pipe = new VoicePipeline({
+      stt,
+      tts,
+      onUserTurn,
+      sendSpeakChunk: () => {},
+      sendClientState: () => {},
+      requireWakeWord: true,
+      conversationWindowMs: 1_000,
+      followupMs: 1_000_000,
+      now: () => 0,
+    });
+    const say = async (text: string) => {
+      pipe.onWake();
+      stt.last!.emit({ text, final: true });
+      await flush();
+    };
+    pipe.onVadEvent("wake_local");
+    await say("хм");
+    expect(onUserTurn).not.toHaveBeenCalled();
+    await say("открой ютуб");
+    expect(onUserTurn).toHaveBeenLastCalledWith("открой ютуб", expect.anything());
+  });
+});

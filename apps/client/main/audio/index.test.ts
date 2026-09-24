@@ -515,7 +515,9 @@ describe("B-F8: push-to-talk и видимость промаха wake", () => {
     const b = setup(never());
     b.ac.activate({ ptt: true });
     expect(b.ac.streaming).toBe(true);
-    expect(b.sendVad).toHaveBeenCalledWith("wake_local");
+    // Контроль-1 №9: кнопка открывает микрофон, но НЕ окно адресации (иначе ТВ в первые 8 с — команда). Реверт:
+    // верни `this.pushToTalk("button")` без { address: false } — ассерт упадёт.
+    expect(b.sendVad).not.toHaveBeenCalledWith("wake_local");
   });
 
   it("mute главнее PTT: хоткей при выключенном микрофоне гейт не открывает", () => {

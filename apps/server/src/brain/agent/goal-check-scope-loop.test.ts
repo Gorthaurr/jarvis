@@ -47,6 +47,19 @@ describe("goal-check — только для действий", () => {
     expect(llm.requests).toHaveLength(3);
   });
 
+  // Контроль-1 №10 (ревью 2026-09-24): действие, где модель только ЧИТАЛА экран, а в финале заявила «Открыл…» —
+  // сверять есть что. Реверт: верни условие `|| !st.honesty.anyMutateAttempted` без ACTION_CLAIM_RE — раундов будет 3.
+  it("действие без единой мутации, но финал заявляет сделанное («Открыл…») → goal-check сверяет с целью", async () => {
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "l1", name: "look", input: { what: "elements" } }] },
+      { toolUses: [{ id: "l2", name: "look", input: { what: "windows" } }] },
+      { text: "Переключил вывод звука на наушники, сэр." },
+      { text: "Вывод не переключён — я только посмотрел список устройств." },
+    ]);
+    await handleUserText(session(), "переключи вывод звука на наушники", deps(llm));
+    expect(llm.requests.length).toBeGreaterThanOrEqual(4); // был goal-check-раунд
+  });
+
   it("действие (мутация): goal-check по-прежнему сверяет с исходной целью", async () => {
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "a1", name: "app_launch", input: { app: "dota2" } }] },

@@ -468,7 +468,9 @@ export class VoicePipeline {
       const { command: c, droppedPrefix } = stripWakeDetailed(t);
       if (droppedPrefix) this.log.info("wake: текст до обращения отброшен (пре-ролл/фон)", { dropped: droppedPrefix.slice(0, 60) });
       cmd = c.length > 0 ? c : t; // только «Джарвис» без команды — отдаём как есть
-    } else if (this.localWakeActive()) {
+    } else if (this.localWakeActive() && !isNoiseOnly(t)) {
+      // Контроль-1 №9 (ревью 2026-09-24): междометие («хм», «ах») окно адресации не съедает и командой не уходит —
+      // настоящая реплика после него всё ещё адресована.
       // W1: клиент услышал «Джарвис» ЛОКАЛЬНО (sherpa KWS), а облачный STT само слово ослышался или
       // отрезал — реплика всё равно адресована. Одноразово: следующая без обращения пойдёт окном.
       this.awake = true;

@@ -197,7 +197,11 @@ export class AudioCoordinator {
     // а не «слушать Джарвис». Раньше при локальном wake activate() гейт не открывал вовсе: промах KWS
     // было нечем обойти.
     if (opts.ptt) {
-      this.pushToTalk("button");
+      // Контроль-1 №9 (ревью 2026-09-24): включение кнопкой ≠ «сейчас скажу». С окном адресации любая реплика ТВ в
+      // ближайшие 8 с уходила командой — и как «явное обращение» (право на слепой реплей макроса). Кнопка открывает
+      // микрофон, а обращаться — «Джарвис» (облачный STT слышит его и при промахе локального KWS). Окно адресации
+      // без слова — только у хоткея PTT: его жмут ровно чтобы сказать.
+      this.pushToTalk("button", { address: false });
       return;
     }
     // W1: с локальным wake «включить слух» = слушать «Джарвис» на устройстве, а НЕ лить звук в облако.
@@ -219,13 +223,13 @@ export class AudioCoordinator {
    * локальном wake гейт закроется сам по тишине (PTT_OPEN_MS) — как после обычного «Джарвис».
    * Честный mute главнее жеста: красная кнопка «Джарвис не слышит» не должна врать — PTT не открывает.
    */
-  pushToTalk(reason: string): boolean {
+  pushToTalk(reason: string, opts: { address?: boolean } = {}): boolean {
     if (this.muted) {
       this.log.warn("push-to-talk проигнорирован: микрофон выключен владельцем (mic-kill-switch)", { reason });
       return false;
     }
     if (!this.gateOpen) this.openGate(`ptt-${reason}`);
-    this.deps.sendVad("wake_local");
+    if (opts.address !== false) this.deps.sendVad("wake_local");
     const inTurn = this.lastServerState === "thinking" || this.lastServerState === "speaking";
     if (this.localWakeAvailable() && !this.holdOpen && !inTurn) this.closer.arm(PTT_OPEN_MS, LISTEN_HOLD_CAP_MS);
     this.log.info("push-to-talk: гейт открыт, окно адресации у сервера", {
