@@ -497,12 +497,12 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   // POST /dev/vad {state:"barge_in"|"speech_start"|"speech_end"} — зовёт ctx.voice.onVadEvent.
   app.post("/dev/vad", { preHandler: devPre }, async (req) => {
     const state = String((req.body as { state?: string })?.state ?? "").trim();
-    if (!["barge_in", "speech_start", "speech_end"].includes(state)) return { ok: false, error: "state: barge_in|speech_start|speech_end" };
+    if (!["barge_in", "speech_start", "speech_end", "speech_cancel"].includes(state)) return { ok: false, error: "state: barge_in|speech_start|speech_end|speech_cancel" };
     const ids = registry.all().map((s) => s.sessionId);
     let ctx: SessionContext | undefined;
     for (let i = ids.length - 1; i >= 0; i -= 1) { const c = liveCtxs.get(ids[i]!); if (c) { ctx = c; break; } }
     if (!ctx) return { ok: false, error: "нет живой клиентской сессии" };
-    ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end");
+    ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end" | "speech_cancel");
     return { ok: true, sessionId: ctx.session.sessionId, injected: state };
   });
   } // end if (devHttpOn) — §sec gate for DEV/EXT HTTP routes

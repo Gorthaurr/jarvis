@@ -102,6 +102,12 @@ describe("W4 act — клиентский рубеж (SDK-мост / репле�
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
+  // Контроль-2: в почтовом клиенте перевод строки — абзац письма, а не отправка. Реверт: убери исключение для «почта».
+  it("почта: многострочная печать через мост/реплей не считается отправкой", () => {
+    expect(assessClientCommit({ kind: "input.type", text: "Добрый день,\nспасибо" }, "outlook", "bridge")).toBeNull();
+    expect(assessClientCommit({ kind: "input.key", combo: "Enter" }, "outlook", "bridge")).not.toBeNull();
+  });
+
   it("реплей: шаг input.type с переводом строки в мессенджере — отказ; в блокноте — нет", async () => {
     await expect(assertReplayTypeAllowed("ок\r\n", async () => "discord")).rejects.toThrow(/§14/u);
     await expect(assertReplayTypeAllowed("строка 1\nстрока 2", async () => "notepad")).resolves.toBeUndefined();

@@ -40,7 +40,7 @@ import { type TradingService } from "../trading/index.js";
 import { type AppUsage, type MatchedChannel, formatChannels } from "../app-channels.js";
 import { appChannelForget, appChannelLearn, appChannelsList } from "./handlers/app-channels.js";
 import { type PostActionObservation, browserUrlBlocked, capResultBody, channelDownResult, overlayDeniedResult, untrustedCapped, untrustedErrorCapped, wrapUntrustedCapped, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted, applyVeil, isVeiled, VEIL_NOTE, stripVeilFields } from "./dispatch-util.js";
-import { checkCredentialInput } from "./credential-guard.js";
+import { checkCredentialInput, lastActTarget, rememberActTarget } from "./credential-guard.js";
 import { sleep } from "@jarvis/shared";
 import { type BrowserCondition, evalBrowserCondition, isBrowserCondition } from "./browser-condition.js";
 import {
@@ -399,14 +399,17 @@ export async function dispatchTool(
   // W4 фасады: look/window/audio → канонический инструмент и здесь (dispatchTool зовут не только из петли:
   // реплей, watch-runner, тесты). Незнакомый what/op остаётся именем фасада → честное «Неизвестный инструмент».
   const { name, input } = canonicalToolCall(rawName, rawInput);
+  const sessKey = ctx.session as unknown as object | undefined;
+  const typesIntoFocus = name === "act" && input.target === undefined && (input.do === "type" || input.do === "set");
   const cred = checkCredentialInput(
     name,
-    input,
+    typesIntoFocus ? { ...input, target: lastActTarget(sessKey) } : input,
     (ref) => refFieldHint(ctx, ref),
     (handle) => uiHandleLabel(ctx.session as unknown as object, typeof handle === "string" ? Number(handle) : handle),
   );
   if (cred.block) return err(cred.block);
   const out = await dispatchToolCore(name, input, ctx);
+  if (name === "act" && input.target !== undefined) rememberActTarget(sessKey, input.target);
   if (cred.note && !out.isError) appendToolNote(out, cred.note);
   return out;
 }

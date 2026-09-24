@@ -129,7 +129,8 @@ export function assessGuiCommit(a: {
   });
   // Ревью 2026-09-24: перевод строки в печатаемом тексте — это Enter (синтетический \r/\n мессенджер читает как
   // «отправить»). «act{do:"type", text:"привет\n"}» в Telegram уходил человеку МИМО вопроса владельца.
-  const typedNewline = (t: unknown): boolean => typeof t === "string" && /[\r\n]/u.test(t);
+  // Контроль-2: в ПОЧТОВОМ клиенте перевод строки — новый абзац письма, отправка там — кнопкой (судится отдельно).
+  const typedNewline = (t: unknown): boolean => proc.human !== "почта" && typeof t === "string" && /[\r\n]/u.test(t);
   if (a.tool === "input_type") {
     return typedNewline(a.input.text) ? mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит") : null;
   }

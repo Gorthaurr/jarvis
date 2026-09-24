@@ -56,7 +56,7 @@ vi.mock("./input.js", () => ({
   typeText: (t: string) => st.typeText(t),
   pressKey: (c: string) => st.pressKey(c),
 }));
-vi.mock("./paste-text.js", () => ({ PASTE_FROM_CHARS: 80, pasteText: (t: string) => st.pasteText(t) }));
+vi.mock("./paste-text.js", () => ({ PASTE_FROM_CHARS: 80, pasteText: (t: string) => st.pasteText(t), pasteNote: () => "" }));
 vi.mock("./observe.js", () => ({
   captureUiFingerprint: async () => ({ lines: ["Button: Отправить"] }),
   observeAfterAction: async () => st.observation,

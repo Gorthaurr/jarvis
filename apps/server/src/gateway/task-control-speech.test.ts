@@ -89,6 +89,11 @@ describe("«заткнись/замолчи/хватит» — перестат�
     expect(voice.speak).not.toHaveBeenCalled();
   });
 
+  it("«замолчи открой телеграм» в тишине не проглатывается — уходит дальше как команда", () => {
+    const { ctx } = fakeCtx();
+    expect(handleControlUtterance(ctx, "замолчи открой телеграм", "voice")).toBe(false);
+  });
+
   it("«вырубись» — по-прежнему kill: задачи остановлены (рефлекс W0 не тронут)", () => {
     const { ctx, tasks } = fakeCtx();
     const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "что-то делаю" });

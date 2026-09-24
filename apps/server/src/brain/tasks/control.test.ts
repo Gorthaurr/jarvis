@@ -134,12 +134,20 @@ describe("W0 рефлекс kill/silence (2026-09-09, лог «Джарвис, �
     expect(classifyTaskControl("тишина").kind).toBe("silence"); // W0 «тишина/молчи» — прежний режим тишины
   });
 
-  it("голое «хватит» (с филлерами) — hush, не kill; «хватит» с содержанием — не hush", () => {
-    for (const phrase of ["хватит", "хватит уже", "да хватит!", "всё, хватит", "Джарвис, хватит", "довольно"]) {
-      expect(classifyTaskControl(phrase), phrase).toMatchObject({ kind: "stop_tts", hush: true });
+  // Контроль-2 №6: голое «хватит» — не hush (его решает модель: остановить листание ленты/музыку); «замолчи» + команда —
+  // не глотается; «помолчи час» — тишина; «хватит молчать» — просьба говорить. Реверт: верни «хватит» в HUSH_WORDS или
+  // прежнее «≤3 слов» — первые ассерты упадут.
+  it("голое «хватит» — stop_tts без hush; «замолчи открой телеграм» — не hush; «помолчи час» — тишина; «хватит молчать» — не тишина", () => {
+    for (const phrase of ["хватит", "хватит уже", "да хватит!", "Джарвис, хватит"]) {
+      const d = classifyTaskControl(phrase);
+      expect(d.kind, phrase).toBe("stop_tts");
+      expect(d.hush, phrase).toBeUndefined();
     }
+    expect(classifyTaskControl("замолчи открой телеграм").hush).toBeUndefined();
+    expect(classifyTaskControl("помолчи час").kind).toBe("silence");
+    expect(classifyTaskControl("замолчи на час").kind).toBe("silence");
+    expect(classifyTaskControl("хватит молчать").kind).not.toBe("silence");
     expect(classifyTaskControl("хватит говорить").kind).toBe("stop_tts");
-    expect(classifyTaskControl("хватит на сегодня музыки").hush).toBeUndefined();
   });
 
   it("kill берёт верх над cancel-словом в той же фразе («прекрати и вырубись» — это про самого Джарвиса)", () => {

@@ -19,6 +19,8 @@ describe("встроенные программы Windows", () => {
     expect(resolveAppTarget("командную строку")).toBe("cmd"); // так её отдаёт роутер из «открой командную строку»
     expect(resolveAppTarget("панель управления")).toBe("control");
     expect(resolveAppTarget("блокнот")).toBe("notepad"); // алиас — имя процесса: его же зовут фокус и закрытие
+    // Контроль-2: «консоль» в игре/браузере — не cmd («закрой консоль» гасила бы все cmd.exe владельца).
+    expect(resolveAppTarget("консоль")).toBe("консоль");
   });
 
   it("путь запуска — из %SystemRoot%, и только если файл есть", () => {

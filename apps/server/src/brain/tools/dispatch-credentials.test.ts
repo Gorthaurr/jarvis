@@ -123,6 +123,31 @@ describe("пароли и коды подтверждения: ввод не д�
     expect(s.actions).toHaveLength(0);
   });
 
+  // Контроль-2 №2: слот навыка и печать в фокус после клика по полю пароля. Реверт: убери case skill_execute /
+  // наследование цели в dispatchTool — соответствующий тест упадёт.
+  it("skill_execute со слотом password → ошибка, реплей не ушёл (а без пароля — уходит)", async () => {
+    const s = spyCtx();
+    // Навык реально исполнимый: без гарда шаг «{{password}}» ушёл бы клиенту skill.execute (иначе тест декоративен).
+    const skill = (slot: string) => ({ id: "login", version: 1, steps: [{ action: "input.type", params: { text: `{{${slot}}}` } }] });
+    let current = skill("query");
+    (s.ctx as unknown as { skills: unknown }).skills = { get: async () => current };
+    await dispatchTool("skill_execute", { skillId: "login", params: { query: "погода" } }, s.ctx);
+    expect(s.actions.map((a) => a.kind)).toEqual(["skill.execute"]); // контроль: обычный слот исполняется
+    s.actions.length = 0;
+    current = skill("password");
+    const r = await dispatchTool("skill_execute", { skillId: "login", params: { password: "s3cret" } }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(0);
+  });
+
+  it("act{target:«Пароль»} (клик) → act{do:type} без цели → ошибка: поле унаследовано из прошлого act", async () => {
+    const s = spyCtx();
+    await dispatchTool("act", { target: "Пароль" }, s.ctx);
+    const r = await dispatchTool("act", { do: "type", text: "s3cret" }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.actions).toHaveLength(1); // только клик
+  });
+
   it("browser_act type в input[type=password] → ошибка, расширение не вызвано", async () => {
     const s = spyCtx();
     const r = await dispatchTool(

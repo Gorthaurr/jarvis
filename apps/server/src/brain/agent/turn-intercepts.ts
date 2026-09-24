@@ -226,6 +226,8 @@ export async function interceptActiveTask(t: TurnCtx): Promise<AgentReply | null
       // не должен плодить ВТОРУЮ queued-задачу (иначе смысл очереди теряется).
       const live = deps.tasks
         .list(deps.userId)
+        // Контроль-2 №11: смоук-задача драйвера не делает реплику владельца «дублем» (и наоборот) — «Уже делаю» было ложью.
+        .filter((t) => Boolean(t.dev) === (deps.devSession === true))
         .filter((t) => t.state === "running" || t.state === "paused" || t.state === "queued");
       let dup = live.find((t) => isDuplicateGoal(clean, t.goal));
       // Полярность-гард и на ЛЕКСИЧЕСКОМ слое (ревью 2026-07-10): «останови запуск поиска в доте»

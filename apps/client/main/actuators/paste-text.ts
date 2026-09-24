@@ -18,6 +18,13 @@ export const PASTE_FROM_CHARS = 80;
 /** Сколько ждём после Ctrl+V, прежде чем вернуть буфер: приложение забирает его асинхронно. */
 export const PASTE_SETTLE_MS = 400;
 
+/**
+ * Контроль-2 №10: буфер вернуть нельзя (скопированные файлы, свой формат) → печатаем посимвольно, но только пока это
+ * укладывается в бюджет act (~130–150 мс/симв, 45 с): длиннее печать выйдет за бюджет, и H-T1 вернётся. Тогда вставка
+ * с ЧЕСТНОЙ пометкой, что буфер владельца заменён.
+ */
+export const TYPE_INSTEAD_MAX_CHARS = 250;
+
 /** Форматы, которые умеем вернуть на место (Electron: availableFormats отдаёт MIME-подобные имена). */
 const RESTORABLE_FORMAT_RE = /^(text\/plain|text\/html|text\/rtf|image\/[\w.+-]+)$/iu;
 
@@ -52,9 +59,9 @@ function restoreClipboard(s: ClipSnapshot): void {
  * Вставить текст в поле с фокусом. Буфер владельца возвращается целиком; вернуть нельзя — печатаем посимвольно
  * (медленнее, но ничего чужого не теряем). Возвращает, каким путём ушёл текст.
  */
-export async function pasteText(text: string): Promise<"paste" | "type"> {
+export async function pasteText(text: string): Promise<"paste" | "type" | "paste-clipboard-lost"> {
   const prev = snapshotClipboard();
-  if (!prev) {
+  if (!prev && text.length <= TYPE_INSTEAD_MAX_CHARS) {
     await typeText(text);
     return "type";
   }
@@ -63,7 +70,12 @@ export async function pasteText(text: string): Promise<"paste" | "type"> {
     await pressKey("Ctrl+V");
     await sleep(PASTE_SETTLE_MS);
   } finally {
-    restoreClipboard(prev);
+    if (prev) restoreClipboard(prev);
   }
-  return "paste";
+  return prev ? "paste" : "paste-clipboard-lost";
+}
+
+/** Честная приписка к результату act, если буфер владельца пришлось заменить. */
+export function pasteNote(how: Awaited<ReturnType<typeof pasteText>>): string {
+  return how === "paste-clipboard-lost" ? " (буфер обмена владельца заменён: в нём было то, что вернуть нельзя, — скажи ему)" : "";
 }

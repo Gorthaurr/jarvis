@@ -108,6 +108,19 @@ function hintsFromActTarget(target: unknown, handleHint?: HandleHintResolver): s
   return out;
 }
 
+/**
+ * Контроль-2 №2: цель последнего act сессии. Горячий путь «act{target:"Пароль"} (клик) → act{do:"type"} без цели»
+ * печатал в поле пароля без единого признака поля — гард только предупреждал. Печать без цели наследует подпись
+ * поля из прошлого act (фокус там и остался).
+ */
+const lastActTargets = new WeakMap<object, unknown>();
+export function rememberActTarget(session: object | undefined, target: unknown): void {
+  if (session && target !== undefined) lastActTargets.set(session, target);
+}
+export function lastActTarget(session: object | undefined): unknown {
+  return session ? lastActTargets.get(session) : undefined;
+}
+
 function field(text: unknown, hints: string[]): TypedField[] {
   return typeof text === "string" && text.length > 0 ? [{ text, hints }] : [];
 }
@@ -150,6 +163,11 @@ export function collectTypedFields(
       return String(input.op ?? "") === "write" ? field(input.text, []) : [];
     case "ui_invoke":
       return String(input.pattern ?? "") === "setValue" ? field(input.value, hintsFromTarget(input.target)) : [];
+    // Контроль-2 №2: значения слотов навыка печатаются в поля реплея — имя слота («password») и есть признак поля.
+    case "skill_execute": {
+      const params = asRecord(input.params);
+      return params ? Object.entries(params).flatMap(([k, v]) => field(v, [k])) : [];
+    }
     case "act": {
       const verb = String(input.do ?? "click");
       return verb === "type" || verb === "set" ? field(input.text, hintsFromActTarget(input.target, handleHint)) : [];

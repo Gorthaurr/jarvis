@@ -106,8 +106,14 @@ const SILENCE_WORDS = ["тишина", "тишину", "молчать", "мол
  * фильма в окне разговора убивало работу. Это stop_tts (§20: «заткнись» ≠ «отмени») с флагом hush: обрывать нечего —
  * реплика проглатывается молча, а не уходит модели.
  */
-const HUSH_WORDS = ["заткнись", "замолчи", "помолчи", "замолкни", "умолкни", "хватит", "харе", "довольно"] as const;
-const HUSH_MAX_WORDS = 3;
+const HUSH_WORDS = ["заткнись", "замолчи", "помолчи", "замолкни", "умолкни"] as const;
+/**
+ * Контроль-2 №6: hush — только если КРОМЕ слова «замолчи» в реплике ничего содержательного нет. «замолчи открой
+ * телеграм» (STT потерял «и») — это ещё и команда: её не глотаем, она идёт дальше. «помолчи час» — режим тишины.
+ * «хватит/харе/довольно» сюда больше не входят: голое «хватит» останавливает и листание ленты, и музыку — его решает
+ * модель (общий навык коротких видео учит именно «хватит»), а проглоченное оно не останавливало ничего.
+ */
+const HUSH_DURATION = new Set(["час", "часа", "полчаса", "минуту", "минут", "минуты", "немного", "пока", "чуть", "на", "время", "какое", "то"]);
 const SILENCE_MAX_WORDS = 3;
 /**
  * B-F2: филлеры рефлекса — не считаются словами при оценке «короткая ли реплика» («да замолчи ты уже» = одно
@@ -172,14 +178,20 @@ export function classifyTaskControl(text: string): TaskControlDecision {
   // Длину меряем БЕЗ филлеров (B-F2): «да замолчи ты уже» — короткая команда, а «в комнате наступила тишина» — нет.
   const content = contentWords(norm);
   // «не молчи» — просьба ГОВОРИТЬ, а не молчать: отрицание снимает рефлекс.
-  if (content.length >= 1 && content.length <= SILENCE_MAX_WORDS && !hasWord(norm, "не") && SILENCE_WORDS.some((w) => hasWord(norm, w))) {
+  // «хватит/перестань молчать» — просьба ГОВОРИТЬ, как и «не молчи» (контроль-2).
+  const negated = hasWord(norm, "не") || hasWord(norm, "хватит") || hasWord(norm, "перестань");
+  if (content.length >= 1 && content.length <= SILENCE_MAX_WORDS && !negated && SILENCE_WORDS.some((w) => hasWord(norm, w))) {
     return { kind: "silence", confidence: "high", reason: "короткое «тишина/молчи» — режим тишины (W0)" };
   }
-  // «хватит/харе/довольно» — только голые (с филлерами): «хватит на сегодня» дальше идёт своим путём (low).
   const hushWord = HUSH_WORDS.find((w) => hasWord(norm, w));
-  const bareOnly = hushWord === "хватит" || hushWord === "харе" || hushWord === "довольно";
-  if (hushWord && !hasWord(norm, "не") && (bareOnly ? content.length === 1 : content.length <= HUSH_MAX_WORDS)) {
-    return { kind: "stop_tts", confidence: "high", hush: true, reason: `«${hushWord}» — перестать говорить; задачи не трогаем (§20)` };
+  if (hushWord && !hasWord(norm, "не")) {
+    const rest = content.filter((w) => !(HUSH_WORDS as readonly string[]).includes(w));
+    if (rest.length === 0) {
+      return { kind: "stop_tts", confidence: "high", hush: true, reason: `«${hushWord}» — перестать говорить; задачи не трогаем (§20)` };
+    }
+    if (rest.every((w) => HUSH_DURATION.has(w))) {
+      return { kind: "silence", confidence: "high", reason: `«${hushWord}» на время — режим тишины (W0)` };
+    }
   }
 
   // norm окаймлён пробелами с обеих сторон → ` фраза ` ловит фразу как ПОЛНЫЕ слова в любом месте

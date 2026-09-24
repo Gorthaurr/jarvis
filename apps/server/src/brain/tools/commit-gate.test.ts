@@ -91,6 +91,15 @@ describe("W4 act — тот же §14-гейт, что у input_key/input_click"
 
   // Ревью 2026-09-24 (контроль-1 №1): app — свободная строка модели; «дискорд»/«Telegram Desktop» окно находили,
   // а якорный регэксп процесса их не узнавал → Enter уходил человеку без вопроса.
+  // Контроль-2: в почтовом клиенте перевод строки — абзац письма; «3ds Max»/«Zoom Player» — не мессенджеры.
+  it("почта: многострочная печать без вопроса; «3ds Max»/«Zoom Player» не мессенджер, «Zoom» — да", () => {
+    expect(assessGuiCommit({ foregroundProcess: "outlook", tool: "input_type", input: { text: "Добрый день,\nспасибо" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "input_type", input: { text: "ок\n" } })).not.toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "3ds Max", tool: "act", input: { do: "key", combo: "Enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "Zoom Player", tool: "act", input: { do: "key", combo: "Enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "Zoom", tool: "act", input: { do: "key", combo: "Enter" } })).not.toBeNull();
+  });
+
   it("act{app} судится по имени из app нестрого: «дискорд», «Telegram Desktop», «телега» → коммит; «notepad» → нет", () => {
     for (const app of ["дискорд", "Telegram Desktop", "телега", "WhatsApp.exe", "1С:Предприятие"]) {
       expect(assessGuiCommit({ foregroundProcess: "chrome", app, tool: "act", input: { do: "key", combo: "Enter" } }), app).not.toBeNull();

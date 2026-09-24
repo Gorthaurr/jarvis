@@ -77,7 +77,6 @@ const APP_ALIASES: Record<string, string> = {
   taskmgr: "taskmgr",
   "командная строка": "cmd",
   "командную строку": "cmd", // винительный: роутер отдаёт «открой командную строку» как есть
-  консоль: "cmd",
   "панель управления": "control",
   "control panel": "control",
   ножницы: "snippingtool",

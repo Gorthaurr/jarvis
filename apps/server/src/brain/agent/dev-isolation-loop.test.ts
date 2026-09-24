@@ -255,6 +255,18 @@ describe("задачи смоук-драйвера и владельца не с
     expect(tasks.get(owner.taskId)?.steer?.pending ?? []).toHaveLength(0);
   });
 
+  // Контроль-2 №11: дубль-гейт тоже по сторонам. Реверт: убери фильтр по dev в turn-intercepts — «Уже делаю».
+  it("реплика владельца, совпавшая с целью ИДУЩЕЙ смоук-задачи, не отвечается «Уже делаю»", async () => {
+    const tasks = new TaskManager();
+    const smoke = tasks.create({ userId: "u1", sessionId: "drv", goal: "открой дискорд", dev: true });
+    tasks.start(smoke.taskId);
+    tasks.create({ userId: "u1", sessionId: "live", goal: "что-то своё" }); // активная задача владельца → scope/дубль-гейт включены
+    for (const t of tasks.list("u1")) if (t.taskId !== smoke.taskId) tasks.start(t.taskId);
+    const llm = new MockLlmProvider([{ text: "Открываю Дискорд, сэр." }]);
+    const reply = await handleUserText(session(), "открой дискорд", deps(llm, tasks));
+    expect(reply.voice).not.toMatch(/Уже делаю/u);
+  });
+
   it("skill_save / app_channel_learn из dev-сессии в навыки/каналы владельца не пишут", async () => {
     const { dispatchTool } = await import("../tools/dispatch.js");
     const save = vi.fn(async () => null);

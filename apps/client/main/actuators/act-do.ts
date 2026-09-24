@@ -16,7 +16,7 @@ import { DrawingOverlayError } from "../selection/overlay-error.js";
 import type { FoundTarget } from "./act-find.js";
 import { invoke } from "./ground.js";
 import { click, pressKey, typeText } from "./input.js";
-import { PASTE_FROM_CHARS, pasteText } from "./paste-text.js";
+import { PASTE_FROM_CHARS, pasteNote, pasteText } from "./paste-text.js";
 
 const log = createLogger("actuator:act-do");
 
@@ -96,15 +96,16 @@ async function doType(f: FoundTarget, p: ActParams): Promise<ActDone> {
   const target = f.handle ? ({ by: "handle", handle: f.handle } as const) : f.point ? ({ by: "coords", x: f.point.x, y: f.point.y, space: "screen" } as const) : null;
   if (!target) throw new Error(`«${f.name}»: некуда кликнуть перед печатью (нет handle/точки)`);
   const r = await click(target, p.physical ? "physical" : "silent", p.restoreCursor);
+  let note = "";
   try {
     // Ревью 2026-09-24 (H-T1): длинный текст — вставкой, иначе печать выходит за бюджет act и повторяется моделью.
-    if (text.length >= PASTE_FROM_CHARS) await pasteText(text);
+    if (text.length >= PASTE_FROM_CHARS) note = pasteNote(await pasteText(text));
     else await typeText(text);
   } catch (e) {
     if (e instanceof DrawingOverlayError) throw e;
     throw new ActPartialError(`клик в «${f.name}» ушёл, печать не удалась: ${msg(e)} — исход неизвестен, не повторяй вслепую`);
   }
-  return { did: `напечатал ${text.length} симв. в «${f.name}»`, screenX: r?.screenX, screenY: r?.screenY, physical: Boolean(p.physical) };
+  return { did: `напечатал ${text.length} симв. в «${f.name}»${note}`, screenX: r?.screenX, screenY: r?.screenY, physical: Boolean(p.physical) };
 }
 
 /**
@@ -114,14 +115,15 @@ async function doType(f: FoundTarget, p: ActParams): Promise<ActDone> {
  */
 async function doTypeFocused(p: ActParams): Promise<ActDone> {
   const text = p.text ?? "";
+  let note = "";
   try {
-    if (text.length >= PASTE_FROM_CHARS) await pasteText(text);
+    if (text.length >= PASTE_FROM_CHARS) note = pasteNote(await pasteText(text));
     else await typeText(text);
   } catch (e) {
     if (e instanceof DrawingOverlayError) throw e;
     throw new ActPartialError(`печать в поле с фокусом не удалась: ${msg(e)} — часть текста могла уйти, исход неизвестен, не повторяй вслепую`);
   }
-  return { did: `напечатал ${text.length} симв. в поле с фокусом`, physical: true };
+  return { did: `напечатал ${text.length} симв. в поле с фокусом${note}`, physical: true };
 }
 
 /** UIA-паттерн по handle (set/toggle/select/expand): без handle честно нельзя — паттерны только у элементов. */

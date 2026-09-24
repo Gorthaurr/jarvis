@@ -71,6 +71,21 @@ describe("pasteText — буфер владельца", () => {
     vi.useRealTimers();
   });
 
+  // Контроль-2 №10: буфер не вернуть, а текст длинный — посимвольно он не уложится в бюджет act (H-T1). Вставка с
+  // честной пометкой. Реверт: верни безусловный typeText при невозвратном буфере — ассерт на "paste-clipboard-lost" упадёт.
+  it("буфер вернуть нельзя, текст длинный (> 250) → вставка, результат честно говорит, что буфер заменён", async () => {
+    clip.formats = ["Files"];
+    const long = "б".repeat(400);
+    const p = pasteText(long);
+    await vi.runAllTimersAsync();
+    expect(await p).toBe("paste-clipboard-lost");
+    expect(typeText).not.toHaveBeenCalled();
+    expect(pressKey).toHaveBeenCalledWith("Ctrl+V");
+    const { pasteNote } = await import("./paste-text.js");
+    expect(pasteNote("paste-clipboard-lost")).toMatch(/буфер обмена владельца заменён/u);
+    vi.useRealTimers();
+  });
+
   it("текст+HTML возвращаются оба; буфер возвращается не раньше, чем через PASTE_SETTLE_MS", async () => {
     clip.formats = ["text/plain", "text/html"];
     clip.text = "мой пароль";

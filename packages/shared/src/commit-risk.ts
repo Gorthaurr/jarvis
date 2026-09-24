@@ -55,7 +55,9 @@ export function riskyAppCategory(app: string): { category: RiskCategory; human: 
   const s = app.trim().toLowerCase().replace(/\.exe$/u, "");
   if (!s) return null;
   const words = s.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  for (const cand of [s, s.replace(/[^\p{L}\p{N}]+/gu, ""), ...words]) {
+  // «max»/«zoom» — и мессенджеры, и слова в чужих названиях («3ds Max», «Zoom Player»): их — только целым именем.
+  const AMBIGUOUS = new Set(["max", "zoom"]);
+  for (const cand of [s, s.replace(/[^\p{L}\p{N}]+/gu, ""), ...words.filter((w) => !AMBIGUOUS.has(w))]) {
     const hit = riskyProcessCategory(APP_NAME_ALIASES[cand] ?? cand);
     if (hit) return hit;
   }
