@@ -15,6 +15,7 @@
 import { spawn } from "node:child_process";
 import { createLogger } from "@jarvis/shared";
 import { LaunchError, smartLaunch } from "./app-resolve.js";
+import { builtinLaunchPath } from "./windows-builtins.js";
 import { DrawingOverlayError, assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 
 const log = createLogger("actuator:apps");
@@ -69,6 +70,17 @@ const APP_ALIASES: Record<string, string> = {
   powershell: "powershell",
   настройки: "ms-settings:",
   settings: "ms-settings:",
+  параметры: "ms-settings:",
+  "параметры windows": "ms-settings:",
+  "диспетчер задач": "taskmgr",
+  "task manager": "taskmgr",
+  taskmgr: "taskmgr",
+  "командная строка": "cmd",
+  консоль: "cmd",
+  "панель управления": "control",
+  "control panel": "control",
+  ножницы: "snippingtool",
+  "snipping tool": "snippingtool",
   // лаунчеры/бренды (имя бренда, не per-game хардкод): резолвер найдёт exe через App Paths/Пуск
   стим: "steam",
   дискорд: "discord",
@@ -139,8 +151,10 @@ export async function launchApp(app: string): Promise<LaunchOutcome> {
   // без хардкода. Провал резолва/запуска → LaunchError (диспетчер → error.runtime → честный isError,
   // а не ложное «Готово»). Что не резолвится — модель доберёт сама (web_search/code_run, см. персону).
   const query = resolveAppTarget(app);
-  log.info(`launch: "${app}" -> резолв "${query}"`);
-  const r = await smartLaunch(query);
+  // Встроенные программы Windows — абсолютным путём из %SystemRoot% (поиск находил обёртку Git/чужие ярлыки).
+  const launchTarget = builtinLaunchPath(query) ?? query;
+  log.info(`launch: "${app}" -> резолв "${launchTarget}"`);
+  const r = await smartLaunch(launchTarget);
   // Ветка URI без признаков запуска (ms-settings:, https:, tg:) и стаб-лончеры UWP подтвердить нечем:
   // говорим это ПРЯМО в результате, иначе «ОС приняла обработчик» снова прочитается как «запустил»
   // (живой дефект steam://rungameid/<мусор> → «Готово»; у Steam-игры теперь есть настоящая сверка).
@@ -148,7 +162,7 @@ export async function launchApp(app: string): Promise<LaunchOutcome> {
   return {
     resolved: r.resolved,
     pid: r.pid,
-    display: r.display,
+    display: launchTarget !== query ? app.trim() : r.display, // не голый путь System32 в данных модели
     kind: r.kind,
     source: r.source,
     confirmed,
