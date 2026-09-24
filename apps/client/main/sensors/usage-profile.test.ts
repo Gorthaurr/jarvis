@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { UsageProfile } from "./usage-profile.js";
+import { UsageProfile, focusCountable } from "./usage-profile.js";
 
 const dirs: string[] = [];
 const tmp = (): string => {
@@ -53,5 +53,15 @@ describe("UsageProfile", () => {
     const u = new UsageProfile(path, () => 1);
     u.tick("x", 1000);
     expect(u.top(1)[0]?.process).toBe("x");
+  });
+
+  it("H-W1: фокус считается только когда владелец за ПК — «отошёл», «не знаю» (ввод Джарвиса) и блокировка не считаются", () => {
+    const u = new UsageProfile(tmp(), () => 1);
+    expect(u.tickFocus("chrome", 60_000, { presence: "away", locked: false })).toBe(false); // ночь, браузер открыт
+    expect(u.tickFocus("Discord", 60_000, { presence: "unknown", locked: false })).toBe(false); // окно двигал Джарвис
+    expect(u.tickFocus("LockApp", 60_000, { presence: "at_pc", locked: true })).toBe(false); // экран заблокирован
+    expect(u.tickFocus("Code", 60_000, { presence: "at_pc", locked: false })).toBe(true);
+    expect(u.top(5)).toEqual([{ process: "Code", minutes: 1, days: 0 }]);
+    expect(focusCountable("at_pc", false)).toBe(true);
   });
 });

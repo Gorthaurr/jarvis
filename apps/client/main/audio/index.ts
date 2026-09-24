@@ -15,6 +15,8 @@ import type { ClientState, VadEvent } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { type IWakeWord, MockWakeWord } from "../wakeword/index.js";
 import { EnergyVad, type IVad, type VadSignal, rms } from "../vad/index.js";
+import { type GateCloseKind, GateCloser } from "./gate-closer.js";
+import { WakeMissMonitor } from "./wake-miss.js";
 
 export interface AudioCoordinatorDeps {
   wakeword?: IWakeWord;
@@ -97,14 +99,34 @@ const MAX_PLAYBACK_TAIL_MS = 90_000;
 /**
  * W1: пре-ролл — кольцо последних кадров, пока гейт закрыт. Локальный wake срабатывает ~150 мс ПОСЛЕ
  * слова, и без пре-ролла облачный STT не услышал бы само «Джарвис» (и текстовый гейт сервера тоже).
- * 75 кадров × 20 мс = 1,5 с — хватает на «Джарвис» + начало команды.
+ *
+ * Ревью 2026-09-24 (B-F12): было 75 кадров (1,5 с). Кадр — 320 сэмплов = 20 мс (renderer/audio-worklet.js);
+ * «Джарвис» звучит ~0,6 с, KWS срабатывает ~150 мс после конца слова → начало слова ~0,75 с назад.
+ * 1,5 с тащили в STT ещё ~0,75 с звука ДО обращения (реплика ТВ, «ну вот»), а серверный stripWake
+ * вырезает только само слово — «…по телевизору Джарвис, открой» уезжало командой «по телевизору открой».
+ * 45 кадров = 0,9 с: слово целиком + ~150 мс запаса на медленное произношение. Даже если первый слог
+ * срежется, реплика не потеряется: wake_local открывает на сервере окно адресации без слова в тексте.
  */
-const PREROLL_FRAMES = 75;
-/** W1: сервер в listening без нового хода дольше этого → гейт закрыть (env JARVIS_LISTEN_IDLE_CLOSE_MS, деф 10 с). */
+const PREROLL_FRAMES = 45;
+/** W1: сервер в listening без РЕЧИ дольше этого → гейт закрыть (env JARVIS_LISTEN_IDLE_CLOSE_MS, деф 10 с). */
 const LISTEN_IDLE_CLOSE_MS = (() => {
   const n = Number.parseInt(process.env.JARVIS_LISTEN_IDLE_CLOSE_MS ?? "", 10);
   return Number.isFinite(n) && n >= 2_000 ? n : 10_000;
 })();
+/**
+ * Ревью 2026-09-24 (B-F3): жёсткий потолок открытого гейта без нового хода — речь его НЕ сдвигает.
+ * Команда владельца укладывается (реплика ≤ 20 с, потолок энергетического VAD), а ТВ/Discord, в которых
+ * VAD тоже видит речь, больше не держат гейт вечно. Производная от idle — отдельного флага не заводим.
+ */
+const LISTEN_HOLD_CAP_MS = LISTEN_IDLE_CLOSE_MS * 3;
+/**
+ * Ревью 2026-09-24 (B-F8): push-to-talk (кнопка микрофона / Ctrl+Alt+J) держит гейт столько, сколько
+ * сервер держит окно адресации после wake_local (`LOCAL_WAKE_WINDOW_MS` в server/voice/pipeline.ts = 8 с):
+ * дольше открытый гейт без адресации бесполезен — реплику без «Джарвис» сервер всё равно отбросит.
+ */
+const PTT_OPEN_MS = 8_000;
+/** Кадр был недавно — захват в renderer жив (для честных логов «слух включён»). */
+const CAPTURE_ALIVE_MS = 2_000;
 
 export class AudioCoordinator {
   private wakeword: IWakeWord;
@@ -138,12 +160,26 @@ export class AudioCoordinator {
   /** Пиковый rms микрофона за текущую сессию речи Джарвиса (диагностика порога barge-in §10). */
   private bargePeak = 0;
   private framesSent = 0; // диагностика потока кадров
+  /**
+   * Ревью 2026-09-24 (B-F3): сервер знает о речи владельца (speech_start / barge_in → userSpeaking=true),
+   * а speech_end ещё не ушёл. Закрытие гейта в этом состоянии обязано досылать speech_end — иначе
+   * userSpeaking на сервере залипает и фоновые итоги не звучат (их дренаж ждёт конца речи).
+   */
+  private speechOpen = false;
+  /** Когда пришёл последний кадр из renderer (0 — ни одного): «слух включён» пишем только при живом захвате. */
+  private lastIngestAt = 0;
+  /** B-F3: закрытие гейта по тишине (речь сдвигает) + жёсткий потолок. */
+  private readonly closer: GateCloser;
+  /** B-F8: телеметрия «говорили при закрытом гейте, wake промолчал». */
+  private readonly wakeMiss: WakeMissMonitor;
 
   constructor(private readonly deps: AudioCoordinatorDeps) {
     this.wakeword = deps.wakeword ?? new MockWakeWord();
     this.vad = deps.vad ?? new EnergyVad();
     this.log = deps.log ?? createLogger("audio");
     this.now = deps.now ?? (() => Date.now());
+    this.closer = new GateCloser((kind) => this.onCloserFire(kind));
+    this.wakeMiss = new WakeMissMonitor({ log: this.log, now: this.now });
   }
 
   get streaming(): boolean {
@@ -154,18 +190,54 @@ export class AudioCoordinator {
    * Push-to-talk / явная активация (когда реальный wake word недоступен, §18). `hold` — удерживать гейт
    * открытым несмотря на idle сервера (запись голосового отпечатка идёт вне хода); снять — release().
    */
-  activate(opts: { hold?: boolean } = {}): void {
+  activate(opts: { hold?: boolean; ptt?: boolean } = {}): void {
     this.muted = false;
     if (opts.hold) this.holdOpen = true;
+    // Ревью 2026-09-24 (B-F8): явный жест владельца «говорю» (кнопка микрофона) — push-to-talk,
+    // а не «слушать Джарвис». Раньше при локальном wake activate() гейт не открывал вовсе: промах KWS
+    // было нечем обойти.
+    if (opts.ptt) {
+      this.pushToTalk("button");
+      return;
+    }
     // W1: с локальным wake «включить слух» = слушать «Джарвис» на устройстве, а НЕ лить звук в облако.
     // Гейт откроет сам детектор (или удержание на запись голоса). Живой лог 2026-09-09: renderer звал
     // activate() при старте ПОСЛЕ подъёма слуха, и гейт оставался открытым до первого idle сервера.
     if (this.localWakeAvailable() && !opts.hold) {
       if (this.gateOpen && this.lastServerState === "idle") this.closeGate("activate-local-wake");
-      this.log.info("слух включён: локальный wake, гейт закрыт до «Джарвис»");
+      // B-F4: «слух включён» — только при живом захвате; иначе честно: владелец разрешил, но кадров нет.
+      if (this.captureAlive()) this.log.info("слух включён: локальный wake, гейт закрыт до «Джарвис»");
+      else this.log.warn("микрофон разрешён владельцем, но кадров захвата нет — renderer ещё не поднял микрофон");
       return;
     }
     if (!this.gateOpen) this.openGate(opts.hold ? "manual-hold" : "manual");
+  }
+
+  /**
+   * Ревью 2026-09-24 (B-F8): push-to-talk — кнопка микрофона или глобальная Ctrl+Alt+J. Открывает гейт
+   * и шлёт серверу wake_local (окно адресации: реплика без «Джарвис» в тексте будет принята). При
+   * локальном wake гейт закроется сам по тишине (PTT_OPEN_MS) — как после обычного «Джарвис».
+   * Честный mute главнее жеста: красная кнопка «Джарвис не слышит» не должна врать — PTT не открывает.
+   */
+  pushToTalk(reason: string): boolean {
+    if (this.muted) {
+      this.log.warn("push-to-talk проигнорирован: микрофон выключен владельцем (mic-kill-switch)", { reason });
+      return false;
+    }
+    if (!this.gateOpen) this.openGate(`ptt-${reason}`);
+    this.deps.sendVad("wake_local");
+    const inTurn = this.lastServerState === "thinking" || this.lastServerState === "speaking";
+    if (this.localWakeAvailable() && !this.holdOpen && !inTurn) this.closer.arm(PTT_OPEN_MS, LISTEN_HOLD_CAP_MS);
+    this.log.info("push-to-talk: гейт открыт, окно адресации у сервера", {
+      reason,
+      ms: PTT_OPEN_MS,
+      capture: this.captureAlive() ? "кадры идут" : "кадров захвата нет — микрофон в renderer не поднят",
+    });
+    return true;
+  }
+
+  private captureAlive(): boolean {
+    return this.lastIngestAt > 0 && this.now() - this.lastIngestAt < CAPTURE_ALIVE_MS;
   }
 
   /** W1: снять удержание (конец записи голоса); при idle сервера и локальном wake гейт закрывается. */
@@ -194,12 +266,16 @@ export class AudioCoordinator {
 
   /** Принять кадр PCM16 из renderer. */
   ingest(pcm: Int16Array): void {
+    this.lastIngestAt = this.now();
     if (this.muted) return; // честный mute: ни в облако, ни в локальный wake
     if (!this.gateOpen) {
       // Гейт закрыт: аудио на сервер НЕ уходит (§0.6). Только wake word локально + пре-ролл в памяти.
       this.preroll.push(Int16Array.from(pcm));
       if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift();
-      if (this.wakeword.ready && this.wakeword.process(pcm)) {
+      const hit = this.wakeword.ready && this.wakeword.process(pcm);
+      // B-F8: промах KWS больше не невидим — отдельный дешёвый детектор речи считает реплики без wake.
+      if (!hit && this.wakeword.ready) this.wakeMiss.frame(pcm);
+      if (hit) {
         this.openGate("wakeword");
         // Серверу: «обращение услышано локально» — следующая реплика принимается без «Джарвис» в тексте
         // (STT может ослышаться), затем пре-ролл (само слово «Джарвис» + начало команды), затем живой поток.
@@ -249,31 +325,21 @@ export class AudioCoordinator {
     // закрылся бы НАВСЕГДА — открыть некому — и Джарвис «глох» после первого ответа).
     if (state === "idle" && this.localWakeAvailable() && !this.holdOpen && !this.muted) this.closeGate("idle-local-wake");
     // Живой прогон 2026-09-09: в комнате с фоном (ТВ/Discord) сервер до idle НЕ доходит — VAD-события
-    // держат его в listening бесконечно, и гейт не закрывался никогда. Поэтому закрываем и по ТАЙМЕРУ:
-    // сервер в listening дольше LISTEN_IDLE_CLOSE_MS без нового хода (thinking/speaking) → закрыть.
+    // держат его в listening бесконечно, и гейт не закрывался никогда. Поэтому закрываем и по ТАЙМЕРУ.
     // Окно follow-up владельца укладывается в этот срок; дальше — снова «Джарвис» (и это цель W0/W1).
-    if (this.localWakeAvailable() && !this.holdOpen && !this.muted && this.gateOpen && state === "listening") this.armListenIdleClose();
-    else this.clearListenIdleClose();
+    // Ревью 2026-09-24 (B-F3): считаем от конца РЕЧИ, а не от входа в listening (владелец, начавший
+    // фразу на 9-й секунде, терял её хвост), и с потолком LISTEN_HOLD_CAP_MS — фон гейт вечно не держит.
+    if (this.localWakeAvailable() && !this.holdOpen && !this.muted && this.gateOpen && state === "listening") {
+      this.closer.arm(LISTEN_IDLE_CLOSE_MS, LISTEN_HOLD_CAP_MS);
+    } else if (state !== "idle") this.closer.clear(); // thinking/speaking: ход в работе — таймер не нужен
   }
 
-  private listenIdleTimer: ReturnType<typeof setTimeout> | null = null;
-
-  private armListenIdleClose(): void {
-    this.clearListenIdleClose();
-    this.listenIdleTimer = setTimeout(() => {
-      this.listenIdleTimer = null;
-      if (this.gateOpen && this.lastServerState === "listening" && this.localWakeAvailable() && !this.holdOpen && !this.muted) {
-        this.closeGate("listen-idle-local-wake");
-      }
-    }, LISTEN_IDLE_CLOSE_MS);
-    this.listenIdleTimer.unref?.();
-  }
-
-  private clearListenIdleClose(): void {
-    if (this.listenIdleTimer) {
-      clearTimeout(this.listenIdleTimer);
-      this.listenIdleTimer = null;
-    }
+  /** B-F3: таймер тишины/потолка сработал — закрываем, только если хода нет и гейт держать некому. */
+  private onCloserFire(kind: GateCloseKind): void {
+    if (!this.gateOpen || this.holdOpen || this.muted || !this.localWakeAvailable()) return;
+    // Хода нет = сервер в listening ИЛИ idle (push-to-talk при простое: кадров не было — сервер не проснулся).
+    if (this.lastServerState === "thinking" || this.lastServerState === "speaking") return;
+    this.closeGate(kind === "cap" ? "listen-cap-local-wake" : "listen-idle-local-wake");
   }
 
   /** Принудительно закрыть микрофон (честный mute, §0.6). */
@@ -331,13 +397,17 @@ export class AudioCoordinator {
       // §10 адаптивный barge: копим ФОН только вне окна речи Джарвиса (его TTS/эхо фон не задирают).
       this.ambientRms += AMBIENT_EMA_ALPHA * (rms(pcm) - this.ambientRms);
       if (sig === "speech_start") {
+        this.speechOpen = true;
         this.deps.sendVad("speech_start");
         this.log.info("VAD: speech_start");
       } else if (sig === "speech_end") {
+        this.speechOpen = false;
         this.deps.sendVad("speech_end");
         this.log.info("VAD: speech_end");
       }
     }
+    // B-F3: идёт речь — дедлайн «тишины» сдвигается (потолок — нет). No-op, если таймер не взведён.
+    if (this.vad.speaking) this.closer.touch();
     this.deps.sendFrame(pcm);
     this.framesSent += 1;
     // Диагностика: периодически подтверждаем, что кадры реально уходят на сервер.
@@ -390,6 +460,7 @@ export class AudioCoordinator {
       this.bargeBelowSince = 0;
       this.playbackActive = false; // звук сейчас оборвём → снимаем barge-окно (renderer тоже пришлёт idle)
       this.deps.onBargeIn?.(); // мгновенно глушим плеер в renderer
+      this.speechOpen = true; // B-F3: сервер на barge_in ставит userSpeaking=true — конец речи за нами
       this.deps.sendVad("barge_in"); // сервер отменяет синтез
       this.log.info("barge_in (устойчивая речь поверх TTS — стоп)", {
         level: Math.round(level),
@@ -402,6 +473,7 @@ export class AudioCoordinator {
 
   private openGate(reason: string): void {
     this.gateOpen = true;
+    this.wakeMiss.reset(); // отрезок, на котором гейт открылся, — попадание, а не промах
     this.log.info("гейт микрофона ОТКРЫТ", { reason });
     this.deps.onMicState?.(true);
   }
@@ -409,6 +481,16 @@ export class AudioCoordinator {
   private closeGate(reason = "close"): void {
     if (!this.gateOpen) return;
     this.gateOpen = false;
+    this.closer.clear();
+    // B-F3: закрылись посреди речи → сервер обязан узнать о её конце (иначе userSpeaking залипает).
+    if (this.speechOpen) {
+      this.speechOpen = false;
+      this.deps.sendVad("speech_end");
+      this.log.info("гейт закрыт посреди речи — серверу досылаю speech_end", { reason });
+    }
+    // Иначе VAD останется speaking, и speech_start новой реплики после реоткрытия серверу не уйдёт.
+    if (this.vad.speaking) (this.vad as { reset?: () => void }).reset?.();
+    this.wakeMiss.reset();
     this.preroll = [];
     (this.wakeword as { reset?: () => void }).reset?.(); // хвост прошлого хода не должен «будить» сам себя
     this.log.info("гейт микрофона ЗАКРЫТ", { reason, localWake: this.localWakeAvailable() });

@@ -29,6 +29,20 @@ interface Persisted {
   seconds: Record<string, number>;
 }
 
+/** Присутствие владельца — как его считает `actuators/user-presence.ownerPresence`. */
+export type OwnerPresenceState = "at_pc" | "away" | "unknown";
+
+/**
+ * Ревью 2026-09-24 (H-W1): фокус считается ТОЛЬКО пока владелец за ПК. Раньше тик шёл каждые 12 с при
+ * любом состоянии: ночь с открытым браузером, экран блокировки, окна, которые двигал САМ Джарвис во время
+ * GUI-задачи, — всё уходило в «самые частые программы владельца», и порядок каналов на сервере строился
+ * по чужой активности. «unknown» (последний ввод — наш) тоже не считаем: это работа Джарвиса, не владельца.
+ * Блокировку проверяем отдельно: первые ~60 с после неё простой ещё мал, и присутствие говорит «за ПК».
+ */
+export function focusCountable(presence: OwnerPresenceState, locked: boolean): boolean {
+  return presence === "at_pc" && !locked;
+}
+
 /** Кап процессов в сторе: лишние (самые редкие) вытесняются, чтобы файл не рос вечно. */
 const MAX_PROCESSES = 200;
 /** Дебаунс записи на диск: тики каждые 12 с, писать каждый — лишнее. */
@@ -54,6 +68,13 @@ export class UsageProfile {
     this.seconds.set(p, (this.seconds.get(p) ?? 0) + ms / 1000);
     if (this.seconds.size > MAX_PROCESSES) this.evict();
     this.scheduleSave();
+  }
+
+  /** H-W1: тик снимка с учётом присутствия владельца. true — посчитан. */
+  tickFocus(process: string | undefined, ms: number, ctx: { presence: OwnerPresenceState; locked: boolean }): boolean {
+    if (!focusCountable(ctx.presence, ctx.locked)) return false;
+    this.tick(process, ms);
+    return true;
   }
 
   /** Топ-N по минутам фокуса (убывание). days — с момента первой записи, не меньше 1 после суток. */
