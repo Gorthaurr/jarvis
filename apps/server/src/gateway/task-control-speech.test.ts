@@ -60,30 +60,39 @@ describe("B-F2: «стоп» сразу после речи Джарвиса —
   });
 });
 
-describe("B-F2: «заткнись/замолчи/хватит» — рефлекс, а не задача модели", () => {
-  it("«да замолчи ты уже» в тишине без задач → перехвачено (silence): quiet, ни слова в ответ", () => {
-    // Реверт: убери «замолчи» из SILENCE_WORDS (control.ts) — вернётся stop_tts, и при молчащем Джарвисе без
-    // задач реплика уйдёт в модель (handleControlUtterance → false).
+// Контроль-1 №2 (ревью 2026-09-24): «замолчи/хватит» — перестать ГОВОРИТЬ. Первая версия B-F2 делала их рефлексом
+// silence/kill: «замолчи» посреди рассказа ОТМЕНЯЛО все задачи и держало напоминания 10 минут, «Хватит!» из фильма
+// в окне разговора убивало работу. Реверт: верни слова в SILENCE_WORDS / голое «хватит» в kill — тесты 2 и 3 упадут.
+describe("«заткнись/замолчи/хватит» — перестать говорить, задачи живы, в модель не уходит", () => {
+  it("«да замолчи ты уже» в тишине без задач → проглочено: ни модели, ни quiet, ни слова в ответ", () => {
     const { ctx, voice } = fakeCtx();
     expect(handleControlUtterance(ctx, "да замолчи ты уже", "voice")).toBe(true);
-    expect(voice.quiet).toHaveBeenCalledWith(10 * 60_000);
+    expect(voice.quiet).not.toHaveBeenCalled();
     expect(voice.speak).not.toHaveBeenCalled();
   });
 
-  it("«заткнись» при активной задаче — задача остановлена, синтез оборван", () => {
+  it("«заткнись», пока Джарвис рассказывает о фоновой задаче — речь оборвана, задача ЖИВА, режима тишины нет", () => {
     const { ctx, voice, tasks } = fakeCtx({ state: "speaking" });
     const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "долгая" });
     expect(handleControlUtterance(ctx, "Джарвис, заткнись", "voice")).toBe(true);
-    expect(tasks.get(t.taskId)?.state).toBe("cancelled");
+    expect(tasks.get(t.taskId)?.state).not.toBe("cancelled");
     expect(voice.onVadEvent).toHaveBeenCalledWith("barge_in");
+    expect(voice.quiet).not.toHaveBeenCalled();
   });
 
-  it("голое «хватит уже» — kill: всё остановлено, ack одним словом мимо очереди", () => {
+  it("голое «хватит уже» при идущей задаче — задача не отменена, ack «Остановил» не звучит", () => {
     const { ctx, voice, tasks } = fakeCtx();
-    tasks.create({ userId: "u1", sessionId: "s1", goal: "что-то делаю" });
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "что-то делаю" });
     expect(handleControlUtterance(ctx, "хватит уже", "voice")).toBe(true);
-    expect(voice.quiet).toHaveBeenCalledWith(60_000);
-    expect(String(voice.speak.mock.calls[0]?.[0])).toContain("Остановил");
-    expect(voice.speakQueued).not.toHaveBeenCalled();
+    expect(tasks.get(t.taskId)?.state).not.toBe("cancelled");
+    expect(voice.quiet).not.toHaveBeenCalled();
+    expect(voice.speak).not.toHaveBeenCalled();
+  });
+
+  it("«вырубись» — по-прежнему kill: задачи остановлены (рефлекс W0 не тронут)", () => {
+    const { ctx, tasks } = fakeCtx();
+    const t = tasks.create({ userId: "u1", sessionId: "s1", goal: "что-то делаю" });
+    expect(handleControlUtterance(ctx, "вырубись", "voice")).toBe(true);
+    expect(tasks.get(t.taskId)?.state).toBe("cancelled");
   });
 });

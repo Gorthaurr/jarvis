@@ -88,4 +88,14 @@ describe("W4 act — тот же §14-гейт, что у input_key/input_click"
     expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Настройки" } })).toBeNull();
     expect(assessGuiCommit({ foregroundProcess: "notepad", tool: "act", input: { target: "Отправить" } })).toBeNull();
   });
+
+  // Ревью 2026-09-24 (контроль-1 №1): app — свободная строка модели; «дискорд»/«Telegram Desktop» окно находили,
+  // а якорный регэксп процесса их не узнавал → Enter уходил человеку без вопроса.
+  it("act{app} судится по имени из app нестрого: «дискорд», «Telegram Desktop», «телега» → коммит; «notepad» → нет", () => {
+    for (const app of ["дискорд", "Telegram Desktop", "телега", "WhatsApp.exe", "1С:Предприятие"]) {
+      expect(assessGuiCommit({ foregroundProcess: "chrome", app, tool: "act", input: { do: "key", combo: "Enter" } }), app).not.toBeNull();
+    }
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", app: "notepad", tool: "act", input: { do: "key", combo: "Enter" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "chrome", app: "Блокнот", tool: "act", input: { target: "Отправить" } })).toBeNull();
+  });
 });

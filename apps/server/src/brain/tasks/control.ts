@@ -35,6 +35,11 @@ export interface TaskControlDecision {
   confidence: "high" | "low";
   /** Человекочитаемая причина решения (для логов/отладки §22 и эскалации). */
   reason: string;
+  /**
+   * Контроль-1 №2 (ревью 2026-09-24): короткое «заткнись/замолчи/хватит» — «перестань говорить». Задачи НЕ
+   * трогает (§20); если обрывать нечего — реплика проглатывается, а не уходит модели задачей (исходная жалоба B-F2).
+   */
+  hush?: boolean;
 }
 
 /**
@@ -61,7 +66,7 @@ function hasStem(norm: string, stems: readonly string[]): boolean {
 const TASK_STEMS = ["задач", "работ", "процесс"] as const;
 
 /** stop_tts: оборвать ТОЛЬКО озвучку, задача живёт (§20). */
-const STOP_TTS_WORDS = ["стоп", "стой", "заткнись", "тихо", "тише", "помолчи", "замолчи"] as const;
+const STOP_TTS_WORDS = ["стоп", "стой", "заткнись", "тихо", "тише", "помолчи", "замолчи", "замолкни", "умолкни"] as const;
 /** stop_tts фразы. */
 const STOP_TTS_PHRASES = ["хватит говорить", "перестань говорить", "не говори", "не болтай"] as const;
 
@@ -94,9 +99,15 @@ const KILL_SELF_VERBS = ["выруби", "выключи", "отключи", "з
  * silence: «тишина» — молчать надолго. Только КОРОТКАЯ реплика (≤3 слов): «в комнате наступила
  * тишина» — не команда. Ack не звучит (просили тишины), см. gateway/task-control.
  */
-// B-F2 (ревью 2026-09-24): «заткнись/замолчи/помолчи» — то же «молчи». Раньше они были ТОЛЬКО stop_tts, а тот при
-// молчащем Джарвисе (после barge-in состояние уже listening) пропускал реплику дальше — в МОДЕЛЬ, задачей.
-const SILENCE_WORDS = ["тишина", "тишину", "молчать", "молчи", "заткнись", "замолчи", "помолчи", "замолкни", "умолкни"] as const;
+const SILENCE_WORDS = ["тишина", "тишину", "молчать", "молчи"] as const;
+/**
+ * «Перестань говорить» (контроль-1 №2, ревью 2026-09-24). B-F2 сначала сделал их рефлексом silence/kill — и
+ * «замолчи» посреди рассказа о фоновой задаче ОТМЕНЯЛО все задачи и держало напоминания 10 минут, а «Хватит!» из
+ * фильма в окне разговора убивало работу. Это stop_tts (§20: «заткнись» ≠ «отмени») с флагом hush: обрывать нечего —
+ * реплика проглатывается молча, а не уходит модели.
+ */
+const HUSH_WORDS = ["заткнись", "замолчи", "помолчи", "замолкни", "умолкни", "хватит", "харе", "довольно"] as const;
+const HUSH_MAX_WORDS = 3;
 const SILENCE_MAX_WORDS = 3;
 /**
  * B-F2: филлеры рефлекса — не считаются словами при оценке «короткая ли реплика» («да замолчи ты уже» = одно
@@ -111,8 +122,6 @@ const REFLEX_FILLERS: ReadonlySet<string> = new Set([
 function contentWords(norm: string): string[] {
   return norm.trim().split(" ").filter((w) => w && !REFLEX_FILLERS.has(w));
 }
-/** B-F2: голое «хватит» (с филлерами: «да хватит уже», «всё, хватит») — «довольно всего»: kill-рефлекс. */
-const KILL_BARE_WORDS = ["хватит", "харе", "довольно"] as const;
 
 /** pause: приостановить с возможностью resume (§20). */
 const PAUSE_WORDS = ["пауза", "приостанови", "приостановить", "отложи", "отложить"] as const;
@@ -164,10 +173,13 @@ export function classifyTaskControl(text: string): TaskControlDecision {
   const content = contentWords(norm);
   // «не молчи» — просьба ГОВОРИТЬ, а не молчать: отрицание снимает рефлекс.
   if (content.length >= 1 && content.length <= SILENCE_MAX_WORDS && !hasWord(norm, "не") && SILENCE_WORDS.some((w) => hasWord(norm, w))) {
-    return { kind: "silence", confidence: "high", reason: "короткое «тишина/молчи/замолчи» — режим тишины (W0, B-F2)" };
+    return { kind: "silence", confidence: "high", reason: "короткое «тишина/молчи» — режим тишины (W0)" };
   }
-  if (content.length === 1 && (KILL_BARE_WORDS as readonly string[]).includes(content[0]!)) {
-    return { kind: "kill", confidence: "high", reason: `голое «${content[0]}» — остановить всё и замолчать (B-F2)` };
+  // «хватит/харе/довольно» — только голые (с филлерами): «хватит на сегодня» дальше идёт своим путём (low).
+  const hushWord = HUSH_WORDS.find((w) => hasWord(norm, w));
+  const bareOnly = hushWord === "хватит" || hushWord === "харе" || hushWord === "довольно";
+  if (hushWord && !hasWord(norm, "не") && (bareOnly ? content.length === 1 : content.length <= HUSH_MAX_WORDS)) {
+    return { kind: "stop_tts", confidence: "high", hush: true, reason: `«${hushWord}» — перестать говорить; задачи не трогаем (§20)` };
   }
 
   // norm окаймлён пробелами с обеих сторон → ` фраза ` ловит фразу как ПОЛНЫЕ слова в любом месте

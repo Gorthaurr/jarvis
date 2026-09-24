@@ -700,7 +700,8 @@ async function dispatchToolCore(
     const actHandle =
       name === "act" && input.target && typeof input.target === "object" ? (input.target as { handle?: unknown }).handle : undefined;
     const risk = assessGuiCommit({
-      foregroundProcess: actApp ?? parseForegroundProcess(ctx.systemContext?.() ?? ""),
+      foregroundProcess: parseForegroundProcess(ctx.systemContext?.() ?? ""),
+      app: actApp,
       tool: name,
       input,
       label:

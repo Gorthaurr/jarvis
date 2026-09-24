@@ -13,7 +13,7 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-import { COMMIT_WORDS_RE, type RiskCategory, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, type RiskCategory, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
 
 export type { RiskCategory };
 // W0: список процессов и riskyProcessCategory переехали в @jarvis/shared/commit-risk — их же читает
@@ -110,14 +110,17 @@ export function parseForegroundProcess(systemContext: string): string | null {
  */
 export function assessGuiCommit(a: {
   foregroundProcess: string | null;
+  /** act{app}: окно, которое act сам сфокусирует — судим по НЕМУ (нестрого: «дискорд», «Telegram Desktop»). */
+  app?: string | null;
   tool: "ui_invoke" | "input_key" | "input_click" | "act" | "input_type";
   input: Record<string, unknown>;
   label?: string;
 }): CommitRisk | null {
-  if (!a.foregroundProcess) return null;
-  const proc = riskyProcessCategory(a.foregroundProcess);
+  const name = a.app?.trim() ? a.app.trim() : a.foregroundProcess;
+  if (!name) return null;
+  const proc = a.app?.trim() ? riskyAppCategory(name) : riskyProcessCategory(name);
   if (!proc) return null;
-  const where = `${a.foregroundProcess} (${proc.human})`;
+  const where = `${name} (${proc.human})`;
   const mk = (what: string): CommitRisk => ({
     category: proc.category,
     where,

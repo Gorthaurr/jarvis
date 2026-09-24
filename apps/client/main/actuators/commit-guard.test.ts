@@ -77,6 +77,9 @@ describe("W4 act — клиентский рубеж (SDK-мост / репле�
     // H-S1 (ревью 2026-09-24): act с app судится по программе в app — Chrome спереди не прикрывает отправку в Telegram.
     expect(assessClientCommit({ kind: "gui.act", target: "Отправить", app: "Telegram" }, "chrome", "bridge")).not.toBeNull();
     expect(assessClientCommit({ kind: "gui.act", target: "Отправить", app: "notepad" }, "Telegram", "bridge")).toBeNull();
+    // Контроль-1 №1 (ревью 2026-09-24): имя в app — нестрого («дискорд», «Telegram Desktop»).
+    expect(assessClientCommit({ kind: "gui.act", do: "key", combo: "Enter", app: "дискорд" }, "chrome", "bridge")).not.toBeNull();
+    expect(assessClientCommit({ kind: "gui.act", target: "Отправить", app: "Telegram Desktop" }, "chrome", "replay")).not.toBeNull();
   });
 
   // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter — мессенджер отправит без вопроса владельцу.

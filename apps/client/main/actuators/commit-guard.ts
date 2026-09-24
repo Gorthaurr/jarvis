@@ -16,7 +16,7 @@
  * пропускаем (fail-open на неизвестности — та же политика, что у `parseForegroundProcess` на сервере).
  */
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
-import { COMMIT_WORDS_RE, createLogger, isCommitKeyCombo, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, createLogger, isCommitKeyCombo, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
 import { listWindows } from "./windows.js";
 
 const log = createLogger("actuator:commit-guard");
@@ -34,11 +34,13 @@ export interface CommitDenial {
  */
 export function assessClientCommit(cmd: ActionCommand, foregroundNow: string | null, via: "bridge" | "replay"): CommitDenial | null {
   // Ревью 2026-09-24 (H-S1): act с app САМ фокусирует это окно — программа коммита та, что в app, а не текущий передний план.
-  const foreground = cmd.kind === "gui.act" && cmd.app?.trim() ? cmd.app.trim() : foregroundNow;
+  const fromApp = cmd.kind === "gui.act" && Boolean(cmd.app?.trim());
+  const foreground = fromApp && cmd.kind === "gui.act" ? (cmd.app ?? "").trim() : foregroundNow;
   if (!foreground) return null;
   const what = commitOf(cmd);
   if (!what) return null;
-  const risk = riskyProcessCategory(foreground);
+  // Имя из app — свободная строка модели («дискорд», «Telegram Desktop»): судим нестрого (ревью 2026-09-24).
+  const risk = fromApp ? riskyAppCategory(foreground) : riskyProcessCategory(foreground);
   if (!risk) return null;
   const path = via === "bridge" ? "SDK-мост (jarvis.key из code_run)" : "реплей навыка";
   return {

@@ -211,7 +211,15 @@ export function handleControlUtterance(ctx: SessionContext, text: string, source
     // такую реплику дальше в роутер, где она честно отработает как команда громкости.
     // B-F2: «говорит» = не только state==="speaking": после barge-in (≤3 с) и пока клиент доигрывает реплику
     // «стоп/тише» — это «замолчи», а не медиаклавиша или громкость.
-    if (!jarvisSpeechBusy(ctx.voice) && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) return false;
+    if (!jarvisSpeechBusy(ctx.voice) && !ctx.agentDeps.tasks.hasAnyActive(ctx.session.userId)) {
+      // «заткнись/замолчи/хватит», а говорить нечего — проглатываем молча: в модели эта реплика стала бы задачей
+      // (B-F2), а в роутере «хватит» — медиаклавишей. «тише/стоп» идут дальше (громкость / плеер).
+      if (decision.hush) {
+        log.info("«замолчи» при молчащем Джарвисе — проглочено", { reason: decision.reason });
+        return true;
+      }
+      return false;
+    }
     ctx.voice.onVadEvent("barge_in");
     ctx.voice.clearPendingSpeech(); // пользователь хочет тишины — не озвучивать отложенные фоновые итоги
     ctx.session.send("client.state", { state: "idle" });

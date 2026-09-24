@@ -26,6 +26,42 @@ export function riskyProcessCategory(processName: string): { category: RiskCateg
   return null;
 }
 
+/** Русские/разговорные имена программ → имя процесса (то, что понимает RISKY_PROCESSES). */
+const APP_NAME_ALIASES: Record<string, string> = {
+  телеграм: "telegram",
+  телеграмм: "telegram",
+  телега: "telegram",
+  тг: "telegram",
+  дискорд: "discord",
+  дис: "discord",
+  ватсап: "whatsapp",
+  вотсап: "whatsapp",
+  вацап: "whatsapp",
+  вайбер: "viber",
+  слак: "slack",
+  тимс: "teams",
+  зум: "zoom",
+  аутлук: "outlook",
+  "1с": "1cv8",
+};
+
+/**
+ * Ревью 2026-09-24: `act{app}` судится по ИМЕНИ из `app`, а не по переднему плану (act сам фокусирует это окно). Но
+ * `app` — свободная строка модели: «дискорд», «Telegram Desktop» окно находили (алиасы / подстрока заголовка), а
+ * якорный `^(telegram|discord…)$` их не узнавал — и Enter/«Отправить» уходил человеку без вопроса владельцу.
+ * Нестрого: вся строка, каждое слово, русские имена. Ложное срабатывание стоит одного лишнего вопроса.
+ */
+export function riskyAppCategory(app: string): { category: RiskCategory; human: string } | null {
+  const s = app.trim().toLowerCase().replace(/\.exe$/u, "");
+  if (!s) return null;
+  const words = s.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  for (const cand of [s, s.replace(/[^\p{L}\p{N}]+/gu, ""), ...words]) {
+    const hit = riskyProcessCategory(APP_NAME_ALIASES[cand] ?? cand);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 /**
  * Клавиша-коммит: Enter и его сочетания (Ctrl+Enter — «отправить» в Telegram/Discord/почте,
  * Shift+Enter в некоторых клиентах — перенос строки, но в других — отправка; считаем коммитом
