@@ -1,19 +1,16 @@
 # Jarvis — карта проекта (читать в начале сессии)
 
-> **Карта, а не летопись** (правило §8.3 ревью 2026-09-09, введено 2026-09-24). Здесь — ЧТО/ГДЕ/КАК и законы.
-> Почему так сделано, история волн и разборов — [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (бывший CLAUDE.md, 528 КБ,
-> искать grep'ом по имени механизма). Механика и тестирование — [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md).
-> Текущий план и вердикт — [`docs/REVIEW_2026-09-24.md`](docs/REVIEW_2026-09-24.md) (поверх [`REVIEW_2026-09-09`](docs/REVIEW_2026-09-09.md)).
-> Меняешь архитектуру — обнови ЭТУ карту одной-двумя строками, а историю — одним абзацем в конец CHANGELOG.
-> Держать файл ≤ 20 КБ.
+> **Карта, а не летопись** (§8.3 ревью 09.09): ЧТО/ГДЕ/КАК и законы, файл ≤ 20 КБ. История и «почему» —
+> [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (grep по имени механизма); механика и тестирование —
+> [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md); план и вердикт — [`docs/REVIEW_2026-09-24.md`](docs/REVIEW_2026-09-24.md).
+> Меняешь архитектуру — одна-две строки сюда, абзац — в конец CHANGELOG.
 
 ## Что это
 Голосовой ИИ-ассистент-мажордом «Джарвис» для ОДНОГО владельца на его Windows-ПК: слышит → понимает → управляет
 компьютером инструментами → отвечает голосом, сам напоминает/следит/докладывает. pnpm-монорепо, Node ≥ 20, pnpm 9.
-Мозг — Claude: основной канал Messages API по ключу (кредиты кончились 31.08 → выключен), рабочий — **подписка Max
-через Claude Agent SDK** (одна сессия SDK на задачу, W2). Тиры на API: `haiku`/`sonnet` = Sonnet, `fable` = Opus
-(эскалация §7); на подписке модель одна (Opus 5), тир задаёт эффорт (medium / high / max). TTS — Yandex (голос
-filipp), STT — Deepgram nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
+Мозг — Claude по **подписке Max через Agent SDK** (сессия SDK на задачу, W2; API по ключу выключен с 31.08): модель
+Opus 5, тир задаёт эффорт (medium/high/max); на API тиры Sonnet → Opus (§7). TTS Yandex (filipp), STT Deepgram
+nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 
 ## Законы (нарушение = дефект, даже если тесты зелёные)
 1. **Честность исхода.** Инструмент НИКОГДА не рапортует ложный успех; провал → «не вышло», неизвестно → «не знаю,
@@ -32,10 +29,9 @@ filipp), STT — Deepgram nova-3, слух — локальный sherpa KWS + S
   Гард — поведением, не грепом по исходнику. Проводку между механизмами — ПЕТЛЁЙ (`handleUserText`), не чистой функцией.
 - **Живой смоук обязателен** для звука, GUI, расширения: «тесты зелёные, живьём не проверено» ≠ «сделано».
   Сам тестирую текстом (`_jarvis_cmd.mjs`), владельца голосом не прошу.
-- **Агенты**: ≤ 3 на воркфлоу в сумме (больше — только по числу, названному владельцем), ≤ 2 раунда ревью; лимит
-  подписки ОБЩИЙ с мозгом Джарвиса. Каждый инкремент: ревью → PR → merge (делаю сам).
+- **Агенты**: ≤ 3 на воркфлоу, ≤ 2 раунда ревью (лимит подписки общий с мозгом Джарвиса). Инкремент: ревью → PR → merge.
 - **Один флаг — одно решение**: новый `JARVIS_*` только с удалением старого (их ~270, цель < 100).
-- Реверт-мутации — только из копии строки в памяти, НИКОГДА `git checkout/stash` на рабочем дереве.
+- Реверт-мутации — только из сохранённой копии, НИКОГДА `git checkout/stash` на рабочем дереве.
 
 ## Запуск / тесты
 - **Боевой запуск — супервизор**: задача Windows `JarvisSupervisor` (при входе) → `node infra/supervisor.mjs` держит
@@ -44,8 +40,8 @@ filipp), STT — Deepgram nova-3, слух — локальный sherpa KWS + S
 - Сервер руками: `apps/server` → `npx tsx src/index.ts` (порт **8787**; НЕ `tsx watch`). Логи: `apps/server/data/logs/
   server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl` (task/round/mouth_to_ear/degradation), `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
-  вывод под супервизором — `apps/client/client.{out,err}.log`. ⚠️ Из песочницы агента Electron падает на GPU-песочнице
-  (артефакт среды агента, не владельца) — для теста `electron . --disable-gpu-sandbox`, проверка «у владельца» — через супервизор.
+  под супервизором — `apps/client/client.{out,err}.log`. ⚠️ Electron из песочницы агента падает на GPU (артефакт среды
+  агента) — «работает ли у владельца» проверять через супервизор.
 - Текст-драйвер: `node _jarvis_cmd.mjs "реплика" ...` (dev-сессия; клиентские действия в нём — фейк). `JARVIS_WS_URL`
   для изолированного инстанса. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
 - Тесты: `apps/server` `npx vitest run` (~3000), `apps/client` `npx vitest run` (~765), `packages/*`, `node --test
@@ -82,23 +78,24 @@ filipp), STT — Deepgram nova-3, слух — локальный sherpa KWS + S
   self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`.
 - `brain/persona/persona.md` — системный промпт (v87, бампать version при правке), `modes.ts`, `emotion.ts`.
 - `brain/tasks/` — реестр задач §20 (durable `data/tasks.json`), scope (правка vs новая), control, narrate.
-- `brain/` ещё: `app-channels.ts` (реестр программных каналов + частота программ W4.2), `capabilities.ts` (паспорт
-  живых возможностей в промпт), `profile.ts`, `consent.ts`, `response-cache.ts`, `knowledge/`, `trading/`, `mcp/`, `skills/`.
-- `memory/` — episodic (pgvector, порог 0.82 под e5), working (окно диалога, durable), user-memory (единый писатель
-  фактов + провенанс), skills (+ семантический recall, гард полярности, скан перед записью), site-recipes, resolution-memory.
-- `integrations/` — `anthropic.ts`, `fallback-llm.ts` (основной ↔ подписка), `subscription-{llm,session}.ts` (W2),
-  `deepgram.ts`, `yandex-tts.ts`, `local-embeddings.ts` (e5), `web.ts`, `smtp.ts`/`imap.ts`.
+- `brain/` ещё: `app-channels.ts` (каналы программ + частота W4.2), `capabilities.ts` (паспорт возможностей),
+  `profile.ts`, `consent.ts`, `response-cache.ts`, `knowledge/`, `trading/`, `mcp/`.
+- `memory/` — episodic (pgvector, порог 0.82), working (окно диалога), user-memory (факты + провенанс), skills (recall,
+  гард полярности, скан; общая библиотека — `seed/shared-skills.ts`), site-recipes, resolution-memory.
+- `integrations/` — `anthropic.ts`, `fallback-llm.ts`, `subscription-{llm,session}.ts` (W2), `deepgram.ts`,
+  `yandex-tts.ts`, `local-embeddings.ts` (e5), `web.ts`, `smtp.ts`/`imap.ts`.
 - `voice/pipeline.ts` — машина голоса: wake-гейт, окно разговора (только ответ владельцу), barge-in, `speakQueued`.
 - `proactive/` — reminders (серии), watch (наблюдения с действием), ambient (почта/календарь/телеграм из вкладок),
   briefing, consolidation (сон-цикл), incidents, quiet-hours, self-review. `autonomy/` — killswitch, часовой предохранитель.
-- `self/` — самоулучшение (поиск по своему коду, слабости из телеметрии, `self_patch` через ветку+verify).
-- `product/` — продуктовый каркас (аккаунты/тарифы/оплата) за `JARVIS_PRODUCT_MODE` (деф 0 = выключен байт-в-байт).
+- `self/` — самоулучшение (свой код, слабости из телеметрии, `self_patch` через ветку+verify).
+- `product/` — продуктовый каркас (аккаунты/тарифы/оплата) за `JARVIS_PRODUCT_MODE` (деф 0).
 - `obs/` — file-log, metrics (COGS, round, mouth_to_ear), pricing.
 
 ## Клиент (`apps/client/main`)
 - `index.ts` (bootstrap, трей, single-instance, IPC), `transport/` (WS, resume), `owner-quit.ts` (маркер «Выйти»).
 - `actuators/` — `dispatch` + apps/input/ground/fs/system/office/screen/browser/code-runner (+ jarvis SDK, `act-bridge.ts`),
-  **`act*.ts`** (найди+сделай+сверь: UIA → OCR → точка; met/failed/unchecked), `commit-guard.ts` (§14), `observe.ts`, `self-guard.ts`.
+  **`act*.ts`** (найди+сделай+сверь: UIA → OCR → точка; met/failed/unchecked; type без цели — в фокус), `commit-guard.ts`
+  (§14), `windows-builtins.ts` (встроенные программы — из %SystemRoot%), `paste-text.ts`, `observe.ts`, `self-guard.ts`.
 - `audio/` + `hearing/` + `vad/` + `wakeword/` — слух (см. механизмы). `renderer/` — UI (орб, чат, настройки, память).
 - `sensors/` — снимок ПК, профиль системы и каталог автоматизации (`TOOL_SPECS`), `usage-profile.ts` (минуты фокуса).
 - `selection/` — режим выделения (рамка «вот тут»), `veil-policy.ts`. `skill-runner/` — реплей навыков.
@@ -114,14 +111,17 @@ filipp), STT — Deepgram nova-3, слух — локальный sherpa KWS + S
 - **Режим выделения**: `screen_selection{view}` — всегда свежий кадр рамки; под вуалью ввод гейтится `overlay_drawing`.
 - **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт по тиру (haiku medium / sonnet high / fable max);
   thinking всегда adaptive; до `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` только персона (кеш CLI между задачами); `persistSession:false`.
-- **Ход голосом (2026-09-24)**: промоушен в фон — по первому tool_use (`agent/sync-promote.ts`), ack «Берусь» — проактив
-  (окно не продлевает); короткие реакции («нет, не надо», «хорошо») — разговор (`router/reaction.ts`), «да» на свежий
-  вопрос — согласие-действие; «заткнись/замолчи» — рефлекс тишины, голое «хватит» — стоп всего (`tasks/control.ts`);
-  goal-check только если была мутация; подсказка навыка — только команде при сыром косинусе ≥ 0.86.
-- **Dev-сессия изолирована** (`AgentDeps.devSession`): своя память, задачи `dev` не в истории и не на диск, без
-  самообучения/memory_write/рефлексов — смоук драйвером память владельца не отравляет.
+- **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`), ack «Берусь» окно не
+  продлевает; реакции («нет, не надо») — разговор (`router/reaction.ts`), «да» на свежий вопрос — согласие-действие; «заткнись/замолчи/хватит» — перестать говорить (stop_tts+hush: задачи живы, в тишине
+  реплика проглатывается), «тишина/молчи» — режим тишины, «вырубись» — стоп всего (`tasks/control.ts`); goal-check —
+  при мутации или заявке «сделал»; подсказка навыка — команде при сыром косинусе ≥ 0.86; исход — навыку, чей макрос шёл.
+- **Dev-сессия изолирована** (`AgentDeps.devSession`): своя память; задачи `dev` не в истории/на диске и отделены от
+  задач владельца (`activeForUser/cancelUser(…, dev)`); без самообучения/memory_write/skill_save/рефлексов.
+- **Гейты §0/§14**: act{type|set} — под гардом паролей/карт; Enter и печать с `\n` в мессенджере/банке/1С — вопрос
+  владельцу; имя программы в `act.app` судится нестрого (`shared/commit-risk.ts riskyAppCategory`).
 - **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается
-  (`gate-closer.ts`); PTT — кнопка микрофона / Ctrl+Alt+J; микрофон повторяется 1→30 с; renderer-guard.
+  (`gate-closer.ts`); mute посреди фразы → VAD `speech_cancel` (обрубок не исполняется); PTT — Ctrl+Alt+J (окно
+  адресации), кнопка микрофона — только открывает гейт; микрофон повторяется 1→30 с; renderer-guard.
 
 ## Решения владельца (не переигрывать)
 - Работаем **по подписке**, API не оплачиваем (2026-09-09). Резерв/основной — Claude-only, мульти-провайдер не берём.
@@ -139,12 +139,13 @@ filipp), STT — Deepgram nova-3, слух — локальный sherpa KWS + S
 - Распакованное расширение Chrome: ID зависит от пути, если в manifest нет `key` (есть с 24.09 — ID `pjkela…ajd`).
 - «Пауза» = медиа-ПЕРЕКЛЮЧАТЕЛЬ: жать только если звук реально идёт (WASAPI peak), иначе он включает музыку.
 - Opus: не слать temperature/top_p; thinking только `adaptive`; пустые thinking-блоки не реплеить.
-- sherpa-onnx-node и onnxruntime-node (e5) в одном процессе конфликтуют → на сервере диктор в сайдкаре, на клиенте только sherpa.
+- sherpa и onnxruntime (e5) в одном процессе конфликтуют → диктор в сайдкаре, на клиенте только sherpa.
 - Chrome 136+ игнорирует CDP на дефолтном профиле → руки в вкладках только через расширение.
 - tier0 жадный: фраза-инструкция/контент должна уходить модели; `not_found` запуска → откат в модель.
-- Денилисты принципиально неполны → позитивные allowlist'ы (smalltalk, «доделай», отказ от предложения).
-- Контекстное исключение «рядом хорошее слово» в денилисте — всегда ключ для атакующего.
-- Свежий фикс — главный источник следующего дефекта: контрольный проход ревью обязателен.
+- Денилисты неполны → позитивные allowlist'ы; исключение «рядом хорошее слово» — ключ для атакующего.
+- Свежий фикс — главный источник следующего дефекта (24.09: 3 из 10 находок — в моих же правках): контроль обязателен.
+- Фикстура теста обязана совпадать с реальной формой входа (гейт Enter читал `key`, схема шлёт `combo` — тесты молчали).
+- Строка прозы навыка, начинающаяся с имени шага (`verify`/`wait`/`launch`), становится шагом слепого реплея.
 
 ## Где искать
 - История и «почему»: `docs/CHANGELOG.md`. Механика/тестирование: `docs/HOW_IT_WORKS.md`. Архитектура: `docs/ARCHITECTURE.md`.
