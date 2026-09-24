@@ -37,7 +37,7 @@ import type { DynamicToolStore } from "./dynamic.js";
 import { toolCreate, toolList, toolLoad, toolRemove } from "./handlers/dynamic-tools.js";
 import type { SkillProvider } from "../../memory/skills.js";
 import { type TradingService } from "../trading/index.js";
-import { type MatchedChannel, formatChannels } from "../app-channels.js";
+import { type AppUsage, type MatchedChannel, formatChannels } from "../app-channels.js";
 import { appChannelForget, appChannelLearn, appChannelsList } from "./handlers/app-channels.js";
 import { type PostActionObservation, browserUrlBlocked, capResultBody, channelDownResult, overlayDeniedResult, untrustedCapped, untrustedErrorCapped, wrapUntrustedCapped, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, findBlockedMcpUrl, numField, ok, untrusted, untrustedError, wrapUntrusted, applyVeil, isVeiled, VEIL_NOTE, stripVeilFields } from "./dispatch-util.js";
 import { checkCredentialInput } from "./credential-guard.js";
@@ -158,6 +158,8 @@ export interface ToolContext {
    * Наполняется из client.env; инструмент app_channels отдаёт рецепты модели по требованию.
    */
   appChannels?: MatchedChannel[];
+  /** W4.2: минуты фокуса по процессу (client.env.usage) — app_channels показывает покрытие частых программ каналами. */
+  appUsage?: AppUsage[];
   /** §трейдинг (слой 1): рыночные данные + технический анализ (только чтение, без денег/ключей). */
   market?: TradingService;
   /** §экспертность: база знаний по доменам — свериться перед экспертной задачей (knowledge_consult). */

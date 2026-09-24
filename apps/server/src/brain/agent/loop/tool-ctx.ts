@@ -32,6 +32,7 @@ export function makeToolCtx(deps: AgentDeps, session: Session, opts: LoopOpts | 
     skills: deps.skills,
     market: deps.market, // §трейдинг: рыночные данные + анализ (только чтение)
     appChannels: deps.appChannels, // реестр программных каналов: «у приложения есть API — не кликай»
+    appUsage: deps.appUsage, // W4.2: минуты фокуса по процессу — покрытие частых программ каналами
     knowledge: deps.knowledge, // §экспертность: база знаний (свериться перед экспертной задачей)
     telegramSend: deps.telegramSend, // §6: невидимая отправка в TG через расширение
     telegramSendVoice: deps.telegramSendVoice, // §: голосовое в TG голосом филиппа

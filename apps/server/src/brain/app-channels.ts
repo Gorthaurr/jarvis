@@ -71,6 +71,47 @@ export interface ChannelRecipe {
   limits: string;
 }
 
+/**
+ * W4.2: минуты фокуса по процессу с клиента (client.env.usage). Windows про частоту молчит (UserAssist почти пуст,
+ * Prefetch пуст) — считает сам клиент (sensors/usage-profile.ts). days — сколько дней ведётся счёт.
+ */
+export interface AppUsage {
+  process: string;
+  minutes: number;
+  days: number;
+}
+
+/** Санация usage с клиента: строки капнуты, числа конечны, не больше 30 записей. ЧИСТАЯ функция. */
+export function sanitizeUsage(raw: unknown): AppUsage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AppUsage[] = [];
+  for (const it of raw) {
+    if (!it || typeof it !== "object") continue;
+    const r = it as { process?: unknown; minutes?: unknown; days?: unknown };
+    const process = typeof r.process === "string" ? r.process.trim().slice(0, 48) : "";
+    const minutes = typeof r.minutes === "number" && Number.isFinite(r.minutes) ? Math.max(0, Math.round(r.minutes)) : NaN;
+    const days = typeof r.days === "number" && Number.isFinite(r.days) ? Math.max(0, r.days) : 0;
+    if (!process || Number.isNaN(minutes)) continue;
+    out.push({ process, minutes, days });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+/**
+ * W4.2: СИД «20 самых частых программ владельца», для которых рецепт обязан существовать (тест держит покрытие).
+ * ЧЕСТНОСТЬ ПРОВЕНАНСА: измерить частоту на машине было нечем (UserAssist: единицы запусков, Prefetch пуст) — сид
+ * собран из инвентаря установленного × решения владельца (GUI_MANUALS_RESEARCH §6a: Dota 2 меню, Discord, OBS,
+ * Telegram Desktop) × выученных навыков × упоминаний в USER_SCENARIOS_2026-09-02 (obs 159, git 85, telegram 74,
+ * word 67, excel 43, discord 40, steam 20, chrome 17, outlook 11) × тех крох UserAssist, что были (Chrome 173 мин
+ * фокуса, Claude 38, Telegram 25). Дальше «чаще всего» становится ИЗМЕРИМЫМ через client.env.usage.
+ */
+export const TOP_APPS_SEED: readonly string[] = [
+  "Google Chrome", "Telegram Desktop", "Discord", "OBS Studio", "Dota 2", "Steam", "Microsoft Word", "Microsoft Excel",
+  "Git", "GitHub CLI", "Windows: проводник", "Windows: блокнот", "Windows: терминал / cmd", "Windows: ножницы (скриншот)",
+  "Yandex Browser", "Cursor", "Notion", "LM Studio", "Ollama", "Microsoft Outlook",
+];
+
 /** Что клиент нашёл на машине. */
 export interface InstalledApp {
   name: string;
@@ -87,6 +128,249 @@ export interface InstalledApp {
  * инструмент, а не хардкод под сценарий).
  */
 export const CHANNEL_RECIPES: readonly ChannelRecipe[] = [
+  // ── W4.2 (2026-09-10): рецепты для ЧАСТЫХ программ владельца (см. TOP_APPS_SEED ниже) ──
+  {
+    app: "Google Chrome",
+    aliases: ["хром", "гугл хром", "браузер"],
+    exe: ["chrome.exe"],
+    uri: ["google-chrome"],
+    kind: "cli",
+    howTo:
+      "СТРАНИЦЫ — только browser_open/browser_read/browser_act/browser_inspect/browser_tabs (расширение в реальных вкладках владельца, " +
+      "его логины, без курсора). Окно/профиль: code_run `Start-Process chrome.exe -ArgumentList '--new-window','<url>'` " +
+      "(`--profile-directory=\"Default\"`, `--app=<url>` — окно-приложение без вкладок, `--incognito`).",
+    verify: "browser_tabs: вкладка с нужным URL есть и активна; для окна — look{what:'windows'} (процесс chrome, заголовок).",
+    limits:
+      "CDP на профиле владельца НЕ работает (Chrome 136+): управлять страницей — только расширением. Расширение не подключено → " +
+      "открыть можно (shell), читать/кликать — нет (честная ошибка). Пароли/платежи в браузере не вводим (§0).",
+  },
+  {
+    app: "Yandex Browser",
+    aliases: ["яндекс браузер", "яндекс", "ябраузер"],
+    exe: ["browser.exe"],
+    uri: ["yabrowser"],
+    kind: "cli",
+    howTo:
+      "Открыть адрес: code_run `Start-Process \"$env:LOCALAPPDATA\\Yandex\\YandexBrowser\\Application\\browser.exe\" -ArgumentList '<url>'` " +
+      "(или app_launch{app:'yabrowser://<url>'}). Расширение Джарвиса здесь НЕ живёт — читать/кликать страницу можно лишь " +
+      "GUI-путём: look{what:'text'} (OCR) / act по видимому тексту / screen_capture.",
+    verify: "look{what:'windows'}: окно процесса browser с заголовком страницы; содержимое — look{what:'text'}.",
+    limits:
+      "browser_* (расширение) тут не работают — для веб-задач предпочитай Chrome. Нет DOM-чтения: только OCR/UIA. " +
+      "Логины владельца в этом браузере — не переносим (§0).",
+  },
+  {
+    app: "Microsoft Outlook",
+    aliases: ["аутлук", "outlook", "почта аутлук"],
+    exe: ["outlook.exe"],
+    uri: ["ms-outlook", "outlookmail"],
+    kind: "cli",
+    howTo:
+      "Черновик письма: code_run `Start-Process outlook.exe -ArgumentList '/c','ipm.note','/m','\"адрес?subject=Тема&body=Текст\"'` " +
+      "(`/a \"<файл>\"` — вложение) — открывает ОКНО письма, НЕ отправляет. Чтение/поиск писем и отправка без окна — COM через " +
+      "code_run (`New-Object -ComObject Outlook.Application` → Session.GetDefaultFolder(6) / CreateItem(0).Send()). " +
+      "Штатная отправка от Джарвиса — mail_send (SMTP, гарды §14).",
+    verify:
+      "Черновик: look{what:'windows'} — окно «… - Сообщение» с темой. Отправка COM: письмо появилось в папке «Отправленные» " +
+      "(Session.GetDefaultFolder(5), последний Item по времени).",
+    limits:
+      "Отправка = необратимо → подтверждение владельца (§14) и никакого «Send» без него; кнопка «Отправить»/Ctrl+Enter в окне — коммит. " +
+      "COM требует запущенного/настроенного Outlook 2016 с профилем владельца; окно безопасности Outlook может блокировать доступ к адресам.",
+  },
+  {
+    app: "Windows: проводник",
+    aliases: ["проводник", "explorer", "папка"],
+    builtin: true,
+    kind: "cli",
+    howTo:
+      "Показать папку/файл владельцу: code_run `explorer.exe \"<папка>\"` или `explorer.exe /select,\"<файл>\"` (выделит файл), " +
+      "`explorer.exe shell:Downloads` (спец-папки). Сами файловые операции — fs_list/fs_move/fs_mkdir/fs_delete, не клики.",
+    verify: "look{what:'windows'}: окно процесса explorer с заголовком = имя папки; выделение файла — look{what:'elements'} (ListItem selected).",
+    limits: "Проводник — для ПОКАЗА владельцу; копировать/переименовывать через его GUI не надо (fs_* честнее и сверяются сами).",
+  },
+  {
+    app: "Windows: блокнот",
+    aliases: ["блокнот", "notepad"],
+    builtin: true,
+    kind: "cli",
+    howTo:
+      "Открыть файл: code_run `notepad.exe \"<файл>\"` (нет файла — предложит создать). Текст ПИСАТЬ через fs_write/fs_edit, а " +
+      "Блокнот использовать, чтобы ПОКАЗАТЬ владельцу; печать в окно — act{target:{role:'Document'}, do:'type', text} (Win11: Edit).",
+    verify: "look{what:'windows'}: заголовок «<имя файла> – Блокнот»; содержимое — fs_read файла (истина на диске), look{what:'context'} для окна.",
+    limits: "Сохранение из окна = Ctrl+S (GUI, диалог «Сохранить как» у нового файла) — надёжнее fs_write. Win11 Блокнот с вкладками: заголовок окна — активная вкладка.",
+  },
+  {
+    app: "Windows: терминал / cmd",
+    aliases: ["терминал", "консоль", "командная строка", "cmd", "powershell"],
+    builtin: true,
+    kind: "cli",
+    howTo:
+      "ВЫПОЛНИТЬ команду — code_run{lang:'powershell'|…} (stdout/exit code — сверка внутри). ОКНО терминала владельцу: " +
+      "code_run `Start-Process wt.exe -ArgumentList '-d','<папка>'` (Windows Terminal) или `Start-Process cmd -ArgumentList '/k','<cmd>'`.",
+    verify: "Результат команды — exit code/stdout code_run; окно — look{what:'windows'} (процесс WindowsTerminal/cmd).",
+    limits: "Печатать команды в чужое окно терминала клавишами — не надо (исход невидим): своё выполнение через code_run.",
+  },
+  {
+    app: "Windows: ножницы (скриншот)",
+    aliases: ["ножницы", "скриншот", "снимок экрана", "snipping"],
+    builtin: true,
+    kind: "uri",
+    howTo:
+      "СКРИНШОТ ДЛЯ СЕБЯ — screen_capture (файл: code_run с .NET `System.Windows.Forms.Screen`/`Graphics.CopyFromScreen` → png). " +
+      "Режим выделения ВЛАДЕЛЬЦЕМ — app_launch{app:'ms-screenclip:'} (открывает рамку «Ножниц», результат в буфере обмена) " +
+      "или `snippingtool.exe /clip`.",
+    verify: "После ms-screenclip: — system_clipboard{op:'read'} (текст пуст, но картинка в буфере — проверять кодом Get-Clipboard -Format Image) или окно «Ножницы» в look{what:'windows'}.",
+    limits: "Ножницы ждут руки владельца (рамка) — для автоматических снимков не годятся; сохранение файла из них — GUI.",
+  },
+  {
+    app: "Windows: калькулятор",
+    aliases: ["калькулятор"],
+    uri: ["calculator", "ms-calculator"],
+    kind: "uri",
+    howTo: "Открыть: app_launch{app:'calculator:'}. СЧИТАТЬ — code_run (python/powershell), не клики по кнопкам.",
+    verify: "look{what:'windows'}: окно «Калькулятор»; вычисление — результат code_run.",
+    limits: "Окно нужно только показать владельцу; вводить выражение кнопками — бессмысленно (код точнее и быстрее).",
+  },
+  {
+    app: "VirtualBox",
+    aliases: ["виртуалбокс", "виртуалка", "виртуальная машина"],
+    exe: ["virtualbox.exe", "vboxmanage.exe"],
+    cmd: "vboxmanage",
+    kind: "cli",
+    howTo:
+      "code_run: `& \"$env:ProgramFiles\\Oracle\\VirtualBox\\VBoxManage.exe\" list vms` / `list runningvms` / `startvm \"<имя>\" --type headless|gui` / " +
+      "`controlvm \"<имя>\" savestate|acpipowerbutton|poweroff` / `showvminfo \"<имя>\" --machinereadable`.",
+    verify: "`list runningvms` содержит имя; `showvminfo … --machinereadable` → VMState=\"running\"|\"saved\"|\"poweroff\".",
+    limits: "Внутрь гостевой ОС — только guestcontrol с Guest Additions и учёткой; poweroff теряет несохранённое (сначала acpipowerbutton/savestate).",
+  },
+  {
+    app: "LM Studio",
+    aliases: ["лм студио", "lmstudio", "локальная модель"],
+    exe: ["lm studio.exe"],
+    uri: ["lmstudio"],
+    kind: "http",
+    howTo:
+      "Локальный OpenAI-совместимый сервер: `lms server start` (CLI LM Studio) или кнопка в приложении → GET http://localhost:1234/v1/models; " +
+      "POST /v1/chat/completions {model, messages}. Загрузить модель: `lms load <модель>`. Всё — code_run/web_fetch на localhost.",
+    verify: "GET http://localhost:1234/v1/models отвечает списком; в нём нужная модель (иначе сервер не запущен/модель не загружена).",
+    limits: "Сервер выключен по умолчанию — запуск нужен; локальная модель слабее облачной; занята GPU-память (игра + модель одновременно тормозят).",
+  },
+  {
+    app: "Cursor",
+    aliases: ["курсор", "cursor ide"],
+    exe: ["cursor.exe"],
+    uri: ["cursor"],
+    kind: "cli",
+    howTo:
+      "Открыть папку/файл: code_run `cursor \"<путь>\"` (`cursor --goto \"<файл>:<строка>\"`, `--diff a b`, `--new-window`). Код ПРАВИТЬ — fs_edit/fs_write " +
+      "(истина на диске), Cursor — чтобы показать владельцу. Расширения: `cursor --list-extensions`.",
+    verify: "look{what:'windows'}: окно процесса Cursor с именем файла/папки в заголовке; правки — fs_read.",
+    limits: "ИИ-чат Cursor — только GUI; терминал внутри IDE — не нужен (code_run). `cursor` на PATH — при установке с галочкой.",
+  },
+  {
+    app: "Antigravity IDE",
+    aliases: ["антигравити", "antigravity"],
+    exe: ["antigravity.exe", "antigravity ide.exe"],
+    uri: ["antigravity", "antigravity-ide"],
+    kind: "uri",
+    howTo:
+      "Открыть: app_launch{app:'Antigravity'} (форк VS Code: `antigravity \"<путь>\"` работает, если CLI на PATH). Файлы правь fs_*; " +
+      "агентские функции IDE — только GUI (act по элементам, look{what:'elements'}).",
+    verify: "look{what:'windows'}: окно процесса Antigravity; правки — fs_read.",
+    limits: "Документированного API нет — не выдумывай эндпоинты. Chromium-окно: look{what:'elements'} видит панели, не всегда содержимое редактора.",
+  },
+  {
+    app: "Figma",
+    aliases: ["фигма"],
+    exe: ["figma.exe"],
+    uri: ["figma"],
+    kind: "uri",
+    needsSetup: "персональный токен Figma REST (FIGMA_TOKEN) — читать файлы/экспорт через api.figma.com",
+    howTo:
+      "Открыть файл: app_launch{app:'figma://file/<ключ>'} или browser_open{url:'https://www.figma.com/file/<ключ>'}. " +
+      "С токеном: web_fetch https://api.figma.com/v1/files/<ключ> (заголовок X-Figma-Token) — структура/экспорт PNG (/images). Правка макета — GUI.",
+    verify: "Окно — look{what:'windows'} (процесс Figma, заголовок файла); REST — ответ 200 с document.",
+    limits: "REST только ЧИТАЕТ и экспортирует; изменять макет программно нельзя — act по элементам (Chromium-окно, UIA частично).",
+  },
+  {
+    app: "Notion",
+    aliases: ["ноушен", "ношн", "notion"],
+    exe: ["notion.exe"],
+    uri: ["notion"],
+    kind: "uri",
+    needsSetup: "интеграция Notion API (NOTION_TOKEN) с доступом к нужным страницам — создавать/читать страницы без GUI",
+    howTo:
+      "Открыть страницу: app_launch{app:'notion://www.notion.so/<id>'} (или browser_open). С токеном: web_fetch https://api.notion.com/v1/pages " +
+      "(POST, Notion-Version) / search / blocks — создание и чтение страниц из code_run. Без токена — GUI (act по тексту, look{what:'elements'}).",
+    verify: "API: ответ 200 и id страницы; GUI — заголовок окна = название страницы (look{what:'windows'}), текст — look{what:'context'}.",
+    limits: "API видит только страницы, к которым интеграция подключена; редактор в GUI — contenteditable, UIA не всегда даёт текст блока.",
+  },
+  {
+    app: "PostgreSQL / pgAdmin",
+    aliases: ["постгрес", "постгре", "база данных", "pgadmin", "пгадмин"],
+    exe: ["pgadmin4.exe", "psql.exe"],
+    cmd: "psql",
+    kind: "cli",
+    howTo:
+      "SQL — code_run{lang:'powershell'}: `$env:PGPASSWORD='…'; psql -h localhost -U postgres -d <db> -At -c \"<SQL>\"` (или `-f script.sql`); " +
+      "пароль из pgpass/переменной владельца, не в тексте. pgAdmin — только показать владельцу.",
+    verify: "Читающий запрос — вывод psql; изменение — контрольный SELECT после (row count / значение).",
+    limits: "DROP/DELETE/UPDATE без WHERE — необратимо → подтверждение владельца (§14). psql на PATH после установки PostgreSQL 18 (иначе полный путь bin).",
+  },
+  {
+    app: "WinRAR",
+    aliases: ["винрар", "rar", "архив"],
+    exe: ["winrar.exe", "rar.exe"],
+    kind: "cli",
+    howTo:
+      "code_run: `& \"$env:ProgramFiles\\WinRAR\\WinRAR.exe\" x -y \"<архив>\" \"<папка>\\\"` (распаковать), `… a -r \"<архив.rar>\" \"<файлы>\"` (собрать), " +
+      "`… t \"<архив>\"` (проверить). Для zip/7z — рецепт 7-Zip.",
+    verify: "fs_list папки после распаковки (ожидаемые файлы); `t` возвращает код 0; `l` — оглавление.",
+    limits: "Архив с паролем: `-p<пароль>` только от владельца. Окно WinRAR при ошибке ждёт клика — используй `-y` и проверяй код возврата.",
+  },
+  {
+    app: "CapCut",
+    aliases: ["капкат", "capcut", "монтаж"],
+    exe: ["capcut.exe"],
+    uri: ["capcut"],
+    kind: "none",
+    howTo: "Программного канала НЕТ (нет CLI/API). Нарезка/склейка/конверт видео — рецепт FFmpeg (честно сверяемо); CapCut — только GUI (act по кнопкам, look{what:'elements'}).",
+    verify: "GUI: look{what:'elements'}/screen_capture; экспорт — wait_for{file} на итоговый файл.",
+    limits: "Интерфейс Chromium-подобный, UIA видит не всё; таймлайн — canvas (только screen_capture + act{physical}). Пиксельный монтаж не обещай.",
+  },
+  {
+    app: "Hiddify / VPN-клиенты",
+    aliases: ["впн", "vpn", "хиддифи", "амнезия", "радмин"],
+    exe: ["hiddify.exe", "amneziavpn.exe", "radmin vpn.exe", "v2rayn.exe"],
+    uri: ["hiddify"],
+    kind: "none",
+    howTo:
+      "Включать/выключать VPN программно — нечем (нет CLI): переключатель в окне — act{app:'Hiddify', target:'…'}. СТАТУС проверяй сетью: " +
+      "code_run `Get-NetAdapter | ? Status -eq Up` (адаптер xray_tun/AmneziaVPN) и `curl ifconfig.me` (внешний IP сменился).",
+    verify: "Внешний IP до/после (curl ifconfig.me) и адаптер в Up — а не надпись «Connected» в окне.",
+    limits: "Импорт подписки — hiddify://import/<url> (только по просьбе владельца). Не трогай VPN во время его звонка/стрима без спроса.",
+  },
+  {
+    app: "AIDA64",
+    aliases: ["аида", "aida64"],
+    exe: ["aida64.exe"],
+    kind: "cli",
+    howTo:
+      "Отчёт без GUI: code_run `& \"$env:ProgramFiles\\FinalWire\\AIDA64 Extreme\\aida64.exe\" /R \"<файл.html|.txt>\" /SUM /HW /TEXT` " +
+      "(ключи /R путь, /SUM сводка, /HW железо, /CSV|/HTML|/TEXT формат) → потом fs_read. Живые датчики — рецепт LibreHardwareMonitor/nvidia-smi.",
+    verify: "wait_for{kind:'file', path, stableMs:1500} → fs_read: в отчёте ожидаемые разделы (CPU/GPU/Память).",
+    limits: "Отчёт занимает секунды-минуты; датчики в реальном времени /R не даёт; лицензия Extreme — у владельца.",
+  },
+  {
+    app: "HoYoPlay (Genshin, ZZZ)",
+    aliases: ["хойоплей", "геншин", "зенлесс", "zzz", "hoyoplay"],
+    exe: ["launcher.exe"],
+    uri: ["hyp-global"],
+    kind: "uri",
+    howTo: "Запуск лаунчера: app_launch{app:'hyp-global://'}; игра — кнопкой в лаунчере (act{app:'HoYoPlay', target:'Запустить', verify:{title:'…'}}).",
+    verify: "look{what:'windows'}: окно процесса игры (ZenlessZoneZero/GenshinImpact) появилось; лаунчер — заголовок HoYoPlay.",
+    limits: "Внутри игры — canvas: меню и подготовка через screen_capture + act{physical}; живой геймплей не обещай (W4.4).",
+  },
   {
     app: "Windows: настройки",
     aliases: ["настройки", "параметры", "виндовс"],
@@ -813,7 +1097,40 @@ export function matchChannels(installed: readonly InstalledApp[]): MatchedChanne
  * пример: там программная отправка от лица владельца запрещена под баном). Назвать их «каналами»
  * значило бы соврать в самой строке, которая учит доверять каналам.
  */
-export function channelSummary(matched: readonly MatchedChannel[]): string {
+/** Канал для процесса переднего окна: по exe рецепта (obs64 → obs64.exe), иначе по имени/алиасам. ЧИСТАЯ функция. */
+export function channelForProcess(process: string, matched: readonly MatchedChannel[]): MatchedChannel | undefined {
+  const p = process.trim().toLowerCase();
+  if (!p) return undefined;
+  const byExe = matched.find((m) => m.exe?.some((e) => e.toLowerCase() === `${p}.exe` || e.toLowerCase() === p));
+  if (byExe) return byExe;
+  return matched.find((m) => !m.builtin && !m.service && queryMatches(p, m.app, m.installedAs, ...(m.aliases ?? [])));
+}
+
+/** Минуты фокуса, приписанные каналу (сумма по процессам, которые к нему сопоставились). */
+function usageMinutesFor(m: MatchedChannel, usage: readonly AppUsage[] | undefined, matched: readonly MatchedChannel[]): number {
+  if (!usage?.length) return 0;
+  let sum = 0;
+  for (const u of usage) if (channelForProcess(u.process, matched)?.app === m.app) sum += u.minutes;
+  return sum;
+}
+
+/**
+ * W4.2: ПОКРЫТИЕ частых программ каналами — для app_channels без запроса: «chrome — 173 мин: Google Chrome (cli);
+ * Claude — 38 мин: канала нет (GUI)». Пусто, если usage нет. ЧИСТАЯ функция.
+ */
+export function formatUsageCoverage(usage: readonly AppUsage[], matched: readonly MatchedChannel[], top = 10): string {
+  const rows = [...usage].filter((u) => u.minutes > 0).sort((a, b) => b.minutes - a.minutes).slice(0, top);
+  if (rows.length === 0) return "";
+  const days = Math.max(...rows.map((u) => u.days));
+  const lines = rows.map((u) => {
+    const ch = channelForProcess(u.process, matched);
+    const tail = !ch ? "канала нет → GUI (look/act)" : ch.kind === "none" ? `${ch.app}: канала НЕТ (см. рецепт)` : `${ch.app} — канал ${ch.kind}`;
+    return `• ${u.process} — ${u.minutes} мин: ${tail}`;
+  });
+  return `ЧАСТЫЕ ПРОГРАММЫ ВЛАДЕЛЬЦА (минуты фокуса за ${days} дн., счёт клиента):\n${lines.join("\n")}`;
+}
+
+export function channelSummary(matched: readonly MatchedChannel[], usage?: readonly AppUsage[]): string {
   const usable = matched.filter((m) => m.kind !== "none");
   const noneCount = matched.length - usable.length;
   // Записи «канала НЕТ» — это ЗНАНИЕ («не ищи API, это бан»), и терять его именно на машине без
@@ -826,7 +1143,13 @@ export function channelSummary(matched: readonly MatchedChannel[]): string {
   // 🔴 ПОРЯДОК ВАЖЕН (наполнение таблицы 2026-09-01): сортировка идёт по типу канала, а cli — первый,
   // поэтому системные утилиты и сетевые сервисы ВЫТЕСНЯЛИ бы из восьмёрки реальные программы владельца
   // (ради которых строка и нужна). Сначала установленное, встроенное и сетевое — счётчиками.
-  const own = usable.filter((m) => !m.builtin && !m.service);
+  // W4.2: программы владельца — в порядке МИНУТ ФОКУСА (client.env.usage), чтобы в восьмёрку паспорта попадали
+  // те, с которыми он реально работает, а не первые по алфавиту.
+  const own = usable
+    .filter((m) => !m.builtin && !m.service)
+    .map((m) => ({ m, min: usageMinutesFor(m, usage, matched) }))
+    .sort((a, b) => b.min - a.min)
+    .map((x) => x.m);
   const services = usable.filter((m) => m.service);
   const builtins = usable.filter((m) => m.builtin);
   const parts: string[] = [];

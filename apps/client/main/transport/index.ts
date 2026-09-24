@@ -238,13 +238,14 @@ export class Transport extends EventEmitter {
 
   /** Авто-профиль окружения (§9): браузер/приложения пользователя → агенту.
    *  §Волна2 (2.6): + структурные списки приложений/игр — лексикон STT-нормализатора. */
-  sendEnv(summary: string, apps?: string[], games?: string[], installed?: ClientEnv["installed"], selectionHotkey?: string | null): void {
+  sendEnv(summary: string, apps?: string[], games?: string[], installed?: ClientEnv["installed"], selectionHotkey?: string | null, usage?: ClientEnv["usage"]): void {
     this.send(
       makeEnvelope<ClientEnv>("client.env", {
         summary,
         ...(apps?.length ? { apps } : {}),
         ...(games?.length ? { games } : {}),
         ...(installed?.length ? { installed } : {}),
+        ...(usage?.length ? { usage } : {}), // W4.2: минуты фокуса по процессу (накопитель клиента)
         // §режим выделения: какая клавиша РЕАЛЬНО зарегистрирована (null — никакая) — для паспорта возможностей.
         ...(selectionHotkey !== undefined ? { selectionHotkey } : {}),
       }),

@@ -56,6 +56,7 @@ import { sidecar } from "./actuators/sidecar-client.js";
 import { browserController } from "./actuators/browser-cdp.js";
 import { buildSystemProfile, detectInstalledApps, formatProfileSummary } from "./sensors/system-profiler.js";
 import { captureAmbient } from "./sensors/system-snapshot.js";
+import { UsageProfile } from "./sensors/usage-profile.js";
 import { Sensors } from "./sensors/index.js";
 import { runSkill } from "./skill-runner/index.js";
 import { createClientActuator } from "./skill-runner/client-actuator.js";
@@ -595,6 +596,20 @@ let envSummary: string | undefined;
 let envApps: string[] = [];
 let envGames: string[] = [];
 let envInstalled: Array<{ name: string; exe?: string; uri?: string; cli?: boolean }> = [];
+// W4.2: накопитель фокуса (минуты по процессу переднего окна) — durable в userData; топ едет в client.env.usage.
+let usageProfileInst: UsageProfile | undefined;
+function usageProfile(): UsageProfile {
+  if (!usageProfileInst) {
+    let base = process.cwd();
+    try {
+      base = app.getPath("userData");
+    } catch {
+      /* до app.ready — мягкий фолбэк */
+    }
+    usageProfileInst = new UsageProfile(join(base, "usage-profile.json"));
+  }
+  return usageProfileInst;
+}
 let envBuiltAt = 0;
 const ENV_TTL_MS = 6 * 3_600_000;
 /**
@@ -657,7 +672,7 @@ async function sendEnvProfile(): Promise<void> {
       envBuiltAt = Date.now();
       log.info("окружение определено (авто)", { summary: envSummary });
     }
-    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled, selectionHotkeyActive);
+    if (envSummary) transport?.sendEnv(envSummary, envApps, envGames, envInstalled, selectionHotkeyActive, usageProfile().top(20));
   } catch (e) {
     log.warn("профиль окружения не собран", e instanceof Error ? e.message : String(e));
   }
@@ -666,11 +681,15 @@ async function sendEnvProfile(): Promise<void> {
 // §контекст системы: ЖИВОЙ снимок «что открыто и на каком мониторе» — отдельно от статичного
 // окружения, обновляется периодически (отдельный таймер, НЕ на горячем sensors-такте). Так Джарвис
 // каждый ход знает, что запущено и где (фикс two-monitor слепоты), без tool-call и round-trip.
+/** Период снимка ПК; им же считается фокус в накопителе W4.2. */
+const AMBIENT_TICK_MS = 12_000;
 let ambientTimer: ReturnType<typeof setInterval> | undefined;
 let emptyAmbientStreak = 0; // А8: пустой снимок N раз подряд = мёртвый сенсор, а не «нечего показать»
 async function sendAmbient(): Promise<void> {
   try {
     const { summary, foreground } = await captureAmbient();
+    // W4.2: минуты фокуса по процессу — единственный честный источник «самых частых программ» (см. usage-profile.ts).
+    usageProfile().tick(foreground?.process, AMBIENT_TICK_MS);
     // А5 (ревью 2026-07-10): живая ЗАНЯТОСТЬ пользователя — из уже собираемого (fg-окно + idle),
     // ноль новых проб. Одной строкой в снимок (модель знает занятость ДО действия, а не постфактум
     // через denied:USER_BUSY) и в сенсоры §9 (гейт проактива «не мешать в игре» оживает).
@@ -699,7 +718,7 @@ async function sendAmbient(): Promise<void> {
   if (!ambientTimer) {
     // 12с (было 30с): контекст должен быть СВЕЖИМ — открыл вкладку/включил звук → Джарвис видит почти
     // сразу, без уточнений. Снимок лёгкий (EnumWindows + WASAPI-пик + вкладки), фон, unref.
-    ambientTimer = setInterval(() => void sendAmbient(), 12_000);
+    ambientTimer = setInterval(() => void sendAmbient(), AMBIENT_TICK_MS);
     ambientTimer.unref?.();
   }
 }

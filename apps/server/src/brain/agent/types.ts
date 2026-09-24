@@ -5,7 +5,7 @@ import { type AsyncMutex, type Semaphore, type ThinkingEffort, type Tier } from 
 import type { McpManager } from "../mcp/manager.js";
 import type { ILlmProvider } from "../../integrations/llm.js";
 import { type SelectionSlot } from "./selection-context.js";
-import type { MatchedChannel } from "../app-channels.js";
+import type { AppUsage, MatchedChannel } from "../app-channels.js";
 import type { CheckpointStore } from "./checkpoint-store.js";
 import type { IWebProvider } from "../../integrations/web.js";
 import { type EpisodicMemory } from "../../memory/episodic.js";
@@ -133,6 +133,8 @@ export interface AgentDeps {
    * подробности модель берёт инструментом app_channels.
    */
   appChannels?: MatchedChannel[];
+  /** W4.2: минуты фокуса по процессу с клиента (client.env.usage) — порядок реестра каналов и честное «у частой программы канала нет». */
+  appUsage?: AppUsage[];
   /**
    * Консьерж (§): висящее уточнение — мы задали короткий вопрос («Волну или коллекцию?») и ждём
    * ответ. Per-session мутируемое состояние; следующая реплика сперва пробуется как ответ (tier0,

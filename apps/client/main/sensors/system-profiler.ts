@@ -220,6 +220,7 @@ const TOOL_SPECS: readonly ToolSpec[] = [
   },
   { id: "dotnet", name: ".NET SDK", cmd: "dotnet", surface: "сборка/запуск .NET — через code_run" },
   { id: "psql", name: "PostgreSQL CLI", cmd: "psql", surface: "SQL к Postgres — через code_run (psql)" },
+  { id: "vboxmanage", name: "VirtualBox", cmd: "vboxmanage", surface: "виртуальные машины: list vms/startvm/controlvm — через code_run (VBoxManage)" }, // W4.2
   // 🔴 Добавлено адверс-ревью 2026-09-01 (HIGH). Реестр каналов уже нёс рецепты под эти команды, но
   // клиент их не детектил — а матч рецепта с `cmd` идёт по ДЕТЕКТИРОВАННОМУ списку. Итог был хуже,
   // чем отсутствие рецепта: app_channels уверенно отвечал «канала нет — остаётся GUI» про питон,

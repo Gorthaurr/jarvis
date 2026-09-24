@@ -94,7 +94,7 @@ import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
 import type { VoiceProfileStore } from "../voice/speaker/store.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { ExtensionBridge } from "./extension-bridge.js";
-import { channelSummary, matchChannels } from "../brain/app-channels.js";
+import { channelSummary, matchChannels, sanitizeUsage } from "../brain/app-channels.js";
 import { hotPromotionsFor } from "../brain/tools/hot-promotions.js";
 import type { Session } from "./session.js";
 import { handleControlUtterance, handleTaskControl, handleTakeover } from "./task-control.js";
@@ -467,7 +467,7 @@ export function makeSessionContext(
         // и без prompt-кеша. Модель обязана это знать: иначе обещает прежнюю скорость и не понимает,
         // почему длинные GUI-задачи не укладываются в потолок.
         llmChannel: brain.llm.channelStatus?.(),
-        appChannels: channelSummary(agentDeps.appChannels ?? []),
+        appChannels: channelSummary(agentDeps.appChannels ?? [], agentDeps.appUsage),
         selectionHotkey: agentDeps.selectionHotkey,
       }),
     reminders: brain.reminders, // §9: durable-напоминания + проактивная озвучка
@@ -974,6 +974,8 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       if (Array.isArray(payload.installed)) {
         ctx.agentDeps.appChannels = matchChannels(payload.installed);
       }
+      // W4.2: минуты фокуса по процессу — санируем (влияемые заголовков тут нет, но форма — с клиента).
+      if (Array.isArray(payload.usage)) ctx.agentDeps.appUsage = sanitizeUsage(payload.usage);
       log.info("client.env: профиль окружения получен", {
         len: summary?.length ?? 0,
         apps: payload.apps?.length ?? 0,

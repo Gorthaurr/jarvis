@@ -10,7 +10,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CHANNEL_RECIPES, channelSummary, exeName, formatChannels, type InstalledApp, matchChannels, recipeMatches } from "./app-channels.js";
+import { CHANNEL_RECIPES, TOP_APPS_SEED, channelForProcess, channelSummary, exeName, formatChannels, formatUsageCoverage, type InstalledApp, matchChannels, recipeMatches, sanitizeUsage } from "./app-channels.js";
 import { browserUrlBlocked } from "./tools/dispatch-util.js";
 
 const app = (name: string, exe?: string, uri?: string) => ({ name, exe, uri });
@@ -305,5 +305,58 @@ describe("выдача модели", () => {
     const text = formatChannels(matchChannels([app("Discord", "discord.exe")]), "discord");
     expect(text).toMatch(/self-bot/i);
     expect(text).toMatch(/бану/i);
+  });
+});
+
+describe("W4.2: рецепты для частых программ владельца + минуты фокуса", () => {
+  const inventory = JSON.parse(
+    readFileSync(new URL("./__fixtures__/installed-real-machine.json", import.meta.url), "utf8"),
+  ) as Array<{ name: string; exe?: string; uri?: string }>;
+  // Клиент присылает и PATH-команды (detectAutomationTools) — на машине владельца git/gh/ollama/psql найдены живьём.
+  const withCli: InstalledApp[] = [...inventory, { name: "git", cli: true }, { name: "gh", cli: true }, { name: "ollama", cli: true }, { name: "psql", cli: true }];
+
+  it("🔴 у КАЖДОЙ программы из сида есть рецепт, и он НАХОДИТСЯ на реальной машине (или это встроенная утилита)", () => {
+    const matched = matchChannels(withCli);
+    const names = new Set(matched.map((m) => m.app));
+    for (const app of TOP_APPS_SEED) {
+      const r = CHANNEL_RECIPES.find((x) => x.app === app);
+      expect(r, `${app}: рецепта нет`).toBeDefined();
+      expect(names.has(app), `${app}: рецепт есть, но на реальной машине не находится`).toBe(true);
+    }
+    expect(TOP_APPS_SEED.length).toBe(20);
+  });
+
+  it("новые рецепты честны: у CapCut/VPN канала НЕТ и они не попадают в строку «каналы есть у»", () => {
+    const matched = matchChannels(withCli);
+    const line = channelSummary(matched);
+    expect(line).not.toMatch(/CapCut|Hiddify/u);
+    expect(matched.find((m) => m.app === "CapCut")?.kind).toBe("none");
+  });
+
+  it("channelForProcess: obs64 → OBS Studio (по exe), chrome → Google Chrome, Telegram → Telegram Desktop, Claude → нет", () => {
+    const matched = matchChannels(withCli);
+    expect(channelForProcess("obs64", matched)?.app).toBe("OBS Studio");
+    expect(channelForProcess("chrome", matched)?.app).toBe("Google Chrome");
+    expect(channelForProcess("Telegram", matched)?.app).toBe("Telegram Desktop");
+    expect(channelForProcess("Claude", matched)).toBeUndefined();
+  });
+
+  it("минуты фокуса упорядочивают паспорт: программа с большим фокусом идёт первой; покрытие называет «канала нет»", () => {
+    const matched = matchChannels(withCli);
+    const usage = sanitizeUsage([{ process: "Telegram", minutes: 25, days: 3 }, { process: "chrome", minutes: 173, days: 3 }, { process: "Claude", minutes: 38, days: 3 }]);
+    const line = channelSummary(matched, usage);
+    expect(line.indexOf("Google Chrome")).toBeGreaterThan(-1);
+    expect(line.indexOf("Google Chrome")).toBeLessThan(line.indexOf("Telegram Desktop"));
+    const cov = formatUsageCoverage(usage, matched);
+    expect(cov).toMatch(/chrome — 173 мин: Google Chrome — канал cli/u);
+    expect(cov).toMatch(/Claude — 38 мин: канала нет/u);
+    expect(cov).toMatch(/за 3 дн\./u);
+  });
+
+  it("sanitizeUsage: мусор отбрасывается, строки капнуты, не больше 30", () => {
+    const out = sanitizeUsage([{ process: " x ".padEnd(80, "y"), minutes: 1.6, days: 2 }, { process: "", minutes: 1, days: 1 }, { process: "z", minutes: "1" }, null, ...Array.from({ length: 40 }, (_, i) => ({ process: `p${i}`, minutes: i, days: 1 }))]);
+    expect(out.length).toBe(30);
+    expect(out[0]).toEqual({ process: " x ".padEnd(80, "y").trim().slice(0, 48), minutes: 2, days: 2 });
+    expect(sanitizeUsage("nope")).toEqual([]);
   });
 });
