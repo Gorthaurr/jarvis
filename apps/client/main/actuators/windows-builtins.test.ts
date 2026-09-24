@@ -16,6 +16,7 @@ describe("встроенные программы Windows", () => {
     expect(resolveAppTarget("Диспетчер задач")).toBe("taskmgr");
     expect(resolveAppTarget("параметры")).toBe("ms-settings:");
     expect(resolveAppTarget("командная строка")).toBe("cmd");
+    expect(resolveAppTarget("командную строку")).toBe("cmd"); // так её отдаёт роутер из «открой командную строку»
     expect(resolveAppTarget("панель управления")).toBe("control");
     expect(resolveAppTarget("блокнот")).toBe("notepad"); // алиас — имя процесса: его же зовут фокус и закрытие
   });
