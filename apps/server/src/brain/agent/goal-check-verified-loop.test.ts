@@ -92,4 +92,32 @@ describe("goal-check не переспрашивает уже сверенное
     await handleUserText(session("met"), "запусти поиск матча в доте", deps(llm));
     expect(goalChecked(llm)).toBe(true);
   });
+
+  // Контроль (ревью W1-C): самоподтверждающийся mutate (громкость) + скриншот — не «сверенное дело» для заявки о запуске.
+  // Реверт: убери `!isBlindMutate(tu.name) ||` в noteRealAction — тест упадёт (живой эпизод 2026-07-02 вернётся).
+  it("граница: app_launch → system_volume → скриншот → «Запустил Доту» — goal-check всё равно сверяет с целью", async () => {
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "l1", name: "app_launch", input: { app: "dota2" } }] },
+      { toolUses: [{ id: "v1", name: "system_volume", input: { op: "up" } }] },
+      { toolUses: [{ id: "s1", name: "screen_capture", input: {} }] },
+      { text: "Запустил Доту, сэр." },
+      { text: "Дота запущена, поиск матча ещё не начат." },
+    ]);
+    await handleUserText(session("met"), "запусти поиск матча в доте", deps(llm));
+    expect(goalChecked(llm)).toBe(true);
+  });
+
+  // app_focus — «рука» (слепой mutate), но это подготовка (фокус окна), а не дело. Реверт: убери
+  // `LAUNCH_ONLY_TOOLS.has(tu.name) ||` в noteRealAction — тест упадёт.
+  it("граница: app_launch → app_focus → скриншот → «Запустил Доту» — фокус окна не дело, goal-check сверяет", async () => {
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "l1", name: "app_launch", input: { app: "dota2" } }] },
+      { toolUses: [{ id: "f1", name: "app_focus", input: { app: "dota2" } }] },
+      { toolUses: [{ id: "s1", name: "screen_capture", input: {} }] },
+      { text: "Запустил Доту, сэр." },
+      { text: "Дота запущена, поиск матча ещё не начат." },
+    ]);
+    await handleUserText(session("met"), "запусти поиск матча в доте", deps(llm));
+    expect(goalChecked(llm)).toBe(true);
+  });
 });

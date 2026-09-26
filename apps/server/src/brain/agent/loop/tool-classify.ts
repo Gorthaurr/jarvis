@@ -242,7 +242,9 @@ function noteRealAction(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: To
     h.verifiedRealAction = true;
     h.realActionUnverified = false;
   }
-  if (eff !== "mutate" || LAUNCH_ONLY_TOOLS.has(tu.name) || r.declined === true || r.uncertain === true) return;
+  // Только РУКИ (слепые mutate: act/browser_act/input_*…): самоподтверждающийся mutate (громкость, код, файл) себя уже
+  // подтвердил, и взгляд после него не делает «Запустил Доту» сверенным делом (app_launch → system_volume → скрин).
+  if (eff !== "mutate" || !isBlindMutate(tu.name) || LAUNCH_ONLY_TOOLS.has(tu.name) || r.declined === true || r.uncertain === true) return;
   if (selfObserved) h.verifiedRealAction = true;
   else h.realActionUnverified = true;
 }
