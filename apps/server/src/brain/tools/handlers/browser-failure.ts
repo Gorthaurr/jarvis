@@ -19,7 +19,7 @@ import { errText, isExtNoReply, pageErrorCode } from "../ext-errors.js";
 import { intentMayMutate } from "../browser-params.js";
 
 /** Хвост «исход неизвестен» — одна формулировка на таймаут, frame_gone и uncertain берста. */
-export const UNKNOWN_TAIL ="НЕ ЗНАЮ, сработало ли — действие могло уйти. НЕ повторяй вслепую (второй клик/Enter = дубль) и не кликай по координатам: сверь browser_inspect / browser_read, потом решай.";
+export const UNKNOWN_TAIL = "НЕ ЗНАЮ, сработало ли — действие могло уйти. НЕ повторяй вслепую (второй клик/Enter = дубль) и не кликай по координатам: сверь browser_inspect / browser_read, потом решай.";
 
 /** Кап текста ошибки со страницы (варианты select бывают сотнями). */
 const PAGE_ERROR_CAP = 1_500;

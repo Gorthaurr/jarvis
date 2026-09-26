@@ -122,4 +122,25 @@ describe("tab.capture: снимки двух задач сериализован
     assert.deepEqual([a.ok, b.ok], [true, true], JSON.stringify([a, b]));
     assert.deepEqual(log, ["target1", "target1:done", "capture", "target2", "target2:done", "capture"]);
   });
+
+  it("зависший снимок (страница не отвечает) не держит очередь вечно — следующий идёт по истечении слота", async () => {
+    const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const TAB = { id: 1, windowId: 1, active: true, url: "https://x.example/", status: "complete" };
+    let n = 0;
+    const slots = [];
+    const env = loadServiceWorker({
+      tabs: { get: async () => TAB, query: async () => [TAB], captureVisibleTab: async () => PNG },
+      windows: { get: async () => ({ state: "normal" }) },
+      scripting: { executeScript: () => ((n += 1) === 1 ? new Promise(() => {}) : Promise.resolve([{ result: { ok: true, w: 1, h: 1, dpr: 1 } }])) },
+      // Слот очереди «истекает» по команде теста (без реальных 15 с).
+      setTimeout: (fn) => { slots.push(fn); return slots.length; },
+      clearTimeout: () => {},
+    });
+    void env.tabCapture("", 1, {}, () => {});
+    const second = env.tabCapture("", 1, {}, () => {});
+    await new Promise((r) => setImmediate(r));
+    slots.shift()();
+    const res = await Promise.race([second, new Promise((r) => setTimeout(() => r("hung"), 500))]);
+    assert.equal(res.ok, true, `второй снимок завис за первым: ${JSON.stringify(res)}`);
+  });
 });
