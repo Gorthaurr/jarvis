@@ -48,6 +48,20 @@ describe("planCapture", () => {
   });
 });
 
+describe("planCapture — один масштаб на обе оси (W1-T7)", () => {
+  it("высота снимка не сходится с вьюпортом (> 2 px) — честная ошибка, а не растянутый кроп", () => {
+    const p = planCapture({ imgW: 800, imgH: 624, viewW: 800, viewH: 600, rect: { x: 40, y: 30, w: 100, h: 50 } });
+    assert.ok(p.error, JSON.stringify(p));
+    assert.ok(planCapture({ imgW: 800, imgH: 624, viewW: 800, viewH: 600 }).error);
+  });
+
+  it("расхождение в пределах округления (≤ 2 px) — кроп по ОДНОМУ масштабу ширины", () => {
+    // По высоте масштаб был бы 1202/600 ≈ 2,0033 → sy = 1002: кроп «поехал» бы вниз.
+    const p = planCapture({ imgW: 1600, imgH: 1202, viewW: 800, viewH: 600, rect: { x: 40, y: 500, w: 100, h: 90 } });
+    assert.deepEqual([p.sx, p.sy, p.sw, p.sh, p.dpr], [80, 1000, 200, 180, 2]);
+  });
+});
+
 describe("pngSize", () => {
   it("размер из заголовка IHDR; не PNG — null", () => {
     const b = Buffer.alloc(33);

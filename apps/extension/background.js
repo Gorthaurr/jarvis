@@ -13,6 +13,7 @@ import { tabCapture } from "./modules/capture.js";
 import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from "./modules/tab-find.js";
 import { replyFor } from "./modules/reply.js";
 import { historyNav } from "./modules/history-nav.js";
+import { parseBatchSteps, batchStepStop } from "./modules/batch-plan.js";
 import { cookiesExport } from "./modules/cookies.js";
 import { startKeepAlive } from "./modules/keep-alive.js";
 
@@ -776,8 +777,9 @@ async function tabAct(url, intent, params, tabId) {
   if (ELEMENT_INTENTS.includes(intent) || (localRef && (intent === "seek" || intent === "scroll"))) {
     let r = await runInPage(null, elementActIsolated, [localRef, intent, P], explicitFrame);
     // Поле может жить в iframe (embed-форма): не нашли в top и фрейм не задан → прощупать фреймы и повторить там.
-    if (shouldProbe(r) && !localRef && (intent === "type" || P.selector)) {
-      const hit = await probeFrames(tab.id, { input: intent === "type", selector: P.selector || "" });
+    // Только по selector (точный сигнал фрейма): «любое поле» чужого фрейма (виджет) — не цель ввода без ref/selector.
+    if (shouldProbe(r) && !localRef && P.selector) {
+      const hit = await probeFrames(tab.id, { selector: P.selector });
       if (hit) {
         r = await runInPage(null, elementActIsolated, [null, intent, P], hit.frameId);
         if (r.ok) { r.frame = hit.frameId; r.frameUrl = hit.url; }
@@ -1039,29 +1041,9 @@ function feedAutoInPage(cfg) {
  */
 async function tabBatch(url, steps, tabId) {
   const { tab } = await readyTargetTab(url, tabId);
-  if (!Array.isArray(steps) || !steps.length) return { ok: false, error: "batch: пустой список шагов" };
-  if (steps.length > 12) return { ok: false, error: "batch: максимум 12 шагов за раз (разбей длинный флоу)" };
-  const parsed = [];
-  for (const s of steps) {
-    const o = s && typeof s === "object" ? s : {};
-    const intent = String(o.intent || o.action || "");
-    if (!intent) return { ok: false, error: "batch: шаг без intent" };
-    const P = o.params && typeof o.params === "object" ? { ...o.params } : { ...o };
-    for (const k of ["ref", "selector"]) if (o[k] != null && P[k] == null) P[k] = o[k];
-    if (typeof o.text === "string" && o.params && typeof o.params === "object") {
-      if (intent !== "type") { if (P.text == null) P.text = o.text; }
-      else if (P.text !== o.text) P.label = o.text; // type: верхний text — подпись поля, params.text — что печатать
-    }
-    let frame = 0;
-    let localRef = null;
-    if (P.ref != null && String(P.ref).trim()) {
-      const pr = parseRef(P.ref);
-      if (!pr) return { ok: false, code: "ref_stale", error: "batch: шаг «" + intent + "» с некорректным ref — сделай browser_inspect заново" };
-      frame = pr.frame || 0;
-      localRef = pr.localRef;
-    }
-    parsed.push({ intent, params: P, frame, localRef });
-  }
+  const plan = parseBatchSteps(steps);
+  if (plan.error) return { ok: false, ...plan };
+  const parsed = plan.parsed;
   // Пред-валидация ref-шагов по фреймам ДО первого действия.
   const byFrame = new Map();
   for (const p of parsed) {
@@ -1085,6 +1067,8 @@ async function tabBatch(url, steps, tabId) {
     try {
       const r = await tabAct(url, p.intent, p.params, tabId);
       results.push({ step: i, ok: true, intent: p.intent, result: r });
+      const stop = batchStepStop(i, p.intent, r, parsed.length, results);
+      if (stop) return stop;
     } catch (e) {
       const msg = String((e && e.message) || e);
       results.push({ step: i, ok: false, intent: p.intent, error: msg });
@@ -1125,7 +1109,7 @@ async function probeFrames(tabId, spec) {
 
 /**
  * Исполняется ВНУТРИ фрейма (self-contained): есть ли тут цель и НАСКОЛЬКО уверенно (score)? spec:
- * {selector} | {text} | {input:true} | {media:true}. Матч текста зеркалит byText из pageActInPage
+ * {selector} | {text} | {media:true} (ввод без selector фреймы не щупает — «любое поле» чужого виджета не цель). Матч текста зеркалит byText из pageActInPage
  * (fold+скоринг), порог сильный (целое слово/точное — score≥80), чтобы probe не тащил слабый substring
  * из рекламы (ревью #5). media — только ВИДИМЫЙ и КРУПНЫЙ элемент (muted-autoplay трекер отсеян, ревью #2).
  * Shadow DOM обходится, селектор понимает « >>> ». Возвращает {found, score, url}.
@@ -1194,12 +1178,6 @@ function probeFindInPage(spec) {
       if (el && visible(el)) return { found: true, score: 120, url: here };
       // селектор не резолвится → падаем в текст (если задан), иначе не найдено
       if (!Q.text) return { found: false, url: here };
-    }
-    if (Q.input) {
-      const cands = deepAll('input[type="text"],input[type="search"],input:not([type]),textarea,[contenteditable="true"]');
-      const ok = cands.some((n) => { const b = n.getBoundingClientRect(); return b.width > 1 && b.height > 1 && !n.disabled && !n.readOnly; });
-      // input-цель СЛАБАЯ (любое поле): даём низкий score, чтобы фрейм с текстовым/селекторным матчем выигрывал.
-      return ok ? { found: true, score: 40, url: here } : { found: false, url: here };
     }
     const foldTxt = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
     const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1430,7 +1408,7 @@ async function elementActIsolated(localRef, intent, params) {
   if (el.tagName === "LABEL" && el.control && intent !== "scroll_to") el = el.control;
 
   // ── клавиши ──
-  const NAMED = { enter: ["Enter", 13], tab: ["Tab", 9], escape: ["Escape", 27], esc: ["Escape", 27], space: [" ", 32, "Space"], backspace: ["Backspace", 8], delete: ["Delete", 46], del: ["Delete", 46], arrowdown: ["ArrowDown", 40], down: ["ArrowDown", 40], arrowup: ["ArrowUp", 38], up: ["ArrowUp", 38], arrowleft: ["ArrowLeft", 37], left: ["ArrowLeft", 37], arrowright: ["ArrowRight", 39], right: ["ArrowRight", 39], home: ["Home", 36], end: ["End", 35], pageup: ["PageUp", 33], pagedown: ["PageDown", 34] };
+  const NAMED = { enter: ["Enter", 13], return: ["Enter", 13], tab: ["Tab", 9], escape: ["Escape", 27], esc: ["Escape", 27], space: [" ", 32, "Space"], backspace: ["Backspace", 8], delete: ["Delete", 46], del: ["Delete", 46], arrowdown: ["ArrowDown", 40], down: ["ArrowDown", 40], arrowup: ["ArrowUp", 38], up: ["ArrowUp", 38], arrowleft: ["ArrowLeft", 37], left: ["ArrowLeft", 37], arrowright: ["ArrowRight", 39], right: ["ArrowRight", 39], home: ["Home", 36], end: ["End", 35], pageup: ["PageUp", 33], pagedown: ["PageDown", 34] };
   const parseCombo = (combo) => {
     const k = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false };
     let key = "";
@@ -1461,26 +1439,31 @@ async function elementActIsolated(localRef, intent, params) {
     if (form && down && press && eligible) { try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch { /* невалидная форма */ } }
     return { submitted: true };
   };
+  // Enter с любыми модификаторами (Ctrl/Shift/Alt/Meta+Enter) — жест отправки для §14 (как isCommitKeyCombo сервера).
   const isEnterCombo = (c) => { const p = parseCombo(c); return Boolean(p && p.key === "Enter"); };
-  // §14: Enter/отправка — подписи поля, формы и её кнопки отправки. Одобрение — на конкретную подпись.
-  const guardHit = (t) => {
+  // §14: судим подписи (parts). Одобрение — на РОВНО ту подпись, что видел владелец (равенство сложенной подписи, не
+  // подстрока: одобренное «Отправить» не пропускает «Отправить перевод 50 000 ₽»).
+  const judgeParts = (parts) => {
     if (!P.guard) return null;
     let re = null;
     try { re = new RegExp(String(P.guard), "iu"); } catch { return null; }
-    const form = t.form || (t.closest && t.closest("form"));
-    const sub = form ? form.querySelector("button[type=submit],button:not([type]),input[type=submit],input[type=image]") : null;
-    // Подписи самой цели — только у поля/кнопки: Enter «в body» не должен судиться по всему тексту страницы.
-    const control = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName) || t.isContentEditable || /^(button|textbox|searchbox|combobox)$/.test(t.getAttribute("role") || "");
-    const parts = (control ? labelParts(t) : []).concat(sub ? labelParts(sub) : [], form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []);
     const shown = (parts.find((p) => re.test(p)) || parts.join(" ")).slice(0, 120);
     const need = { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
     if (!P.guardApproved) return parts.some((p) => re.test(p)) ? need : null;
     if (P.approvedLabel) {
       const a = fold(P.approvedLabel);
-      const same = parts.some((p) => { const f = fold(p); return f && (f.includes(a) || (f.length >= 4 && a.includes(f))); }) || (P.text != null && fold(P.text) === a);
+      const same = Boolean(a) && (parts.some((p) => fold(p) === a || fold(String(p).slice(0, 120)) === a) || (P.text != null && fold(P.text) === a));
       if (!same) return need;
     }
     return null;
+  };
+  // Enter/отправка — подписи поля, формы и её кнопки отправки.
+  const guardHit = (t) => {
+    const form = t.form || (t.closest && t.closest("form"));
+    const sub = form ? form.querySelector("button[type=submit],button:not([type]),input[type=submit],input[type=image]") : null;
+    // Подписи самой цели — только у поля/кнопки: Enter «в body» не должен судиться по всему тексту страницы.
+    const control = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName) || t.isContentEditable || /^(button|textbox|searchbox|combobox)$/.test(t.getAttribute("role") || "");
+    return judgeParts((control ? labelParts(t) : []).concat(sub ? labelParts(sub) : [], form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []));
   };
   const setNativeValue = (node, val) => {
     const proto = node.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -1537,8 +1520,9 @@ async function elementActIsolated(localRef, intent, params) {
     }
     if (intent === "scroll") { window.scrollBy(0, Number(P.dy) || 600); return { ok: true }; }
     if (intent === "seek") {
-      const md = el.matches && el.matches("audio, video") ? el : (el.querySelector && el.querySelector("audio, video")) || document.querySelector("audio, video");
-      if (!md) return fail("not_found", "нет видео/аудио для перемотки");
+      // Только медиа САМОЙ цели (она, её плеер-предок или вложенный плеер): чужой первый плеер документа — не цель.
+      const md = el.matches && el.matches("audio, video") ? el : (el.querySelector && el.querySelector("audio, video")) || (el.closest && el.closest("audio, video"));
+      if (!md) return fail("not_found", "в этом элементе нет видео/аудио для перемотки — укажи ref самого плеера");
       const to = Number(P.to);
       const sec = Number(P.seconds);
       const dur = Number.isFinite(md.duration) ? md.duration : Infinity;
@@ -1550,12 +1534,13 @@ async function elementActIsolated(localRef, intent, params) {
       if (!editable(el) && el.querySelector) el = el.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]),textarea,[contenteditable="true"]') || el;
       if (isSecret(el)) return fail("secret_field", SECRET);
       if (!editable(el)) return fail("", "элемент не поле ввода — для кнопки click, для галочки/списка set");
-      const enter = Boolean(P.enter || P.submit);
+      // Флаги нормализует сервер: жест Enter — только строгое true («false»-строка не отправляет).
+      const enter = P.enter === true || P.submit === true;
       if (enter) { const g = guardHit(el); if (g) return g; }
       const bad = writeText(el, String(P.text != null ? P.text : ""));
       if (bad) return fail("", bad);
       const out = { ok: true, value: readValue(el).slice(0, 60), submitted: false };
-      if (enter) out.submitted = pressEnter(el, Boolean(P.submit)).submitted;
+      if (enter) out.submitted = pressEnter(el, P.submit === true).submitted;
       return out;
     }
     if (intent === "set") {
@@ -1572,6 +1557,9 @@ async function elementActIsolated(localRef, intent, params) {
         if (cur() === wantOn) return { ok: true, checked: wantOn, changed: false }; // уже так — не кликаем (повторный set не снимает)
         if (!wantOn && t.tagName === "INPUT" && /^radio$/i.test(t.type)) return fail("", "radio не снимается кликом — выбери другой вариант этой группы");
         if (t.disabled || t.getAttribute("aria-disabled") === "true") return fail("", "элемент недоступен (disabled)");
+        // §14: переключатель «Опубликовать»/«Автоплатёж» — тот же гард, что у клика (по его СОБСТВЕННЫМ подписям).
+        const g = judgeParts(labelParts(t));
+        if (g) return g;
         const r = t.getBoundingClientRect();
         const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
         for (const ty of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
@@ -1601,11 +1589,13 @@ async function elementActIsolated(localRef, intent, params) {
     if (intent === "key") {
       const k = parseCombo(P.combo != null ? P.combo : P.key);
       if (!k) return fail("", "key: не понял клавишу «" + String(P.combo != null ? P.combo : P.key || "").slice(0, 30) + "» — пример: Enter, Tab, Escape, ArrowDown, Ctrl+A");
-      if (k.key === "Enter" && !k.ctrlKey && !k.altKey && !k.metaKey) {
+      // §14: ЛЮБОЙ Enter (и Ctrl/Shift/Alt/Meta+Enter — отправка в чатах и комментариях) сперва судится гардом.
+      if (isEnterCombo(P.combo != null ? P.combo : P.key)) {
         const g = guardHit(el);
         if (g) return g;
-        return { ok: true, sent: String(P.combo || P.key), ...pressEnter(el, false) };
       }
+      // Голый Enter — жест браузера (форма уходит); с модификаторами — событие с НАСТОЯЩИМИ модификаторами, без сабмита.
+      if (k.key === "Enter" && !k.ctrlKey && !k.altKey && !k.metaKey && !k.shiftKey) return { ok: true, sent: String(P.combo || P.key), ...pressEnter(el, false) };
       const o = { key: k.key, code: k.code, keyCode: k.keyCode, which: k.keyCode, ctrlKey: k.ctrlKey, shiftKey: k.shiftKey, altKey: k.altKey, metaKey: k.metaKey, bubbles: true, cancelable: true, composed: true };
       const down = el.dispatchEvent(new KeyboardEvent("keydown", o));
       if (down && k.key.length === 1 && !k.ctrlKey && !k.altKey && !k.metaKey) el.dispatchEvent(new KeyboardEvent("keypress", o));
@@ -1791,8 +1781,9 @@ async function robustClickMain(params) {
     } else if (P.approvedLabel) {
       // Одобрение — на КОНКРЕТНУЮ подпись, которую видел владелец: пока он думал, страница могла перерисоваться, а
       // селектор/текст — попасть в другую кнопку («Оплатить 50 000 ₽» вместо одобренного «Отправить»). Не та — снова вопрос.
+      // Равенство сложенной подписи (не подстрока): одобренное «Отправить» не пропускает «Отправить перевод 50 000 ₽».
       const a = foldTxt(P.approvedLabel);
-      const same = parts.some((p) => { const f = foldTxt(p); return f && (f.includes(a) || (f.length >= 4 && a.includes(f))); });
+      const same = Boolean(a) && parts.some((p) => foldTxt(p) === a || foldTxt(String(p).slice(0, 120)) === a);
       if (!same) return confirmNeeded;
     }
   }

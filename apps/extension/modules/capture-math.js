@@ -29,9 +29,13 @@ function capFactor(w, h) {
  */
 export function planCapture({ imgW, imgH, viewW, viewH, rect, scale }) {
   if (!(imgW > 0 && imgH > 0 && viewW > 0 && viewH > 0)) return { error: "нет размеров снимка или вьюпорта" };
-  const kx = imgW / viewW;
-  const ky = imgH / viewH;
-  const dpr = Math.round(kx * 100) / 100;
+  // ОДИН масштаб на обе оси (CSS → физические px). Высота снимка не сходится с вьюпортом (инфобар/ресайз в момент
+  // снимка) → кадр не того вьюпорта: честный отказ, а не растянутый кроп.
+  const k0 = imgW / viewW;
+  if (Math.abs(imgH - viewH * k0) > 2) return { error: "снимок не совпал с вьюпортом (" + imgW + "×" + imgH + " против " + viewW + "×" + viewH + " CSS) — окно менялось во время снимка, повтори" };
+  const kx = k0;
+  const ky = k0;
+  const dpr = Math.round(k0 * 100) / 100;
   if (!rect) {
     const k = Math.min(1, capFactor(imgW, imgH));
     const outW = Math.max(1, Math.round(imgW * k));

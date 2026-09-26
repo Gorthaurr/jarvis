@@ -32,8 +32,11 @@ describe("ревью 26.09: гард коммита, select, снимок", { sk
     await page.open(fixtureUrl("plain.html"));
     const miss = await click({ selector: "#pay-now", guard: GUARD, guardApproved: true, approvedLabel: "Отправить" });
     assert.equal(miss.code, "commit_confirm");
-    const hit = await click({ selector: "#send-now", guard: GUARD, guardApproved: true, approvedLabel: "Отправить" });
-    assert.equal(hit.ok, true);
+    // Одобрение — на РОВНО ту подпись (равенство, не подстрока): «Отправить» не покрывает «Отправить сейчас».
+    const prefix = await click({ selector: "#send-now", guard: GUARD, guardApproved: true, approvedLabel: "Отправить" });
+    assert.equal(prefix.code, "commit_confirm");
+    const hit = await click({ selector: "#send-now", guard: GUARD, guardApproved: true, approvedLabel: prefix.label });
+    assert.equal(hit.ok, true, JSON.stringify(hit));
   });
 
   it("немодальный role=dialog (cookie-баннер) не забирает клик у одноимённой ссылки страницы", async () => {

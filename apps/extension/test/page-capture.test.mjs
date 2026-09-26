@@ -16,7 +16,10 @@ const PIXEL = `async (d, x, y) => {
 
 describe("tab.capture — снимок и зум вкладки", { skip: !findChrome() && "нет Chrome" }, () => {
   let page;
-  before(async () => { page = await launchPage(); });
+  // Вьюпорт фиксирован (800×600, dpr 1): у headless Chromium innerHeight и высота снимка иначе расходятся на пару px
+  // (ревью W1-T7), и точные размеры кропа зависели бы от среды.
+  const pin = (deviceScaleFactor = 1) => page.cdp("Emulation.setDeviceMetricsOverride", { width: 800, height: 600, deviceScaleFactor, mobile: false });
+  before(async () => { page = await launchPage(); await pin(); });
   after(async () => { await page?.close(); });
   const sw = (extra = {}) => swOnPage(page, { renderCapture: (d, p) => page.call(renderCapture.toString(), d, p), ...extra });
   const shot = (env, opts) => env.tabCapture("", 1, opts, env.captureTargetIsolated);
@@ -54,7 +57,7 @@ describe("tab.capture — снимок и зум вкладки", { skip: !findC
 
   it("dpr 2: кроп в ФИЗИЧЕСКИХ пикселях", async () => {
     await page.open(fixtureUrl("capture.html"));
-    await page.cdp("Emulation.setDeviceMetricsOverride", { width: 800, height: 600, deviceScaleFactor: 2, mobile: false });
+    await pin(2);
     try {
       const { env } = sw();
       const r = await shot(env, { rect: { x: 40, y: 30, w: 100, h: 50 } });
@@ -62,7 +65,7 @@ describe("tab.capture — снимок и зум вкладки", { skip: !findC
       assert.deepEqual([r.width, r.height], [400, 200]);
       assert.deepEqual((await pixel(r.dataUrl, 200, 100)).px, [255, 0, 0]);
     } finally {
-      await page.cdp("Emulation.clearDeviceMetricsOverride", {});
+      await pin();
     }
   });
 
