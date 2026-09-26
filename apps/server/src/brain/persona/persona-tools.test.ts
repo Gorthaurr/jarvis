@@ -55,6 +55,18 @@ function unknownTools(text: string): string[] {
   });
 }
 
+/** Холодные инструменты, названные в абзаце БЕЗ слова tool_load в том же абзаце (модель позвала бы их как горячие). */
+function coldWithoutLoad(text: string): string[] {
+  const offenders: string[] = [];
+  text.split(/\n\s*\n/u).forEach((block, i) => {
+    if (/tool_load/u.test(block)) return;
+    for (const name of COLD_TOOL_NAMES) {
+      if (new RegExp(`(^|[^\\w])${name}([^\\w]|$)`, "u").test(block)) offenders.push(`абзац ${i + 1}: ${name}`);
+    }
+  });
+  return offenders;
+}
+
 describe("персона и общие навыки учат только существующим инструментам", () => {
   it("персона: каждый названный инструмент есть в @jarvis/tools (ни `read.window`, ни устаревших имён)", () => {
     expect(unknownTools(PERSONA)).toEqual([]);
@@ -66,20 +78,17 @@ describe("персона и общие навыки учат только сущ
   });
 
   it("персона: холодный инструмент назван только рядом с tool_load (в том же абзаце)", () => {
-    const offenders: string[] = [];
-    PERSONA.split(/\n\s*\n/u).forEach((block, i) => {
-      if (/tool_load/u.test(block)) return;
-      for (const name of COLD_TOOL_NAMES) {
-        if (new RegExp(`(^|[^\\w])${name}([^\\w]|$)`, "u").test(block)) offenders.push(`абзац ${i + 1}: ${name}`);
-      }
-    });
-    expect(offenders).toEqual([]);
+    expect(coldWithoutLoad(PERSONA)).toEqual([]);
   });
 
   it("сам страж ловит несуществующий и холодный-без-tool_load (проверка на подложном тексте)", () => {
     expect(unknownTools("смотри `read.window` и `browser_read`")).toEqual(["read.window"]);
     expect(unknownTools("вызови nope_tool{x:1} и `input_*`")).toEqual(["nope_tool"]);
+    // W1-ревью T11: подложка гоняется ЧЕРЕЗ сам страж (не тавтология по строке): без tool_load — ловит, с ним — нет;
+    // пометка в СОСЕДНЕМ абзаце не спасает (граница — пустая строка).
     const cold = [...COLD_TOOL_NAMES][0]!;
-    expect(`абзац про \`${cold}\``.includes("tool_load")).toBe(false); // подложка без пометки — то, что ловит тест выше
+    expect(coldWithoutLoad(`Вступление.\n\nАбзац про \`${cold}\` — зови прямо.`)).toEqual([`абзац 2: ${cold}`]);
+    expect(coldWithoutLoad(`Абзац про \`${cold}\`: сначала tool_load{names:["${cold}"]}.`)).toEqual([]);
+    expect(coldWithoutLoad(`Про tool_load.\n\nАбзац про \`${cold}\`.`)).toEqual([`абзац 2: ${cold}`]);
   });
 });

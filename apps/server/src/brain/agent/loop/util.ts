@@ -94,12 +94,14 @@ export const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Можно ли этот КОНКРЕТНЫЙ вызов исполнить параллельно (имя из allowlist И операция — чтение). W1: browser_tabs
- * получил op:"close" (алиас прежнего browser_close) — закрытие вкладки параллельно с её чтением = гонка.
+ * Можно ли этот КОНКРЕТНЫЙ вызов исполнить параллельно (имя из allowlist И операция — чистое чтение). Вызов уже
+ * КАНОНИЧЕСКИЙ (tool-round): browser_tabs{op:"close"} сюда приходит как browser_close (facades.ts) — не из allowlist.
+ * W1-ревью T4: снимок/зум вкладки (browser_read{view:"image"}) — не параллельно: зум по ref прокручивает страницу, а
+ * captureVisibleTab снимает общий вьюпорт — два зума разом вырезали бы чужую область.
  */
 export function isParallelReadonlyCall(name: string, input: unknown): boolean {
   if (!PARALLEL_READONLY_TOOLS.has(name)) return false;
-  if (name === "browser_tabs") return String((input as { op?: unknown } | undefined)?.op ?? "list") !== "close";
+  if (name === "browser_read") return (input as { view?: unknown } | undefined)?.view !== "image";
   return true;
 }
 

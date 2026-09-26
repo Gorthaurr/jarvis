@@ -20,7 +20,7 @@
  * Модуль ЧИСТЫЙ (без IO): стор — checkpoint-store.ts, врезка — agent/index.ts.
  */
 import { foldText } from "@jarvis/shared";
-import { classifyImageBlocks } from "./image-marks.js";
+import { classifyImageBlocks, type ImageClass } from "./image-marks.js";
 import type { LlmMessage } from "../../integrations/llm.js";
 import { CANCEL_PHRASES, CANCEL_WORDS } from "../tasks/control.js";
 import { OUTBOUND_SEND_TOOLS, toolCallEffect } from "./error-voice.js";
@@ -326,6 +326,18 @@ function briefInput(input: Record<string, unknown>): string {
   return parts.join(", ").slice(0, 180);
 }
 
+/**
+ * Пометка вместо картинки — по классу (image-marks), с подсказкой, КАК получить свежую. Record по ImageClass: новый
+ * класс без пометки не скомпилируется (W1-ревью LOOP-10: снимок вкладки уходил общей «картинкой» без подсказки).
+ */
+const JOURNAL_IMAGE_LABEL: Record<ImageClass, string> = {
+  doc: "[страница документа/картинка файла — в журнал не сохраняется; повторный file_view вернёт её]",
+  screenshot: "[скриншот — в журнал не сохраняется]",
+  tab: '[снимок вкладки — в журнал не сохраняется; свежий — browser_read{view:"image"}]',
+  selection: "[картинка — в журнал не сохраняется]",
+  other: "[картинка — в журнал не сохраняется]",
+};
+
 /** Схлопнуть содержимое tool_result в текст (картинки — пометкой, они в журнал не идут). */
 function resultText(content: unknown): string {
   if (typeof content === "string") return content;
@@ -334,13 +346,7 @@ function resultText(content: unknown): string {
   const blocks = content as Array<{ type: string; text?: string }>;
   // Класс картинки — по маркерам того же tool_result (image-marks): страница документа ≠ скриншот,
   // иначе продолжение читало «скриншот» и шло сверять экран вместо повторного file_view.
-  const cls = classifyImageBlocks(blocks);
-  const imageLabel =
-    cls === "doc"
-      ? "[страница документа/картинка файла — в журнал не сохраняется; повторный file_view вернёт её]"
-      : cls === "screenshot"
-        ? "[скриншот — в журнал не сохраняется]"
-        : "[картинка — в журнал не сохраняется]";
+  const imageLabel = JOURNAL_IMAGE_LABEL[classifyImageBlocks(blocks)];
   for (const b of blocks) {
     if (b?.type === "text" && typeof b.text === "string") parts.push(b.text);
     else if (b?.type === "image") parts.push(imageLabel);

@@ -7,7 +7,7 @@
  *    который readback поля (fused observed) не гасит;
  *  - browser_inspect/browser_read — одним параллельным раундом; browser_tabs{op:"close"} — строго последовательно;
  *  - журнал чекпойнта: закрытие вкладки и set — в «СДЕЛАНО», hover — нет.
- * Реверт-мутации — в отчёте волны (error-voice NEUTRAL_BROWSER_INTENTS, tool-classify webActGesture/inspectWebBatch,
+ * Реверт-мутации — в отчёте волны (error-voice NEUTRAL_BROWSER_INTENTS, send-gesture webActGesture/inspectWebBatch,
  * util isParallelReadonlyCall, checkpoint effect(e.tool, e.raw)).
  */
 import { mkdtempSync, rmSync } from "node:fs";
@@ -23,8 +23,11 @@ import { InMemoryEpisodicMemory } from "../../memory/episodic.js";
 import { WorkingMemory } from "../../memory/working.js";
 import type { ToolResult } from "../tools/dispatch.js";
 import { TaskManager } from "../tasks/manager.js";
+import { canonicalToolCall } from "@jarvis/tools";
 import { CheckpointStore } from "./checkpoint-store.js";
+import { toolCallEffect } from "./error-voice.js";
 import { type AgentDeps, handleUserText } from "./index.js";
+import { isParallelReadonlyCall } from "./loop/util.js";
 
 vi.mock("../tools/dispatch.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../tools/dispatch.js")>();
@@ -171,6 +174,32 @@ describe("W1: параллельные чтения вкладки", () => {
       { text: "Закрыл вкладку, итог — 1200 рублей." },
     ]);
     await handleUserText(session(), "закрой ту вкладку и прочитай итого на этой", deps(llm));
+    expect(firstResult(llm)).toContain('"seq"');
+  });
+
+  it("W1-ревью T8: канонический browser_tabs{op:\"close\"} — дело и не параллельное чтение (без веток по сырому имени)", () => {
+    const c = canonicalToolCall("browser_tabs", { op: "close", tabId: 7 });
+    expect(isParallelReadonlyCall(c.name, c.input)).toBe(false);
+    expect(toolCallEffect(c.name, c.input)).toBe("mutate");
+    const list = canonicalToolCall("browser_tabs", {});
+    expect(isParallelReadonlyCall(list.name, list.input)).toBe(true); // список вкладок — по-прежнему чтение
+  });
+
+  it("W1-ревью T4: два browser_read{view:\"image\"} (зум по ref) — строго последовательно: вьюпорт и прокрутка общие", async () => {
+    let started!: () => void;
+    const secondStarted = new Promise<void>((r) => (started = r));
+    fakes.browser_read = async (i) => {
+      if (i.ref === "e1_2") {
+        started();
+        return okRes("снимок 2");
+      }
+      return okRes(await Promise.race([secondStarted.then(() => "par"), new Promise<string>((r) => setTimeout(() => r("seq"), 300))]));
+    };
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "z1", name: "browser_read", input: { view: "image", ref: "e1_1" } }, { id: "z2", name: "browser_read", input: { view: "image", ref: "e1_2" } }] },
+      { text: "На обоих снимках цена 1200 рублей, сэр." },
+    ]);
+    await handleUserText(session(), "приблизь обе карточки товара на сайте и сравни цены", deps(llm));
     expect(firstResult(llm)).toContain('"seq"');
   });
 });
