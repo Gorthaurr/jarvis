@@ -38,6 +38,13 @@ describe("canonicalToolCall", () => {
     expect(canonicalToolName("fs_read", { path: "a" })).toBe("fs_read");
   });
 
+  it("W1: browser_tabs{op:'close'} → browser_close (tabId/url); list/без op — сам browser_tabs", () => {
+    expect(canonicalToolCall("browser_tabs", { op: "close", tabId: 7, junk: 1 })).toEqual({ name: "browser_close", input: { tabId: 7 } });
+    expect(canonicalToolCall("browser_tabs", { op: "close", url: "youtube.com" })).toEqual({ name: "browser_close", input: { url: "youtube.com" } });
+    expect(canonicalToolCall("browser_tabs", { op: "list" })).toEqual({ name: "browser_tabs", input: { op: "list" } });
+    expect(canonicalToolCall("browser_tabs", {})).toEqual({ name: "browser_tabs", input: {} });
+  });
+
   it("НЕ мутирует вход: объект SDK остаётся прежним (по нему сопоставляется хендлер канала подписки)", () => {
     const input = { what: "elements", pid: 3 };
     const c = canonicalToolCall("look", input);
@@ -57,5 +64,23 @@ describe("горячий набор (W4.3)", () => {
       expect(COLD_TOOL_NAMES.has(cold), cold).toBe(true);
       expect(TOOLS_BY_NAME[cold], cold).toBeDefined(); // канонический инструмент существует — dispatch исполнит
     }
+  });
+
+  // W1: ref-режим единственный → берст форм горячий; закрытие вкладок — фасадом browser_tabs{op:"close"}, имя
+  // browser_close осталось (старые навыки) в COLD. Потолок 60 держится обменом, а не ростом.
+  it("W1: browser_batch горячий, browser_close холодный (цель фасада browser_tabs op:close); схемы W1 на месте", () => {
+    const hot = hotToolNames();
+    expect(hot).toContain("browser_batch");
+    expect(hot).toContain("browser_tabs");
+    expect(COLD_TOOL_NAMES.has("browser_close")).toBe(true);
+    expect(TOOLS_BY_NAME.browser_close).toBeDefined();
+    const act = TOOLS_BY_NAME.browser_act!.input_schema as { properties: Record<string, { enum?: string[] }> };
+    for (const i of ["set", "key", "hover", "scroll_to", "back", "forward"]) expect(act.properties.intent?.enum, i).toContain(i);
+    for (const f of ["ref", "selector", "text", "value", "checked", "combo", "option", "enter", "params", "tabId"]) expect(act.properties[f], f).toBeDefined();
+    const read = TOOLS_BY_NAME.browser_read!.input_schema as { properties: Record<string, { enum?: string[] }>; required?: string[] };
+    expect(read.properties.view?.enum).toEqual(["text", "image"]);
+    expect(read.required ?? []).not.toContain("selectorIntent"); // картинке фильтр текста не нужен
+    const tabs = TOOLS_BY_NAME.browser_tabs!.input_schema as { properties: Record<string, { enum?: string[] }> };
+    expect(tabs.properties.op?.enum).toEqual(["list", "close"]);
   });
 });

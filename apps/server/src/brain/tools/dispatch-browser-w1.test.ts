@@ -250,6 +250,22 @@ describe("browser_act: форма полей и честные сигналы и
   });
 });
 
+describe("browser_tabs{op} — список и закрытие одним горячим именем (browser_close ушёл в COLD)", () => {
+  it("op:'close' с tabId закрывает РОВНО эту вкладку; без op — список; прежнее имя browser_close работает", async () => {
+    const tabClose = vi.fn(async () => ({ closed: 1 }));
+    const tabList = vi.fn(async () => ({ tabs: [{ tabId: 5, title: "YouTube", host: "youtube.com", url: "https://youtube.com/" }] }));
+    const c = makeCtx({ ext: ext({ tabClose, tabList }) });
+    const r = await dispatchTool("browser_tabs", { op: "close", tabId: 5 }, c);
+    expect(r.isError).toBe(false);
+    expect(tabClose).toHaveBeenCalledWith(undefined, 5);
+    expect(tabList).not.toHaveBeenCalled();
+    const l = await dispatchTool("browser_tabs", {}, c);
+    expect(text(l)).toMatch(/tabId 5/u);
+    await dispatchTool("browser_close", { url: "youtube.com" }, c);
+    expect(tabClose).toHaveBeenLastCalledWith("youtube.com", undefined);
+  });
+});
+
 describe("browser_read{view:\"image\"} — снимок/зум вкладки картинкой класса «tab»", () => {
   const png = "iVBORw0KGgo=";
   it("успех: image-блок + маркер вкладки; rect/ref/scale уходят расширению", async () => {
