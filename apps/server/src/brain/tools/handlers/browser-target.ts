@@ -77,5 +77,14 @@ export function resolveBrowserTarget(ctx: ToolContext, input: Record<string, unk
     return { url: explicit, tabId };
   }
   if (explicit) return { url: explicit };
-  return currentBrowserTarget(ctx) ?? null;
+  const own = byTask.get(ctx);
+  if (own) return own;
+  // Р2 srv-tests-3: задача-продолжение («открой ютуб» → «включи») своей цели не выбирала — при первом неявном вызове
+  // ЗАКРЕПЛЯЕТ за собой снимок сессионной цели; иначе browser_open параллельной задачи увёл бы её act/read в чужую вкладку.
+  const sess = sessOf(ctx);
+  const shared = sess ? bySession.get(sess) : undefined;
+  if (!shared) return null;
+  const pinned = { ...shared };
+  byTask.set(ctx, pinned);
+  return pinned;
 }

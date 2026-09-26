@@ -87,3 +87,71 @@ describe("W1-LOOP-4: цель вкладки у каждой задачи сво
     expect(aCall?.[3]).toBe(7);
   }, 20_000);
 });
+
+/** Сессия + расширение: browser_open отдаёт вкладку по адресу (магазин → 7, почта → 9), tab.act записывает цель. */
+function world(): { session: Session; ext: NonNullable<AgentDeps["ext"]> } {
+  const sendAction = vi.fn((_cmd: ActionCommand) => Promise.resolve({ commandId: "c", ok: true, durationMs: 1 } as ActionResult));
+  const requestConfirm = vi.fn((req: ConfirmRequest): Promise<ConfirmResult> => Promise.resolve({ requestId: req.requestId, approved: true, outcome: "approved" }));
+  const session = { sessionId: "s-target-r2", userId: "u-target", sendAction, send: vi.fn(), requestConfirm } as unknown as Session;
+  const ext: NonNullable<AgentDeps["ext"]> = {
+    connected: true,
+    openOrFocus: vi.fn(async (url: string) => ({ focused: false, tabId: url.includes("mail") ? 9 : 7 })),
+    tabRead: vi.fn(async () => ({})),
+    tabInspect: vi.fn(async () => ({ url: SITE, elements: [] })),
+    tabAct: vi.fn(async () => ({ ok: true })),
+    tabList: vi.fn(async () => ({ tabs: [] })),
+    tabClose: vi.fn(async () => ({ closed: 0 })),
+    exportCookies: vi.fn(async () => ({ cookies: [] })),
+  };
+  return { session, ext };
+}
+const MAIL = "https://mail.example/inbox";
+
+describe("Р2 srv-tests-3/4: задача закрепляет цель вкладки за собой", () => {
+  it("задача-продолжение без своей цели: первый неявный вызов закрепляет цель сессии, чужой browser_open её не уводит", async () => {
+    const { session, ext } = world();
+    // Реплика 1: открыла вкладку 7 и закончилась — цель осталась только у сессии.
+    await handleUserText(session, "зайди на сайт магазина и найди там каталог видео", depsFor(new MockLlmProvider([{ toolUses: [{ id: "t1", name: "browser_open", input: { url: SITE } }] }, { text: "Открыл." }]), ext));
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // Реплика 2 (продолжение): наведение без url/tabId, между раундами — «думает».
+    const llmA = new GatedLlm(
+      [
+        { toolUses: [{ id: "a1", name: "browser_act", input: { intent: "hover", ref: "e1_2" } }] },
+        { toolUses: [{ id: "a2", name: "browser_act", input: { intent: "click", text: "Первое видео" } }] },
+        { text: "Кликнул." },
+      ],
+      gate,
+    );
+    const taskA = handleUserText(session, "наведи на первое видео каталога и кликни по нему", depsFor(llmA, ext));
+    await until(() => vi.mocked(ext.tabAct).mock.calls.length > 0);
+    // Параллельная задача той же сессии открыла почту (вкладка 9).
+    await handleUserText(session, "проверь, что во входящих почты", depsFor(new MockLlmProvider([{ toolUses: [{ id: "b1", name: "browser_open", input: { url: MAIL } }] }, { text: "Открыл почту." }]), ext));
+    expect(vi.mocked(ext.openOrFocus).mock.calls.map((c) => c[0])).toEqual([SITE, MAIL]);
+    release();
+    await taskA;
+    await until(() => vi.mocked(ext.tabAct).mock.calls.length >= 2);
+    expect(vi.mocked(ext.tabAct).mock.calls.map((c) => [c[1], c[3]])).toEqual([["hover", 7], ["click", 7]]);
+  }, 20_000);
+
+  it("явный tabId задачи закрепляется за НЕЙ: чужой browser_open между раундами не уводит её неявный act", async () => {
+    const { session, ext } = world();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const llmA = new GatedLlm(
+      [
+        { toolUses: [{ id: "a1", name: "browser_read", input: { tabId: 5 } }] },
+        { toolUses: [{ id: "a2", name: "browser_act", input: { intent: "click", ref: "e1_2" } }] },
+        { text: "Нажал." },
+      ],
+      gate,
+    );
+    const taskA = handleUserText(session, "прочитай вкладку 5 и нажми там первую кнопку", depsFor(llmA, ext));
+    await until(() => vi.mocked(ext.tabRead).mock.calls.length > 0);
+    await handleUserText(session, "проверь, что во входящих почты", depsFor(new MockLlmProvider([{ toolUses: [{ id: "b1", name: "browser_open", input: { url: MAIL } }] }, { text: "Открыл почту." }]), ext));
+    release();
+    await taskA;
+    await until(() => vi.mocked(ext.tabAct).mock.calls.length >= 1);
+    expect(vi.mocked(ext.tabAct).mock.calls[0]?.[3]).toBe(5);
+  }, 20_000);
+});
