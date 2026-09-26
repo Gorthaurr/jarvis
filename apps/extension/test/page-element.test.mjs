@@ -88,6 +88,16 @@ describe("set / key / scroll_to / Enter", { skip: !findChrome() && "нет Chrom
     assert.equal(await page.eval("window.__c.search"), 1);
   });
 
+  it("type по селектору обёртки (формы) — в её поле; обёртка с полем пароля — отказ §0", async () => {
+    await page.open(fixtureUrl("form.html"));
+    const r = await act("type", { selector: "#search", text: "котики" });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(await page.eval("document.getElementById('q').value"), "котики");
+    await page.eval("document.getElementById('blocked').insertAdjacentHTML('afterbegin', '<input type=password id=pw2>')");
+    const s = await act("type", { selector: "#blocked", text: "hunter2" });
+    assert.equal(s.code, "secret_field");
+  });
+
   it("scroll_to: элемент ниже сгиба оказывается во вьюпорте", async () => {
     await page.open(fixtureUrl("form.html"));
     const r = await act("scroll_to", { text: "Кнопка внизу" });

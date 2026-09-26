@@ -1543,6 +1543,8 @@ async function elementActIsolated(localRef, intent, params) {
       return { ok: true, currentTime: Math.round(md.currentTime) };
     }
     if (intent === "type") {
+      // Цель — обёртка (форма, карточка поиска): печатаем в её поле. §0 — уже по разрешённому полю.
+      if (!editable(el) && el.querySelector) el = el.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]),textarea,[contenteditable="true"]') || el;
       if (isSecret(el)) return fail("secret_field", SECRET);
       if (!editable(el)) return fail("", "элемент не поле ввода — для кнопки click, для галочки/списка set");
       const enter = Boolean(P.enter || P.submit);
