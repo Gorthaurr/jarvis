@@ -11,39 +11,54 @@
  */
 import type { Target, UiPattern } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
-import { NotImplementedError } from "./input.js";
+import { NotImplementedError, ensureSidecar } from "./sidecar-ready.js";
 import { sidecar } from "./sidecar-client.js";
+import { injectRpc } from "./inject.js";
+import { noteGround, noteSnapshot } from "./handle-mirror.js";
 
 const log = createLogger("actuator:ground");
 
-/** Результат ui.ground — в ActionResult.data (§5: {handle, bbox}). */
+/** Результат ui.ground — в ActionResult.data (§5: {handle, bbox}); W2: + name/role элемента (сайдкар их отдаёт). */
 export interface GroundResult {
   handle: string;
+  /** ФИЗИЧЕСКИЕ пиксели (UIA BoundingRectangle). */
   bbox: { x: number; y: number; w: number; h: number };
+  name?: string;
+  /** Как отдаёт сайдкар: «ControlType.Button». */
+  role?: string;
 }
 
-function ensure(): void {
-  if (!sidecar().ready) throw new NotImplementedError("сайдкар UIA не запущен");
-}
+const ensure = (): void => ensureSidecar("сайдкар UIA не запущен");
+/** W2: поколение сайдкара для зеркала handle (тестовые моки отдают только {ready, request}). */
+const gen = (): number => (sidecar() as { generation?: number }).generation ?? 0;
 
 /** Обход a11y-дерева сложного окна реально дольше дефолтных 5с — даём запас, чтобы не рвать на полпути. */
 const UIA_TIMEOUT_MS = 12_000;
 
-/** Провалидировать ответ ground: handle обязателен, иначе действие ушло бы по undefined-handle. */
+/**
+ * Провалидировать ответ ground: handle обязателен, иначе действие ушло бы по undefined-handle.
+ * W2: РЕАЛЬНАЯ форма сайдкара (Ipc.cs GroundResult) — ПЛОСКАЯ {handle, x, y, w, h, name, role}; прежний разбор читал
+ * только `bbox`, и bbox всегда был нулевым — проверка «под точкой контейнер» (H-A1) в бою не срабатывала.
+ * Вложенный `bbox` оставлен для старых моков.
+ */
 function asGroundResult(data: unknown): GroundResult {
-  const d = data as { handle?: unknown; bbox?: { x?: unknown; y?: unknown; w?: unknown; h?: unknown } };
+  const d = data as { handle?: unknown; bbox?: { x?: unknown; y?: unknown; w?: unknown; h?: unknown }; x?: unknown; y?: unknown; w?: unknown; h?: unknown; name?: unknown; role?: unknown };
   // Сайдкар отдаёт handle ЧИСЛОМ (C# int) — нормализуем в строку (Target.handle: string). Раньше здесь
   // жёстко требовалась строка → ground ВСЕГДА бросал на числовом handle (латентный баг ui.invoke-по-handle).
   const rawHandle = typeof d?.handle === "number" ? String(d.handle) : d?.handle;
   if (typeof rawHandle !== "string" || !rawHandle) {
     throw new Error("ui.ground: элемент не найден (пустой handle от сайдкара)");
   }
-  const b = d.bbox;
-  const ok = b && [b.x, b.y, b.w, b.h].every((n) => typeof n === "number" && Number.isFinite(n));
-  return {
+  const b = d.bbox ?? { x: d.x, y: d.y, w: d.w, h: d.h };
+  const ok = [b.x, b.y, b.w, b.h].every((n) => typeof n === "number" && Number.isFinite(n));
+  const g: GroundResult = {
     handle: rawHandle,
-    bbox: ok ? { x: b!.x as number, y: b!.y as number, w: b!.w as number, h: b!.h as number } : { x: 0, y: 0, w: 0, h: 0 },
+    bbox: ok ? { x: b.x as number, y: b.y as number, w: b.w as number, h: b.h as number } : { x: 0, y: 0, w: 0, h: 0 },
+    ...(typeof d.name === "string" ? { name: d.name } : {}),
+    ...(typeof d.role === "string" ? { role: d.role } : {}),
   };
+  noteGround(g, gen()); // W2: зеркало handle (читает рубеж П1/П2)
+  return g;
 }
 
 /** Найти элемент по роли/имени в активном окне (a11y-first, §6). §Волна2 (2.4): nameMode="substring"
@@ -93,16 +108,17 @@ export async function uiSnapshot(pid?: number, maxItems?: number): Promise<UiSna
   log.debug("ui.snapshot", { pid, maxItems });
   const data = (await sidecar().request("ui.snapshot", { pid, maxItems }, UIA_TIMEOUT_MS)) as UiSnapshot;
   if (!data || !Array.isArray(data.items)) throw new Error("ui.snapshot: сайдкар вернул пустой снапшот");
+  noteSnapshot(data, gen()); // W2: зеркало handle (имя, роль, value, pid окна, bbox)
   return data;
 }
 
 /** §бесшумный-ввод: элемент под ТОЧКОЙ (логические virtual-desktop координаты, как у click) → handle
  *  actionable-предка. Даёт бесшумный клик «по пикселям» из screen_capture (ui.invoke по handle, без курсора).
  *  Бросает, если под точкой нет UIA-элемента (canvas/игра) — вызывающий деградирует на физ.клик. */
-export async function groundAtPoint(logicalX: number, logicalY: number): Promise<GroundResult> {
+export async function groundAtPoint(logicalX: number, logicalY: number, timeoutMs = UIA_TIMEOUT_MS): Promise<GroundResult> {
   ensure();
   log.debug("ui.ground.at", { logicalX, logicalY });
-  return asGroundResult(await sidecar().request("ground.at", { x: logicalX, y: logicalY }, UIA_TIMEOUT_MS));
+  return asGroundResult(await sidecar().request("ground.at", { x: logicalX, y: logicalY }, timeoutMs));
 }
 
 /** Действие по UIA-паттерну над целью (основной путь, §6). Сайдкар действует по handle. */
@@ -118,7 +134,7 @@ export async function invoke(target: Target, pattern: UiPattern, value?: string)
   if (target.by === "handle") handle = target.handle;
   else if (target.by === "role") handle = (await ground({ role: target.role, name: target.name })).handle;
   else throw new NotImplementedError("ui.invoke по координатам невозможен — нужен a11y-handle");
-  await sidecar().request("invoke", { handle, pattern, value }, UIA_TIMEOUT_MS);
+  await injectRpc("invoke", { handle, pattern, value }, UIA_TIMEOUT_MS); // W2: через рубеж инжекции
 }
 
 /** Прочитать выделение/окно (дейксис §19) через сайдкар (TextPattern / a11y-выжимка). */

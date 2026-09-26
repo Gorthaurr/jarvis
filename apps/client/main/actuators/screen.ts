@@ -16,6 +16,8 @@
 import { type Display, desktopCapturer, screen } from "electron";
 import { createLogger } from "@jarvis/shared";
 import { monitors } from "../monitors.js";
+// W2 (пакет 0): rect модели (кадр / последний снимок / space:"screen") → DIP — единый перевод coords.ts.
+import { rectToDip } from "./coords.js";
 
 const log = createLogger("actuator:screen");
 const MAX_EDGE = 1568;
@@ -118,6 +120,7 @@ export interface CaptureRect {
   w: number;
   h: number;
   space?: "screen";
+  frame?: string;
 }
 
 export interface CaptureOpts {
@@ -133,13 +136,6 @@ export interface CaptureOpts {
   updateMapping?: boolean;
 }
 
-/** rect (image-координаты последнего снимка ИЛИ DIP) → DIP virtual-desktop. */
-function rectToDip(rect: CaptureRect): { x: number; y: number; w: number; h: number } {
-  if (rect.space === "screen") return { x: rect.x, y: rect.y, w: rect.w, h: rect.h };
-  const m = lastMapping;
-  if (!m) return { x: rect.x, y: rect.y, w: rect.w, h: rect.h }; // без прежнего снимка считаем DIP (честная деградация)
-  return { x: m.boundsX + rect.x / m.scale, y: m.boundsY + rect.y / m.scale, w: rect.w / m.scale, h: rect.h / m.scale };
-}
 
 export async function captureScreen(which?: string | number, opts?: CaptureOpts): Promise<ScreenShot> {
   // Выбор монитора для кропа — ПО РЕГИОНУ, не по foreground/курсору (ревью #1/#2):

@@ -25,13 +25,13 @@ import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
 import * as fs from "./fs.js";
 import { viewFile } from "./file-view.js";
-import { type CaptureRect, captureScreen, getLastCaptureMapping, probeScreen } from "./screen.js";
+import { type CaptureRect, captureScreen, probeScreen } from "./screen.js";
+import { toDipPoint } from "./coords.js";
+import { actionErrorOf } from "./action-error.js";
 import { selectionClear, selectionStart, selectionView } from "./selection.js";
 import { selectionStore } from "../selection/store.js";
 import { OVERLAY_EXIT_CODE, focusStealsUnderVeil, isVeilGatedInput, overlayDrawingFromCodeRun, veilRelevant } from "../selection/veil-policy.js";
-import { DrawingOverlayError } from "./input.js";
 import { act } from "./act.js";
-import { ActPartialError } from "./act-do.js";
 import { screenOcr, waitFor } from "./sensors-cheap.js";
 import { captureUiFingerprint, observeAfterAction } from "./observe.js";
 import * as system from "./system.js";
@@ -97,14 +97,11 @@ const OBSERVING_KINDS = new Set<ActionCommand["kind"]>([
  * наблюдение честно останется без дельты (слабым), а не выдаст окрестность за сверку исхода.
  */
 export function plannedClickPoint(cmd: ActionCommand): { x: number; y: number } | undefined {
-  const toScreen = (x: number, y: number, space?: "screen"): { x: number; y: number } => {
-    if (space === "screen") return { x, y };
-    const m = getLastCaptureMapping();
-    return m ? { x: m.boundsX + x / m.scale, y: m.boundsY + y / m.scale } : { x, y };
-  };
-  if (cmd.kind === "input.click" && cmd.target.by === "coords") return toScreen(cmd.target.x, cmd.target.y, cmd.target.space);
-  if (cmd.kind === "input.mouse" && cmd.op === "drag" && cmd.toX !== undefined && cmd.toY !== undefined) {
-    return toScreen(cmd.toX, cmd.toY, cmd.space);
+  try {
+    if (cmd.kind === "input.click" && cmd.target.by === "coords") return toDipPoint(cmd.target.x, cmd.target.y, cmd.target);
+    if (cmd.kind === "input.mouse" && cmd.op === "drag" && cmd.toX !== undefined && cmd.toY !== undefined) return toDipPoint(cmd.toX, cmd.toY, cmd);
+  } catch {
+    /* неизвестный кадр — снимка «до» нет; честную ошибку даст само действие (coords.ts) */
   }
   return undefined;
 }
@@ -388,14 +385,8 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
 
         // Наблюдение — для завершённых жестов (drag/wheel/up); move/down — середина жеста.
         const wantsObserve = willObserve(cmd);
-        // Точка для OCR-региона — конец drag в экранных DIP (координаты команды — vision-координаты
-        // последнего снимка, кроме space:"screen"; маппинг тот же, что внутри input.mouse).
-        const dragEnd = (() => {
-          if (cmd.op !== "drag" || cmd.toX === undefined || cmd.toY === undefined) return undefined;
-          if (cmd.space === "screen") return { x: cmd.toX, y: cmd.toY };
-          const m = getLastCaptureMapping();
-          return m ? { x: m.boundsX + cmd.toX / m.scale, y: m.boundsY + cmd.toY / m.scale } : { x: cmd.toX, y: cmd.toY };
-        })();
+        // Точка для OCR-региона — конец drag в экранных DIP (тот же перевод coords.ts, что внутри input.mouse).
+        const dragEnd = cmd.op === "drag" && cmd.toX !== undefined && cmd.toY !== undefined ? toDipPoint(cmd.toX, cmd.toY, cmd) : undefined;
         const observation = wantsObserve
           ? await observeAfterAction({ settleMs: 400, clickPoint: dragEnd, before: beforeUi })
           : undefined;
@@ -783,14 +774,14 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
       }
     }
   } catch (e) {
-    // §режим выделения: гейт точки инжекции бросил — это состояние системы (вуаль), не сбой актуатора.
-    if (e instanceof DrawingOverlayError) {
-      // Контроль-6 (C5R-2): «ушло, исход не подтверждён» — отдельный признак (сервер: overlayActionInjected).
-      return { ...errResult(commandId, startedAt, "overlay_drawing", e.message), ...(e.injected ? { stepActionInjected: true } : {}) };
+    // W2 (action-error.ts): ошибка с протокольным исходом — код, данные и «часть ушла» доходят до сервера как есть:
+    // вуаль (overlay_drawing, состояние системы), частичный act (runtime + ушло), рубеж инжекции (denied + needsApproval).
+    // Контроль-6 (C5R-2) / W4: stepActionInjected — «ушло, исход не подтверждён», «доделай» не повторит вслепую.
+    const ae = actionErrorOf(e);
+    if (ae) {
+      const out = errResult(commandId, startedAt, ae.code, e instanceof Error ? e.message : String(e));
+      return { ...out, ...(ae.data !== undefined ? { data: ae.data } : {}), ...(ae.injected ? { stepActionInjected: true } : {}) };
     }
-    // W4: часть act ушла в GUI (клик в поле прошёл, печать упала) — ошибка, но с признаком «ушло»: сервер
-    // помечает исход неизвестным, чтобы «доделай» не повторило действие вслепую.
-    if (e instanceof ActPartialError) return { ...errResult(commandId, startedAt, "runtime", e.message), stepActionInjected: true };
     const message = e instanceof Error ? e.message : String(e);
     log.error(`actuator ${cmd.kind} упал: ${message}`);
     // NotImplementedError из стабов — это тоже runtime-ошибка наружу (честно).

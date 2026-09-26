@@ -9,7 +9,6 @@ import { antiRunawayIdentical, familyCap } from "./anti-runaway.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { pruneStaleImages } from "../prune-images.js";
 import { buildResumeDigest, mergeDigests } from "../checkpoint.js";
-import { digestOptions } from "./digest-options.js";
 
 export function ladderHint(ctx: LoopCtx): void {
   const { st, pushSystemNote } = ctx;
@@ -28,7 +27,7 @@ export function ladderHint(ctx: LoopCtx): void {
 }
 
 export function commitRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult): void {
-  const { deps, opts, st, taskId, convo, priorDigest, effectOf, saveCheckpoint } = ctx;
+  const { deps, opts, st, taskId, convo, priorDigest, digestOpts, saveCheckpoint } = ctx;
   const { KEEP_SCREENSHOTS, KEEP_SELECTION_VIEWS, KEEP_DOC_IMAGES } = ctx.cfg;
   // Волна C: результаты раунда УЖЕ в истории (мутации совершены) — даже если петля сейчас выйдет по
   // обрыву канала/отмене до `round += 1`, журнал чекпойнта обязан их включить.
@@ -44,7 +43,7 @@ export function commitRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult)
         deps.checkpoints.refreshJournal(
           deps.userId,
           opts.resumeFrom.taskId,
-          mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
+          mergeDigests(priorDigest, buildResumeDigest(convo, digestOpts())),
           Math.max(st.progress.round + 1, st.progress.committedToolRounds),
         );
       } else if (st.budget.preventiveCheckpoint) {

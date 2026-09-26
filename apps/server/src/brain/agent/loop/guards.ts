@@ -4,11 +4,10 @@ import type { LoopCtx } from "./context.js";
 import { formatSelectionContext } from "../selection-context.js";
 import { maskOldObservations } from "../mask-observations.js";
 import { buildResumeDigest, mergeDigests, STEER_NOTE_MARKER } from "../checkpoint.js";
-import { digestOptions } from "./digest-options.js";
 import { metrics } from "../../../obs/metrics.js";
 
 export function budgetNudge(ctx: LoopCtx, elapsedMs: number): void {
-  const { deps, opts, st, taskId, convo, priorDigest, effectOf, pushSystemNote, saveCheckpoint, loopMaxMs } = ctx;
+  const { deps, opts, st, taskId, convo, priorDigest, digestOpts, pushSystemNote, saveCheckpoint, loopMaxMs } = ctx;
   // Волна 1 (1.5): видимый бюджет времени. (а) 70% потолка → одноразовый впрыск «сворачивайся» —
   // модель успевает завершить подшаг, свериться и дать ЧЕСТНЫЙ частичный итог штатным финалом;
   // (б) остаток меньше среднего раунда → новый LLM-раунд не начинаем (его всё равно убьёт потолок
@@ -34,7 +33,7 @@ export function budgetNudge(ctx: LoopCtx, elapsedMs: number): void {
         deps.checkpoints?.refreshJournal(
           deps.userId,
           opts.resumeFrom.taskId,
-          mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
+          mergeDigests(priorDigest, buildResumeDigest(convo, digestOpts())),
           Math.max(st.progress.round, st.progress.committedToolRounds),
         );
       } catch (e) {

@@ -4,7 +4,7 @@ import type { LoopCtx } from "./context.js";
 import type { LoopState } from "./state.js";
 import type { AgentDeps, LoopOpts } from "../types.js";
 import type { LlmMessage } from "../../../integrations/llm.js";
-import { type CheckpointReason, type TaskCheckpoint, buildResumeDigest, mergeDigests } from "../checkpoint.js";
+import { type CheckpointReason, type DigestOptions, type TaskCheckpoint, buildResumeDigest, mergeDigests } from "../checkpoint.js";
 import { digestOptions } from "./digest-options.js";
 import { toolCallEffect } from "../error-voice.js";
 
@@ -58,7 +58,7 @@ export function makeNoteHelpers(core: NoteCore) {
         tier: st.tier.currentTier,
         // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
         // иначе третий заход не видел отправок первого и мог повторить их людям).
-        digest: mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
+        digest: mergeDigests(priorDigest, buildResumeDigest(convo, digestOpts())),
         ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
       };
       const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);
@@ -77,5 +77,6 @@ export function makeNoteHelpers(core: NoteCore) {
       return false;
     }
   };
-  return { effectOf, pushSystemNote, saveCheckpoint };
+  const digestOpts = (): DigestOptions => digestOptions(st, effectOf); // W2: одна сборка опций журнала (digest-options.ts)
+  return { effectOf, digestOpts, pushSystemNote, saveCheckpoint };
 }

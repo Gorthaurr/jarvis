@@ -64,9 +64,10 @@ export async function precheckVerify(verify: ActVerify | undefined, deadline: nu
  */
 export async function verifyOutcome(
   verify: ActVerify | undefined,
-  ctx: { before?: UiFingerprint; clickPoint?: { x: number; y: number }; deadline: number; preMet?: boolean },
+  ctx: { before?: UiFingerprint; clickPoint?: { x: number; y: number }; deadline: number; preMet?: boolean; observe?: boolean },
 ): Promise<ActVerdict> {
-  const observation = await observeAfterAction({ settleMs: 350, clickPoint: ctx.clickPoint, before: ctx.before });
+  // W2: observe:false — без наблюдения ПОСЛЕ (промежуточный шаг серии); признак verify по-прежнему ждём.
+  const observation = ctx.observe === false ? undefined : await observeAfterAction({ settleMs: 350, clickPoint: ctx.clickPoint, before: ctx.before });
   const cond = verify ? verifyCondition(verify) : null;
   if (!cond) {
     const detail = !verify

@@ -5,7 +5,6 @@ import type { AgentReply } from "../types.js";
 import type { LoopOutcome } from "./outcome.js";
 import { llmFailureLine } from "../../../integrations/anthropic.js";
 import { buildResumeDigest, mergeDigests, resumeOfferPhrase } from "../checkpoint.js";
-import { digestOptions } from "./digest-options.js";
 import { splitIntoSentences } from "../../nlu/sentences.js";
 import { isHollowSuccess, looksLikeGiveUp, maskedFailureReply } from "../error-voice.js";
 import { verbalize } from "../../verbalize/index.js";
@@ -25,7 +24,7 @@ export function makeTerminal(ctx: LoopCtx) {
 export interface TerminalEnv { terminal: (voice: string) => AgentReply; doneRounds: number }
 
 export function refreshResumeJournal(ctx: LoopCtx): void {
-  const { deps, opts, st, taskId, convo, priorDigest, effectOf } = ctx;
+  const { deps, opts, st, taskId, convo, priorDigest, digestOpts } = ctx;
   // 🔴 Волна C (контрольное ревью, HIGH): если это ПРОДОЛЖЕНИЕ и заход успел поработать — журнал в
   // сторе обязан включать ЭТОТ заход, КАКИМ БЫ ни был терминал. Иначе комбинация двух фиксов давала
   // тихую ловушку: peek (не take) оставляет чекпойнт живым, а saveCheckpoint зовут лишь три терминала
@@ -39,7 +38,7 @@ export function refreshResumeJournal(ctx: LoopCtx): void {
       deps.checkpoints.refreshJournal(
         deps.userId,
         opts.resumeFrom.taskId,
-        mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
+        mergeDigests(priorDigest, buildResumeDigest(convo, digestOpts())),
         Math.max(st.progress.round, st.progress.committedToolRounds),
       );
     } catch (e) {

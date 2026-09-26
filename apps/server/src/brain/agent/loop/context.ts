@@ -10,7 +10,7 @@ import { makeTierHelpers } from "./tiering.js";
 import { TaskManager } from "../../tasks/manager.js";
 import type { Task } from "../../tasks/task.js";
 import type { RecalledSkill } from "../../../memory/skills.js";
-import type { CheckpointReason } from "../checkpoint.js";
+import type { CheckpointReason, DigestOptions } from "../checkpoint.js";
 import type { LoopState } from "./state.js";
 import type { LoopConfig } from "./config.js";
 import type { AgentDeps, ReplySink, LoopOpts } from "../types.js";
@@ -36,6 +36,7 @@ export interface LoopCtx extends LoopBase {
   showStatus: () => void;
   notePartial: (source: string, k: number) => void;
   effectOf: (name: string, input?: unknown) => "verify" | "mutate" | "neutral";
+  digestOpts: () => DigestOptions; // W2: опции журнала из состояния петли (digest-options.ts) — одна сборка на все места
   pushSystemNote: (note: string) => void;
   saveCheckpoint: (reason: CheckpointReason, opts2?: { deliverable?: boolean }) => boolean;
   escalateForQuality: (reason: string) => void;

@@ -18,8 +18,11 @@
 import type { ActTarget } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
 import { groundAtPoint, type UiSnapshotItem, uiSnapshot } from "./ground.js";
-import { getLastCaptureMapping } from "./screen.js";
+import { toDipPoint } from "./coords.js";
+import { looksLikeContainer } from "./point-policy.js";
 import { screenOcr } from "./sensors-cheap.js";
+// W2: политика «что под точкой» — point-policy.ts (общая с рубежом §14, П1); реэкспорт для прежних импортов.
+export { MAX_ACTIONABLE_H, MAX_ACTIONABLE_W, looksLikeContainer } from "./point-policy.js";
 
 const log = createLogger("actuator:act-find");
 
@@ -27,8 +30,13 @@ const log = createLogger("actuator:act-find");
 export interface FoundTarget {
   via: "handle" | "point" | "snapshot" | "ocr";
   handle?: string;
+  /** W2: РЕАЛЬНОЕ имя элемента (снапшот, ground.at); нет элемента — текст запроса/строка OCR. Рубеж §14 судит по нему. */
   name: string;
+  /** W2: что просила модель (текст цели) — отдельно от реального имени. */
+  query?: string;
   role?: string;
+  /** W2: bbox найденного элемента (ФИЗИЧЕСКИЕ пиксели), если он известен. */
+  bbox?: { x: number; y: number; w: number; h: number };
   /** Экранные DIP точки действия (есть у point/ocr) — база OCR-снимка «до/после» и физического клика. */
   point?: { x: number; y: number };
   /** Честная пометка (снапшот усечён, роль не проверена OCR и т.п.). */
@@ -78,35 +86,22 @@ export function scoreItem(it: UiSnapshotItem, q: Query): number {
 
 const label = (it: UiSnapshotItem): string => `${it.role} «${String(it.name ?? "").slice(0, 40)}»${it.automationId ? ` [${it.automationId}]` : ""}`;
 
-function toScreen(x: number, y: number, space?: "screen"): { x: number; y: number } {
-  if (space === "screen") return { x, y };
-  const m = getLastCaptureMapping();
-  return m ? { x: m.boundsX + x / m.scale, y: m.boundsY + y / m.scale } : { x, y };
-}
-
 /**
- * Ревью 2026-09-24 (H-A1): сайдкар отдаёт под точкой actionable-предка, а если такого нет — САМ элемент, и в
- * играх/Electron это контейнер на пол-окна (живая проба: Group 1343×756 без имени). Клик по его handle =
- * клик в ЦЕНТР контейнера, а не в найденную точку, с отчётом «нажал». Крупный элемент под точкой — не кнопка:
- * берём только саму точку. Порог в физических пикселях (bbox сайдкара) — с запасом на масштаб 150–200 %.
+ * Ступень «точка»: элемент под точкой → handle; ничего нет или это контейнер (point-policy, H-A1) → сама точка
+ * (физический путь). W2: name — РЕАЛЬНОЕ имя элемента под точкой (ground.at), query — что просили.
  */
-export const MAX_ACTIONABLE_W = 600;
-export const MAX_ACTIONABLE_H = 300;
-export function looksLikeContainer(bbox: { w: number; h: number } | undefined): boolean {
-  return !!bbox && (bbox.w > MAX_ACTIONABLE_W || bbox.h > MAX_ACTIONABLE_H);
-}
-
-/** Ступень «точка»: элемент под точкой → handle; ничего нет или это контейнер → сама точка (физический путь). */
-async function findAtPoint(p: { x: number; y: number }, via: "point" | "ocr", name: string): Promise<FoundTarget> {
+async function findAtPoint(p: { x: number; y: number }, via: "point" | "ocr", query: string): Promise<FoundTarget> {
   try {
     const g = await groundAtPoint(p.x, p.y);
+    const name = g.name?.trim() ? g.name : query;
+    const role = g.role?.replace(/^ControlType\./u, "");
     if (looksLikeContainer(g.bbox)) {
-      return { via, name, point: p, note: `под точкой контейнер ${g.bbox.w}×${g.bbox.h}, не кнопка: действие пойдёт физическим кликом в саму точку` };
+      return { via, name, query, point: p, bbox: g.bbox, note: `под точкой контейнер ${g.bbox.w}×${g.bbox.h}, не кнопка: действие пойдёт физическим кликом в саму точку` };
     }
-    return { via, handle: g.handle, name, point: p };
+    return { via, handle: g.handle, name, query, ...(role ? { role } : {}), point: p, bbox: g.bbox };
   } catch (e) {
     log.debug("act-find: под точкой нет UIA-элемента — физический путь", e instanceof Error ? e.message : String(e));
-    return { via, name, point: p, note: "под точкой нет UIA-элемента: действие пойдёт физическим кликом" };
+    return { via, name: query, query, point: p, note: "под точкой нет UIA-элемента: действие пойдёт физическим кликом" };
   }
 }
 
@@ -130,7 +125,8 @@ async function findInSnapshot(q: Query): Promise<{ found: FoundTarget | null; se
     );
   }
   const it = top[0]!.it;
-  return { found: { via: "snapshot", handle: String(it.handle), name: it.name, role: it.role }, seen, truncated: snap.truncated };
+  const bbox = { x: it.x, y: it.y, w: it.w, h: it.h };
+  return { found: { via: "snapshot", handle: String(it.handle), name: it.name, query: q.text, role: it.role, bbox }, seen, truncated: snap.truncated };
 }
 
 /** Ступень OCR: строка с текстом → центр в экранных DIP (mapping полного кадра) → ground.at или точка. */
@@ -155,11 +151,14 @@ async function findByOcr(text: string): Promise<FoundTarget | null> {
   return { ...f, note: `${f.note ? `${f.note}; ` : ""}найдено OCR (роль не проверена)` };
 }
 
-/** Найти цель по лестнице. deadline — абсолютное время (Date.now()), после которого ступени не начинаем. */
-export async function findTarget(target: ActTarget, deadline: number): Promise<FoundTarget> {
-  const q: Query & { handle?: string; x?: number; y?: number; space?: "screen" } = typeof target === "string" ? { text: target } : target;
-  if (q.handle) return { via: "handle", handle: String(q.handle), name: `handle ${q.handle}` };
-  if (typeof q.x === "number" && typeof q.y === "number") return findAtPoint(toScreen(q.x, q.y, q.space), "point", q.text ?? `точка ${q.x},${q.y}`);
+/**
+ * Найти цель по лестнице. deadline — абсолютное время (Date.now()), после которого ступени не начинаем.
+ * W2: `hwnd` — окно `app`, в котором ищем (сфокусировано act); П1/П5 сужают по нему снапшот и OCR (G-12).
+ */
+export async function findTarget(target: ActTarget, deadline: number, _opts: { hwnd?: number } = {}): Promise<FoundTarget> {
+  const q: Query & { handle?: string; x?: number; y?: number; space?: "screen"; frame?: string } = typeof target === "string" ? { text: target } : target;
+  if (q.handle) return { via: "handle", handle: String(q.handle), name: `handle ${q.handle}`, ...(q.text ? { query: q.text } : {}) };
+  if (typeof q.x === "number" && typeof q.y === "number") return findAtPoint(toDipPoint(q.x, q.y, q), "point", q.text ?? `точка ${q.x},${q.y}`);
   if (!q.text && !q.role && !q.automationId) throw new ActFindError("Цель пустая: нужен text, role, automationId, handle или x/y.");
   const remaining = (): number => deadline - Date.now();
   if (remaining() < NEED_SNAPSHOT_MS) throw new ActFindError("Бюджет act исчерпан до поиска цели — повтори с меньшим verify.timeoutMs или без app.");
