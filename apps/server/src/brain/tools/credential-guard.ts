@@ -144,8 +144,13 @@ export function lastActTarget(session: object | undefined): unknown {
   return session ? lastActTargets.get(session) : undefined;
 }
 
+/**
+ * Р2 srv-bypass-3: судим ровно то, что НАПЕЧАТАЕТСЯ. Аргументы SDK — z.record(unknown), а расширение печатает
+ * `String(P.text)`: номер карты или код числом (4111111111111111, 123456) раньше проходил мимо Луны и признака поля.
+ */
 function field(text: unknown, hints: string[], secret = false): TypedField[] {
-  return typeof text === "string" && text.length > 0 ? [{ text, hints, ...(secret ? { secret } : {}) }] : [];
+  const s = text === undefined || text === null ? "" : String(text);
+  return s.length > 0 ? [{ text: s, hints, ...(secret ? { secret } : {}) }] : [];
 }
 
 /** Шаги берста: браузерный ({intent,ref,params}) и нативный SkillStep ({action,target,params}). */
