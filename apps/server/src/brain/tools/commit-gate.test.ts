@@ -1,6 +1,7 @@
 /** §14 гейт необратимых кликов (причина №4 USER_SCENARIOS_2026-09-02) — чистые правила. */
 import { describe, expect, it } from "vitest";
 import {
+  COMMIT_WORDS_RE,
   assessGuiCommit,
   assessWebCommit,
   hostOfUrl,
@@ -45,6 +46,25 @@ describe("assessWebCommit", () => {
   it("клик без имени (селектор/координаты) на опасном хосте — не гейтится (осознанный предел)", () => {
     expect(assessWebCommit({ host: "online.sberbank.ru", intent: "click", params: { selector: "#btn-7" } })).toBeNull();
     expect(assessWebCommit({ host: "online.sberbank.ru", intent: "scroll", params: { dy: 300 } })).toBeNull();
+  });
+});
+
+// W1 (B-5): удаление необратимо так же, как отправка — «Удалить навсегда» в почте уходило без вопроса владельцу.
+describe("W1: глаголы удаления в COMMIT_WORDS_RE (общий список веба, GUI-гейта и клиентского рубежа)", () => {
+  it("«Удалить», «Удалить навсегда», «Удаление аккаунта», «Стереть», Delete/Erase — коммит", () => {
+    for (const s of ["Удалить", "Удалить навсегда", "Удаление аккаунта", "удалите чат", "Стереть всё", "Delete", "Delete forever", "Erase disk"]) {
+      expect(COMMIT_WORDS_RE.test(s), s).toBe(true);
+    }
+  });
+  it("не удаление: «Удалённый рабочий стол», «удаленный доступ», «удалёнка», «Не удалось», папка «Deleted», undelete — НЕ коммит", () => {
+    for (const s of ["Удалённый рабочий стол", "удаленный доступ", "Работа на удалёнке", "Не удалось загрузить", "Deleted items", "Undelete", "Eraser tool"]) {
+      expect(COMMIT_WORDS_RE.test(s), s).toBe(false);
+    }
+  });
+  it("проводка: клик «Удалить навсегда» в веб-почте спрашивает, клик по папке «Удалённые» — нет; act «Удалить» в Telegram — коммит", () => {
+    expect(assessWebCommit({ host: "mail.google.com", intent: "click", params: { text: "Удалить навсегда" } })?.what).toMatch(/Удалить навсегда/u);
+    expect(assessWebCommit({ host: "mail.google.com", intent: "click", params: { text: "Удалённые" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Удалить для всех" } })?.what).toMatch(/Удалить/u);
   });
 });
 
