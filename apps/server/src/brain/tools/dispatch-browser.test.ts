@@ -94,7 +94,7 @@ describe("browser_* через расширение", () => {
     await dispatchTool("browser_open", { url: "https://music.yandex.ru" }, c);
     await dispatchTool("browser_act", { intent: "play" }, c);
     // play ушёл В music.yandex.ru c tabId 42, а НЕ в активную вкладку (= Telegram)
-    expect(tabAct).toHaveBeenCalledWith("https://music.yandex.ru", "play", expect.anything(), 42, false);
+    expect(tabAct).toHaveBeenCalledWith("https://music.yandex.ru", "play", expect.anything(), 42);
   });
 
   it("browser_read после browser_open читает ТУ ЖЕ вкладку (url + tabId)", async () => {
@@ -228,7 +228,7 @@ describe("browser_* через расширение", () => {
   it("browser_act с явным url в input целится в него (без предварительного open)", async () => {
     const tabAct = vi.fn(async () => ({ ok: true }));
     const r = await dispatchTool("browser_act", { intent: "play", url: "https://music.yandex.ru" }, makeCtx({ ext: ext({ tabAct }) }));
-    expect(tabAct).toHaveBeenCalledWith("https://music.yandex.ru", "play", expect.anything(), undefined, false);
+    expect(tabAct).toHaveBeenCalledWith("https://music.yandex.ru", "play", expect.anything(), undefined);
     expect(r.isError).toBe(false);
   });
 
@@ -378,8 +378,8 @@ describe("browser_* через расширение", () => {
     // Передаём ТОЛЬКО tabId (без url) — должен пробросить именно его в ext.tabAct.
     const r = await dispatchTool("browser_act", { intent: "pause", tabId: 111 }, makeCtx({ ext: ext({ tabAct }) }));
     expect(r.isError).toBeFalsy();
-    // сигнатура tabAct(url, intent, params, tabId, refMode) — точный tabId 4-м, refMode 5-м (деф false) аргументом
-    expect(tabAct).toHaveBeenCalledWith("", "pause", expect.anything(), 111, false);
+    // сигнатура tabAct(url, intent, params, tabId) — точный tabId 4-м аргументом (W1: refMode шлёт сам мост, всегда true)
+    expect(tabAct).toHaveBeenCalledWith("", "pause", expect.anything(), 111);
   });
 
   it("browser_tabs без расширения → честная ошибка (не выдумывает вкладки)", async () => {
@@ -389,55 +389,32 @@ describe("browser_* через расширение", () => {
   });
 });
 
-/** Прогнать проверку с включённым ref-режимом (JARVIS_BROWSER_REF=1), вернув env как было. Общий для AX-Ref и §3.11. */
-const withRef = async (fn: () => Promise<void>) => {
-  const prev = process.env.JARVIS_BROWSER_REF;
-  process.env.JARVIS_BROWSER_REF = "1";
-  try {
-    await fn();
-  } finally {
-    if (prev === undefined) delete process.env.JARVIS_BROWSER_REF;
-    else process.env.JARVIS_BROWSER_REF = prev;
-  }
-};
-
-// §AX-Ref: ref-адресация (флаг JARVIS_BROWSER_REF), браузерный берст, ранжированный observed, ref_stale.
+// §AX-Ref: ref-адресация, браузерный берст, ранжированный observed, ref_stale. W1: ref-режим единственный — флага
+// окружения нет, тесты ниже идут без всякой настройки env (на коде с флагом берст и рецепты молчали бы).
 describe("browser_* AX-Ref (ref/batch/observed)", () => {
-  it("browser_batch: без ref-режима — честно выключен (не притворяется, что сделал)", async () => {
-    const tabBatch = vi.fn(async () => ({ ok: true, done: 2, total: 2 }));
-    const r = await dispatchTool("browser_batch", { steps: [{ ref: "e1_0", intent: "click" }] }, makeCtx({ ext: ext({ tabBatch }) }));
-    expect(r.isError).toBe(true);
-    expect(String(r.content)).toMatch(/JARVIS_BROWSER_REF/);
-    expect(tabBatch).not.toHaveBeenCalled();
-  });
-
   it("browser_batch: в ref-режиме зовёт tabBatch и НЕ снимает verify-долг (исход сверяется отдельно)", async () => {
-    await withRef(async () => {
-      const tabBatch = vi.fn(async () => ({ ok: true, done: 3, total: 3 }));
-      const c = makeCtx({ ext: ext({ tabBatch, openOrFocus: vi.fn(async () => ({ focused: true, tabId: 5 })) }) });
-      await dispatchTool("browser_open", { url: "https://x.example" }, c);
-      const r = await dispatchTool(
-        "browser_batch",
-        { steps: [{ ref: "e1_0", intent: "type", params: { text: "u" } }, { ref: "e1_1", intent: "click" }] },
-        c,
-      );
-      expect(r.isError).toBeFalsy();
-      expect(tabBatch).toHaveBeenCalledWith("https://x.example", expect.any(Array), 5, true);
-      expect(r.observed).not.toBe(true); // берст — слепой: исход формы/логина сверяется явно
-      expect(String(r.content)).toMatch(/Сверь исход/i);
-    });
+    const tabBatch = vi.fn(async () => ({ ok: true, done: 3, total: 3 }));
+    const c = makeCtx({ ext: ext({ tabBatch, openOrFocus: vi.fn(async () => ({ focused: true, tabId: 5 })) }) });
+    await dispatchTool("browser_open", { url: "https://x.example" }, c);
+    const r = await dispatchTool(
+      "browser_batch",
+      { steps: [{ ref: "e1_0", intent: "type", params: { text: "u" } }, { ref: "e1_1", intent: "click" }] },
+      c,
+    );
+    expect(r.isError).toBeFalsy();
+    expect(tabBatch).toHaveBeenCalledWith("https://x.example", expect.any(Array), 5);
+    expect(r.observed).not.toBe(true); // берст — слепой: исход формы/логина сверяется явно
+    expect(String(r.content)).toMatch(/Сверь исход/i);
   });
 
   it("browser_batch: устаревший снимок → честный err (пересними), без слепого повтора", async () => {
-    await withRef(async () => {
-      const tabBatch = vi.fn(async () => ({ ok: false, code: "ref_stale", done: 1, total: 2, stoppedAt: 1, error: "устаревшие ref e1_1" }));
-      const c = makeCtx({ ext: ext({ tabBatch, openOrFocus: vi.fn(async () => ({ focused: true, tabId: 5 })) }) });
-      await dispatchTool("browser_open", { url: "https://x.example" }, c);
-      const r = await dispatchTool("browser_batch", { steps: [{ ref: "e1_0", intent: "click" }] }, c);
-      expect(r.isError).toBe(true);
-      expect(String(r.content)).toMatch(/browser_inspect/i);
-      expect(String(r.content)).toMatch(/1 из 2/);
-    });
+    const tabBatch = vi.fn(async () => ({ ok: false, code: "ref_stale", done: 1, total: 2, stoppedAt: 1, error: "устаревшие ref e1_1" }));
+    const c = makeCtx({ ext: ext({ tabBatch, openOrFocus: vi.fn(async () => ({ focused: true, tabId: 5 })) }) });
+    await dispatchTool("browser_open", { url: "https://x.example" }, c);
+    const r = await dispatchTool("browser_batch", { steps: [{ ref: "e1_0", intent: "click" }] }, c);
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).toMatch(/browser_inspect/i);
+    expect(String(r.content)).toMatch(/1 из 2/);
   });
 
   it("browser_act type БЕЗ enter → observed (нативный readback value); type С enter (коммит) → долг ОСТАЁТСЯ", async () => {
@@ -554,35 +531,20 @@ describe("§3.11 текущий URL страницы читаем + рецепт
     expect(content).not.toContain(longUrl.slice(0, 201));
   });
 
-  it("рецепт хоста на ПЕРВОМ browser_read по youtube.com (ref-режим) — один раз за сессию, ВНЕ untrusted", async () => {
-    await withRef(async () => {
-      const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/watch?v=abc", text: "видео" }));
-      const c = makeCtx({ ext: ext({ tabRead }) });
-      const r1 = await dispatchTool("browser_read", { url: "youtube.com" }, c);
-      const c1 = String(r1.content);
-      expect(c1).toMatch(HINT);
-      expect(c1).toMatch(/YouTube: play\/pause/); // seed youtube.com из site-recipes
-      expect(c1.lastIndexOf("Приём для этого сайта")).toBeGreaterThan(c1.lastIndexOf("</untrusted_content>")); // наша заметка — снаружи
-      const r2 = await dispatchTool("browser_read", { url: "youtube.com" }, c);
-      expect(String(r2.content)).not.toMatch(HINT); // второй read по тому же хосту в той же сессии — молчит
-      expect(String(r2.content)).toContain("[URL: https://www.youtube.com/watch?v=abc]"); // а URL — всегда
-      // другая сессия — снова первый раз (учёт per-session, не глобальный)
-      const r3 = await dispatchTool("browser_read", { url: "youtube.com" }, makeCtx({ ext: ext({ tabRead }) }));
-      expect(String(r3.content)).toMatch(HINT);
-    });
-  });
-
-  it("без ref-режима хинта на browser_read нет (регресс: гейт refModeOn не снят — решение владельца)", async () => {
-    const prev = process.env.JARVIS_BROWSER_REF;
-    delete process.env.JARVIS_BROWSER_REF;
-    try {
-      const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/watch?v=abc", text: "видео" }));
-      const r = await dispatchTool("browser_read", { url: "youtube.com" }, makeCtx({ ext: ext({ tabRead }) }));
-      expect(r.isError).toBe(false);
-      expect(String(r.content)).not.toMatch(HINT);
-    } finally {
-      if (prev !== undefined) process.env.JARVIS_BROWSER_REF = prev;
-    }
+  it("рецепт хоста на ПЕРВОМ browser_read по youtube.com — один раз за сессию, ВНЕ untrusted (без флага env, W1)", async () => {
+    const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/watch?v=abc", text: "видео" }));
+    const c = makeCtx({ ext: ext({ tabRead }) });
+    const r1 = await dispatchTool("browser_read", { url: "youtube.com" }, c);
+    const c1 = String(r1.content);
+    expect(c1).toMatch(HINT);
+    expect(c1).toMatch(/YouTube: play\/pause/); // seed youtube.com из site-recipes
+    expect(c1.lastIndexOf("Приём для этого сайта")).toBeGreaterThan(c1.lastIndexOf("</untrusted_content>")); // наша заметка — снаружи
+    const r2 = await dispatchTool("browser_read", { url: "youtube.com" }, c);
+    expect(String(r2.content)).not.toMatch(HINT); // второй read по тому же хосту в той же сессии — молчит
+    expect(String(r2.content)).toContain("[URL: https://www.youtube.com/watch?v=abc]"); // а URL — всегда
+    // другая сессия — снова первый раз (учёт per-session, не глобальный)
+    const r3 = await dispatchTool("browser_read", { url: "youtube.com" }, makeCtx({ ext: ext({ tabRead }) }));
+    expect(String(r3.content)).toMatch(HINT);
   });
 
   it("browser_read: title страницы санитизирован — закрывающий делимитер untrusted ровно один (страница не разорвёт обёртку заголовком)", async () => {
@@ -595,48 +557,42 @@ describe("§3.11 текущий URL страницы читаем + рецепт
   });
 
   it("browser_open отдаёт рецепт при КАЖДОМ открытии хоста (явная точка входа), а read после него — нет", async () => {
-    await withRef(async () => {
-      const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/", text: "лента" }));
-      const c = makeCtx({ ext: ext({ tabRead }) });
-      const o1 = await dispatchTool("browser_open", { url: "https://youtube.com" }, c);
-      const o2 = await dispatchTool("browser_open", { url: "https://youtube.com/feed" }, c);
-      expect(String(o1.content)).toMatch(HINT);
-      expect(String(o2.content)).toMatch(HINT); // второй open того же хоста — тоже с рецептом
-      const r = await dispatchTool("browser_read", {}, c);
-      expect(String(r.content)).not.toMatch(HINT);
-    });
+    const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/", text: "лента" }));
+    const c = makeCtx({ ext: ext({ tabRead }) });
+    const o1 = await dispatchTool("browser_open", { url: "https://youtube.com" }, c);
+    const o2 = await dispatchTool("browser_open", { url: "https://youtube.com/feed" }, c);
+    expect(String(o1.content)).toMatch(HINT);
+    expect(String(o2.content)).toMatch(HINT); // второй open того же хоста — тоже с рецептом
+    const r = await dispatchTool("browser_read", {}, c);
+    expect(String(r.content)).not.toMatch(HINT);
   });
 
   it("browser_open помечает хост: после open с хинтом первый browser_read/inspect его НЕ дублирует", async () => {
-    await withRef(async () => {
-      const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/", text: "лента" }));
-      const tabInspect = vi.fn(async () => ({ url: "https://www.youtube.com/", title: "YouTube", count: 0, elements: [] }));
-      const c = makeCtx({ ext: ext({ tabRead, tabInspect }) });
-      const o = await dispatchTool("browser_open", { url: "https://youtube.com" }, c);
-      expect(String(o.content)).toMatch(HINT); // точка входа — хинт как раньше
-      const r = await dispatchTool("browser_read", {}, c);
-      expect(String(r.content)).not.toMatch(HINT);
-      const i = await dispatchTool("browser_inspect", {}, c);
-      expect(String(i.content)).not.toMatch(HINT);
-    });
+    const tabRead = vi.fn(async () => ({ title: "YouTube", url: "https://www.youtube.com/", text: "лента" }));
+    const tabInspect = vi.fn(async () => ({ url: "https://www.youtube.com/", title: "YouTube", count: 0, elements: [] }));
+    const c = makeCtx({ ext: ext({ tabRead, tabInspect }) });
+    const o = await dispatchTool("browser_open", { url: "https://youtube.com" }, c);
+    expect(String(o.content)).toMatch(HINT); // точка входа — хинт как раньше
+    const r = await dispatchTool("browser_read", {}, c);
+    expect(String(r.content)).not.toMatch(HINT);
+    const i = await dispatchTool("browser_inspect", {}, c);
+    expect(String(i.content)).not.toMatch(HINT);
   });
 
   it("browser_inspect: первый осмотр хоста в сессии (без open) несёт рецепт один раз, ВНЕ untrusted", async () => {
-    await withRef(async () => {
-      const tabInspect = vi.fn(async () => ({
-        url: "https://www.youtube.com/watch?v=x",
-        title: "YouTube",
-        count: 1,
-        elements: [{ selector: "button", role: "button", name: "Play" }],
-      }));
-      const c = makeCtx({ ext: ext({ tabInspect }) });
-      const r1 = await dispatchTool("browser_inspect", { url: "youtube.com" }, c);
-      const c1 = String(r1.content);
-      expect(r1.isError).toBe(false);
-      expect(c1).toMatch(HINT);
-      expect(c1.lastIndexOf("Приём для этого сайта")).toBeGreaterThan(c1.lastIndexOf("</untrusted_content>"));
-      const r2 = await dispatchTool("browser_inspect", { url: "youtube.com" }, c);
-      expect(String(r2.content)).not.toMatch(HINT);
-    });
+    const tabInspect = vi.fn(async () => ({
+      url: "https://www.youtube.com/watch?v=x",
+      title: "YouTube",
+      count: 1,
+      elements: [{ selector: "button", role: "button", name: "Play" }],
+    }));
+    const c = makeCtx({ ext: ext({ tabInspect }) });
+    const r1 = await dispatchTool("browser_inspect", { url: "youtube.com" }, c);
+    const c1 = String(r1.content);
+    expect(r1.isError).toBe(false);
+    expect(c1).toMatch(HINT);
+    expect(c1.lastIndexOf("Приём для этого сайта")).toBeGreaterThan(c1.lastIndexOf("</untrusted_content>"));
+    const r2 = await dispatchTool("browser_inspect", { url: "youtube.com" }, c);
+    expect(String(r2.content)).not.toMatch(HINT);
   });
 });

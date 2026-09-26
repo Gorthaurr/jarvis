@@ -8,7 +8,7 @@
  * Путей ввода семь: input_type, browser_act{type}, browser_batch, web_act{type}, ui_invoke{setValue},
  * system_clipboard{write} и те же действия внутри input_batch — каждый со своим кейсом.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ActionCommand } from "@jarvis/protocol";
 import { rememberUiHandles } from "./commit-gate.js";
 import { type ToolContext, dispatchTool } from "./dispatch.js";
@@ -60,16 +60,6 @@ function spyCtx(): Spy {
 }
 
 const TAB = { url: "https://site.test/login" };
-let refFlag: string | undefined;
-
-beforeAll(() => {
-  refFlag = process.env.JARVIS_BROWSER_REF;
-  process.env.JARVIS_BROWSER_REF = "1"; // browser_batch живёт только в ref-режиме
-});
-afterAll(() => {
-  if (refFlag === undefined) delete process.env.JARVIS_BROWSER_REF;
-  else process.env.JARVIS_BROWSER_REF = refFlag;
-});
 
 describe("пароли и коды подтверждения: ввод не доходит до компьютера", () => {
   it("input_type с номером карты → ошибка, ActionCommand НЕ отправлен", async () => {

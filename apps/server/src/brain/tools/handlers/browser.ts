@@ -51,13 +51,8 @@ const BROWSER_TASK_WINDOW_MS = 90_000;
 /** P2.1: окно после честного промаха browser_act, в котором координатный клик по canvas разрешён. */
 const CANVAS_ESCAPE_WINDOW_MS = 30_000;
 
-// §веб-редизайн (AX-Ref): ref-адресация по идентичности (устойчивый реестр вместо хрупкого CSS-селектора)
-// и браузерный берст — за флагами, ДЕФОЛТ OFF (нужен живой смоук в реальном Chrome: reload расширения +
-// не-Яндекс сайт с iframe/shadow/списками; node --check это не ловит). Env читаем ЛЕНИВО (в index.ts .env
-// грузится ПОСЛЕ hoisted-импортов → module-level process.env был бы пуст).
-function refModeOn(): boolean {
-  return process.env.JARVIS_BROWSER_REF === "1";
-}
+// W1 (2026-09-26): ref-режим (адресация по идентичности, рецепты сайтов, берст) — ЕДИНСТВЕННЫЙ; флаг
+// JARVIS_BROWSER_REF удалён. Мост шлёт расширению refMode:true всегда (совместимость со старой версией).
 /** Ошибка расширения указывает на устаревший ref (снимок изменился), а НЕ на отсутствие DOM-элемента? Тогда
  *  НЕ открываем canvas-хатч (элемент есть, нужен свежий browser_inspect — не координатный клик). */
 function looksLikeRefStale(msg: string): boolean {
@@ -65,9 +60,8 @@ function looksLikeRefStale(msg: string): boolean {
 }
 
 /** §AX-Ref: рецепт-хинт для хоста (наша курируемая заметка = ДАННЫЕ, не со страницы → доверенное, без untrusted).
- *  Только в ref-режиме (часть ref-механизма; дефолт-путь с хардкодом не трогаем). Нет рецепта → пусто. */
+ *  Нет рецепта → пусто. */
 function recipeHintFor(url: string): string {
-  if (!refModeOn()) return "";
   try {
     const r = siteRecipes().recall(url);
     return r ? `\nℹ️ Приём для этого сайта (наша заметка, НЕ со страницы): ${r.hint}` : "";
@@ -87,9 +81,8 @@ const recipeHinted = new WeakMap<object, Set<string>>();
 /**
  * Рецепт хоста с учётом «уже отдавал». `always` (browser_open — явная точка входа в сайт) отдаёт хинт при
  * каждом открытии, как и раньше, и помечает хост; без него (read/inspect) — только если хост ещё не помечен.
- * Хинт — НАША заметка (доверенная) → вызывающий ставит его ВНЕ untrusted-обёртки. Гейт refModeOn() внутри
- * recipeHintFor не трогаем (AX-Ref деф OFF — отдельное решение владельца); хост помечается лишь когда хинт
- * реально отдан (пустой хинт = флаг выключен либо рецепта нет — помечать нечего).
+ * Хинт — НАША заметка (доверенная) → вызывающий ставит его ВНЕ untrusted-обёртки; хост помечается лишь когда
+ * хинт реально отдан (пустой хинт = рецепта нет — помечать нечего).
  */
 function recipeHintOnce(ctx: ToolContext, url: string, opts: { always?: boolean } = {}): string {
   const hint = recipeHintFor(url);
@@ -390,7 +383,7 @@ export async function browserInspect(ctx: ToolContext, input: Record<string, unk
   const query = String(input.query ?? "").trim() || undefined;
   const cap = typeof input.cap === "number" ? input.cap : undefined;
   try {
-    const r = (await ctx.ext.tabInspect(target.url, query, cap, target.tabId, refModeOn())) as
+    const r = (await ctx.ext.tabInspect(target.url, query, cap, target.tabId)) as
       | { url?: string; title?: string; count?: number; truncated?: boolean; gen?: number; elements?: unknown[] }
       | undefined;
     rememberRefHints(ctx, r?.elements);
@@ -442,7 +435,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       // ЧЕРЕЗ catch ниже (единый путь обработки, без параллельной ветки на r.ok===false).
       let raw: unknown;
       try {
-        raw = await ctx.ext.tabAct(actUrl, intent, actParams, actTab, refModeOn());
+        raw = await ctx.ext.tabAct(actUrl, intent, actParams, actTab);
       } catch (e) {
         // Страница узнала в элементе коммит (подпись видна только ей) и НЕ нажала — спрашиваем и повторяем.
         const pageLabel = guard ? commitConfirmLabel(e instanceof Error ? e.message : String(e)) : null;
@@ -450,7 +443,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         const decision = await confirmWebCommit(ctx, place, pageCommitRisk(place, pageLabel), pageLabel);
         if (decision !== true) return decision;
         try {
-          raw = await ctx.ext.tabAct(actUrl, intent, { ...actParams, ...approved(pageLabel) }, actTab, refModeOn());
+          raw = await ctx.ext.tabAct(actUrl, intent, { ...actParams, ...approved(pageLabel) }, actTab);
         } catch (e2) {
           // Пока владелец думал, кнопка сменилась (страница снова вернула commit_confirm) — не жмём и подпись не
           // пересказываем модели (её задаёт страница, M11).
@@ -507,7 +500,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
             goal: "Листаю короткие видео по окончании ролика",
             label: (done) => (done > 0 ? `Пролистал ${done}` : "Жду конца ролика"),
             probe: async () => {
-              const s = ((await ctx.ext!.tabAct(url, "feed_auto", { action: "status" }, tabId, false)) ?? {}) as {
+              const s = ((await ctx.ext!.tabAct(url, "feed_auto", { action: "status" }, tabId)) ?? {}) as {
                 running?: boolean;
                 advanced?: number;
                 stoppedReason?: string | null;
@@ -596,8 +589,6 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
  * НЕ снимает verify-долг: исход берста (успех логина/поиска) сверяется отдельно (browser_inspect/browser_read).
  */
 export async function browserBatch(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
-  // Берст адресует ref → работает только в ref-режиме (иначе снимок не минтит ref). Деф off → живой смоук owner'а.
-  if (!refModeOn()) return err("browser_batch доступен только в ref-режиме (включи JARVIS_BROWSER_REF=1). Пока действуй пошагово через browser_act.");
   if (!ctx.ext?.connected || !ctx.ext.tabBatch) return err("browser_batch недоступен: расширение браузера не подключено.");
   const steps = Array.isArray(input.steps) ? (input.steps as unknown[]) : [];
   if (!steps.length) return err("browser_batch: пустой список шагов (steps).");
@@ -628,7 +619,7 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
   }
   const actUrl = place.tabId !== undefined ? place.url : target.url;
   try {
-    const r = (await ctx.ext.tabBatch(actUrl, judged.map((j) => j.step), place.tabId ?? target.tabId, refModeOn())) as
+    const r = (await ctx.ext.tabBatch(actUrl, judged.map((j) => j.step), place.tabId ?? target.tabId)) as
       | { ok?: boolean; done?: number; total?: number; stoppedAt?: number; error?: string; code?: string }
       | undefined;
     const done = r?.done ?? 0;

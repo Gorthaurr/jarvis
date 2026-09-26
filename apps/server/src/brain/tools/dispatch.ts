@@ -208,11 +208,12 @@ export interface ToolContext {
     readonly connected: boolean;
     openOrFocus(url: string): Promise<unknown>;
     tabRead(url?: string, tabId?: number, query?: string): Promise<unknown>;
-    tabInspect(url?: string, query?: string, cap?: number, tabId?: number, refMode?: boolean): Promise<unknown>;
-    tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number, refMode?: boolean): Promise<unknown>;
+    // W1: ref-режим единственный — мост сам шлёт refMode:true, аргумента больше нет.
+    tabInspect(url?: string, query?: string, cap?: number, tabId?: number): Promise<unknown>;
+    tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown>;
     // §AX-Ref: берст веб-шагов по ref одним вызовом (веб-аналог input_batch). Опционально — старые
     // структурные ext-моки/провайдеры без него остаются валидны; browserBatch guard'ит наличие.
-    tabBatch?(url: string, steps: unknown[], tabId?: number, refMode?: boolean): Promise<unknown>;
+    tabBatch?(url: string, steps: unknown[], tabId?: number): Promise<unknown>;
     tabList(): Promise<unknown>;
     tabClose(url?: string, tabId?: number): Promise<unknown>;
     exportCookies(domains?: string[]): Promise<unknown>;

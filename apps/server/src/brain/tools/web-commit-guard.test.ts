@@ -289,18 +289,11 @@ describe("ревью 26.09: web_act судит ТЕКУЩУЮ страницу �
 
 describe("ревью 26.09: browser_batch читает поля шага из params, как расширение", () => {
   it("шаг {intent:'type', params:{text, enter:true}} в мессенджере — вопрос владельцу", async () => {
-    const prev = process.env.JARVIS_BROWSER_REF;
-    process.env.JARVIS_BROWSER_REF = "1";
-    try {
-      const e = { ...ext([{ tabId: 8, url: "https://web.whatsapp.com/" }]), tabBatch: vi.fn(async () => ({ ok: true, done: 1, total: 1 })) };
-      const c = makeCtx(e, false);
-      await dispatchTool("browser_batch", { tabId: 8, steps: [{ ref: "e1_2", intent: "type", params: { text: "привет", enter: true, guardApproved: true } }] }, c);
-      expect(c.confirm).toHaveBeenCalledTimes(1);
-      expect(e.tabBatch).not.toHaveBeenCalled();
-    } finally {
-      if (prev === undefined) delete process.env.JARVIS_BROWSER_REF;
-      else process.env.JARVIS_BROWSER_REF = prev;
-    }
+    const e = { ...ext([{ tabId: 8, url: "https://web.whatsapp.com/" }]), tabBatch: vi.fn(async () => ({ ok: true, done: 1, total: 1 })) };
+    const c = makeCtx(e, false);
+    await dispatchTool("browser_batch", { tabId: 8, steps: [{ ref: "e1_2", intent: "type", params: { text: "привет", enter: true, guardApproved: true } }] }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(e.tabBatch).not.toHaveBeenCalled();
   });
 });
 
