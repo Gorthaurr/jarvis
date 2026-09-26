@@ -10,6 +10,7 @@
 import { sleep, hostOf, urlPathQuery, noTabError, isPrivateHost, codedError, pageFailure, parseRef } from "./modules/utils.js";
 import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from "./modules/tab-find.js";
 import { replyFor } from "./modules/reply.js";
+import { historyNav } from "./modules/history-nav.js";
 import { cookiesExport } from "./modules/cookies.js";
 import { startKeepAlive } from "./modules/keep-alive.js";
 
@@ -617,7 +618,8 @@ function looksBlankRead(res) {
  *  • click/shake/hover/play/pause/next/prev по ref и click/shake/hover без ref — robustClickMain (MAIN: видит React-props);
  *  • type/set/select/key/enter/submit/scroll_to (+ seek/scroll по ref) — elementActIsolated (изолированный мир, там
  *    реестр ref; §0 — отказ печатать в секретное поле);
- *  • play/pause без ref — mediaControlMain; feed_auto — feedAutoInPage; прочее (scroll/seek/next/prev/readMedia/
+ *  • back/forward — история вкладки (historyNav); play/pause без ref — mediaControlMain; feed_auto — feedAutoInPage;
+ *    прочее (scroll/seek/next/prev/readMedia/
  *    getValue) — pageActInPage. Поле refMode старого сервера не нужно: ref работает всегда.
  */
 const ELEMENT_INTENTS = ["type", "set", "select", "key", "enter", "submit", "scroll_to"];
@@ -665,6 +667,8 @@ async function tabAct(url, intent, params, tabId) {
     loading = st !== "complete";
   }
   const done = (res) => (loading && res && typeof res === "object" ? { ...res, loading: true } : res);
+  // B-6: back/forward — история вкладки (в SW), никогда не перемотка медиа на странице.
+  if (intent === "back" || intent === "forward") return done(await historyNav(tab.id, intent));
   // Явный frameId из browser_inspect (элемент в iframe) — целимся точно в тот фрейм.
   const fidRaw = Number(P.frameId);
   let explicitFrame = Number.isFinite(fidRaw) && fidRaw > 0 ? fidRaw : undefined;
@@ -2250,18 +2254,6 @@ async function pageActInPage(intent, params) {
       if (Number.isFinite(to)) m.currentTime = Math.min(Math.max(0, to), dur);
       else m.currentTime = Math.min(Math.max(0, m.currentTime + (Number.isFinite(sec) ? sec : 10)), dur);
       return { ok: true, currentTime: Math.round(m.currentTime), duration: Number.isFinite(m.duration) ? Math.round(m.duration) : null };
-    }
-    // back/forward: если на странице есть видео/аудио — это ПЕРЕМОТКА (а не история браузера).
-    if (intent === "back" || intent === "forward") {
-      const m = media();
-      if (m && Number.isFinite(m.duration) && m.duration > 0) {
-        const dur = m.duration;
-        m.currentTime = Math.min(Math.max(0, m.currentTime + (intent === "forward" ? 10 : -10)), dur);
-        return { ok: true, via: "seek", currentTime: Math.round(m.currentTime) };
-      }
-      if (intent === "back") history.back();
-      else history.forward();
-      return { ok: true, via: "history" };
     }
     if (intent === "play") {
       // «воспроизвед» — общий стем (ловит и «Воспроизведение», и «Воспроизвести»); + central-кнопку Вайба.
