@@ -10,15 +10,17 @@ import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
 import { assessWebCommit } from "../commit-gate.js";
-import { commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
+import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
 import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refFieldHint, rememberRefHints } from "./browser-refs.js";
-import { nonDomFailure, pageErrorBlock, secretFieldRefusal } from "./browser-failure.js";
+import { batchStopped, nonDomFailure, pageErrorBlock } from "./browser-failure.js";
 import { actObserved, historySeekMismatch, navigatedTo } from "./browser-act-outcome.js";
 import { browserReadImage } from "./browser-capture.js";
+import { markBrowserActMiss, rememberBrowserTarget, resolveBrowserTarget } from "./browser-target.js";
 
 export { refFieldHint, refFieldInfo } from "./browser-refs.js";
+export { canvasClickAllowed, inBrowserTask, markBrowserActMiss } from "./browser-target.js";
 
 /** Без расширения рук во вкладках нет (W1: CDP-откат удалён) — одна честная формулировка на все инструменты. */
 function extMissing(tool: string): ToolResult {
@@ -48,26 +50,6 @@ const TAB_URL_CAP = 200;
 /** Кап page-controlled значений в browser_act (переход/фрейм/readback поля) — прежние 300. */
 const ACT_VALUE_CAP = 300;
 
-/**
- * Цель браузерной задачи, запомненная per-сессия (WeakMap по объекту сессии — не держит сессию в памяти).
- */
-interface BrowserTarget {
-  url: string;
-  /** tabId из openOrFocus — точное попадание + лечит гонку about:blank свежей вкладки. */
-  tabId?: number;
-  /** Когда открыли (Date.now) — окно «активной веб-задачи» для блокировки мыши (см. inBrowserTask). */
-  at?: number;
-  /** P2.1: когда browser_act ЧЕСТНО не нашёл цель (canvas/WebGL — DOM пуст). Открывает окно, в котором
-   *  координатный input_click разрешён как escape-hatch (зрение→клик по пикселям), а не глухо блокируется. */
-  actMissedAt?: number;
-}
-const browserTarget = new WeakMap<object, BrowserTarget>();
-
-/** Окно, в течение которого после browser_open считаем задачу «браузерной» и НЕ двигаем мышь. */
-const BROWSER_TASK_WINDOW_MS = 90_000;
-/** P2.1: окно после честного промаха browser_act, в котором координатный клик по canvas разрешён. */
-const CANVAS_ESCAPE_WINDOW_MS = 30_000;
-
 // W1 (2026-09-26): ref-режим (адресация по идентичности, рецепты сайтов, берст) — ЕДИНСТВЕННЫЙ; флаг
 // JARVIS_BROWSER_REF удалён. Мост шлёт расширению refMode:true всегда (совместимость со старой версией).
 /** Ошибка расширения указывает на устаревший ref (снимок изменился), а НЕ на отсутствие DOM-элемента? Тогда
@@ -88,7 +70,7 @@ function recipeHintFor(url: string): string {
 }
 
 /**
- * §3.11: хосты, которым рецепт-хинт в ЭТОЙ сессии уже отдан (WeakMap по объекту сессии, как browserTarget —
+ * §3.11: хосты, которым рецепт-хинт в ЭТОЙ сессии уже отдан (WeakMap по объекту сессии, как цель вкладки —
  * сессию в памяти не держим). Раньше хинт звучал ТОЛЬКО в browser_open; задача, начавшаяся с чтения уже
  * открытой вкладки (tabId из browser_tabs), рецепта не видела. Теперь его отдаёт и ПЕРВЫЙ browser_read/
  * browser_inspect по хосту — но не чаще раза на хост за сессию: повтор на каждом чтении раздувал бы контекст.
@@ -114,50 +96,6 @@ function recipeHintOnce(ctx: ToolContext, url: string, opts: { always?: boolean 
   return fresh || opts.always ? hint : "";
 }
 
-/** Идёт ли сейчас браузерная задача (был browser_open недавно) — тогда мышь (input_click) под запретом. */
-export function inBrowserTask(ctx: ToolContext): boolean {
-  const sess = ctx.session as unknown as object | undefined;
-  const t = sess ? browserTarget.get(sess) : undefined;
-  return Boolean(t && t.at !== undefined && Date.now() - t.at < BROWSER_TASK_WINDOW_MS);
-}
-
-/** P2.1: пометить, что browser_act честно не справился (нет элемента/исключение/autoplay-гейт) — открыть
- *  окно для координатного клика. Так на canvas/видео модель не упирается в глухую блокировку мыши. */
-export function markBrowserActMiss(ctx: ToolContext): void {
-  const sess = ctx.session as unknown as object | undefined;
-  if (!sess) return;
-  const t = browserTarget.get(sess);
-  if (t) t.actMissedAt = Date.now();
-}
-
-/** P2.1: разрешён ли сейчас координатный input_click внутри браузерной задачи (был недавний честный
- *  промах browser_act → DOM-путь исчерпан, нужен глаз+клик по пикселям). Окно короткое, само истекает. */
-export function canvasClickAllowed(ctx: ToolContext): boolean {
-  const sess = ctx.session as unknown as object | undefined;
-  const t = sess ? browserTarget.get(sess) : undefined;
-  return Boolean(t && t.actMissedAt !== undefined && Date.now() - t.actMissedAt < CANVAS_ESCAPE_WINDOW_MS);
-}
-
-/**
- * Цель вкладки: явный tabId из input (из browser_tabs — ТОЧНОЕ попадание) → явный url → запомненная из
- * browser_open → null (не бьём вслепую). При явном tabId запоминаем цель — follow-up act/read на ТОЙ ЖЕ вкладке.
- */
-function resolveBrowserTarget(ctx: ToolContext, input: Record<string, unknown>): BrowserTarget | null {
-  const explicit = String(input.url ?? "").trim();
-  // §sec (H14): явный приватный/loopback/небезопасный url для act/read тоже отсекаем (как browser_open).
-  if (explicit && browserUrlBlocked(explicit)) return null;
-  const rawTab = input.tabId;
-  const tabId = typeof rawTab === "number" ? rawTab : Number.parseInt(String(rawTab ?? ""), 10);
-  if (Number.isFinite(tabId) && tabId > 0) {
-    const sess = ctx.session as unknown as object | undefined;
-    if (sess) browserTarget.set(sess, { url: explicit, tabId, at: Date.now() });
-    return { url: explicit, tabId };
-  }
-  if (explicit) return { url: explicit };
-  const sess = ctx.session as unknown as object | undefined;
-  return (sess && browserTarget.get(sess)) ?? null;
-}
-
 /**
  * Открыть URL в браузере ПОЛЬЗОВАТЕЛЯ через расширение (§): есть вкладка сервиса → ФОКУС (не дубль),
  * нет → новая — в его сессии/логине. Расширение не подключено → откат на клиентский browser.open (inDefault, shell).
@@ -166,7 +104,6 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   const url = String(input.url ?? "").trim();
   if (!url) return err("browser_open: пустой url");
   if (browserUrlBlocked(url)) return err("browser_open: адрес заблокирован (внутренняя сеть/loopback/метаданные или небезопасная схема).");
-  const sess = ctx.session as unknown as object | undefined;
   // Контроль-9 (browser-open-ext-bypasses-veil): гейт вуали стоит ДО выбора канала. Контроль-7/8 закрыли только
   // ветку `sendAction` (расширение НЕ подключено); при подключённом расширении `openOrFocus` зовёт
   // `chrome.windows.update{focused:true, drawAttention:true}` — окно браузера встаёт поверх окна рисования и
@@ -183,7 +120,7 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   if (ctx.ext?.connected) {
     try {
       const r = (await ctx.ext.openOrFocus(url)) as { focused?: boolean; tabId?: number } | undefined;
-      if (sess) browserTarget.set(sess, { url, tabId: r?.tabId, at: Date.now() }); // tabId → точное попадание act/read
+      rememberBrowserTarget(ctx, { url, tabId: r?.tabId, at: Date.now() }); // tabId → точное попадание act/read
       return ok((r?.focused ? `Уже было открыто — переключился на вкладку.` : `Открыл ${url}.`) + recipeHintOnce(ctx, url, { always: true }));
     } catch {
       /* расширение не сработало — откат ниже */
@@ -191,7 +128,7 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   }
   const result = await ctx.session.sendAction({ kind: "browser.open", url, inDefault: true }, actionTimeoutMs("browser.open"));
   if (result.ok) {
-    if (sess) browserTarget.set(sess, { url, at: Date.now() }); // shell-открытие: tabId нет, act/read найдут по хосту
+    rememberBrowserTarget(ctx, { url, at: Date.now() }); // shell-открытие: tabId нет, act/read найдут по хосту
     return ok(`Открыл ${url}.` + recipeHintOnce(ctx, url, { always: true }));
   }
   const cd = channelDownResult(result, `Не отправлено открытие ${url}: канал с ПК недоступен (переподключение).`); // Б4 #4
@@ -395,8 +332,8 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     const actTab = place.tabId ?? target.tabId;
     const label = typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params, label });
-    // Пустой text не должен затирать подпись ref (?? пропускает "") — иначе одобрение ушло бы без approvedLabel.
-    const riskLabel = (typeof params.text === "string" && params.text.trim()) || label || "";
+    // W1-2: подпись одобрения — из тех же частей, по которым судили риск (text/name/title/подпись ref).
+    const riskLabel = commitApprovalLabel(intent, params, label);
     if (risk) {
       const decision = await confirmWebCommit(ctx, place, risk, riskLabel);
       if (decision !== true) return decision;
@@ -404,9 +341,9 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     // guard — на ЛЮБОМ сайте (W1, B-5) для интентов, которые жмут цель (клик, play/next по ref, set кнопки, key Enter);
     // hover/scroll_to ничего не жмут — без гарда (контракт §7).
     const guard = intentNeedsPageGuard(intent) ? pageGuardFor(place) : undefined;
-    // Одобрение привязано к подписи, которую видел владелец: страница сверит её с реальным элементом.
-    const approved = (lbl: string): Record<string, unknown> => ({ guardApproved: true, ...(lbl ? { approvedLabel: lbl } : {}) });
-    const actParams = guard ? { ...params, guard, ...(risk ? approved(riskLabel) : {}) } : params;
+    // Одобрение привязано к подписи, которую видел владелец: страница сверит её с реальным элементом; без подписи
+    // одобрения не шлём вовсе (approvalFields) — страница, узнав коммит, спросит заново.
+    const actParams = guard ? { ...params, guard, ...(risk ? approvalFields(riskLabel) : {}) } : params;
     try {
       // ЧЕСТНОСТЬ: пробрасываем исход расширения (navigated/already/playing/currentTime) —
       // иначе модель не видит, что play НЕ дал звук (autoplay-гейт), и врёт «готово, играет».
@@ -422,7 +359,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         const decision = await confirmWebCommit(ctx, place, pageCommitRisk(place, pageLabel), pageLabel);
         if (decision !== true) return decision;
         try {
-          raw = await ctx.ext.tabAct(actUrl, intent, { ...actParams, ...approved(pageLabel) }, actTab);
+          raw = await ctx.ext.tabAct(actUrl, intent, { ...actParams, ...approvalFields(pageLabel) }, actTab);
         } catch (e2) {
           // Пока владелец думал, кнопка сменилась (страница снова вернула commit_confirm) — не жмём и подпись не
           // пересказываем модели (её задаёт страница, M11).
@@ -591,12 +528,16 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     const ref = own.ref;
     const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
-    const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? { guardApproved: true, ...(label ? { approvedLabel: label } : {}) } : {}) } : own;
-    // ref на верху шага = тот, что судили гард §0 и §14 (расширение берёт s.ref раньше params.ref): иначе шаг
-    // {ref:"пароль", params:{ref:"поиск"}} судился бы по полю поиска, а печатал в поле пароля.
+    // W1-T3: одобрение — только с подписью (text/name/title шага или подпись ref), как у browser_act.
+    const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? approvalFields(commitApprovalLabel(intent, own, label)) : {}) } : own;
+    // Шаг уходит в ОДНОЙ форме — ровно то, что судили гарды §0/§14 (W1-1/W1-T1): нормализованный intent (без action,
+    // иначе расширение взяло бы другой), все поля в params; ref на верху = судимый (расширение берёт s.ref раньше
+    // params.ref — {ref:"пароль", params:{ref:"поиск"}} судился бы по полю поиска, а печатал в поле пароля).
     const judgedRef = typeof ref === "string" ? { ref } : {};
-    return { step: { ...o, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
+    return { intent, step: { intent, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
   });
+  const noIntent = judged.findIndex((j) => !j.intent);
+  if (noIntent >= 0) return err(`browser_batch: у шага ${noIntent + 1} нет intent — ничего не делал. Укажи intent каждому шагу.`);
   const risky = judged.map((j) => j.risk).filter((x): x is string => x !== null);
   if (risky.length > 0) {
     if (!ctx.confirm) return err(`browser_batch: шаги ${risky.join("; ")} на ${where} — необратимые, нужно подтверждение владельца (§14), а канал недоступен.`);
@@ -624,17 +565,4 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     // B-4: берст ушёл, ответа нет — какие шаги прошли, неизвестно: «сверь», а не «не удался» (повтор = дубль ввода).
     return nonDomFailure("browser_batch", "batch", e) ?? err(`browser_batch не удался:\n${pageErrorBlock("browser-batch-error", errText(e))}`);
   }
-}
-
-/** Берст остановился на шаге: честный текст по коду страницы; текст ошибки со страницы — в untrusted (B-10). */
-function batchStopped(r: { error?: string; code?: string } | undefined, head: string): ToolResult {
-  const code = pageErrorCode(r ?? {}) ?? pageErrorCode(String(r?.error ?? ""));
-  // Шаг упёрся в кнопку-коммит, которую сервер не распознал (подпись видна только странице): не жали. Подпись не
-  // пересказываем (её задаёт страница, M11) — этот шаг отдельным browser_act, там будет вопрос владельцу.
-  if (code === "commit_confirm") return err(`${head} — следующий шаг жмёт кнопку-коммит. Сделай его отдельным browser_act (спросит владельца).`);
-  // §0: страница отказалась печатать в поле пароля/кода — дальше вводит владелец (не обходить другим шагом).
-  if (code === "secret_field") return secretFieldRefusal(`${head} — следующий шаг`);
-  if (code === "tab_closed") return err(`${head} — вкладка закрыта; в другую не бил. Возьми tabId из browser_tabs.`);
-  // Устаревший снимок и прочее → честно, без слепого повтора: пересними и продолжи.
-  return err(`${head}: шаг не выполнен. Сделай browser_inspect и продолжи с актуального снимка.\n${pageErrorBlock("browser-batch-error", String(r?.error ?? "без описания"))}`);
 }

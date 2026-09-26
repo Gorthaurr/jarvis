@@ -30,7 +30,9 @@ export function rememberRefHints(ctx: ToolContext, elements: unknown): void {
     if (!raw || typeof raw !== "object") continue;
     const e = raw as Record<string, unknown>;
     if (typeof e.ref !== "string" || !e.ref) continue;
-    const hint = [e.name, e.label, e.aria, e.selector, e.role, e.type]
+    // W1-T9: видимый текст (e.text — у кнопок, чьё aria-имя расходится с надписью) — тоже подпись: без него §14 и
+    // approvedLabel судили бы «Действие» вместо «Оплатить заказ».
+    const hint = [e.name, e.text, e.label, e.aria, e.selector, e.role, e.type]
       .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
       .join(" ")
       .slice(0, 160);
