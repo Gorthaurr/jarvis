@@ -592,7 +592,10 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
     const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? { guardApproved: true, ...(label ? { approvedLabel: label } : {}) } : {}) } : own;
-    return { step: { ...o, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
+    // ref на верху шага = тот, что судили гард §0 и §14 (расширение берёт s.ref раньше params.ref): иначе шаг
+    // {ref:"пароль", params:{ref:"поиск"}} судился бы по полю поиска, а печатал в поле пароля.
+    const judgedRef = typeof ref === "string" ? { ref } : {};
+    return { step: { ...o, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
   });
   const risky = judged.map((j) => j.risk).filter((x): x is string => x !== null);
   if (risky.length > 0) {
