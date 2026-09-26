@@ -2,24 +2,28 @@
  * Поиск/ожидание ЦЕЛЕВОЙ вкладки (SW-уровень) — вынесено из god-file background.js (§ревью split).
  * НЕ page-инжекторы (исполняются в service worker, не в странице) → дробятся свободно. Требует право tabs.
  */
-import { hostOf, sleep } from "./utils.js";
+import { codedError, hostOf, noTabError, sleep } from "./utils.js";
 
 /**
  * Найти ЦЕЛЕВУЮ вкладку. Приоритет — tabId из browser_open (точное попадание + лечит гонку
  * about:blank: свежая вкладка ещё без url, по хосту не находится, по id — сразу). Иначе по ХОСТУ
  * (среди совпадений — активная, иначе первая). Хост задан, но вкладки НЕТ → null (НЕ бьём в чужую
  * активную — это и был баг: play/read уходили в Telegram). Ни tabId, ни хоста → активная в окне.
+ * W1 (B-9): явный tabId, которого больше НЕТ, → ошибка tab_closed. Раньше молча падали в поиск по хосту/в активную
+ * вкладку владельца — действие уходило туда, куда его не просили (наблюдение с recover ловит код и чинит вкладку).
  */
 export async function findTargetTab(url, tabId) {
   const host = hostOf(url);
   if (tabId != null) {
+    let t = null;
     try {
-      const t = await chrome.tabs.get(tabId);
-      // Жива и (хост совпал ИЛИ ещё грузится about:blank ИЛИ хост вообще не задан) → это наша вкладка.
-      if (t && (!host || hostOf(t.url || "") === host || !t.url || t.status !== "complete")) return t;
+      t = await chrome.tabs.get(tabId);
     } catch {
-      /* вкладка закрыта — падаем на поиск по хосту */
+      t = null;
     }
+    if (!t) throw codedError("tab_closed", "вкладка " + tabId + " закрыта — открой страницу заново (browser_open) или возьми tabId из browser_tabs");
+    // Жива и (хост совпал ИЛИ ещё грузится about:blank ИЛИ хост вообще не задан) → это наша вкладка.
+    if (!host || hostOf(t.url || "") === host || !t.url || t.status !== "complete") return t;
   }
   if (host) {
     const tabs = await chrome.tabs.query({});
@@ -31,7 +35,11 @@ export async function findTargetTab(url, tabId) {
   return active || null;
 }
 
-/** Дождаться, пока вкладка догрузится (для только что открытой browser_open — иначе скрипт бьёт в about:blank). */
+/**
+ * Дождаться, пока вкладка догрузится (для только что открытой browser_open — иначе скрипт бьёт в about:blank).
+ * Честный исход (B-9): "complete" | "loading" (не дождались — вызывающий работает как есть, но говорит об этом) |
+ * "gone" (вкладку закрыли). Раньше по таймауту возвращалось true — «готово», когда страница ещё грузилась.
+ */
 export async function waitForTabReady(tabId, timeoutMs = 6000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -39,12 +47,22 @@ export async function waitForTabReady(tabId, timeoutMs = 6000) {
     try {
       t = await chrome.tabs.get(tabId);
     } catch {
-      return false; // вкладка исчезла
+      return "gone";
     }
-    if (t && t.status === "complete") return true;
+    if (t && t.status === "complete") return "complete";
     await sleep(150);
   }
-  return true; // не дождались — пробуем как есть
+  return "loading";
+}
+
+/** Целевая вкладка, дождавшись загрузки: {tab, loading}. Нет вкладки → noTabError; закрыли, пока ждали, → tab_closed. */
+export async function readyTargetTab(url, tabId) {
+  const tab = await findTargetTab(url, tabId);
+  if (!tab || tab.id == null) throw noTabError(url);
+  if (tab.status === "complete") return { tab, loading: false };
+  const st = await waitForTabReady(tab.id);
+  if (st === "gone") throw codedError("tab_closed", "вкладка закрылась, пока грузилась");
+  return { tab, loading: st !== "complete" };
 }
 
 /** Дождаться полной загрузки вкладки. */

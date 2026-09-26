@@ -7,8 +7,9 @@
  * никакого debug-порта, вкладка в фоне → почти невидимо.
  */
 
-import { sleep, hostOf, urlPathQuery, noTabError, isPrivateHost } from "./modules/utils.js";
-import { findTargetTab, waitForTabReady, waitTabComplete } from "./modules/tab-find.js";
+import { sleep, hostOf, urlPathQuery, noTabError, isPrivateHost, codedError, pageFailure } from "./modules/utils.js";
+import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from "./modules/tab-find.js";
+import { replyFor } from "./modules/reply.js";
 import { cookiesExport } from "./modules/cookies.js";
 import { startKeepAlive } from "./modules/keep-alive.js";
 
@@ -54,12 +55,8 @@ function connect() {
       return;
     }
     if (!msg || !msg.id) return;
-    try {
-      const data = await handle(msg);
-      send({ id: msg.id, ok: true, data });
-    } catch (e) {
-      send({ id: msg.id, ok: false, error: String((e && e.message) || e) });
-    }
+    // Провал несёт code/label отдельными полями (контракт W1 §7) — сервер не разбирает их из текста.
+    send(await replyFor(msg, handle));
   };
   ws.onclose = () => scheduleReconnect();
   ws.onerror = () => {
@@ -134,9 +131,8 @@ async function handle(msg) {
  * вовсе; дочерние фреймы идут маркированными блоками после top-фрейма, в общий кап 8K.
  */
 async function tabRead(url, tabId, query) {
-  const tab = await findTargetTab(url, tabId);
-  if (!tab || tab.id == null) throw noTabError(url);
-  if (tab.status !== "complete") await waitForTabReady(tab.id);
+  // B-9: мёртвый tabId → tab_closed (не читаем чужую активную вкладку); не догрузилась → loading:true в ответе.
+  const { tab, loading } = await readyTargetTab(url, tabId);
   const args = [String(query || "")];
   let frames;
   try {
@@ -185,6 +181,7 @@ async function tabRead(url, tabId, query) {
     headings: Array.isArray(main.headings) ? main.headings : [],
     filtered: anyFiltered,
     ...(media ? { media } : {}),
+    ...(loading ? { loading: true } : {}),
   };
 }
 
@@ -194,9 +191,7 @@ async function tabRead(url, tabId, query) {
  * действовала browser_act{selector}, а не угадывала. Универсально (любой сайт), без хардкода под сервис.
  */
 async function tabInspect(url, query, cap, tabId, refMode) {
-  const tab = await findTargetTab(url, tabId);
-  if (!tab || tab.id == null) throw noTabError(url);
-  if (tab.status !== "complete") await waitForTabReady(tab.id);
+  const { tab, loading } = await readyTargetTab(url, tabId);
   const capN = Number(cap) || 80;
   const args = [query || "", capN, Boolean(refMode)];
   // ВСЕ фреймы: интерактив часто живёт в iframe (embed-плеер/форма/оплата) — раньше inspect был слеп к ним.
@@ -240,6 +235,7 @@ async function tabInspect(url, query, cap, tabId, refMode) {
     truncated,
     frames: frameList,
     elements,
+    ...(loading ? { loading: true } : {}),
   };
 }
 
@@ -554,7 +550,13 @@ async function tabAct(url, intent, params, tabId, refMode) {
   // Пустое чтение чиним ТОЛЬКО когда сервер подтвердил ШИРОКИЙ таргет (body/html/main/#root): у живой
   // страницы там пусто не бывает. Узкий селектор пустым бывает законно — его reload'ить нельзя (ревью).
   const mayReviveBlank = mayRevive && P.recoverIfBlank === true;
-  let tab = await findTargetTab(url, tabId);
+  let tab = null;
+  try {
+    tab = await findTargetTab(url, tabId);
+  } catch (e) {
+    // B-9: явный tabId закрыт → tab_closed. Наблюдение (recover) такую вкладку ЧИНИТ (переоткроет по url), а не падает.
+    if (!(mayRevive && e && e.code === "tab_closed")) throw e;
+  }
   let recovered = null;
   // ⚠️ У findTargetTab есть фолбэк «активная вкладка» (нет живого tabId и нет хоста) — для НАБЛЮДЕНИЯ он
   // недопустим: читать/перезагружать вкладку, которую пользователь сейчас смотрит, значит и врать
@@ -573,7 +575,14 @@ async function tabAct(url, intent, params, tabId, refMode) {
     if (rev.tab) { tab = rev.tab; recovered = rev.recovered; }
   }
   if (!tab || tab.id == null) throw noTabError(url);
-  if (tab.status !== "complete") await waitForTabReady(tab.id);
+  let loading = false;
+  if (tab.status !== "complete") {
+    // Честный исход ожидания (B-9): закрыли, пока ждали, → tab_closed; не догрузилась → работаем, но говорим об этом.
+    const st = await waitForTabReady(tab.id);
+    if (st === "gone") throw codedError("tab_closed", "вкладка закрылась, пока грузилась");
+    loading = st !== "complete";
+  }
+  const done = (res) => (loading && res && typeof res === "object" ? { ...res, loading: true } : res);
   // Явный frameId из browser_inspect (элемент в iframe) — целимся точно в тот фрейм.
   const fidRaw = Number(P.frameId);
   let explicitFrame = Number.isFinite(fidRaw) && fidRaw > 0 ? fidRaw : undefined;
@@ -582,7 +591,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
   let localRef = null;
   if (refMode && P.ref !== undefined && P.ref !== null && String(P.ref).trim()) {
     const m = /^(?:f(\d+))?(e\d+_\d+)$/.exec(String(P.ref).trim());
-    if (!m) throw new Error("tab.act " + intent + ": некорректный ref «" + P.ref + "» — сделай browser_inspect заново");
+    if (!m) throw codedError("ref_stale", "некорректный ref «" + P.ref + "» — сделай browser_inspect заново");
     // Ревью AX-Ref #5: при наличии ref ФРЕЙМ берём ИСКЛЮЧИТЕЛЬНО из ref (источник истины адресации). Иначе
     // стейл P.frameId + top-ref (m[1] undefined) резолвил бы ref в реестре ЧУЖОГО фрейма (gen не уникален
     // между фреймами → сверка проходит на другом узле → клик не туда с ложным успехом). Сбрасываем P.frameId.
@@ -649,9 +658,9 @@ async function tabAct(url, intent, params, tabId, refMode) {
     if (clickLike) {
       const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
       const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
-      if (!stamp.ok) throw new Error("tab.act " + intent + ": " + (stamp.error || "ref не разрешён"));
+      if (!stamp.ok) throw pageFailure(intent, stamp);
       const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel }], explicitFrame);
-      if (!rc.ok) throw new Error("tab.act " + intent + ": " + (rc.error || "не вышло"));
+      if (!rc.ok) throw pageFailure(intent, rc);
       // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
       // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
       // кнопке) → честный провал, как mediaControlMain (иначе observed снял бы долг на «не заигравшем» play).
@@ -672,11 +681,11 @@ async function tabAct(url, intent, params, tabId, refMode) {
           rc.playing = st.playing;
         }
       }
-      return rc;
+      return done(rc);
     }
     const rr = await runInPage(null, actByRefIsolated, [localRef, intent, P], explicitFrame);
-    if (!rr.ok) throw new Error("tab.act " + intent + ": " + (rr.error || "не вышло"));
-    return rr;
+    if (!rr.ok) throw pageFailure(intent, rr);
+    return done(rr);
   }
   // КЛИК (и встряхивание) — через MAIN-world РОБАСТ-клик: React-onClick/Enter минуют Swiper-гейт,
   // который в capture-фазе глушит синтетику (корень «встряхнуть не срабатывает», подтверждено). Остальные
@@ -698,8 +707,8 @@ async function tabAct(url, intent, params, tabId, refMode) {
         if (rc.ok) { rc.frame = hit.frameId; rc.frameUrl = hit.url; }
       }
     }
-    if (!rc.ok) throw new Error("tab.act click: " + (rc.error || "не вышло"));
-    return rc;
+    if (!rc.ok) throw pageFailure("click", rc);
+    return done(rc);
   }
   // PLAY/PAUSE — точечно В ЭТОЙ вкладке через MAIN-world React-onClick по кнопке плеера. НЕ через
   // системную медиа-клавишу (она глобальная — снимала с паузы YouTube/чужой плеер, реальный баг).
@@ -714,8 +723,8 @@ async function tabAct(url, intent, params, tabId, refMode) {
         if (rm.ok) { rm.frame = hit.frameId; rm.frameUrl = hit.url; }
       }
     }
-    if (!rm.ok) throw new Error("tab.act " + intent + ": " + (rm.error || "не вышло"));
-    return rm;
+    if (!rm.ok) throw pageFailure(intent, rm);
+    return done(rm);
   }
   // АВТОЛИСТАНИЕ ЛЕНТЫ КОРОТКИХ ВИДЕО (Shorts/Reels, 2026-07-25 по просьбе владельца): ставим в СТРАНИЦУ
   // persistent-поллер, который сам переключает на следующий ролик, когда текущий доиграл. Без него задача
@@ -729,8 +738,8 @@ async function tabAct(url, intent, params, tabId, refMode) {
       [{ action: String(P.action || "start"), maxCount: Number(P.maxCount) || 0, maxMinutes: Number(P.maxMinutes) || 0 }],
       explicitFrame,
     );
-    if (!rr || rr.ok !== true) throw new Error("tab.act feed_auto: " + ((rr && rr.error) || "не вышло"));
-    return rr;
+    if (!rr || rr.ok !== true) throw pageFailure("feed_auto", rr);
+    return done(rr);
   }
   const Pm = { ...P, refMode: Boolean(refMode) }; // refMode → pageActInPage гейтит Яндекс-навигацию хардкода
   let r = await runInPage(null, pageActInPage, [intent, Pm], explicitFrame);
@@ -761,7 +770,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
       }
     }
   }
-  if (!r.ok) throw new Error("tab.act " + intent + ": " + (r.error || "не вышло"));
+  if (!r.ok) throw pageFailure(intent, r);
   // Актуальные координаты вкладки (могла быть переоткрыта → НОВЫЙ tabId) — сервер обновит ими предикат
   // наблюдения, иначе следующий тик снова искал бы мёртвый tabId. tabUrl нужен для будущих переоткрытий.
   if (mayRevive) {
@@ -772,7 +781,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
     // приостанавливать наблюдение раньше, чем починка вообще получила право сработать (ревью р2 #12).
     if (reviveThrottled) r.reviveThrottled = true;
   }
-  return r;
+  return done(r);
 }
 
 /**
@@ -935,9 +944,7 @@ function feedAutoInPage(cfg) {
  * ПОСЛЕДОВАТЕЛЬНО, стоп на первой ошибке, честное «выполнено k из n». Многополевая форма (логин) = 1 раунд.
  */
 async function tabBatch(url, steps, tabId, refMode) {
-  const tab = await findTargetTab(url, tabId);
-  if (!tab || tab.id == null) throw noTabError(url);
-  if (tab.status !== "complete") await waitForTabReady(tab.id);
+  const { tab } = await readyTargetTab(url, tabId);
   if (!Array.isArray(steps) || !steps.length) return { ok: false, error: "batch: пустой список шагов" };
   if (steps.length > 12) return { ok: false, error: "batch: максимум 12 шагов за раз (разбей длинный флоу)" };
   // Разбор ref каждого шага. Все шаги ОБЯЗАНЫ адресовать ref из текущего снимка (без ref батч не берём).

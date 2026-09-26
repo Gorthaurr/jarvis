@@ -16,7 +16,7 @@ function sw() {
       },
     },
     findTargetTab: async () => tab,
-    waitForTabReady: async () => true,
+    waitForTabReady: async () => "complete",
     sleep: async () => {},
     hostOf: () => "x.example",
     noTabError: () => new Error("нет вкладки"),

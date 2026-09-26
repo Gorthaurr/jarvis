@@ -66,15 +66,15 @@ function moduleSources() {
 
 /**
  * Service worker расширения в vm — для юнитов SW-уровня (tabAct: какой page-функцией и с какими аргументами он зовёт
- * страницу). Функции modules/* — НАСТОЯЩИЕ (см. moduleSources); `chrome.tabs`/`chrome.scripting`/`chrome.windows` и
+ * страницу). Функции modules/* — НАСТОЯЩИЕ (см. moduleSources); `chrome.tabs`/`scripting`/`windows`/`runtime` и
  * любые глобалы подменяются overrides (они побеждают модули); остальное chrome — глухая заглушка, таймеры и сокет —
  * пустышки (верхний код SW не должен жить дальше теста). Настоящие таймеры — передать setTimeout в overrides.
  */
 export function loadServiceWorker(overrides = {}) {
   const src = moduleSources() + "\n" + readFileSync(join(here, "..", "background.js"), "utf8").replace(/^import .*$/gmu, "");
   const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub });
-  const { tabs, scripting, windows, ...globals } = overrides;
-  const own = { tabs, scripting, windows };
+  const { tabs, scripting, windows, runtime, ...globals } = overrides;
+  const own = { tabs, scripting, windows, runtime };
   const chrome = new Proxy(stub, { get: (_t, k) => own[k] || stub });
   const noop = () => 0;
   class FakeSocket { constructor() {} send() {} close() {} }

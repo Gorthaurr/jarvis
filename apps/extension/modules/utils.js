@@ -35,6 +35,29 @@ export function noTabError(url) {
 }
 
 /**
+ * Ошибка с машинным кодом (контракт W1: secret_field, tab_closed, ref_stale, not_found, commit_confirm…). Код — ПЕРВЫМ
+ * словом текста (сервер до W1 разбирает текст: commit_confirm, ref_stale) и полем `code` в WS-кадре ошибки.
+ */
+export function codedError(code, message) {
+  const msg = String(message || "");
+  const e = new Error(code && !msg.startsWith(code) ? code + ": " + msg : msg);
+  if (code) e.code = code;
+  return e;
+}
+
+/**
+ * Провал page-функции ({ok:false, code?, error, label?}) → ошибка tab.act. С кодом — код первым словом («commit_confirm:
+ * <подпись>» — после двоеточия ТОЛЬКО подпись: сервер берёт её до конца строки); без кода — «tab.act <интент>: …».
+ */
+export function pageFailure(intent, r) {
+  const code = (r && r.code) || "";
+  const msg = String((r && r.error) || "не вышло");
+  const e = code ? codedError(code, msg) : new Error("tab.act " + intent + ": " + msg);
+  if (r && r.label) e.label = String(r.label);
+  return e;
+}
+
+/**
  * Приватный/локальный/link-local хост (SSRF-класс). allFrames-чтение (read/inspect) инжектит скрипт
  * в КАЖДЫЙ фрейм на привилегии расширения (обходит SOP) — фрейм с `src` на роутер/intranet/метаданные
  * иначе слил бы своё содержимое в контекст модели. Зеркалит серверный browserUrlBlocked (там URL,
