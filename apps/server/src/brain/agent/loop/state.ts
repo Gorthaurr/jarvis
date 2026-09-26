@@ -219,6 +219,12 @@ export interface HonestyState {
   // раунд уже был сверкой глазами (screen_capture/read) — модель только что смотрела на результат,
   // лишний раунд не жжём (lastRoundHadVerify).
   goalCheckDone: boolean;
+  // W1 (L-3): в задаче СВЕРЕНО дело, а не только запуск — не-запускной mutate с приложенным наблюдением (act met,
+  // readback поля) или реальный взгляд после него. Тогда «Открыл блокнот и напечатал…» — не «заявка только о
+  // запуске»: goal-check не жжёт лишний раунд (на подписке — новая сессия) на уже подтверждённом деле.
+  verifiedRealAction: boolean;
+  // Не-запускной mutate прошёл БЕЗ наблюдения — ждёт реального взгляда, чтобы стать «сверенным делом».
+  realActionUnverified: boolean;
 }
 
 export interface NudgeState {
@@ -461,6 +467,8 @@ function initHonestyState(): HonestyState {
     gateStoppedByVeil: false,
     lastRoundHadVerify: false,
     goalCheckDone: false,
+    verifiedRealAction: false,
+    realActionUnverified: false,
   };
 }
 

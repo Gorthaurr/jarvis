@@ -5,7 +5,7 @@ import type { RoundResult } from "./tool-round.js";
 import type { ToolResult } from "../../tools/dispatch.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { describeIrreversible } from "../../tasks/misfire.js";
-import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, isBlindMutate, toolEffect } from "../error-voice.js";
+import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, LAUNCH_ONLY_TOOLS, isBlindMutate, toolEffect } from "../error-voice.js";
 import { actionTitle, stepLabelFor } from "../../tasks/task.js";
 
 export function noteToolCall(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, round: RoundResult) {
@@ -226,6 +226,23 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
       st.honesty.composedPending = true;
     }
   }
+  noteRealAction(ctx, tu, r, eff, realVerify, observed && !sendCommit);
+}
+
+/**
+ * W1 (L-3): СВЕРЕНО ли в задаче дело, а не только запуск. Не-запускной mutate с приложенным наблюдением (act
+ * verified:"met", readback поля) — сверен сразу; без наблюдения — ждёт реального взгляда. Коммит отправки своим
+ * снимком себя не сверяет (снимок = факт нажатия). Потребитель — goal-check (loop/nudge-policy.ts).
+ */
+function noteRealAction(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, eff: "verify" | "mutate" | "neutral", realVerify: boolean, selfObserved: boolean): void {
+  const h = ctx.st.honesty;
+  if (realVerify && h.realActionUnverified) {
+    h.verifiedRealAction = true;
+    h.realActionUnverified = false;
+  }
+  if (eff !== "mutate" || LAUNCH_ONLY_TOOLS.has(tu.name) || r.declined === true || r.uncertain === true) return;
+  if (selfObserved) h.verifiedRealAction = true;
+  else h.realActionUnverified = true;
 }
 
 export function applyRoundFlags(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, effOfCall: "verify" | "mutate" | "neutral", reportOfThisTurn: boolean, round: RoundResult): void {
