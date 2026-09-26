@@ -1023,28 +1023,44 @@ function feedAutoInPage(cfg) {
 }
 
 /**
- * §Волна2-веб: БЕРСТ шагов по ref одним вызовом (веб-аналог input_batch). Все шаги адресуют ref из ОДНОГО
- * снимка → стабильный ref делает батч безопасным (каждый шаг сверяет идентичность/gen/isConnected). Пред-
- * валидирует ВСЕ ref ДО первого действия (устаревший снимок не маскируется успехом), исполняет
- * ПОСЛЕДОВАТЕЛЬНО, стоп на первой ошибке, честное «выполнено k из n». Многополевая форма (логин) = 1 раунд.
+ * БЕРСТ шагов одним вызовом (веб-аналог input_batch): форма из N полей + кнопка за один раунд. Цель шага — ref |
+ * selector | text, как у browser_act (поля шага — на верхнем уровне или в params; text шага — подпись цели, у type
+ * текст для ввода — params.text). ref-шаги пред-валидируются ВСЕ до первого действия (устаревший снимок не
+ * маскируется успехом). Исполнение последовательно через tabAct (те же §0/§14/B-1), стоп на первом провале, честное
+ * «выполнено k из n»; код отказа шага (secret_field, commit_confirm, ref_stale…) — полем code.
  */
 async function tabBatch(url, steps, tabId) {
   const { tab } = await readyTargetTab(url, tabId);
   if (!Array.isArray(steps) || !steps.length) return { ok: false, error: "batch: пустой список шагов" };
   if (steps.length > 12) return { ok: false, error: "batch: максимум 12 шагов за раз (разбей длинный флоу)" };
-  // Разбор ref каждого шага. Все шаги ОБЯЗАНЫ адресовать ref из текущего снимка (без ref батч не берём).
   const parsed = [];
   for (const s of steps) {
-    const intent = String((s && s.intent) || "");
-    const P = s && s.params && typeof s.params === "object" ? s.params : s || {};
-    const rawRef = s && s.ref !== undefined && s.ref !== null ? s.ref : P.ref;
-    const mm = /^(?:f(\d+))?(e\d+_\d+)$/.exec(String(rawRef || "").trim());
-    if (!mm) return { ok: false, error: "batch: шаг «" + intent + "» без валидного ref («" + rawRef + "») — все шаги батча адресуют ref из browser_inspect" };
-    parsed.push({ intent, params: P, frame: mm[1] !== undefined ? Number(mm[1]) : 0, localRef: mm[2] });
+    const o = s && typeof s === "object" ? s : {};
+    const intent = String(o.intent || o.action || "");
+    if (!intent) return { ok: false, error: "batch: шаг без intent" };
+    const P = o.params && typeof o.params === "object" ? { ...o.params } : { ...o };
+    for (const k of ["ref", "selector"]) if (o[k] != null && P[k] == null) P[k] = o[k];
+    if (typeof o.text === "string" && o.params && typeof o.params === "object") {
+      if (intent !== "type") { if (P.text == null) P.text = o.text; }
+      else if (P.text !== o.text) P.label = o.text; // type: верхний text — подпись поля, params.text — что печатать
+    }
+    let frame = 0;
+    let localRef = null;
+    if (P.ref != null && String(P.ref).trim()) {
+      const pr = parseRef(P.ref);
+      if (!pr) return { ok: false, code: "ref_stale", error: "batch: шаг «" + intent + "» с некорректным ref — сделай browser_inspect заново" };
+      frame = pr.frame || 0;
+      localRef = pr.localRef;
+    }
+    parsed.push({ intent, params: P, frame, localRef });
   }
-  // Пред-валидация ВСЕХ ref по фреймам ДО первого действия.
+  // Пред-валидация ref-шагов по фреймам ДО первого действия.
   const byFrame = new Map();
-  for (const p of parsed) { if (!byFrame.has(p.frame)) byFrame.set(p.frame, []); byFrame.get(p.frame).push(p.localRef); }
+  for (const p of parsed) {
+    if (!p.localRef) continue;
+    if (!byFrame.has(p.frame)) byFrame.set(p.frame, []);
+    byFrame.get(p.frame).push(p.localRef);
+  }
   for (const [fr, refs] of byFrame) {
     const target = fr ? { tabId: tab.id, frameIds: [fr] } : { tabId: tab.id };
     let res;
@@ -1054,18 +1070,22 @@ async function tabBatch(url, steps, tabId) {
     const bad = (res && res.result && res.result.bad) || [];
     if (bad.length) return { ok: false, code: "ref_stale", error: "batch: устаревшие ref " + bad.join(", ") + " — снимок изменился, сделай browser_inspect заново" };
   }
-  // Исполнение шагов ПОСЛЕДОВАТЕЛЬНО через штатный ref-путь tabAct (реестр в isolated-world персистит между
-  // шагами; навигация внутри батча убивает реестр → следующий ref честно ref_stale и батч честно стопнет).
+  // Навигация внутри берста убивает реестр → следующий ref честно ref_stale, берст честно стопнет.
   const results = [];
   for (let i = 0; i < parsed.length; i += 1) {
     const p = parsed[i];
-    const stepParams = { ...p.params, ref: (p.frame ? "f" + p.frame : "") + p.localRef };
     try {
-      const r = await tabAct(url, p.intent, stepParams, tabId);
+      const r = await tabAct(url, p.intent, p.params, tabId);
       results.push({ step: i, ok: true, intent: p.intent, result: r });
     } catch (e) {
-      results.push({ step: i, ok: false, intent: p.intent, error: String((e && e.message) || e) });
-      return { ok: false, stoppedAt: i, done: i, total: parsed.length, results, error: "шаг " + (i + 1) + " («" + p.intent + "») не выполнен: " + String((e && e.message) || e) };
+      const msg = String((e && e.message) || e);
+      results.push({ step: i, ok: false, intent: p.intent, error: msg });
+      return {
+        ok: false, stoppedAt: i, done: i, total: parsed.length, results,
+        error: "шаг " + (i + 1) + " («" + p.intent + "») не выполнен: " + msg,
+        ...(e && e.code ? { code: e.code } : {}),
+        ...(e && e.label ? { label: e.label } : {}),
+      };
     }
   }
   return { ok: true, done: parsed.length, total: parsed.length, results };
