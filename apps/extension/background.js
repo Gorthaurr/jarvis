@@ -1989,8 +1989,18 @@ async function mediaControlMain(intent) {
  */
 function readPageInPage(query) {
   const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е");
-  const main = document.querySelector("main, article, [role=main]") || document.body;
-  const raw = ((main && main.innerText) || "").replace(/[\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  // B-8: область чтения — main / [role=main], иначе body. Первая <article> брала из ленты один пост. Открытые окна
+  // (dialog, role=dialog/alertdialog, aria-modal) — ПЕРВЫМИ: модалка важнее фона под ней, а портал в конце body
+  // иначе срезался бы капом (и вне main не виден вовсе).
+  const main = document.querySelector("main, [role=main]") || document.body;
+  const shown = (el) => { const r = el.getBoundingClientRect(); const cs = getComputedStyle(el); return r.width > 1 && r.height > 1 && cs.visibility !== "hidden" && cs.display !== "none"; };
+  const windows = [...document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal="true"]')]
+    .filter((d, i, all) => shown(d) && !all.some((o) => o !== d && o.contains(d)))
+    .slice(0, 3)
+    .map((d) => "[Окно] " + String(d.innerText || "").trim().slice(0, 2000))
+    .filter((t) => t.length > 7);
+  const body = ((main && main.innerText) || "").replace(/[\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  const raw = (windows.length ? windows.join("\n\n") + "\n\n" : "") + body;
   const headings = [...document.querySelectorAll("h1, h2, h3")]
     .map((h) => (h.innerText || "").replace(/\s+/g, " ").trim())
     .filter((t) => t && t.length <= 120)
