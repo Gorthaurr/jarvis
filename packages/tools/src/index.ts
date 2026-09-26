@@ -150,9 +150,7 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "screen.ocr": "screen_read_text", // §Волна2 (2.3): локальный OCR — текст с экрана без vision
   "screen.probe": "screen_probe", // §Волна2 (2.3): $0-проба «изменилось ли» (перцептивный хеш)
   "wait.for": "wait_for", // §Волна2 (2.3): клиентское ожидание события без LLM-поллинга
-  "browser.open": "browser_open",
-  "browser.act": "browser_act",
-  "browser.read": "browser_read",
+  "browser.open": "browser_open", // browser_act/browser_read — через расширение, ActionCommand не эмитят (W1, B-12)
   "code.run": "code_run",
   "job.status": "job_status", // фоновое задание code_run{background:true}: статус/хвост вывода/остановка
   "skill.execute": "skill_execute",

@@ -4,7 +4,7 @@
  * Контракт (§5): на КАЖДЫЙ ActionCommand клиент обязан вернуть ровно один ActionResult,
  * корреляция по commandId (= envelope.id). durationMs обязателен.
  *
- * Реализованы: app.launch/focus, browser.open/act/read (apps.ts/browser.ts);
+ * Реализованы: app.launch/focus, browser.open (apps.ts/browser.ts; руки во вкладках — расширение, W1);
  * input.type/key/click, ui.ground/invoke, context.read — через нативный win-сайдкар
  * (sidecar-client, UIAutomation+SendInput); code.run (code-runner); skill.execute
  * (skill-runner); message.send (userbot); order.place (browser). Ввод/UIA требуют
@@ -334,13 +334,13 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
       case "browser.open": {
         // inDefault (консьерж «просто открой/включи»): открыть в ДЕФОЛТНОМ (залогиненном) браузере
         // пользователя через shell — его сессия/логины, мгновенно, без CDP-инстанса и без 12с
-        // singleton-лага, физическую мышь НЕ трогаем. Управление (browser.act) тут не нужно.
+        // singleton-лага, физическую мышь НЕ трогаем. Руки во вкладке — расширение (W1), не клиент.
         if (cmd.inDefault) {
           const out = await apps.launchApp(cmd.url);
           return okResult(commandId, startedAt, { ...out, url: cmd.url, controlled: false, inDefault: true });
         }
-        // Управляемый браузер (CDP) — чтобы дальше работали browser.act/read на этой же
-        // странице. Нет Chrome / сбой CDP → мягкий откат на запуск дефолтного браузера.
+        // Управляемый браузер (CDP; клиентские browser.act/read удалены — W1, B-12). Нет Chrome / сбой CDP → мягкий
+        // откат на запуск дефолтного браузера.
         try {
           await browser.open(cmd.url);
           return okResult(commandId, startedAt, { url: cmd.url, controlled: true });
@@ -497,13 +497,6 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
           mute: cmd.mute,
           level: cmd.level,
         });
-        return okResult(commandId, startedAt, r);
-      }
-      case "browser.act":
-        await browser.act(cmd.intent, cmd.params);
-        return okResult(commandId, startedAt);
-      case "browser.read": {
-        const r = await browser.read(cmd.selectorIntent);
         return okResult(commandId, startedAt, r);
       }
       case "code.run": {
