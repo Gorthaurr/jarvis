@@ -5,8 +5,9 @@ import type { RoundResult } from "./tool-round.js";
 import type { ToolResult } from "../../tools/dispatch.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { describeIrreversible } from "../../tasks/misfire.js";
-import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, LAUNCH_ONLY_TOOLS, isBlindMutate, toolCallEffect } from "../error-voice.js";
+import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, isBlindMutate, toolCallEffect } from "../error-voice.js";
 import { armSendDebt, sendGestureOf } from "./send-gesture.js";
+import { noteRealAction } from "./launch-claim.js";
 import { actionTitle, stepLabelFor } from "../../tasks/task.js";
 
 export function noteToolCall(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, round: RoundResult) {
@@ -195,25 +196,7 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
     // не должно получать verify-нудж), ни сброса набора (повтор после «да» — снова отправка, её исход сверяется).
     if (r.declined !== true) armSendDebt(st, gesture, isBlindMutate(tu.name) && !observed);
   }
-  noteRealAction(ctx, tu, r, eff, realVerify, observed && !sendCommit);
-}
-
-/**
- * W1 (L-3): СВЕРЕНО ли в задаче дело, а не только запуск. Не-запускной mutate с приложенным наблюдением (act
- * verified:"met", readback поля) — сверен сразу; без наблюдения — ждёт реального взгляда. Коммит отправки своим
- * снимком себя не сверяет (снимок = факт нажатия). Потребитель — goal-check (loop/nudge-policy.ts).
- */
-function noteRealAction(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, eff: "verify" | "mutate" | "neutral", realVerify: boolean, selfObserved: boolean): void {
-  const h = ctx.st.honesty;
-  if (realVerify && h.realActionUnverified) {
-    h.verifiedRealAction = true;
-    h.realActionUnverified = false;
-  }
-  // Только РУКИ (слепые mutate: act/browser_act/input_*…): самоподтверждающийся mutate (громкость, код, файл) себя уже
-  // подтвердил, и взгляд после него не делает «Запустил Доту» сверенным делом (app_launch → system_volume → скрин).
-  if (eff !== "mutate" || !isBlindMutate(tu.name) || LAUNCH_ONLY_TOOLS.has(tu.name) || r.declined === true || r.uncertain === true) return;
-  if (selfObserved) h.verifiedRealAction = true;
-  else h.realActionUnverified = true;
+  noteRealAction(st.honesty, tu, r, eff, realVerify, observed && !sendCommit); // W1 (L-3): сверено ли ДЕЛО (launch-claim.ts)
 }
 
 export function applyRoundFlags(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, effOfCall: "verify" | "mutate" | "neutral", reportOfThisTurn: boolean, round: RoundResult): void {
