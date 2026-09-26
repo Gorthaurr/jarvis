@@ -1,14 +1,12 @@
 /**
  * Bootstrap main-процесса Electron (§3).
  *
- * Поднимает окно (renderer), инициализирует транспорт (WS к серверу), tier0, актуаторы,
+ * Поднимает окно (renderer), инициализирует транспорт (WS к серверу), актуаторы,
  * аудио-координацию (стаб) и связывает всё через IPC-мост (preload).
  *
- * M0-поток (§17):
+ * Поток текста (§17):
  *   пользователь вводит текст в поле renderer
- *     -> main сначала пробует tier0 ЛОКАЛЬНО (regex, $0)
- *     -> если tier0 распознал command -> исполняет dispatch(actuators) локально
- *     -> если tier0 не распознал -> шлёт dev.text на сервер
+ *     -> main шлёт dev.text на сервер ВСЕГДА (tier0 — серверный, с откатом в модель; 26.09 клиентский убран)
  *        -> сервер вернёт action.command (напр. app.launch)
  *        -> transport исполнит через actuators -> вернёт action.result
  *     -> состояние (idle/thinking/...) прокидывается в renderer (орб).
@@ -26,7 +24,7 @@ import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
 import { guardedDispatch } from "./actuators/commit-guard.js";
 import { createSherpaHearing } from "./hearing/sherpa-hearing.js";
 import { setActBridge } from "./actuators/code-runner.js";
-import * as tier0 from "./tier0/index.js";
+import { submitTypedText } from "./submit-text.js";
 import { monitors } from "./monitors.js";
 import { selectionStore } from "./selection/store.js";
 import { type SelectionWiring, wireSelection } from "./selection/wiring.js";
@@ -409,51 +407,14 @@ function startTransport(): void {
   transport.start();
 }
 
-/** Обработка dev-текста из renderer: сначала tier0 локально, иначе на сервер (§3, §17). */
-async function handleSubmitText(text: string): Promise<void> {
-  const trimmed = text.trim();
-  if (!trimmed) return;
-  log.info(`ввод пользователя: "${trimmed}"`);
-  setState("thinking");
-
-  // 1) tier0 — локальный детерминированный путь, $0, без сети (§3).
-  const match = tier0.parse(trimmed);
-  if (match) {
-    try {
-      if (match.kind === "command") {
-        // Исполняем через тот же актуаторный диспатч, что и серверные команды.
-        const result = await dispatch(`tier0-${Date.now().toString(36)}`, match.command);
-        log.info(`tier0 command "${match.utterance}" -> ok=${result.ok}`);
-        win?.webContents.send(IPC.display, {
-          title: "tier0 (локально, $0)",
-          markdown: result.ok
-            ? `Выполнено: \`${match.command.kind}\``
-            : `Ошибка: ${result.error?.message ?? "unknown"}`,
-        });
-      } else {
-        await match.run();
-        log.info(`tier0 local "${match.label}" выполнено`);
-        win?.webContents.send(IPC.display, {
-          title: "tier0 (локально, $0)",
-          markdown: `Выполнено: ${match.label}`,
-        });
-      }
-    } catch (e) {
-      log.error(`tier0 ошибка: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setState("idle");
-    }
-    return;
-  }
-
-  // 2) Не tier0 -> на сервер (он вернёт action.command, transport исполнит актуатором).
-  if (transport) {
-    transport.sendDevText(trimmed);
-    // state вернётся в idle по приходу результата/transcript; здесь оставляем thinking.
-  } else {
-    log.warn("transport не инициализирован — нет соединения с сервером");
-    setState("idle");
-  }
+/** Текст из чата renderer → мозг целиком (tier0 — только серверный; см. submit-text.ts). */
+function handleSubmitText(text: string): void {
+  submitTypedText(text, {
+    send: (t) => transport?.sendDevText(t) ?? false,
+    setState,
+    notify: (title, markdown) => win?.webContents.send(IPC.display, { title, markdown }),
+    log,
+  });
 }
 
 // ── запись навыка демонстрацией (§8) ───────────────────────────

@@ -185,9 +185,11 @@ export class Transport extends EventEmitter {
   }
 
   /** Отправить dev-текст пользователя на сервер (M0 поток, §17). */
-  sendDevText(text: string): void {
-    const env = makeEnvelope<DevText>("dev.text", { text });
-    this.send(env);
+  /** false — сокет не открыт и фраза НЕ ушла (вызывающий обязан сказать об этом владельцу). */
+  sendDevText(text: string): boolean {
+    if (!this.isOpen()) return false;
+    this.rawSend(makeEnvelope<DevText>("dev.text", { text }));
+    return true;
   }
 
   /** Сообщить серверу состояние клиента (idle/listening/thinking/speaking). */
