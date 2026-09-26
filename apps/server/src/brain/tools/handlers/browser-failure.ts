@@ -65,6 +65,9 @@ export function nonDomFailure(what: string, intent: string, e: unknown): ToolRes
       // W1-5: фрейм перезагрузился ВО ВРЕМЯ действия — оно могло уже сработать. Не «не вышло» и не координаты.
       if (!intentMayMutate(intent)) return err(`${what}: целевой фрейм перезагрузился — действие не подтверждено; сделай browser_inspect и повтори.`);
       return unknownOutcome(`${what}: целевой фрейм перезагрузился во время действия. ${UNKNOWN_TAIL}`);
+    case "frame_missing":
+      // Р2 srv-regress-4: фрейм пропал ДО действия (инъекция не состоялась / штамп ref) — точно не выполняли.
+      return err(`${what}: целевой фрейм пропал ДО действия — ничего не выполнял. Сделай browser_inspect и повтори по свежему снимку (не по координатам).`);
     case "no_effect":
       // Элемент найден и нажат, видимого эффекта нет — элемент ЕСТЬ, координатный клик не нужен.
       return err(`${what}: элемент нажат, но видимого эффекта нет (кнопка не та или неактивна). НЕ кликай по координатам: сверь browser_inspect и выбери другой элемент.\n${pageErrorBlock("browser-act-error", msg)}`);

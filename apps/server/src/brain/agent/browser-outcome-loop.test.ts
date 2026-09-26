@@ -21,7 +21,7 @@ import { MockWebProvider } from "../../integrations/web.js";
 import { InMemoryEpisodicMemory } from "../../memory/episodic.js";
 import { WorkingMemory } from "../../memory/working.js";
 import { TaskManager } from "../tasks/manager.js";
-import { extNoReplyError } from "../tools/ext-errors.js";
+import { extNoReplyError, extReplyError } from "../tools/ext-errors.js";
 import { CheckpointStore } from "./checkpoint-store.js";
 import { type AgentDeps, handleUserText } from "./index.js";
 
@@ -126,6 +126,20 @@ describe("W1: исход браузерных рук доходит до жур�
     const line = digest.split("\n").find((l) => l.includes("browser_batch(")) ?? "";
     expect(line).toContain("1..1");
     expect(line).toMatch(/шага 2 УШЛО, исход неизвестен/u);
+  }, 20_000);
+
+  // Р2 srv-regress-4: фрейм пропал ДО действия — клика не было. Раньше это «исход неизвестен», uncertainCalls гасил
+  // mutationsAllFailed, и задача, где ничего не сделано, не записывалась провалом.
+  it("клик во фрейм, пропавший ДО действия (frame_missing) → «ОШИБКА», а не «ИСХОД НЕИЗВЕСТЕН»", async () => {
+    const ext = extWith({
+      tabAct: async () => {
+        throw extReplyError("frame_missing: целевой фрейм 7 пропал ДО действия — ничего не выполнял. Сделай свежий browser_inspect и повтори по новому снимку.", "frame_missing");
+      },
+    });
+    const digest = await digestAfter("u-browser-frame-missing", { id: "b5", name: "browser_act", input: { url: SITE, intent: "click", ref: "f7e1_3" } }, ext);
+    const line = digest.split("\n").find((l) => l.includes("browser_act(")) ?? "";
+    expect(line).toContain("ОШИБКА");
+    expect(line).not.toContain("ИСХОД НЕИЗВЕСТЕН");
   }, 20_000);
 
   it("стоп берста по переходу (navigated, исход известен) → «ЧАСТИЧНО 1..1; дальше — нет», без «исход неизвестен»", async () => {

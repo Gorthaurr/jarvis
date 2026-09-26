@@ -6,6 +6,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { dispatchTool, type ToolContext } from "./dispatch.js";
+import { extReplyError } from "./ext-errors.js";
+import { canvasClickAllowed } from "./handlers/browser.js";
 
 type Send = (cmd: ActionCommand, timeoutMs?: number) => Promise<ActionResult>;
 type Ext = NonNullable<ToolContext["ext"]>;
@@ -86,5 +88,34 @@ describe("ext-regress-3 / NEW-2 и submit-nav: стоп берста с изве
     expect(r.uncertain).toBe(true);
     expect(text(r)).toMatch(/НЕ ЗНАЮ/u);
     expect([r.partialSteps, r.partialInjected]).toEqual([undefined, true]);
+  });
+});
+
+describe("srv-regress-4: фрейм пропал ДО действия — «не выполнял», не «не знаю»", () => {
+  // Ровно то, что шлёт мост: tab.act → {ok:false, error:"frame_missing: …", code:"frame_missing"} → extReplyError.
+  const missing = () => extReplyError("frame_missing: целевой фрейм 7 пропал ДО действия — ничего не выполнял. Сделай свежий browser_inspect и повтори по новому снимку.", "frame_missing");
+
+  it("browser_act: честный провал без uncertain и без координатного хатча", async () => {
+    const e = ext({ tabAct: vi.fn(async () => { throw missing(); }) });
+    const ctx = makeCtx(e);
+    const r = await dispatchTool("browser_act", { tabId: 5, intent: "click", ref: "f7e1_2" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(r.uncertain).toBeUndefined();
+    expect(text(r)).toMatch(/^browser_act «click»: целевой фрейм пропал ДО действия — ничего не выполнял/u);
+    expect(text(r)).not.toMatch(/НЕ ЗНАЮ|canvas/u);
+    expect(canvasClickAllowed(ctx)).toBe(false); // элемент был — координатный хатч не открываем
+  });
+
+  it("а посреди действия (frame_gone) — по-прежнему «НЕ ЗНАЮ» (uncertain)", async () => {
+    const e = ext({ tabAct: vi.fn(async () => { throw extReplyError("frame_gone: целевой фрейм 7 исчез", "frame_gone"); }) });
+    const r = await dispatchTool("browser_act", { url: SITE, intent: "click", ref: "f7e1_2" }, makeCtx(e));
+    expect(r.uncertain).toBe(true);
+  });
+
+  it("берст: шаг упал frame_missing — «шаг не выполнен», без uncertain и без «ушло» в журнал", async () => {
+    const r = await batch({ ok: false, stoppedAt: 0, done: 0, total: 2, code: "frame_missing", results: [{ step: 0, ok: false, intent: "type", error: "frame_missing: целевой фрейм 7 пропал ДО действия — ничего не выполнял." }], error: "шаг 1 («type») не выполнен: frame_missing: целевой фрейм 7 пропал ДО действия — ничего не выполнял." });
+    expect(r.uncertain).toBeUndefined();
+    expect(r.partialInjected).toBeUndefined();
+    expect(text(r)).toMatch(/шаг не выполнен/u);
   });
 });

@@ -47,6 +47,56 @@ describe("tabBatch: шаг увёл страницу, отправил форм�
   });
 });
 
+// Р2 srv-regress-4: смерть контекста ДО действия (инъекция во фрейм, которого нет; штамп ref) — «не выполнял», а не
+// «исход неизвестен». Ошибки — ровно те строки, что бросает chrome.scripting.executeScript.
+describe("смерть контекста: до действия — frame_missing/ref_stale, посреди — frame_gone", () => {
+  const TOPNAV = { ...TAB, url: "https://x.example/next", status: "loading" };
+  const run = (fail) => {
+    const calls = [];
+    let n = 0;
+    const env = loadServiceWorker({
+      tabs: { get: async () => (n > 0 ? TOPNAV : TAB), query: async () => [TAB] },
+      scripting: {
+        executeScript: async (inj) => {
+          calls.push(inj.func.name);
+          const msg = fail(inj.func.name);
+          if (msg) { n += 1; throw new Error(msg); }
+          return [{ result: { ok: true } }];
+        },
+      },
+      sleep: async () => {},
+    });
+    return { env, calls };
+  };
+
+  it("ref во фрейме, которого уже нет («No frame with id») — frame_missing, клика не было", async () => {
+    const { env, calls } = run((fn) => (fn === "stampRefIsolated" ? "No frame with id 7 in tab 1." : ""));
+    await assert.rejects(env.tabAct("", "click", { ref: "f7e1_2" }, 1), (e) => e.code === "frame_missing");
+    assert.deepEqual(calls, ["stampRefIsolated"]);
+  });
+
+  it("фрейм удалён во время штампа (до действия) — frame_missing", async () => {
+    const { env } = run((fn) => (fn === "stampRefIsolated" ? "Frame with ID 7 was removed." : ""));
+    await assert.rejects(env.tabAct("", "click", { ref: "f7e1_2" }, 1), (e) => e.code === "frame_missing");
+  });
+
+  it("фрейм удалён посреди клика — frame_gone (исход неизвестен)", async () => {
+    const { env } = run((fn) => (fn === "robustClickMain" ? "Frame with ID 7 was removed." : ""));
+    await assert.rejects(env.tabAct("", "click", { ref: "f7e1_2" }, 1), (e) => e.code === "frame_gone");
+  });
+
+  it("ввод во фрейм, которого нет (селектор + frameId) — frame_missing", async () => {
+    const { env } = run((fn) => (fn === "elementActIsolated" ? "No frame with id 9 in tab 1." : ""));
+    await assert.rejects(env.tabAct("", "type", { selector: "#q", text: "x", frameId: 9 }, 1), (e) => e.code === "frame_missing");
+  });
+
+  it("top-страница ушла во время штампа ref — ref_stale, а не «клик увёл страницу» и не клик по новой", async () => {
+    const { env, calls } = run((fn) => (fn === "stampRefIsolated" ? "Frame with ID 0 was removed." : ""));
+    await assert.rejects(env.tabAct("", "click", { ref: "e1_2" }, 1), (e) => e.code === "ref_stale");
+    assert.deepEqual(calls, ["stampRefIsolated"]);
+  });
+});
+
 describe("tabAct type без selector: фреймы не щупаем", () => {
   it("не найдено в top → честный not_found, ввода в «любое поле» чужого фрейма нет", async () => {
     const calls = [];
