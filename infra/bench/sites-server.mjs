@@ -3,7 +3,7 @@
 // видео), /__bench/* — общий скрипт страниц и приём трасс. Запуск: node sites-server.mjs (пути — из config).
 import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import https from "node:https";
-import { extname, join, normalize } from "node:path";
+import { extname, join, normalize, sep } from "node:path";
 import { HERE, PORTS, hosts, paths } from "./config.mjs";
 import { Journal, startControl } from "./sites-journal.mjs";
 
@@ -55,7 +55,7 @@ function sendFile(req, res, file) {
 /** Файл внутри корня (без выхода за него через ..). */
 function inside(root, rel) {
   const f = normalize(join(root, rel));
-  return f.startsWith(root) && existsSync(f) && statSync(f).isFile() ? f : null;
+  return f.startsWith(root + sep) && existsSync(f) && statSync(f).isFile() ? f : null;
 }
 
 async function handle(req, res) {

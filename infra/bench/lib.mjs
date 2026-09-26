@@ -1,7 +1,7 @@
 // Стенд: API сценариев (node --test infra/bench/scenarios/). Стенд поднимается один раз и остаётся жить (ensureUp);
 // сценарии сериализуются межпроцессным замком (node --test гоняет файлы параллельно); каждый — со своим run.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DISPLAY, paths } from "./config.mjs";
 import { cdp, resetTabs } from "./chrome.mjs";
@@ -16,6 +16,8 @@ export { cdp, sleep };
 export async function ensureUp() {
   const st = await status();
   if (st.ready) return st;
+  // Процессы живы, но расширение переподключается (MV3 service worker засыпает) — ждём, а не перезапускаем.
+  if (st.up && (await waitFor(async () => (await status()).ready, 30_000, 500))) return status();
   await up({ quiet: true });
   const again = await status();
   if (!again.ready) throw new Error(`стенд не готов: ${JSON.stringify({ ext: again.ext, sites: again.sites, healthz: again.healthz })}`);
@@ -39,7 +41,15 @@ export async function lock(timeoutMs = 600_000) {
       } catch {
         /* замок только что создаётся */
       }
-      if (owner && !alive(owner)) rmSync(dir, { recursive: true, force: true });
+      // Протух: владелец мёртв, либо pid так и не записан (упал между mkdir и записью) дольше 10 с.
+      const age = (() => {
+        try {
+          return Date.now() - statSync(dir).mtimeMs;
+        } catch {
+          return 0;
+        }
+      })();
+      if ((owner && !alive(owner)) || (!owner && age > 10_000)) rmSync(dir, { recursive: true, force: true });
       if (Date.now() > until) throw new Error("замок стенда занят слишком долго");
       await sleep(250);
     }
