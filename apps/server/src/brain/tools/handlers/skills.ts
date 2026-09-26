@@ -8,6 +8,7 @@ import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep,
 import { fillSlots } from "../../../memory/skill-slots.js";
 import { isQuarantined } from "../../../memory/skills.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
+import { sendActionApproved } from "../send-approved.js";
 import { type PostActionObservation, channelDownResult, overlayDeniedResult, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, ok, applyVeil, stripVeilFields } from "../dispatch-util.js";
 
 /** Каталог выученных навыков для модели (id, имя, версия). */
@@ -48,10 +49,10 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   // Ревью фиксов Волны 3 (#12): клиент гонит runSkill под бюджетом 90с на ЛЮБОЙ skill.execute —
   // прежний дефолтный таймаут 15с отваливался ПЕРВЫМ, и LLM-петля начинала кликать параллельно
   // ещё идущему реплею («два писателя в GUI»). Ждём строго дольше клиентского бюджета.
-  const result = await ctx.session.sendAction(
-    { kind: "skill.execute", skillId: skill.id, version: skill.version, steps, params },
-    SKILL_EXECUTE_SERVER_TIMEOUT_MS,
-  );
+  // W2: через шов одобрения §14 (П3: needsApproval → вопрос → повтор steps.slice(k) с грантами).
+  const sent = await sendActionApproved(ctx, { kind: "skill.execute", skillId: skill.id, version: skill.version, steps, params }, SKILL_EXECUTE_SERVER_TIMEOUT_MS);
+  if ("tool" in sent) return sent.tool;
+  const result = sent.result;
   // Б4 (ревью #4): канал ПК мёртв (resume-grace) → помечаем channelDown, чтобы петля ждала reconnect,
   // а не эскалировала тир («Opus от транспорта»). Хендлер обходит generic-путь dispatch — делаем сами.
   const cd = channelDownResult(result, `Навык «${skillId}» не отправлен: канал с ПК недоступен (переподключение).`);
@@ -232,11 +233,10 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
   // параллельно ещё идущему берсту. Единый потолок строго выше клиентского бюджета; нормальное
   // завершение возвращается раньше — потолок платится только на реально зависшем берсте.
   const timeoutMs = SKILL_EXECUTE_SERVER_TIMEOUT_MS;
-  const result = await ctx.session.sendAction(
-    // origin — как у прочих команд (H5: USER_BUSY-гейт проактивного берста на клиенте).
-    { kind: "skill.execute", skillId: `adhoc-batch-${newId()}`, version: 0, steps, params: {}, origin: ctx.origin ?? "user" },
-    timeoutMs,
-  );
+  // origin — как у прочих команд (H5: USER_BUSY-гейт проактивного берста на клиенте).
+  const sent = await sendActionApproved(ctx, { kind: "skill.execute", skillId: `adhoc-batch-${newId()}`, version: 0, steps, params: {}, origin: ctx.origin ?? "user" }, timeoutMs);
+  if ("tool" in sent) return sent.tool;
+  const result = sent.result;
   const n = steps.length;
   // Б4 (ревью #4): канал ПК мёртв → channelDown (петля ждёт reconnect, не эскалирует тир).
   const cdb = channelDownResult(result, "Берст не отправлен: канал с ПК недоступен (переподключение).");

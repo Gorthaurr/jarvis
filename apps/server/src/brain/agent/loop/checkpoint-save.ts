@@ -5,6 +5,7 @@ import type { LoopState } from "./state.js";
 import type { AgentDeps, LoopOpts } from "../types.js";
 import type { LlmMessage } from "../../../integrations/llm.js";
 import { type CheckpointReason, type TaskCheckpoint, buildResumeDigest, mergeDigests } from "../checkpoint.js";
+import { digestOptions } from "./digest-options.js";
 import { toolCallEffect } from "../error-voice.js";
 
 export interface NoteCore { deps: AgentDeps; opts: LoopOpts | undefined; st: LoopState; task: LoopCtx["task"]; taskId: string; text: string; convo: LlmMessage[]; priorDigest: string | undefined }
@@ -57,7 +58,7 @@ export function makeNoteHelpers(core: NoteCore) {
         tier: st.tier.currentTier,
         // Цепочка продолжений помнит ВСЁ: журнал прошлых заходов склеивается с текущим (ревью:
         // иначе третий заход не видел отправок первого и мог повторить их людям).
-        digest: mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes: st.progress.systemNotes, effectOf, confirmedSends: st.honesty.confirmedSends, declinedCalls: st.honesty.declinedCalls, uncertainCalls: st.honesty.uncertainCalls, partialCalls: st.honesty.partialCalls })),
+        digest: mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
         ...(deps.toolActivation?.size ? { toolNames: [...deps.toolActivation] } : {}),
       };
       const ok = deps.checkpoints.save(cp, opts?.resumeFrom?.taskId);

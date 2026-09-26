@@ -63,6 +63,7 @@ export async function buildLoopContext(base: LoopBase): Promise<LoopCtx> {
   ({ tools: st.arsenal.tools, systemTools: st.arsenal.systemTools } = buildToolSet());
   const convo = buildConvo(deps, text, opts);
   const toolCtx = makeToolCtx(deps, session, opts);
+  toolCtx.isCancelled = () => task.cancel.cancelled; // W2: длинные серии (act{steps}, П4) проверяют отмену между шагами
   st.budget.loopStartMs = Date.now();
   /**
    * Журнал ПРОШЛЫХ заходов — снимок на входе в петлю (контрольное ревью-3). Оба места, где журнал

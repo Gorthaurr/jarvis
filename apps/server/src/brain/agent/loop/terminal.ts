@@ -5,6 +5,7 @@ import type { AgentReply } from "../types.js";
 import type { LoopOutcome } from "./outcome.js";
 import { llmFailureLine } from "../../../integrations/anthropic.js";
 import { buildResumeDigest, mergeDigests, resumeOfferPhrase } from "../checkpoint.js";
+import { digestOptions } from "./digest-options.js";
 import { splitIntoSentences } from "../../nlu/sentences.js";
 import { isHollowSuccess, looksLikeGiveUp, maskedFailureReply } from "../error-voice.js";
 import { verbalize } from "../../verbalize/index.js";
@@ -38,7 +39,7 @@ export function refreshResumeJournal(ctx: LoopCtx): void {
       deps.checkpoints.refreshJournal(
         deps.userId,
         opts.resumeFrom.taskId,
-        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes: st.progress.systemNotes, effectOf, confirmedSends: st.honesty.confirmedSends, declinedCalls: st.honesty.declinedCalls, uncertainCalls: st.honesty.uncertainCalls, partialCalls: st.honesty.partialCalls })),
+        mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
         Math.max(st.progress.round, st.progress.committedToolRounds),
       );
     } catch (e) {

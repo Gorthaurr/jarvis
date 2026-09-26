@@ -4,6 +4,7 @@ import type { LoopCtx } from "./context.js";
 import { formatSelectionContext } from "../selection-context.js";
 import { maskOldObservations } from "../mask-observations.js";
 import { buildResumeDigest, mergeDigests, STEER_NOTE_MARKER } from "../checkpoint.js";
+import { digestOptions } from "./digest-options.js";
 import { metrics } from "../../../obs/metrics.js";
 
 export function budgetNudge(ctx: LoopCtx, elapsedMs: number): void {
@@ -33,7 +34,7 @@ export function budgetNudge(ctx: LoopCtx, elapsedMs: number): void {
         deps.checkpoints?.refreshJournal(
           deps.userId,
           opts.resumeFrom.taskId,
-          mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes: st.progress.systemNotes, effectOf, confirmedSends: st.honesty.confirmedSends, declinedCalls: st.honesty.declinedCalls, uncertainCalls: st.honesty.uncertainCalls, partialCalls: st.honesty.partialCalls })),
+          mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
           Math.max(st.progress.round, st.progress.committedToolRounds),
         );
       } catch (e) {

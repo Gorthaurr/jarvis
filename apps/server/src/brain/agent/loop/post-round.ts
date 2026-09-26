@@ -9,6 +9,7 @@ import { antiRunawayIdentical, familyCap } from "./anti-runaway.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { pruneStaleImages } from "../prune-images.js";
 import { buildResumeDigest, mergeDigests } from "../checkpoint.js";
+import { digestOptions } from "./digest-options.js";
 
 export function ladderHint(ctx: LoopCtx): void {
   const { st, pushSystemNote } = ctx;
@@ -43,7 +44,7 @@ export function commitRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult)
         deps.checkpoints.refreshJournal(
           deps.userId,
           opts.resumeFrom.taskId,
-          mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes: st.progress.systemNotes, effectOf, confirmedSends: st.honesty.confirmedSends, declinedCalls: st.honesty.declinedCalls, uncertainCalls: st.honesty.uncertainCalls, partialCalls: st.honesty.partialCalls })),
+          mergeDigests(priorDigest, buildResumeDigest(convo, digestOptions(st, effectOf))),
           Math.max(st.progress.round + 1, st.progress.committedToolRounds),
         );
       } else if (st.budget.preventiveCheckpoint) {
