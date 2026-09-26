@@ -20,6 +20,7 @@ import {
   reasonHuman,
   resumeOfferPhrase,
 } from "./checkpoint.js";
+import { TAB_CAPTURE_MARK } from "./image-marks.js";
 
 describe("isResumeRequest", () => {
   it("ловит голую команду продолжения в разных словоформах", () => {
@@ -429,6 +430,28 @@ describe("buildResumeDigest", () => {
     const d = buildResumeDigest(withImg);
     expect(d).toContain("в журнал не сохраняется");
     expect(d).not.toContain("AAA");
+  });
+
+  it("W1-ревью LOOP-10: снимок вкладки — своя пометка с путём к свежему (browser_read{view:\"image\"}), не общая «картинка»", () => {
+    const tabShot: LlmMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "browser_read", input: { view: "image" } }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "t",
+            content: [
+              { type: "text", text: `${TAB_CAPTURE_MARK}: 1280×800 px, dpr 1. Координаты картинки НЕ адресуют элементы.` },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: "BBB" } },
+            ],
+          },
+        ],
+      },
+    ];
+    const d = buildResumeDigest(tabShot);
+    expect(d).toContain('снимок вкладки — в журнал не сохраняется; свежий — browser_read{view:"image"}');
+    expect(d).not.toContain("BBB");
   });
 
   it("старые вызовы ужимаются сильнее свежих", () => {

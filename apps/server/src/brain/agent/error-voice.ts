@@ -161,15 +161,14 @@ const NEUTRAL_BROWSER_INTENTS = new Set(["hover", "scroll_to"]);
  * Эффект КОНКРЕТНОГО вызова: у части инструментов под одним именем операции разной природы. Единая точка для петли
  * и журнала — разойдись они, журнал звал бы «сделанным» то, что петля считала взглядом (и наоборот).
  *  - screen_selection: `view` — свежий кадр области (сверка), start/clear — нейтральны;
- *  - browser_act{hover|scroll_to} — нейтральны: ни дела, ни verify-долга (наведение/прокрутка ничего не отправляют);
- *  - browser_tabs{op:"close"} (алиас прежнего browser_close) — ЗАКРЫВАЕТ вкладку: дело, а не чтение списка.
- * Без входа (потребители по одному имени) — эффект по имени, как раньше.
+ *  - browser_act{hover|scroll_to} — нейтральны: ни дела, ни verify-долга (наведение/прокрутка ничего не отправляют).
+ * Вызов — КАНОНИЧЕСКИЙ (петля и журнал канонизируют до этого): browser_tabs{op:"close"} приходит как browser_close
+ * (facades.ts) и по имени — mutate. Без входа (потребители по одному имени) — эффект по имени, как раньше.
  */
 export function toolCallEffect(name: string, input?: unknown): "verify" | "mutate" | "neutral" {
   const i = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   if (name === "screen_selection") return String(i.op ?? "view") === "view" ? "verify" : "neutral";
   if (name === "browser_act" && NEUTRAL_BROWSER_INTENTS.has(String(i.intent ?? ""))) return "neutral";
-  if (name === "browser_tabs" && String(i.op ?? "") === "close") return "mutate";
   return toolEffect(name);
 }
 

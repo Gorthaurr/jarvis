@@ -43,9 +43,16 @@ export function handSignature(name: string, input: unknown): string {
 
 /** ref-токены (`e3_5`, `f2e3_5`) растут с каждым снимком — в хеш вида не входят, иначе «новым» был бы любой взгляд. */
 const REF_TOKEN = /\b(?:f\d+)?e\d+_\d+\b/gu;
+/** Позиция плеера (browser_read, handlers/browser.ts) тикает сама по себе — это не новый вид страницы. */
+const PLAYER_LINE = /\[Плеер[^\]\n]*\]/gu;
+/**
+ * Хеш ТЕКСТОВОЙ сути взгляда (W1-ревью LOOP-1). Картинка (base64 скриншота/снимка вкладки) другая на каждом кадре, а
+ * строка плеера — каждую секунду: хеш по ним звал «прогрессом» любой взгляд, и долбёжка одной кнопки на живой странице
+ * (видео, анимация) обнуляла семейный счёт навсегда.
+ */
 function lookDigest(content: ToolResult["content"]): string {
-  const raw = typeof content === "string" ? content : JSON.stringify(content);
-  return createHash("sha1").update(raw.replace(REF_TOKEN, "ref")).digest("hex");
+  const text = typeof content === "string" ? content : content.map((b) => (b.type === "text" ? b.text : "")).join("\n");
+  return createHash("sha1").update(text.replace(PLAYER_LINE, "").replace(REF_TOKEN, "ref")).digest("hex");
 }
 
 /** Прогресс: счётчики рук и глаз — с нуля, все цели снова «первые». Нейтральные (поиск/память) не трогаем. */
@@ -80,11 +87,15 @@ export function countFamilyCall(ctx: LoopCtx, tu: LlmResponse["toolUses"][number
     if (st.nudge.handActedSinceLook && prev !== undefined && prev !== digest) resetPageFamily(st);
     st.nudge.handActedSinceLook = false;
   }
-  if (eff === "mutate" && isBlindMutate(tu.name)) {
-    if (!r.isError) st.nudge.handActedSinceLook = true;
-    // Эффект руки подтверждён самим вызовом (readback поля, навигация) — это не топтание: не считаем. Сброс ВСЕХ
-    // счётчиков он не делает: иначе пинг-понг «слабый клик X / set Y с readback» обнулял бы счёт X каждым Y.
-    if (!r.isError && r.observed === true) return;
+  // W1-ревью LOOP-6: нейтральный интент руки (browser_act{hover|scroll_to}) — тоже по сигнатуре цели: 12 прокруток к
+  // РАЗНЫМ полям формы — не топтание (иначе L-1 возвращался через scroll_to), повтор той же цели — считается.
+  if (eff !== "verify" && isBlindMutate(tu.name)) {
+    if (eff === "mutate") {
+      if (!r.isError) st.nudge.handActedSinceLook = true;
+      // Эффект руки подтверждён самим вызовом (readback поля, навигация) — это не топтание: не считаем. Сброс ВСЕХ
+      // счётчиков он не делает: иначе пинг-понг «слабый клик X / set Y с readback» обнулял бы счёт X каждым Y.
+      if (!r.isError && r.observed === true) return;
+    }
     const sig = handSignature(tu.name, tu.input);
     if (!st.nudge.seenHandSigs.has(sig)) {
       st.nudge.seenHandSigs.add(sig);
