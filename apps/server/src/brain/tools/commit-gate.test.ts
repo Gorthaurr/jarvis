@@ -39,6 +39,15 @@ describe("assessWebCommit", () => {
     expect(assessWebCommit({ host: "www.wildberries.ru", intent: "submit" })?.what).toMatch(/отправка формы/u);
     expect(assessWebCommit({ host: "docs.example.com", intent: "type", params: { text: "x", enter: true } })).toBeNull();
   });
+  it("W1: key-сочетания Enter (Ctrl+Enter, Shift+Enter) в мессенджере — коммит; Tab/Ctrl+A — нет; поле combo, как в схеме", () => {
+    for (const combo of ["Enter", "Ctrl+Enter", "shift+enter", "Return"]) {
+      expect(assessWebCommit({ host: "web.telegram.org", intent: "key", params: { combo } }), combo).not.toBeNull();
+    }
+    for (const combo of ["Tab", "Ctrl+A", "Escape", "Alt+Enter"]) {
+      expect(assessWebCommit({ host: "web.telegram.org", intent: "key", params: { combo } }), combo).toBeNull();
+    }
+    expect(assessWebCommit({ host: "docs.example.com", intent: "key", params: { combo: "Ctrl+Enter" } })).toBeNull(); // не опасное место
+  });
   it("подпись ref из последнего inspect судится как текст клика («Оплатить» по ref)", () => {
     expect(assessWebCommit({ host: "www.ozon.ru", intent: "click", params: { ref: "e3_5" }, label: "button Оплатить заказ" })?.summary).toMatch(/маркетплейс/u);
     expect(assessWebCommit({ host: "www.ozon.ru", intent: "click", params: { ref: "e3_5" } })).toBeNull(); // подписи нет — судить нечего

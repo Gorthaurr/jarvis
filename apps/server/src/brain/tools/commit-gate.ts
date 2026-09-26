@@ -13,7 +13,7 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-import { COMMIT_WORDS_RE, type RiskCategory, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, type RiskCategory, isCommitKeyCombo, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
 import { LMS_COMMIT_RE, isLmsPage, lmsKeyCommits } from "./commit-lms.js";
 
 export type { RiskCategory };
@@ -101,7 +101,10 @@ export function assessWebCommit(a: {
   const parts = [p.text, p.name, p.title, a.label].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
   const text = parts.join(" ");
   // Ревью 26.09: type{submit:true} постит так же, как enter:true; web_act{key} без key — это Enter (jarvis-browser.ts).
-  const keyEnter = intent === "key" && /^(?:enter|return)?$/iu.test(String(p.key ?? p.combo ?? "").trim());
+  // W1: browser_act{key, combo} — Ctrl+Enter/Shift+Enter отправляют в мессенджерах так же, как Enter (общий с GUI-гейтом
+  // и клиентским рубежом isCommitKeyCombo). Пустая клавиша — Enter (web_act{key} без key).
+  const combo = String(p.combo ?? p.key ?? "").trim();
+  const keyEnter = intent === "key" && (combo === "" || isCommitKeyCombo(combo));
   const commitByKey =
     (intent === "enter" || intent === "submit" || keyEnter || (intent === "type" && (truthy(p.enter) || truthy(p.submit)))) &&
     (category !== "edu" || lmsKeyCommits(url));

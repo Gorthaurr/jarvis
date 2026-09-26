@@ -9,9 +9,9 @@ import { cutText } from "@jarvis/shared";
 import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
-import { assessWebCommit, riskyHostCategory } from "../commit-gate.js";
+import { assessWebCommit } from "../commit-gate.js";
 import { commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
-import { browserActParams, browserStepFields } from "../browser-params.js";
+import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refFieldHint, rememberRefHints } from "./browser-refs.js";
 import { nonDomFailure, pageErrorBlock, secretFieldRefusal } from "./browser-failure.js";
@@ -401,8 +401,9 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       const decision = await confirmWebCommit(ctx, place, risk, riskLabel);
       if (decision !== true) return decision;
     }
-    // guard — для ЛЮБОГО интента на опасном месте: расширение превращает в клик и play/next по ref, и встряхивание.
-    const guard = pageGuardFor(place, riskyHostCategory(place.host) !== null);
+    // guard — на ЛЮБОМ сайте (W1, B-5) для интентов, которые жмут цель (клик, play/next по ref, set кнопки, key Enter);
+    // hover/scroll_to ничего не жмут — без гарда (контракт §7).
+    const guard = intentNeedsPageGuard(intent) ? pageGuardFor(place) : undefined;
     // Одобрение привязано к подписи, которую видел владелец: страница сверит её с реальным элементом.
     const approved = (lbl: string): Record<string, unknown> => ({ guardApproved: true, ...(lbl ? { approvedLabel: lbl } : {}) });
     const actParams = guard ? { ...params, guard, ...(risk ? approved(riskLabel) : {}) } : params;
@@ -580,7 +581,7 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
   // адресу вкладки (26.09: tabId без url давал host="" и берст на банке уходил без вопроса).
   const place = await resolvePlace(ctx, target);
   const where = place.host || "неизвестной вкладке";
-  const guard = pageGuardFor(place, riskyHostCategory(place.host) !== null);
+  const guard = pageGuardFor(place); // W1: на любом сайте; шагам hover/scroll_to — не шлём
   // Ревью 26.09: поля шага живут в step.params (так их читает расширение) — гейт смотрел на верхний уровень шага и
   // type{text, enter:true} в мессенджере уходил без вопроса. Служебные поля гарда от модели не принимаем.
   const judged = steps.map((st, i) => {
@@ -590,7 +591,7 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     const ref = own.ref;
     const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
-    const params = guard ? { ...own, guard, ...(risk ? { guardApproved: true, ...(label ? { approvedLabel: label } : {}) } : {}) } : own;
+    const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? { guardApproved: true, ...(label ? { approvedLabel: label } : {}) } : {}) } : own;
     return { step: { ...o, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
   });
   const risky = judged.map((j) => j.risk).filter((x): x is string => x !== null);
