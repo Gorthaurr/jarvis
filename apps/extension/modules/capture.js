@@ -12,8 +12,20 @@ import { renderCapture } from "./capture-render.js";
 
 const captureFail = (code, error) => ({ ok: false, code, error });
 
+/**
+ * W1-T4: снимки СЕРИАЛИЗОВАНЫ на весь SW. Две задачи, снимающие вкладки одновременно, перемежали «прокрутить ref в
+ * центр» одной и captureVisibleTab другой — кадр с чужой прокруткой и чужим rect (плюс лимит Chrome на частоту снимков).
+ */
+let captureQueue = Promise.resolve();
+
 /** targetFn — page-функция изолированного мира (реестр ref): {ok, w, h, dpr, rect?} | {ok:false, code, error}. */
-export async function tabCapture(url, tabId, opts, targetFn) {
+export function tabCapture(url, tabId, opts, targetFn) {
+  const run = captureQueue.then(() => captureOnce(url, tabId, opts, targetFn));
+  captureQueue = run.catch(() => {});
+  return run;
+}
+
+async function captureOnce(url, tabId, opts, targetFn) {
   const o = opts || {};
   let tab;
   try {

@@ -1515,7 +1515,15 @@ async function elementActIsolated(localRef, intent, params) {
       const b = el.getBoundingClientRect();
       return { ok: true, inViewport: b.width > 0 && b.height > 0 && b.bottom > 0 && b.right > 0 && b.top < innerHeight && b.left < innerWidth };
     }
-    if (intent === "scroll") { window.scrollBy(0, Number(P.dy) || 600); return { ok: true }; }
+    if (intent === "scroll") {
+      // EXT-9: крутим ближайший прокручиваемый контейнер ЦЕЛИ (список/чат) с цепочкой вверх до окна — как колесо над ней;
+      // ни один не сдвинулся (край / не прокручивается) — no_effect, а не ложный ok. 50 мс — и для CSS smooth-прокрутки.
+      const moved = async (box) => { const at = () => (box ? box.scrollTop : scrollY); const p0 = at(); (box || window).scrollBy(0, Number(P.dy) || 600); await new Promise((r) => setTimeout(r, 50)); return at() !== p0; };
+      for (let s = el; s && s !== document.body && s !== document.documentElement; s = s.parentElement || (s.getRootNode && s.getRootNode().host) || null) {
+        if (s.scrollHeight > s.clientHeight + 1 && /(auto|scroll|overlay)/.test(getComputedStyle(s).overflowY) && (await moved(s))) return { ok: true };
+      }
+      return (await moved(null)) ? { ok: true } : fail("no_effect", "прокрутка ничего не сдвинула — ни контейнер цели, ни страница дальше не прокручиваются (край)");
+    }
     if (intent === "seek") {
       // Только медиа САМОЙ цели (она, её плеер-предок или вложенный плеер): чужой первый плеер документа — не цель.
       const md = el.matches && el.matches("audio, video") ? el : (el.querySelector && el.querySelector("audio, video")) || (el.closest && el.closest("audio, video"));

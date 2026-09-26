@@ -164,3 +164,44 @@ describe("§0: страница не печатает в секретное по
     assert.equal(await page.eval("document.getElementById('pw-noname').value"), "");
   });
 });
+
+// Р2 (EXT-9 остаток): scroll по ref крутил window и отвечал ok — внутренний список (чаты, лента) стоял на месте.
+describe("scroll по ref — контейнер цели, честный no_effect", { skip: !findChrome() && "нет Chrome" }, () => {
+  let page;
+  before(async () => { page = await launchPage(); });
+  after(async () => { await page?.close(); });
+  const act = (intent, params, ref) => page.callIsolated(fns.elementActIsolated, ref, intent, params);
+  const LIST = `(() => { const d = document.createElement('div'); d.id = 'chatlist'; d.setAttribute('role', 'list'); d.tabIndex = 0;
+    d.setAttribute('aria-label', 'Чаты'); d.style.cssText = 'height:100px;overflow:auto;scroll-behavior:smooth';
+    d.innerHTML = Array.from({ length: 50 }, (_, i) => '<div><button id="row' + i + '">Чат ' + i + '</button></div>').join('');
+    document.body.prepend(d); document.documentElement.style.overflow = 'hidden'; return 1; })()`;
+  const refOf = async (selector) => (await page.callIsolated(fns.inspectPageInPage, "", 200)).elements.find((e) => e.selector === selector)?.ref;
+  const pos = () => page.eval("[document.getElementById('chatlist').scrollTop, scrollY]");
+
+  it("ref самого списка — прокручен список (плавная CSS-прокрутка тоже), окно на месте", async () => {
+    await page.open(fixtureUrl("plain.html"));
+    await page.eval(LIST);
+    const r = await act("scroll", { dy: 300 }, await refOf("#chatlist"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const [top, y] = await pos();
+    assert.ok(top > 0, `список не прокручен: scrollTop=${top}`);
+    assert.equal(y, 0);
+  });
+
+  it("ref строки внутри списка — прокручен её список", async () => {
+    await page.open(fixtureUrl("plain.html"));
+    await page.eval(LIST);
+    const r = await act("scroll", { dy: 200 }, await refOf("#row3"));
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.ok((await pos())[0] > 0);
+  });
+
+  it("список уже внизу и страница не прокручивается — ok:false, code no_effect (не ложный ok)", async () => {
+    await page.open(fixtureUrl("plain.html"));
+    await page.eval("document.body.replaceChildren(); 1"); // страница короче окна — прокручивать нечего
+    await page.eval(LIST);
+    await page.eval("(() => { const d = document.getElementById('chatlist'); d.style.scrollBehavior = 'auto'; d.scrollTop = d.scrollHeight; return 1; })()");
+    const r = await act("scroll", { dy: 300 }, await refOf("#chatlist"));
+    assert.deepEqual([r.ok, r.code], [false, "no_effect"], JSON.stringify(r));
+  });
+});

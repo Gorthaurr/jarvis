@@ -91,6 +91,18 @@ describe("ext-regress-3 / NEW-2 и submit-nav: стоп берста с изве
   });
 });
 
+describe("EXT-9 остаток: scroll по ref без сдвига — честное «край», не «кнопка не та» и не координаты", () => {
+  it("no_effect у scroll → текст про прокрутку, без хатча", async () => {
+    const e = ext({ tabAct: vi.fn(async () => { throw extReplyError("no_effect: прокрутка ничего не сдвинула — ни контейнер цели, ни страница дальше не прокручиваются (край)", "no_effect"); }) });
+    const ctx = makeCtx(e);
+    const r = await dispatchTool("browser_act", { tabId: 5, intent: "scroll", ref: "e1_4", dy: 300 }, ctx);
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/^browser_act «scroll»: прокрутка ничего не сдвинула/u);
+    expect(text(r)).not.toMatch(/кнопка не та/u);
+    expect(canvasClickAllowed(ctx)).toBe(false);
+  });
+});
+
 describe("srv-regress-4: фрейм пропал ДО действия — «не выполнял», не «не знаю»", () => {
   // Ровно то, что шлёт мост: tab.act → {ok:false, error:"frame_missing: …", code:"frame_missing"} → extReplyError.
   const missing = () => extReplyError("frame_missing: целевой фрейм 7 пропал ДО действия — ничего не выполнял. Сделай свежий browser_inspect и повтори по новому снимку.", "frame_missing");
