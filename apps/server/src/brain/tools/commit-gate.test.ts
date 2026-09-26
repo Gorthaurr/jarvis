@@ -39,11 +39,12 @@ describe("assessWebCommit", () => {
     expect(assessWebCommit({ host: "www.wildberries.ru", intent: "submit" })?.what).toMatch(/отправка формы/u);
     expect(assessWebCommit({ host: "docs.example.com", intent: "type", params: { text: "x", enter: true } })).toBeNull();
   });
-  it("W1: key-сочетания Enter (Ctrl+Enter, Shift+Enter) в мессенджере — коммит; Tab/Ctrl+A — нет; поле combo, как в схеме", () => {
-    for (const combo of ["Enter", "Ctrl+Enter", "shift+enter", "Return"]) {
+  it("W1: key-сочетания Enter (Ctrl/Shift/Alt+Enter) в мессенджере — коммит; Tab/Ctrl+A — нет; поле combo, как в схеме", () => {
+    // Таблица всех форм — стык с расширением (key-combo-contract.test.ts, fixtures/key-combos.json).
+    for (const combo of ["Enter", "Ctrl+Enter", "shift+enter", "Return", "Alt+Enter"]) {
       expect(assessWebCommit({ host: "web.telegram.org", intent: "key", params: { combo } }), combo).not.toBeNull();
     }
-    for (const combo of ["Tab", "Ctrl+A", "Escape", "Alt+Enter"]) {
+    for (const combo of ["Tab", "Ctrl+A", "Escape"]) {
       expect(assessWebCommit({ host: "web.telegram.org", intent: "key", params: { combo } }), combo).toBeNull();
     }
     expect(assessWebCommit({ host: "docs.example.com", intent: "key", params: { combo: "Ctrl+Enter" } })).toBeNull(); // не опасное место

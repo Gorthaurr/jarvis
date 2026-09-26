@@ -89,14 +89,16 @@ describe("W1-2 / W1-T3 / W1-T9: одобрение §14 всегда с подп
     expect(p.approvedLabel).toBe("Оплатить");
   });
 
-  it("кнопка с aria-именем «Действие» и видимым «Оплатить заказ» — вопрос ДО клика, подпись одобрения несёт видимый текст", async () => {
+  it("кнопка с aria-именем «Действие» и видимым «Оплатить заказ» — вопрос ДО клика; одобрение — имя цели + её ref", async () => {
     const e = ext({ tabInspect: vi.fn(async () => ({ url: BANK, elements: [{ ref: "e1_7", name: "Действие", text: "Оплатить заказ", role: "button" }] })) });
-    const confirm = vi.fn(async () => ({ approved: true, outcome: "approved" as const }));
+    const confirm = vi.fn(async (_s: string) => ({ approved: true, outcome: "approved" as const }));
     const c = makeCtx(e, confirm);
     await dispatchTool("browser_inspect", { url: BANK }, c);
     await dispatchTool("browser_act", { url: BANK, intent: "click", ref: "e1_7" }, c);
     expect(confirm).toHaveBeenCalledTimes(1);
-    expect(String(actParams(e).approvedLabel)).toContain("Оплатить заказ");
+    expect(String(confirm.mock.calls[0]?.[0])).toContain("Оплатить заказ"); // суд о риске — по видимому тексту (хинт)
+    // Контракт approve (NEW-1): подпись одобрения — видимое имя без selector/role/type, идентичность — ref.
+    expect([actParams(e).approvedLabel, actParams(e).approvedRef]).toEqual(["Действие", "e1_7"]);
   });
 });
 

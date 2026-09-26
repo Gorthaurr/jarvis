@@ -749,7 +749,7 @@ async function tabAct(url, intent, params, tabId) {
     const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
     if (!stamp.ok) throw pageFailure(intent, stamp);
     // hover: action ставит SW (не модель), гарда нет — наведение ничего не совершает.
-    const cp = intent === "hover" ? { nonce, action: "hover" } : { nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel };
+    const cp = intent === "hover" ? { nonce, action: "hover" } : { nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel, approvedRef: P.approvedRef, ref: P.ref };
     const rc = await runInPage("MAIN", robustClickMain, [cp], explicitFrame);
     if (!rc.ok) throw pageFailure(intent, rc);
     // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
@@ -1331,7 +1331,7 @@ async function elementActIsolated(localRef, intent, params) {
     if (/^(INPUT|TEXTAREA)$/.test(e.tagName)) {
       parts.push(e.getAttribute("placeholder") || "");
       if (/^(submit|button|reset|image)$/i.test(e.type || "")) parts.push(e.value || "", e.getAttribute("alt") || "");
-    } else if (e.tagName !== "SELECT") parts.push(String(e.innerText || "").slice(0, 200));
+    } else if (e.tagName !== "SELECT") parts.push(String(e.innerText || "")); // без обрезки: одобрение — на ВСЮ подпись
     return parts.map((p) => String(p).replace(/\s+/g, " ").trim()).filter(Boolean);
   };
   const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1408,18 +1408,19 @@ async function elementActIsolated(localRef, intent, params) {
   if (el.tagName === "LABEL" && el.control && intent !== "scroll_to") el = el.control;
 
   // ── клавиши ──
-  const NAMED = { enter: ["Enter", 13], return: ["Enter", 13], tab: ["Tab", 9], escape: ["Escape", 27], esc: ["Escape", 27], space: [" ", 32, "Space"], backspace: ["Backspace", 8], delete: ["Delete", 46], del: ["Delete", 46], arrowdown: ["ArrowDown", 40], down: ["ArrowDown", 40], arrowup: ["ArrowUp", 38], up: ["ArrowUp", 38], arrowleft: ["ArrowLeft", 37], left: ["ArrowLeft", 37], arrowright: ["ArrowRight", 39], right: ["ArrowRight", 39], home: ["Home", 36], end: ["End", 35], pageup: ["PageUp", 33], pagedown: ["PageDown", 34] };
+  const NAMED = { enter: ["Enter", 13], return: ["Enter", 13], tab: ["Tab", 9], escape: ["Escape", 27], esc: ["Escape", 27], space: [" ", 32, "Space"], spacebar: [" ", 32, "Space"], backspace: ["Backspace", 8], delete: ["Delete", 46], del: ["Delete", 46], arrowdown: ["ArrowDown", 40], down: ["ArrowDown", 40], arrowup: ["ArrowUp", 38], up: ["ArrowUp", 38], arrowleft: ["ArrowLeft", 37], left: ["ArrowLeft", 37], arrowright: ["ArrowRight", 39], right: ["ArrowRight", 39], home: ["Home", 36], end: ["End", 35], pageup: ["PageUp", 33], pagedown: ["PageDown", 34] };
+  // Разбор combo — зеркало parseKeyCombo (@jarvis/shared key-combo.ts), стык — test/fixtures/key-combos.json: ровно ОДНА
+  // не-модификаторная клавиша в любом порядке, иначе null → invalid_combo, ничего не жмём («a+Enter» жал голый Enter).
+  const MODS = { ctrl: "ctrlKey", control: "ctrlKey", shift: "shiftKey", alt: "altKey", option: "altKey", meta: "metaKey", cmd: "metaKey", command: "metaKey", win: "metaKey", super: "metaKey" };
   const parseCombo = (combo) => {
     const k = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false };
-    let key = "";
+    const keys = [];
     for (const part of String(combo || "").split("+").map((s) => s.trim()).filter(Boolean)) {
-      const l = part.toLowerCase();
-      if (l === "ctrl" || l === "control") k.ctrlKey = true;
-      else if (l === "shift") k.shiftKey = true;
-      else if (l === "alt" || l === "option") k.altKey = true;
-      else if (l === "meta" || l === "cmd" || l === "win" || l === "command") k.metaKey = true;
-      else key = part;
+      if (MODS[part.toLowerCase()]) k[MODS[part.toLowerCase()]] = true;
+      else keys.push(part);
     }
+    if (keys.length !== 1) return null;
+    const key = keys[0];
     const n = NAMED[key.toLowerCase()];
     if (n) return { ...k, key: n[0], code: n[2] || n[0], keyCode: n[1] };
     if (/^f([1-9]|1[0-2])$/i.test(key)) return { ...k, key: key.toUpperCase(), code: key.toUpperCase(), keyCode: 111 + Number(key.slice(1)) };
@@ -1439,31 +1440,28 @@ async function elementActIsolated(localRef, intent, params) {
     if (form && down && press && eligible) { try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch { /* невалидная форма */ } }
     return { submitted: true };
   };
-  // Enter с любыми модификаторами (Ctrl/Shift/Alt/Meta+Enter) — жест отправки для §14 (как isCommitKeyCombo сервера).
-  const isEnterCombo = (c) => { const p = parseCombo(c); return Boolean(p && p.key === "Enter"); };
-  // §14: судим подписи (parts). Одобрение — на РОВНО ту подпись, что видел владелец (равенство сложенной подписи, не
-  // подстрока: одобренное «Отправить» не пропускает «Отправить перевод 50 000 ₽»).
+  // §14: подпись, узнанная гардом, → commit_confirm с ней (без обрезки). Одобрено (контракт approve), если цель по ref и
+  // это одобренный ref, либо сложенная часть подписи РАВНА одобренной (показанная владельцу — тоже часть): не подстрока —
+  // одобренное «Отправить» не пропускает «Отправить перевод 50 000 ₽». guardApproved без подписи и ref — не одобрение.
   const judgeParts = (parts) => {
-    if (!P.guard) return null;
     let re = null;
-    try { re = new RegExp(String(P.guard), "iu"); } catch { return null; }
-    const shown = (parts.find((p) => re.test(p)) || parts.join(" ")).slice(0, 120);
-    const need = { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
-    if (!P.guardApproved) return parts.some((p) => re.test(p)) ? need : null;
-    if (P.approvedLabel) {
-      const a = fold(P.approvedLabel);
-      const same = Boolean(a) && (parts.some((p) => fold(p) === a || fold(String(p).slice(0, 120)) === a) || (P.text != null && fold(P.text) === a));
-      if (!same) return need;
-    }
-    return null;
+    try { re = P.guard ? new RegExp(String(P.guard), "iu") : null; } catch { re = null; }
+    const shown = re ? parts.find((p) => re.test(p)) : undefined;
+    if (shown === undefined) return null;
+    const a = fold(P.approvedLabel);
+    const byRef = Boolean(localRef) && P.approvedRef != null && String(P.approvedRef) === String(P.ref);
+    if (P.guardApproved && (byRef || (a && parts.some((p) => fold(p) === a)))) return null;
+    return { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
   };
-  // Enter/отправка — подписи поля, формы и её кнопки отправки.
+  // Кнопко-подобная цель: Enter/Space её активируют (APG, react-aria) — гард судит её собственные подписи.
+  const buttonLike = (e) => Boolean(e && e.matches && e.matches("button,a[href],summary,input[type=submit],input[type=button],input[type=image],input[type=checkbox],input[type=radio],[role=button],[role=link],[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],[role=tab],[role=checkbox],[role=switch],[role=radio],[tabindex]"));
+  // Enter/отправка — подписи цели (поле или кнопко-подобная; не body), формы и ВСЕХ её кнопок отправки (и вне формы по
+  // form=id): requestSubmit без submitter шлёт форму, а первая безобидная «Применить» прятала «Оплатить заказ».
   const guardHit = (t) => {
     const form = t.form || (t.closest && t.closest("form"));
-    const sub = form ? form.querySelector("button[type=submit],button:not([type]),input[type=submit],input[type=image]") : null;
-    // Подписи самой цели — только у поля/кнопки: Enter «в body» не должен судиться по всему тексту страницы.
-    const control = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName) || t.isContentEditable || /^(button|textbox|searchbox|combobox)$/.test(t.getAttribute("role") || "");
-    return judgeParts((control ? labelParts(t) : []).concat(sub ? labelParts(sub) : [], form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []));
+    const subs = form ? [...form.getRootNode().querySelectorAll("button,input")].filter((b) => b.form === form && /^(submit|image)$/i.test(b.type || "")) : [];
+    const own = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName) || t.isContentEditable || /^(textbox|searchbox|combobox)$/.test(t.getAttribute("role") || "") || buttonLike(t);
+    return judgeParts((own ? labelParts(t) : []).concat(...subs.map(labelParts), form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []));
   };
   const setNativeValue = (node, val) => {
     const proto = node.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -1489,7 +1487,7 @@ async function elementActIsolated(localRef, intent, params) {
     if (!done || (v && !got.includes(fold(v))) || (!v && got)) return "редактор не принял ввод — сверь browser_inspect (содержимое не заменено)";
     return null;
   };
-  const selectOption = (t, wantOpt) => {
+  const selectOption = (t, wantOpt, parts) => {
     const w = fold(wantOpt);
     if (!w) return fail("", "select: укажи option (или value) — текст варианта из state.options");
     let best = null;
@@ -1501,6 +1499,9 @@ async function elementActIsolated(localRef, intent, params) {
       if (s > bestScore) { bestScore = s; best = o; }
     }
     if (!best) return fail("", "такого варианта в списке нет — варианты в state.options снимка (browser_inspect)");
+    // §14 (loop-bypass-7): список, применяющий действие на change («Удалить навсегда») — гард по опции и подписи списка.
+    const g = judgeParts([String(best.text || "").replace(/\s+/g, " ").trim()].concat(parts || labelParts(t)).filter(Boolean));
+    if (g) return g;
     const before = [...t.selectedOptions];
     try { t.focus(); } catch { /* ignore */ }
     if (t.multiple) best.selected = true;
@@ -1548,7 +1549,9 @@ async function elementActIsolated(localRef, intent, params) {
       if (!checkable(t) && !editable(t) && t.tagName !== "SELECT" && t.querySelector) {
         t = t.querySelector('input[type=checkbox],input[type=radio],[role=checkbox],[role=switch],[role=radio],select,textarea,input:not([type=hidden])') || t;
       }
-      if (t.tagName === "SELECT") return selectOption(t, P.value != null ? P.value : P.option);
+      // §14: подписи цели И обёртки, по которой адресовали (безымянный переключатель внутри «Опубликовать профиль»).
+      const own = labelParts(t).concat(t !== el ? labelParts(el) : []);
+      if (t.tagName === "SELECT") return selectOption(t, P.value != null ? P.value : P.option, own);
       if (checkable(t)) {
         const b = (v) => (v === true || v === "true" || v === "on" || v === 1 ? true : v === false || v === "false" || v === "off" || v === 0 ? false : undefined);
         const wantOn = b(P.checked !== undefined ? P.checked : P.value);
@@ -1557,8 +1560,8 @@ async function elementActIsolated(localRef, intent, params) {
         if (cur() === wantOn) return { ok: true, checked: wantOn, changed: false }; // уже так — не кликаем (повторный set не снимает)
         if (!wantOn && t.tagName === "INPUT" && /^radio$/i.test(t.type)) return fail("", "radio не снимается кликом — выбери другой вариант этой группы");
         if (t.disabled || t.getAttribute("aria-disabled") === "true") return fail("", "элемент недоступен (disabled)");
-        // §14: переключатель «Опубликовать»/«Автоплатёж» — тот же гард, что у клика (по его СОБСТВЕННЫМ подписям).
-        const g = judgeParts(labelParts(t));
+        // §14: переключатель «Опубликовать»/«Автоплатёж» — тот же гард, что у клика.
+        const g = judgeParts(own);
         if (g) return g;
         const r = t.getBoundingClientRect();
         const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
@@ -1588,12 +1591,10 @@ async function elementActIsolated(localRef, intent, params) {
     }
     if (intent === "key") {
       const k = parseCombo(P.combo != null ? P.combo : P.key);
-      if (!k) return fail("", "key: не понял клавишу «" + String(P.combo != null ? P.combo : P.key || "").slice(0, 30) + "» — пример: Enter, Tab, Escape, ArrowDown, Ctrl+A");
-      // §14: ЛЮБОЙ Enter (и Ctrl/Shift/Alt/Meta+Enter — отправка в чатах и комментариях) сперва судится гардом.
-      if (isEnterCombo(P.combo != null ? P.combo : P.key)) {
-        const g = guardHit(el);
-        if (g) return g;
-      }
+      if (!k) return fail("invalid_combo", "key: не понял клавишу «" + String(P.combo != null ? P.combo : P.key || "").slice(0, 30) + "» — одна клавиша плюс модификаторы (Enter, Tab, Escape, ArrowDown, Ctrl+Enter); ничего не нажимал");
+      // §14: ЛЮБОЙ Enter (Ctrl/Shift/Alt/Meta+Enter — отправка в чатах) — гард цели и формы; Space активирует кнопку.
+      const g = k.key === "Enter" ? guardHit(el) : k.key === " " && buttonLike(el) ? judgeParts(labelParts(el)) : null;
+      if (g) return g;
       // Голый Enter — жест браузера (форма уходит); с модификаторами — событие с НАСТОЯЩИМИ модификаторами, без сабмита.
       if (k.key === "Enter" && !k.ctrlKey && !k.altKey && !k.metaKey && !k.shiftKey) return { ok: true, sent: String(P.combo || P.key), ...pressEnter(el, false) };
       const o = { key: k.key, code: k.code, keyCode: k.keyCode, which: k.keyCode, ctrlKey: k.ctrlKey, shiftKey: k.shiftKey, altKey: k.altKey, metaKey: k.metaKey, bubbles: true, cancelable: true, composed: true };
@@ -1770,21 +1771,22 @@ async function robustClickMain(params) {
   // §14 на СТРАНИЦЕ (26.09): сервер не видит подписи элемента, выбранного селектором/ref, а браузер видит. На
   // опасном сайте/LMS сервер присылает guard (регэксп глаголов коммита) — подпись совпала и одобрения нет →
   // НЕ кликаем, возвращаем подпись: сервер спросит владельца и повторит с guardApproved (флаг ставит только он).
+  // Встряхивание дожимает Enter (фолбэк ниже) — в поле ввода никогда (srv-bypass-5: Enter в композер = отправка).
+  const field = target.isContentEditable || /^(TEXTAREA|SELECT)$/.test(target.tagName) || (target.tagName === "INPUT" && !/^(submit|button|reset|image)$/i.test(target.type));
   if (P.guard && P.action !== "hover") {
     let re = null;
     try { re = new RegExp(String(P.guard), "iu"); } catch { re = null; }
-    const parts = labelParts(target).concat(target !== node ? labelParts(node) : []);
-    const shown = (parts.find((p) => re && re.test(p)) || parts.join(" ")).slice(0, 120);
-    const confirmNeeded = { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
-    if (!P.guardApproved) {
-      if (re && parts.some((p) => re.test(p))) return confirmNeeded;
-    } else if (P.approvedLabel) {
-      // Одобрение — на КОНКРЕТНУЮ подпись, которую видел владелец: пока он думал, страница могла перерисоваться, а
-      // селектор/текст — попасть в другую кнопку («Оплатить 50 000 ₽» вместо одобренного «Отправить»). Не та — снова вопрос.
-      // Равенство сложенной подписи (не подстрока): одобренное «Отправить» не пропускает «Отправить перевод 50 000 ₽».
-      const a = foldTxt(P.approvedLabel);
-      const same = Boolean(a) && parts.some((p) => foldTxt(p) === a || foldTxt(String(p).slice(0, 120)) === a);
-      if (!same) return confirmNeeded;
+    // Enter-фолбэк — жест отправки формы: судим и все её кнопки отправки, как guardHit.
+    const form = P.expectChange && (target.form || (target.closest && target.closest("form")));
+    const subs = form ? [...form.getRootNode().querySelectorAll("button,input")].filter((b) => b.form === form && /^(submit|image)$/i.test(b.type || "")) : [];
+    const parts = labelParts(target).concat(target !== node ? labelParts(node) : [], ...subs.map(labelParts));
+    const shown = re ? parts.find((p) => re.test(p)) : undefined;
+    // Одобрение (контракт approve): тот же ref, либо сложенная часть подписи РАВНА одобренной (не подстрока, без обрезки)
+    // — пока владелец думал, страница могла перерисоваться («Оплатить 50 000 ₽» вместо одобренного «Отправить»).
+    const a = foldTxt(P.approvedLabel);
+    const byRef = Boolean(P.nonce) && P.approvedRef != null && String(P.approvedRef) === String(P.ref);
+    if (shown !== undefined && !(P.guardApproved && (byRef || (a && parts.some((p) => foldTxt(p) === a))))) {
+      return { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
     }
   }
   try {
@@ -1907,7 +1909,7 @@ async function robustClickMain(params) {
   // H19: синтетический Enter не жмёт нативную кнопку/ссылку — он только во встряхивании (expectChange сверяет
   // РЕАЛЬНУЮ смену контента после каждого метода, двойного действия там нет).
   const methods = [{ name: "pointer", fn: pointer }, { name: "react", fn: reactOwn }];
-  if (P.expectChange) methods.push({ name: "enter", fn: pressEnter });
+  if (P.expectChange && !field) methods.push({ name: "enter", fn: pressEnter });
   let used = null;
   for (const m of methods) {
     let fired = false;
@@ -2218,6 +2220,13 @@ async function pageActInPage(intent, params) {
       const pick = (sel) => [...document.querySelectorAll(sel)].find((e) => visible(e) && re.test(labelOf(e)));
       const btn = pick("button,[role=button]") || pick("a");
       if (!btn) return { ok: false, code: "not_found", error: "не нашёл кнопку «" + (intent === "next" ? "следующий" : "предыдущий") + "» — перемотка внутри ролика это seek" };
+      // §14 (srv-bypass-8): «Далее: оплатить заказ» — гард подписей, как у клика по ref; одобрение — равенство подписи.
+      const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
+      const parts = [btn.getAttribute("aria-label"), btn.getAttribute("title"), btn.innerText].map((x) => String(x || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+      let gre = null;
+      try { gre = P.guard ? new RegExp(String(P.guard), "iu") : null; } catch { gre = null; }
+      const shown = gre ? parts.find((x) => gre.test(x)) : undefined;
+      if (shown !== undefined && !(P.guardApproved && fold(P.approvedLabel) && parts.some((x) => fold(x) === fold(P.approvedLabel)))) return { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
       btn.click();
       return { ok: true };
     }
