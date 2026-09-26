@@ -88,7 +88,20 @@ export const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
   "self_weaknesses", "self_code_search", "self_code_read",
   "file_view", // §3.9: чтение картинки/страницы PDF с диска — чистое чтение, GUI не трогает
   "job_status",
+  // W1 «браузерные руки»: глаза во вкладке — чтение текста/снимок вкладки и find по странице. Мышь/фокус владельца
+  // не трогают (расширение), страницу не меняют: «найди поле A и поле B» — одним параллельным раундом.
+  "browser_read", "browser_inspect",
 ]);
+
+/**
+ * Можно ли этот КОНКРЕТНЫЙ вызов исполнить параллельно (имя из allowlist И операция — чтение). W1: browser_tabs
+ * получил op:"close" (алиас прежнего browser_close) — закрытие вкладки параллельно с её чтением = гонка.
+ */
+export function isParallelReadonlyCall(name: string, input: unknown): boolean {
+  if (!PARALLEL_READONLY_TOOLS.has(name)) return false;
+  if (name === "browser_tabs") return String((input as { op?: unknown } | undefined)?.op ?? "list") !== "close";
+  return true;
+}
 
 /**
  * Консервативная оценка токенов блоков tool_result — для PROACTIVE контекст-гарда (аудит 2026-07-20).

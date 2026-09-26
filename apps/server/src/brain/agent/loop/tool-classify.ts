@@ -5,7 +5,8 @@ import type { RoundResult } from "./tool-round.js";
 import type { ToolResult } from "../../tools/dispatch.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { describeIrreversible } from "../../tasks/misfire.js";
-import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, LAUNCH_ONLY_TOOLS, isBlindMutate, toolEffect } from "../error-voice.js";
+import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, LAUNCH_ONLY_TOOLS, isBlindMutate, toolCallEffect } from "../error-voice.js";
+import { inspectWebBatch, webActGesture } from "./browser-gesture.js";
 import { actionTitle, stepLabelFor } from "../../tasks/task.js";
 
 export function noteToolCall(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, round: RoundResult) {
@@ -58,12 +59,9 @@ export function noteToolCall(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], 
   // эвристики по имени, op-override у screen_selection), один на весь разбор вызова. Раньше здесь стоял голый
   // `toolEffect`, и `mcp__think__sequentialthinking` (объявлен neutral, но имя не проходит READONLY_NAME_RE)
   // считался попыткой мутации: `durableNeutralDone` гас, и реально созданное напоминание объявлялось «не сработало».
-  const effOfCall =
-    tu.name === "screen_selection"
-      ? String((tu.input as Record<string, unknown> | undefined)?.op ?? "view") === "view"
-        ? "verify"
-        : "neutral"
-      : ((tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolEffect(tu.name));
+  // W1: эффект по ВХОДУ (toolCallEffect) — screen_selection по op, browser_act{hover|scroll_to} нейтральны,
+  // browser_tabs{op:"close"} — дело. Та же функция у журнала чекпойнта (checkpoint-save.ts effectOf).
+  const effOfCall = (tu.name.startsWith("mcp__") ? deps.mcp?.declaredEffect(tu.name) : undefined) ?? toolCallEffect(tu.name, tu.input);
   if (effOfCall === "mutate") st.honesty.anyMutateAttempted = true; // контроль-8 (durable-neutral-masked)
   // Контроль-8 (background-job-no-success/-string-flag): жизнь ФОНОВОГО задания. Запуск неопределён (spawn ≠ исход),
   // завершение с кодом 0 — РЕАЛЬНО сделанная мутирующая работа (иначе «инструменты не отработали» при собранном
@@ -149,21 +147,25 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
   // §P1-отправка (форензика «Отправлено — ушло в Клод», а сообщение осталось в поле): КОММИТ =
   // send-key после набора (composedPending), ЛИБО берст compose→send одним input_batch (ревью р1
   // #3/#9). Fused-наблюдение коммита — снимок «факт нажатия», НЕ исход → долг сверки исхода.
-  const batch = tu.name === "input_batch" ? inspectBatchSteps(tu.input) : { committed: false, endsComposed: false, hasSend: false };
+  // W1 «браузерные руки»: берст во вкладке (`{ref,intent,params}`) — тот же закон «поле → кнопка = отправка».
+  const batch =
+    tu.name === "input_batch" ? inspectBatchSteps(tu.input) : tu.name === "browser_batch" ? inspectWebBatch(tu.input) : { committed: false, endsComposed: false, hasSend: false };
   // КОММИТ отправки после набора (composedPending): не только Enter — ревью р2 #3: чаще жмут КНОПКУ
   // «Отправить» (input_click/input_mouse/ui_invoke). Любой такой жест после набора = коммит → долг
   // сверки исхода (как compose-and-commit в replayUnsafe). Ложный позитив (клик мимо кнопки) стоит
   // одной лишней сверки — дёшево против ложного «Отправлено». Ревью р3 #1/#4: input_batch с
   // коммит-шагом (batch.hasSend) при наборе В ПРОШЛОМ раунде (composedPending) — тоже коммит.
   // W4 «Руки»: act click/double/key-Enter после набора — тот же коммит (его сверка признаком долг отправки НЕ снимает).
-  const actG = tu.name === "act" ? actGesture(tu.input) : { commit: false, composes: false };
+  // W1: browser_act — то же для вкладки: type/set → key Enter/click/submit; type/set с enter:true — набор И коммит
+  // одним вызовом (readback поля такой коммит НЕ сверяет — исход отправки только реальным взглядом).
+  const actG = tu.name === "act" ? actGesture(tu.input) : tu.name === "browser_act" ? webActGesture(tu.input) : { commit: false, composes: false };
   const commitGesture =
     (tu.name === "input_key" && isSendKey(combo)) ||
     tu.name === "input_click" ||
     tu.name === "input_mouse" ||
     tu.name === "ui_invoke" ||
     actG.commit;
-  const sendCommit = ((commitGesture || batch.hasSend) && st.honesty.composedPending) || batch.committed;
+  const sendCommit = ((commitGesture || batch.hasSend) && st.honesty.composedPending) || batch.committed || (actG.commit && actG.composes);
   // СНЯТИЕ долга: реальный взгляд снимает ВСЁ (вкл. sendCommitDebt). Fused-наблюдение снимает только
   // ОБЫЧНЫЙ слепой долг и только если это НЕ коммит и НЕ висит долг отправки (ревью р1 #4/#8/#16:
   // соседний Enter/клик/фокус не должен гасить долг отправки своим слабым снимком).
@@ -220,7 +222,7 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
       tu.name === "input_type" ||
       (tu.name === "ui_invoke" && (tu.input as { pattern?: unknown }).pattern === "setValue") ||
       (tu.name === "input_key" && isPasteCombo(combo)) ||
-      actG.composes ||
+      (actG.composes && !actG.commit) ||
       batch.endsComposed
     ) {
       st.honesty.composedPending = true;

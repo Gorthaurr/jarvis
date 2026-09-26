@@ -23,8 +23,8 @@ import { foldText } from "@jarvis/shared";
 import { classifyImageBlocks } from "./image-marks.js";
 import type { LlmMessage } from "../../integrations/llm.js";
 import { CANCEL_PHRASES, CANCEL_WORDS } from "../tasks/control.js";
-import { OUTBOUND_SEND_TOOLS, toolEffect } from "./error-voice.js";
-import { canonicalToolName } from "@jarvis/tools";
+import { OUTBOUND_SEND_TOOLS, toolCallEffect } from "./error-voice.js";
+import { canonicalToolCall } from "@jarvis/tools";
 
 /** Почему задача прервалась (для честной формулировки при продолжении). */
 export type CheckpointReason = "timeout" | "contextWrap" | "earlyWrap" | "stepCap" | "channelLost" | "hardKill";
@@ -102,7 +102,7 @@ export interface DigestOptions {
    * по имени; петля передаёт версию с ДЕКЛАРАЦИЕЙ MCP-сервера, иначе нейтральный `think` попадал бы в
    * «сделано», а мутирующий `get_*` внешнего сервера — нет.
    */
-  effectOf?: (toolName: string) => "verify" | "mutate" | "neutral";
+  effectOf?: (toolName: string, input?: unknown) => "verify" | "mutate" | "neutral";
   /**
    * 🔴 tool_use_id вызовов «исходящее сообщение/заказ ЧЕЛОВЕКУ», по которым отправка ПОДТВЕРЖДЕНА
    * (`ToolResult.sent === true`). Без этого журнал выводил факт совершения из `is_error`, а честные
@@ -275,7 +275,7 @@ export function mergeDigests(prior: string | undefined, fresh: string, maxChars 
 type Entry =
   | { kind: "user"; text: string }
   | { kind: "say"; text: string }
-  | { kind: "call"; id: string; tool: string; input: string; ok?: boolean; result?: string }
+  | { kind: "call"; id: string; tool: string; input: string; raw?: unknown; ok?: boolean; result?: string }
   /** Запись о РЕПЛЕЕ выученного макроса: реальные мутации, совершённые вне tool_use (см. авто-макрос). */
   | { kind: "macro"; text: string };
 
@@ -408,7 +408,9 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
         if (b.type === "text" && b.text.trim()) entries.push({ kind: "say", text: b.text });
         else if (b.type === "tool_use") {
           // W4 фасады: журнал судит эффект по КАНОНИЧЕСКОМУ имени (look{what:"elements"} = ui_snapshot, не «мутация»).
-          const call: Extract<Entry, { kind: "call" }> = { kind: "call", id: b.id, tool: canonicalToolName(b.name, b.input), input: briefInput(b.input) };
+          // W1: и по каноническому ВХОДУ — browser_act{hover} не «менял мир», browser_tabs{op:"close"} — менял.
+          const canon = canonicalToolCall(b.name, b.input);
+          const call: Extract<Entry, { kind: "call" }> = { kind: "call", id: b.id, tool: canon.name, input: briefInput(b.input), raw: canon.input };
           callById.set(b.id, call);
           entries.push(call);
         }
@@ -464,7 +466,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
   // режется с начала при переполнении — и первым выпадало бы именно то, чего повторять НЕЛЬЗЯ
   // («telegram_send Кате — ok» в начале длинной задачи). Компактная строка на действие переживает
   // любую усечку, поэтому продолжение всегда знает, что уже совершено необратимо.
-  const effect = opts.effectOf ?? toolEffect;
+  const effect = opts.effectOf ?? toolCallEffect;
   const done: string[] = [];
   for (const e of entries) {
     // Реплей макроса — совершённые мутации без tool_use: место им именно в несокращаемой секции.
@@ -485,7 +487,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     // рассказывает он про ушедшие действия фонового скрипта: метка «ЧАСТИЧНО — шаги 1..2 УЖЕ ВЫПОЛНЕНЫ» жила
     // только в подробной части, которую `truncateFront` режет с начала, и «доделай» повторяло эти действия.
     if (e.kind !== "call") continue;
-    if (effect(e.tool) !== "mutate" && !opts.partialCalls?.has(e.id) && !opts.uncertainCalls?.has(e.id)) continue;
+    if (effect(e.tool, e.raw) !== "mutate" && !opts.partialCalls?.has(e.id) && !opts.uncertainCalls?.has(e.id)) continue;
     // 🔴 Нейтрализация ОБЯЗАТЕЛЬНА и здесь (контрольное ревью-2, HIGH): input мутирующего вызова —
     // текст, который мог прийти со страницы («скопируй это и запиши в файл»). Без неё `</untrusted_content>`
     // в первой же строке журнала ЗАКРЫВАЛ нашу обёртку, и весь остаток (дампы страниц прошлого захода

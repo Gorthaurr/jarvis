@@ -179,11 +179,32 @@ describe("stepLabelFor — «что делаю сейчас» для чипа (�
     expect(stepLabelFor("memory_search", {})).toBe("Вспоминаю");
   });
 
-  it("browser_act play/pause — конкретно (делегирует actionTitle), click — общая метка", () => {
+  it("browser_act play/pause — конкретно (делегирует actionTitle), незнакомый интент — общая метка", () => {
     expect(stepLabelFor("browser_act", { intent: "play" })).toBe("Воспроизведение");
     expect(stepLabelFor("browser_act", { intent: "pause" })).toBe("Пауза");
-    expect(stepLabelFor("browser_act", { intent: "click" })).toBe("Действую на странице");
+    expect(stepLabelFor("browser_act", { intent: "что-то_новое" })).toBe("Действую на странице");
     expect(stepLabelFor("browser_batch", {})).toBe("Действую на странице");
+  });
+
+  // W1 «браузерные руки»: чип по интенту новых рук, а не одно «Действую на странице». Значение поля в метку не идёт.
+  it("W1: новые интенты и операции вкладки — своя метка; значение set/type в чип не утекает", () => {
+    expect(stepLabelFor("browser_act", { intent: "click", ref: "e1_2" })).toBe("Нажимаю на странице");
+    expect(stepLabelFor("browser_act", { intent: "set", ref: "e1_3", value: "Секрет123" })).toBe("Заполняю поле");
+    expect(stepLabelFor("browser_act", { intent: "set", ref: "e1_4", checked: true })).toBe("Отмечаю на странице");
+    expect(stepLabelFor("browser_act", { intent: "type", params: { text: "личное письмо" } })).toBe("Печатаю на странице");
+    expect(stepLabelFor("browser_act", { intent: "key", combo: "Enter" })).toBe("Нажимаю Enter");
+    expect(stepLabelFor("browser_act", { intent: "hover", ref: "e1_5" })).toBe("Навожу на элемент");
+    expect(stepLabelFor("browser_act", { intent: "scroll_to", ref: "e1_6" })).toBe("Прокручиваю к элементу");
+    expect(stepLabelFor("browser_batch", { steps: [{}, {}, {}] })).toBe("Действую на странице: 3 шага");
+    expect(stepLabelFor("browser_batch", { steps: Array.from({ length: 12 }, () => ({})) })).toBe("Действую на странице: 12 шагов");
+    expect(stepLabelFor("browser_read", { view: "image" })).toBe("Смотрю на вкладку");
+    expect(stepLabelFor("browser_read", { view: "image", ref: "e1_9" })).toBe("Рассматриваю элемент");
+    expect(stepLabelFor("browser_inspect", { query: "кнопка войти" })).toBe("Ищу на странице: «кнопка войти»");
+    expect(stepLabelFor("browser_tabs", { op: "close", tabId: 7 })).toBe("Закрываю вкладку");
+    expect(stepLabelFor("browser_tabs", {})).toBe("Смотрю вкладки");
+    for (const label of [stepLabelFor("browser_act", { intent: "set", value: "Секрет123" }), stepLabelFor("browser_act", { intent: "type", text: "личное письмо" })]) {
+      expect(label).not.toMatch(/Секрет|личное/u);
+    }
   });
 
   it("browser_open/web_fetch — с хостом и глаголом", () => {
