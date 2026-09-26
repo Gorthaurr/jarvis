@@ -53,6 +53,16 @@ const call = (id: string, name: string, input: Record<string, unknown>): MockTur
 const done = (text: string): MockTurn[] => [{ text }, { text }, { text }];
 const verifyNudged = (llm: MockLlmProvider): boolean => JSON.stringify(llm.requests).includes("лестница §Волна3");
 const TYPE = { ref: "e3_2", intent: "type", params: { text: "Вопрос по заказу" } };
+/** tool_result вызова `id` (формулировки хендлера не закрепляем — это зона tools; только исход и суть). */
+function result(llm: MockLlmProvider, id: string): { content: string; isError: boolean } {
+  for (const m of llm.requests.at(-1)?.messages ?? []) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content as Array<{ type: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+      if (b.type === "tool_result" && b.tool_use_id === id) return { content: JSON.stringify(b.content), isError: b.is_error === true };
+    }
+  }
+  throw new Error(`нет tool_result для ${id}`);
+}
 
 describe("р2 loop-regress-3: частично исполненный берст — долг по исполненным шагам", () => {
   it("[набор, «Отправить», ещё клик] встал на 3-м шаге → «Сообщение отправлено» без взгляда → verify-нудж", async () => {
@@ -61,8 +71,10 @@ describe("р2 loop-regress-3: частично исполненный берст
       call("b1", "browser_batch", { url: SITE, steps: [TYPE, { ref: "e3_9", intent: "click" }, { ref: "e3_11", intent: "click" }] }),
       ...done("Сообщение в поддержку отправлено, сэр."),
     ]);
-    await handleUserText(session(), "напиши в поддержку магазина вопрос по заказу", deps(llm, ext(stopped)));
-    expect(JSON.stringify(llm.requests[1]?.messages ?? [])).toMatch(/выполнено 2 из 3/u); // стоп дошёл через хендлер
+    const e = ext(stopped);
+    await handleUserText(session(), "напиши в поддержку магазина вопрос по заказу", deps(llm, e));
+    expect(e.tabBatch).toHaveBeenCalledTimes(1); // стоп пришёл от расширения через настоящий хендлер
+    expect(result(llm, "b1").isError).toBe(true);
     expect(verifyNudged(llm)).toBe(true);
   });
 
@@ -76,9 +88,13 @@ describe("р2 loop-regress-3: частично исполненный берст
       call("c1", "browser_act", { url: SITE, intent: "click", ref: "e3_9" }),
       ...done("Заказ оформлен, сэр."),
     ]);
-    await handleUserText(session(), "оформи заказ с комментарием в магазине", deps(llm, ext(stopped, { ok: true, navigated: "https://shop.example/order/done" })));
-    expect(JSON.stringify(llm.requests[1]?.messages ?? [])).toMatch(/кнопку-коммит/u);
-    expect(JSON.stringify(llm.requests.at(-1)?.messages ?? [])).toMatch(/вызвало переход страницы/u); // клик — с наблюдением (observed)
+    const e = ext(stopped, { ok: true, navigated: "https://shop.example/order/done" });
+    await handleUserText(session(), "оформи заказ с комментарием в магазине", deps(llm, e));
+    expect(e.tabBatch).toHaveBeenCalledTimes(1);
+    expect(result(llm, "b1").isError).toBe(true);
+    const clicked = result(llm, "c1"); // клик прошёл с наблюдением перехода (observed) — снимок нажатия, не исход
+    expect(clicked.isError).toBe(false);
+    expect(clicked.content).toContain("shop.example/order/done");
     expect(verifyNudged(llm)).toBe(true);
   });
 });
