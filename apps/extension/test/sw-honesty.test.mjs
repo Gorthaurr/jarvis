@@ -97,6 +97,23 @@ describe("смерть контекста: до действия — frame_missi
   });
 });
 
+// B-16 (контракт с сервером): вкладка не догрузилась за ожидание — ответы read/inspect/act несут loading:true (сервер
+// ставит пометку «ещё грузилась» и не засчитывает readback сверкой).
+describe("вкладка не догрузилась — loading:true в ответах read / inspect / act", () => {
+  it("tabRead, tabInspect и tabAct", async () => {
+    const SLOW = { ...TAB, status: "loading" };
+    const page = { readPageInPage: { title: "t", url: TAB.url, text: "x", headings: [] }, inspectPageInPage: { url: TAB.url, title: "t", elements: [] } };
+    const env = loadServiceWorker({
+      tabs: { get: async () => SLOW, query: async () => [SLOW] },
+      scripting: { executeScript: async (inj) => [{ frameId: 0, result: page[inj.func.name] ?? { ok: true, value: "x" } }] },
+      waitForTabReady: async () => "loading",
+    });
+    assert.equal((await env.tabRead("", 1, "")).loading, true);
+    assert.equal((await env.tabInspect("", "", 80, 1)).loading, true);
+    assert.equal((await env.tabAct("", "type", { selector: "#q", text: "x" }, 1)).loading, true);
+  });
+});
+
 describe("tabAct type без selector: фреймы не щупаем", () => {
   it("не найдено в top → честный not_found, ввода в «любое поле» чужого фрейма нет", async () => {
     const calls = [];

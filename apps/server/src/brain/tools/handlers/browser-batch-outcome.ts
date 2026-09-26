@@ -8,7 +8,7 @@
  */
 import type { ToolResult } from "../dispatch.js";
 import { ok } from "../dispatch-util.js";
-import { type ActReply, navigatedTo } from "./browser-act-outcome.js";
+import { type ActReply, loadingNote, navigatedTo } from "./browser-act-outcome.js";
 import { UNKNOWN_TAIL, batchStopped, unknownOutcome } from "./browser-failure.js";
 
 /** Ответ tab.batch: {ok, done, total, stoppedAt?, code?, error?, results:[{step, ok, intent, result|error}]}. */
@@ -22,10 +22,9 @@ export interface BatchReply {
   results?: unknown;
 }
 
-/** Исход последнего шага из results (форма tabBatch расширения). */
-function lastStepResult(results: unknown): ActReply | undefined {
-  const last: unknown = Array.isArray(results) ? results[results.length - 1] : undefined;
-  const r = last && typeof last === "object" ? (last as { result?: unknown }).result : undefined;
+/** Исход шага из элемента results (форма tabBatch расширения: {step, ok, intent, result|error}). */
+function stepResult(entry: unknown): ActReply | undefined {
+  const r = entry && typeof entry === "object" ? (entry as { result?: unknown }).result : undefined;
   return r && typeof r === "object" ? (r as ActReply) : undefined;
 }
 
@@ -41,14 +40,17 @@ export function batchOutcome(r: BatchReply | undefined, steps: number): ToolResu
   const done = r?.done ?? 0;
   const total = r?.total ?? steps;
   if (r?.ok) {
-    const last = lastStepResult(r.results);
+    const results = Array.isArray(r.results) ? (r.results as unknown[]) : [];
+    const last = stepResult(results[results.length - 1]);
     // srv-tests-5 / EXT-6: последний шаг ушёл, а страница перешла посреди действия — «выполнен» было бы ложью.
     if (last?.uncertain === true) {
       return markInjected(unknownOutcome(`browser_batch: выполнено ${done} из ${total}, но исход последнего шага не подтверждён (страница перешла во время действия). ${UNKNOWN_TAIL}`), done - 1);
     }
     const nav = last && navigatedTo(last) ? " Последний шаг увёл страницу на другой адрес." : "";
+    // B-16: хоть один шаг работал с недогруженной вкладкой — пометка (наша, доверенная).
+    const slow = loadingNote(results.map(stepResult).find((x) => x?.loading === true));
     // Успех берста НЕ снимает verify-долг (observed не ставим): ИСХОД (логин прошёл? поиск нашёл?) — отдельная сверка.
-    return ok(`Берст выполнен: ${done} из ${total} шагов по ref.${nav} Сверь ИСХОД (browser_inspect/browser_read) прежде чем говорить «готово».`);
+    return ok(`Берст выполнен: ${done} из ${total} шагов по ref.${nav} Сверь ИСХОД (browser_inspect/browser_read) прежде чем говорить «готово».${slow}`);
   }
   const at = r?.stoppedAt !== undefined ? ` (стоп на шаге ${(r.stoppedAt ?? 0) + 1})` : "";
   const out = batchStopped(r, `browser_batch: выполнено ${done} из ${total}${at}`);

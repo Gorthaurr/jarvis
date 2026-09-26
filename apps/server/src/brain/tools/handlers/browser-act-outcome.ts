@@ -18,6 +18,15 @@ export interface ActReply {
   value?: unknown;
   checked?: unknown;
   submitted?: boolean;
+  /** B-16: расширение не дождалось загрузки вкладки (waitForTabReady) и работало с недогруженной страницей. */
+  loading?: boolean;
+}
+
+/** B-16: пометка «страница ещё грузилась» — НАША (доверенная), ставится ВНЕ untrusted; нет loading → "". */
+export function loadingNote(r: unknown): string {
+  return r && typeof r === "object" && (r as ActReply).loading === true
+    ? "\n[Страница ещё грузилась (не дождался загрузки) — содержимое может быть неполным или смениться: сверь после загрузки (browser_read/browser_inspect ещё раз).]"
+    : "";
 }
 
 const HISTORY_INTENTS: ReadonlySet<string> = new Set(["back", "forward"]);
@@ -38,8 +47,9 @@ export function actCommits(intent: string, params: Record<string, unknown>, r: A
   return false;
 }
 
-/** Сильный сигнал исхода → `observed` (verify-долг снят в том же раунде). */
+/** Сильный сигнал исхода → `observed` (verify-долг снят в том же раунде). Страница ещё грузилась — не сигнал (B-16). */
 export function actObserved(intent: string, params: Record<string, unknown>, r: ActReply): boolean {
+  if (r.loading === true) return false;
   const readback = (r.value !== undefined || r.checked !== undefined) && !actCommits(intent, params, r);
   const media = !HISTORY_INTENTS.has(intent) && (r.playing !== undefined || r.currentTime !== undefined);
   return readback || media || (navigatedTo(r) && r.uncertain !== true);

@@ -91,6 +91,40 @@ describe("ext-regress-3 / NEW-2 и submit-nav: стоп берста с изве
   });
 });
 
+describe("B-16: loading:true от расширения доходит до модели (read/inspect/act/batch), act — не observed", () => {
+  const LOADING = /Страница ещё грузилась/u;
+  // Наша пометка — ВНЕ <untrusted_content> (после закрывающего тега), иначе модель читала бы её как текст страницы.
+  const outside = (r: { content: unknown }): string => text(r).split("</untrusted_content>").pop() ?? "";
+
+  it("browser_read и browser_inspect: пометка «ещё грузилась» после untrusted-блока; без loading — её нет", async () => {
+    const e = ext({
+      tabRead: vi.fn(async () => ({ title: "Магазин", url: SITE, text: "Загрузка…", headings: [], loading: true })),
+      tabInspect: vi.fn(async () => ({ url: SITE, title: "Магазин", count: 0, truncated: false, frames: [], elements: [], loading: true })),
+    });
+    const read = await dispatchTool("browser_read", { tabId: 5 }, makeCtx(e));
+    const insp = await dispatchTool("browser_inspect", { tabId: 5 }, makeCtx(e));
+    expect(outside(read)).toMatch(LOADING);
+    expect(outside(insp)).toMatch(LOADING);
+    const calm = ext({ tabRead: vi.fn(async () => ({ title: "Магазин", url: SITE, text: "Каталог", headings: [] })) });
+    expect(text(await dispatchTool("browser_read", { tabId: 5 }, makeCtx(calm)))).not.toMatch(LOADING);
+  });
+
+  it("browser_act set с readback на недогруженной странице — пометка и НЕ observed (с загруженной — observed)", async () => {
+    const reply = { ok: true, value: "Иванов", changed: true };
+    const slow = await dispatchTool("browser_act", { tabId: 5, intent: "set", ref: "e1_3", value: "Иванов" }, makeCtx(ext({ tabAct: vi.fn(async () => ({ ...reply, loading: true })) })));
+    const fast = await dispatchTool("browser_act", { tabId: 5, intent: "set", ref: "e1_3", value: "Иванов" }, makeCtx(ext({ tabAct: vi.fn(async () => reply) })));
+    expect(text(slow)).toMatch(LOADING);
+    expect(slow.observed).toBeUndefined();
+    expect(fast.observed).toBe(true);
+  });
+
+  it("browser_batch: шаг на недогруженной странице — пометка к «Берст выполнен»", async () => {
+    const r = await batch({ ok: true, done: 2, total: 2, results: [{ ...typed, result: { ...typed.result, loading: true } }, { step: 1, ok: true, intent: "click", result: { ok: true } }] });
+    expect(r.isError).toBe(false);
+    expect(text(r)).toMatch(LOADING);
+  });
+});
+
 describe("EXT-9 остаток: scroll по ref без сдвига — честное «край», не «кнопка не та» и не координаты", () => {
   it("no_effect у scroll → текст про прокрутку, без хатча", async () => {
     const e = ext({ tabAct: vi.fn(async () => { throw extReplyError("no_effect: прокрутка ничего не сдвинула — ни контейнер цели, ни страница дальше не прокручиваются (край)", "no_effect"); }) });

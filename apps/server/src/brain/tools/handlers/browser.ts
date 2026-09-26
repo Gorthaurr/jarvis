@@ -16,7 +16,7 @@ import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refFieldHint, rememberRefHints } from "./browser-refs.js";
 import { nonDomFailure, pageErrorBlock } from "./browser-failure.js";
 import { type BatchReply, batchOutcome } from "./browser-batch-outcome.js";
-import { actObserved, historySeekMismatch, navigatedTo } from "./browser-act-outcome.js";
+import { actObserved, historySeekMismatch, loadingNote, navigatedTo } from "./browser-act-outcome.js";
 import { browserReadImage } from "./browser-capture.js";
 import { markBrowserActMiss, rememberBrowserTarget, resolveBrowserTarget } from "./browser-target.js";
 
@@ -274,7 +274,7 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
       );
       // Рецепт хоста — НАША заметка, ВНЕ untrusted-обёртки (как в browser_open); хост — фактический, со страницы
       // (recall по нему в безопасную сторону: чужой хост даст лишь чужую нашу заметку либо ничего).
-      out.content += recipeHintOnce(ctx, r?.url || target.url);
+      out.content += recipeHintOnce(ctx, r?.url || target.url) + loadingNote(r); // B-16: недогруженная страница — пометка
       return out;
     } catch (e) {
       return err(`Не смог прочитать вкладку: ${e instanceof Error ? e.message : String(e)}`);
@@ -302,7 +302,7 @@ export async function browserInspect(ctx: ToolContext, input: Record<string, unk
     const shown = capInspectElements(r?.elements);
     const out = untrusted(`DOM вкладки ${r?.url ?? target.url ?? ""}`, JSON.stringify({ url: r?.url, title: sanitizePageText(r?.title ?? "", 200), count: r?.count, truncated: r?.truncated || shown.dropped > 0 || undefined, gen: r?.gen, elements: shown.elements }));
     if (shown.dropped > 0) out.content += `\n[Снимок усечён: не показано ${shown.dropped} элементов — сузь browser_inspect{query}.]`;
-    out.content += recipeHintOnce(ctx, r?.url || target.url); // §3.11: первый осмотр хоста в сессии тоже несёт рецепт
+    out.content += recipeHintOnce(ctx, r?.url || target.url) + loadingNote(r); // §3.11 рецепт; B-16 «ещё грузилась»
     return out;
   } catch (e) {
     return err(`Не смог осмотреть вкладку: ${e instanceof Error ? e.message : String(e)}`);
@@ -437,7 +437,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         }
       }
       const diag = Object.keys(diagObj).length ? ` Результат: ${JSON.stringify(diagObj)}` : "";
-      let body = `Сделал «${intent}» в браузере.${diag}`;
+      let body = `Сделал «${intent}» в браузере.${diag}${loadingNote(r)}`; // B-16: loading — не observed (actObserved)
       if (navigatedTo(r)) {
         body += r.uncertain
           ? " Похоже, страница ПЕРЕШЛА во время действия, но исход самого действия НЕ подтверждён — сверь (browser_read/ui_snapshot/inspect) прежде чем говорить «готово»."

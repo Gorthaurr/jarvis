@@ -244,4 +244,25 @@ describe("W1: журнал чекпойнта судит эффект по вх�
     expect(doneSection).toMatch(/browser_act\([^)]*set/u);
     expect(doneSection).not.toMatch(/hover/u);
   });
+
+  // Р2 B-16: НАСТОЯЩИЙ хендлер, подменено только расширение (его ответ tab.act): readback поля на недогруженной вкладке
+  // (loading:true) — не сверка, долг остаётся; тот же ответ без loading — сверка в том же вызове.
+  for (const [name, loading, nudged] of [["ещё грузилась", true, true], ["загружена", false, false]] as const) {
+    it(`set с readback, вкладка ${name} → verify-нудж: ${nudged}`, async () => {
+      const ext = {
+        connected: true,
+        openOrFocus: vi.fn(async () => ({ tabId: 5 })),
+        tabRead: vi.fn(async () => ({})),
+        tabInspect: vi.fn(async () => ({ elements: [] })),
+        tabAct: vi.fn(async () => ({ ok: true, value: "Иванов", changed: true, ...(loading ? { loading: true } : {}) })),
+        tabList: vi.fn(async () => ({ tabs: [{ tabId: 5, url: "https://shop.example/form", status: "complete", active: true }] })),
+        tabClose: vi.fn(async () => ({ closed: 0 })),
+        exportCookies: vi.fn(async () => ({ cookies: [] })),
+      } as unknown as NonNullable<AgentDeps["ext"]>;
+      const llm = new MockLlmProvider([act("a1", { tabId: 5, intent: "set", ref: "e1_3", value: "Иванов" }), ...done("Заполнил фамилию, сэр.")]);
+      await handleUserText(session(), "впиши фамилию Иванов в поле на сайте", deps(llm, { ext }));
+      expect(vi.mocked(ext.tabAct)).toHaveBeenCalledTimes(1);
+      expect(verifyNudged(llm)).toBe(nudged);
+    });
+  }
 });
