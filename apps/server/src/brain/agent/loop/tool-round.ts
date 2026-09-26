@@ -1,12 +1,13 @@
 // W3 «Петля»: раунд инструментов: аренда, диспатч, результат, классификация каждого вызова, закрытие раунда.
-import { log, notifyToolRound, PARALLEL_READONLY_TOOLS } from "./util.js";
+import { log, notifyToolRound, isParallelReadonlyCall } from "./util.js";
 import type { LoopCtx } from "./context.js";
 import { dispatchTool } from "../../tools/dispatch.js";
 import { noteToolCall, applySuccessEffects, applyRoundFlags } from "./tool-classify.js";
+import { countFamilyCall } from "./family-count.js";
 import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
-import { isBlindMutate } from "../error-voice.js";
-import { canonicalToolCall, canonicalToolName } from "@jarvis/tools";
+import { isBlindMutate, toolCallEffect } from "../error-voice.js";
+import { canonicalToolCall } from "@jarvis/tools";
 
 /**
  * B-F6: tool_result вызова, снятого отменой владельца (не «ошибка инструмента»). Последовательный вызов не исполнялся
@@ -84,7 +85,10 @@ export function prefetchReadonly(ctx: LoopCtx, resp: LlmResponse) {
   // перебрасываются в точке потребления — семантика ошибок 1:1 с последовательным путём.
   const parallelSafe =
     resp.toolUses.length > 1 &&
-    resp.toolUses.every((tu) => PARALLEL_READONLY_TOOLS.has(canonicalToolName(tu.name, tu.input)));
+    resp.toolUses.every((tu) => {
+      const c = canonicalToolCall(tu.name, tu.input);
+      return isParallelReadonlyCall(c.name, c.input);
+    });
   const prefetched = parallelSafe
     ? new Map(
         resp.toolUses.map((tu) => [
@@ -131,7 +135,7 @@ export async function acquireForTool(ctx: LoopCtx, tu: LlmResponse["toolUses"][n
     // действия блокируются, пока модель не сверится глазами (verify снимает гард), но не больше
     // 2 блоков (анти-deadloop, ревью B+C: упорный «клик без сверки» дальше добьют anti-runaway
     // и verify-петля, а не вечный круг ошибок).
-    if (st.budget.lastAcquireWaitMs > STALE_INPUT_WAIT_MS && isBlindMutate(tu.name)) {
+    if (st.budget.lastAcquireWaitMs > STALE_INPUT_WAIT_MS && isBlindMutate(tu.name) && toolCallEffect(tu.name, tu.input) === "mutate") {
       const waitedSec = Math.round(st.budget.lastAcquireWaitMs / 1000);
       st.budget.staleGuardBlocks += 1;
       if (st.budget.staleGuardBlocks >= 2) st.budget.lastAcquireWaitMs = 0;
@@ -214,6 +218,7 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
     const { effOfCall, reportOfThisTurn } = noteToolCall(ctx, tu, r, round);
     if (!r.isError) applySuccessEffects(ctx, tu, r, effOfCall, round);
     applyRoundFlags(ctx, tu, r, effOfCall, reportOfThisTurn, round);
+    countFamilyCall(ctx, tu, r, effOfCall, round); // W1 (L-1/L-12): семейный счёт — по каноническому вызову и его исходу
     round.resultBlocks.push({
       type: "tool_result",
       tool_use_id: tu.id,

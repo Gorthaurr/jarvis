@@ -219,6 +219,12 @@ export interface HonestyState {
   // раунд уже был сверкой глазами (screen_capture/read) — модель только что смотрела на результат,
   // лишний раунд не жжём (lastRoundHadVerify).
   goalCheckDone: boolean;
+  // W1 (L-3): в задаче СВЕРЕНО дело, а не только запуск — не-запускной mutate с приложенным наблюдением (act met,
+  // readback поля) или реальный взгляд после него. Тогда «Открыл блокнот и напечатал…» — не «заявка только о
+  // запуске»: goal-check не жжёт лишний раунд (на подписке — новая сессия) на уже подтверждённом деле.
+  verifiedRealAction: boolean;
+  // Не-запускной mutate прошёл БЕЗ наблюдения — ждёт реального взгляда, чтобы стать «сверенным делом».
+  realActionUnverified: boolean;
 }
 
 export interface NudgeState {
@@ -251,6 +257,13 @@ export interface NudgeState {
   // отчёта модель получала «топтание» + Opus, на 12-й — ложный «Застрял на file_view»). Повтором считается
   // только та же пара (path, page).
   seenFileViews: Set<string>;
+  // W1 (L-1): у РУК (слепые mutate: browser_act/act/input_*/…) первая встреча ЦЕЛИ бесплатна — считается повтор той же
+  // сигнатуры (имя + цель без значения). 14 разных полей формы — не «топтание»; долбёжка одной кнопки — да.
+  seenHandSigs: Set<string>;
+  // Последний взгляд каждым сенсором (хеш содержимого без ref-токенов): новый вид ПОСЛЕ действия руки = прогресс
+  // (новая страница теста) — счётчики рук и глаз обнуляются. Тот же вид — топтание, счёт идёт дальше.
+  lookDigests: Map<string, string>;
+  handActedSinceLook: boolean;
   // Anti-runaway (§20): сигнатура tool-вызовов прошлого раунда + счётчик одинаковых подряд.
   // Модель иногда зацикливается на ОДНОМ И ТОМ ЖЕ УСПЕШНОМ действии (открывает «до посинения»,
   // карточка задачи не закрывается) — ловим повтор и обрываем. Только УСПЕШНЫЙ повтор: подряд
@@ -461,6 +474,8 @@ function initHonestyState(): HonestyState {
     gateStoppedByVeil: false,
     lastRoundHadVerify: false,
     goalCheckDone: false,
+    verifiedRealAction: false,
+    realActionUnverified: false,
   };
 }
 
@@ -473,6 +488,9 @@ function initNudgeState(): NudgeState {
     familyNudges: 0,
     toolNameCount: new Map<string, number>(),
     seenFileViews: new Set<string>(),
+    seenHandSigs: new Set<string>(),
+    lookDigests: new Map<string, string>(),
+    handActedSinceLook: false,
     lastToolSig: "",
     identicalRepeats: 0,
     continuations: 0,
