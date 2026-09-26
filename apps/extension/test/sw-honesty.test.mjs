@@ -6,7 +6,7 @@ import { loadServiceWorker } from "./cdp-harness.mjs";
 
 const TAB = { id: 1, windowId: 1, active: true, url: "https://x.example/", status: "complete" };
 
-describe("tabBatch: шаг увёл страницу или исход неизвестен — стоп, code uncertain", () => {
+describe("tabBatch: шаг увёл страницу, отправил форму или исход неизвестен — стоп с кодом по исходу", () => {
   const run = (outcomes) => {
     const seen = [];
     const env = loadServiceWorker({
@@ -17,18 +17,27 @@ describe("tabBatch: шаг увёл страницу или исход неиз�
   };
   const steps = [{ intent: "click", selector: "#a" }, { intent: "type", selector: "#b", params: { text: "x" } }];
 
+  // Р2 (NEW-2, submit-nav): достоверный переход и отправка формы — СВОИ коды (шаг выполнен), uncertain — только неизвестный исход.
   for (const [name, first] of [
     ["uncertain", { ok: true, navigated: "https://x.example/next", uncertain: true }],
     ["navigated", { ok: true, navigated: "https://x.example/next" }],
+    ["submitted", { ok: true, value: "x", submitted: true }],
   ]) {
-    it(`${name} на шаге 1 из 2 → ok:false, code uncertain, шаг 2 НЕ исполнен`, async () => {
+    it(`${name} на шаге 1 из 2 → ok:false, code ${name}, шаг 2 НЕ исполнен`, async () => {
       const { env, seen } = run([first]);
       const r = await env.tabBatch("", steps, 1);
-      assert.deepEqual([r.ok, r.code, r.stoppedAt, r.done, r.total], [false, "uncertain", 0, 1, 2], JSON.stringify(r));
-      assert.match(r.error, /^uncertain:/u);
+      assert.deepEqual([r.ok, r.code, r.stoppedAt, r.done, r.total], [false, name, 0, 1, 2], JSON.stringify(r));
+      assert.match(r.error, new RegExp(`^${name}:`, "u"));
       assert.deepEqual(seen, ["click"]);
     });
   }
+
+  it("ввод без Enter (submitted:false) и navigated:false — берст идёт дальше", async () => {
+    const { env, seen } = run([{ ok: true, value: "x", submitted: false, navigated: false }]);
+    const r = await env.tabBatch("", steps, 1);
+    assert.deepEqual([r.ok, r.done], [true, 2], JSON.stringify(r));
+    assert.deepEqual(seen, ["click", "type"]);
+  });
 
   it("uncertain на ПОСЛЕДНЕМ шаге — берст выполнен, исход шага отдан как есть", async () => {
     const { env } = run([{ ok: true }, { ok: true, uncertain: true, navigated: "https://x.example/n" }]);

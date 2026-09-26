@@ -14,7 +14,8 @@ import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebComm
 import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refFieldHint, rememberRefHints } from "./browser-refs.js";
-import { batchStopped, nonDomFailure, pageErrorBlock } from "./browser-failure.js";
+import { nonDomFailure, pageErrorBlock } from "./browser-failure.js";
+import { type BatchReply, batchOutcome } from "./browser-batch-outcome.js";
 import { actObserved, historySeekMismatch, navigatedTo } from "./browser-act-outcome.js";
 import { browserReadImage } from "./browser-capture.js";
 import { markBrowserActMiss, rememberBrowserTarget, resolveBrowserTarget } from "./browser-target.js";
@@ -546,21 +547,8 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
   }
   const actUrl = place.tabId !== undefined ? place.url : target.url;
   try {
-    const r = (await ctx.ext.tabBatch(actUrl, judged.map((j) => j.step), place.tabId ?? target.tabId)) as
-      | { ok?: boolean; done?: number; total?: number; stoppedAt?: number; error?: string; code?: string }
-      | undefined;
-    const done = r?.done ?? 0;
-    const total = r?.total ?? steps.length;
-    if (r?.ok) {
-      // Успех берста НЕ снимает verify-долг (observed не ставим): шаги реально прошли по ref, но ИСХОД
-      // (логин прошёл? поиск нашёл?) — отдельная сверка. browser_batch = BLIND_MUTATE (error-voice).
-      return ok(`Берст выполнен: ${done} из ${total} шагов по ref. Сверь ИСХОД (browser_inspect/browser_read) прежде чем говорить «готово».`);
-    }
-    const at = r?.stoppedAt !== undefined ? ` (стоп на шаге ${(r.stoppedAt ?? 0) + 1})` : "";
-    const out = batchStopped(r, `browser_batch: выполнено ${done} из ${total}${at}`);
-    // Контроль-8: частичное исполнение — в журнал («доделай» не повторит уже введённое/нажатое).
-    if (done > 0) out.partialSteps = done;
-    return out;
+    // Исход берста — по ответу и results расширения (browser-batch-outcome.ts: uncertain последнего шага, стопы).
+    return batchOutcome((await ctx.ext.tabBatch(actUrl, judged.map((j) => j.step), place.tabId ?? target.tabId)) as BatchReply | undefined, steps.length);
   } catch (e) {
     // B-4: берст ушёл, ответа нет — какие шаги прошли, неизвестно: «сверь», а не «не удался» (повтор = дубль ввода).
     return nonDomFailure("browser_batch", "batch", e) ?? err(`browser_batch не удался:\n${pageErrorBlock("browser-batch-error", errText(e))}`);

@@ -1,0 +1,90 @@
+/**
+ * Адверс-ревью W1, раунд 2 — зона «честность исходов» через настоящий dispatchTool. Фикстуры — РЕАЛЬНАЯ форма ответа
+ * расширения: tab.batch = {ok, done, total, stoppedAt?, code?, error?, results:[{step, ok, intent, result|error}]}
+ * (modules/batch-plan.js + tabBatch), ошибки tab.act — extReplyError с code (мост). Реверт-проверка: сломай → красный.
+ */
+import { describe, expect, it, vi } from "vitest";
+import type { ActionCommand, ActionResult } from "@jarvis/protocol";
+import { dispatchTool, type ToolContext } from "./dispatch.js";
+
+type Send = (cmd: ActionCommand, timeoutMs?: number) => Promise<ActionResult>;
+type Ext = NonNullable<ToolContext["ext"]>;
+
+function ext(over: Partial<Ext> = {}): Ext {
+  return {
+    connected: true,
+    openOrFocus: vi.fn(async () => ({ focused: true, tabId: 42 })),
+    tabRead: vi.fn(async () => ({})),
+    tabInspect: vi.fn(async () => ({ url: "", title: "", count: 0, elements: [] })),
+    tabAct: vi.fn(async () => ({ ok: true })),
+    tabBatch: vi.fn(async () => ({ ok: true, done: 1, total: 1 })),
+    tabList: vi.fn(async () => ({ tabs: [], count: 0 })),
+    tabClose: vi.fn(async () => ({ closed: 1 })),
+    exportCookies: vi.fn(async () => ({ ok: true, count: 0, cookies: [] })),
+    ...over,
+  };
+}
+const makeCtx = (e: Ext): ToolContext =>
+  ({ session: { sendAction: vi.fn<Send>(async () => ({ commandId: "c", ok: true, durationMs: 1 })) }, userId: "u1", ext: e, confirm: vi.fn(async () => ({ approved: true, outcome: "approved" as const })) }) as unknown as ToolContext;
+const SITE = "https://shop.example/";
+const text = (r: { content: unknown }): string => (typeof r.content === "string" ? r.content : JSON.stringify(r.content));
+const STEPS = [
+  { ref: "e1_1", intent: "type", params: { text: "кот" } },
+  { ref: "e1_2", intent: "click" },
+];
+const typed = { step: 0, ok: true, intent: "type", result: { ok: true, value: "кот", submitted: false } };
+const batch = (reply: unknown) => dispatchTool("browser_batch", { url: SITE, steps: STEPS }, makeCtx(ext({ tabBatch: vi.fn(async () => reply) })));
+
+describe("srv-tests-5 / EXT-6: исход ПОСЛЕДНЕГО шага из results берста", () => {
+  it("последний клик увёл страницу, исход не подтверждён (uncertain) — НЕ ЗНАЮ, не «Берст выполнен»", async () => {
+    const last = { step: 1, ok: true, intent: "click", result: { ok: true, navigated: "https://shop.example/checkout", uncertain: true, note: "страница перешла во время действия — исход не подтверждён" } };
+    const r = await batch({ ok: true, done: 2, total: 2, results: [typed, last] });
+    expect(r.uncertain).toBe(true);
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/НЕ ЗНАЮ/u);
+    expect(text(r)).not.toMatch(/Берст выполнен/u);
+    // журнал: шаг 1 сделан, действие шага 2 ушло с неизвестным исходом (не «сделано» и не «ошибка»)
+    expect([r.partialSteps, r.partialInjected]).toEqual([1, true]);
+  });
+
+  it("последний шаг достоверно перешёл (navigated без uncertain) — выполнен, с пометкой о переходе, без uncertain", async () => {
+    const last = { step: 1, ok: true, intent: "click", result: { ok: true, navigated: "https://shop.example/item/1" } };
+    const r = await batch({ ok: true, done: 2, total: 2, results: [typed, last] });
+    expect(r.isError).toBe(false);
+    expect(r.uncertain).toBeUndefined();
+    expect(text(r)).toMatch(/Берст выполнен: 2 из 2/u);
+    expect(text(r)).toMatch(/увёл страницу/u);
+  });
+});
+
+describe("ext-regress-3 / NEW-2 и submit-nav: стоп берста с известным исходом шага — не «не знаю»", () => {
+  const stop = (code: string, why: string) => ({
+    ok: false, code, stoppedAt: 0, done: 1, total: 2, results: [{ step: 0, ok: true, intent: "type", result: { ok: true, value: "кот", submitted: code === "submitted", ...(code === "navigated" ? { navigated: "https://shop.example/#list" } : {}) } }],
+    error: `${code}: шаг 1 («type») — ${why}; остальные шаги НЕ выполнены. Сверь страницу (browser_inspect), вслепую не повторяй`,
+  });
+
+  it("navigated: «шаг 1 выполнен, страница перешла; остальные не делал — пересними», без uncertain", async () => {
+    const r = await batch(stop("navigated", "выполнен, страница перешла на другой адрес"));
+    expect(r.uncertain).toBeUndefined();
+    expect(text(r)).toMatch(/шаг 1 выполнен, страница перешла/u);
+    expect(text(r)).toMatch(/остальные шаги НЕ делал — пересними/u);
+    expect(text(r)).not.toMatch(/НЕ ЗНАЮ/u);
+    expect([r.partialSteps, r.partialInjected]).toEqual([1, undefined]);
+  });
+
+  it("submitted: «на шаге 1 форма отправлена, остальное не делал», без uncertain", async () => {
+    const r = await batch(stop("submitted", "выполнен, форма отправлена (страница могла уйти)"));
+    expect(r.uncertain).toBeUndefined();
+    expect(text(r)).toMatch(/на шаге 1 форма отправлена/u);
+    expect(text(r)).not.toMatch(/НЕ ЗНАЮ/u);
+    expect(r.partialSteps).toBe(1);
+  });
+
+  it("uncertain-стоп: исход шага неизвестен — НЕ ЗНАЮ; в журнал он не «сделан», а «ушёл, сверь»", async () => {
+    const first = { step: 0, ok: true, intent: "type", result: { ok: true, navigated: "https://shop.example/pay", uncertain: true } };
+    const r = await batch({ ok: false, code: "uncertain", stoppedAt: 0, done: 1, total: 2, results: [first], error: "uncertain: шаг 1 («type») — исход не подтверждён (страница перешла во время действия); остальные шаги НЕ выполнены" });
+    expect(r.uncertain).toBe(true);
+    expect(text(r)).toMatch(/НЕ ЗНАЮ/u);
+    expect([r.partialSteps, r.partialInjected]).toEqual([undefined, true]);
+  });
+});

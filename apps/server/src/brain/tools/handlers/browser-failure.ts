@@ -19,7 +19,7 @@ import { errText, isExtNoReply, pageErrorCode } from "../ext-errors.js";
 import { intentMayMutate } from "../browser-params.js";
 
 /** Хвост «исход неизвестен» — одна формулировка на таймаут, frame_gone и uncertain берста. */
-const UNKNOWN_TAIL = "НЕ ЗНАЮ, сработало ли — действие могло уйти. НЕ повторяй вслепую (второй клик/Enter = дубль) и не кликай по координатам: сверь browser_inspect / browser_read, потом решай.";
+export const UNKNOWN_TAIL ="НЕ ЗНАЮ, сработало ли — действие могло уйти. НЕ повторяй вслепую (второй клик/Enter = дубль) и не кликай по координатам: сверь browser_inspect / browser_read, потом решай.";
 
 /** Кап текста ошибки со страницы (варианты select бывают сотнями). */
 const PAGE_ERROR_CAP = 1_500;
@@ -74,8 +74,9 @@ export function nonDomFailure(what: string, intent: string, e: unknown): ToolRes
 }
 
 /** Берст остановился на шаге: честный текст по коду страницы; текст ошибки со страницы — в untrusted (B-10). */
-export function batchStopped(r: { error?: string; code?: string } | undefined, head: string): ToolResult {
+export function batchStopped(r: { error?: string; code?: string; stoppedAt?: number } | undefined, head: string): ToolResult {
   const code = pageErrorCode(r ?? {}) ?? pageErrorCode(String(r?.error ?? ""));
+  const k = (r?.stoppedAt ?? 0) + 1;
   // Шаг упёрся в кнопку-коммит, которую сервер не распознал (подпись видна только странице): не жали. Подпись не
   // пересказываем (её задаёт страница, M11) — этот шаг отдельным browser_act, там будет вопрос владельцу.
   if (code === "commit_confirm") return err(`${head} — следующий шаг жмёт кнопку-коммит. Сделай его отдельным browser_act (спросит владельца).`);
@@ -84,6 +85,9 @@ export function batchStopped(r: { error?: string; code?: string } | undefined, h
   if (code === "tab_closed" || code === "tab_gone") return err(`${head} — вкладка закрыта; в другую не бил. Возьми tabId из browser_tabs.`);
   // W1-7/EXT-6/W1-5: шаг ушёл, а страница перешла или фрейм перезагрузился — исход шага неизвестен, остаток не делали.
   if (code === "uncertain" || code === "frame_gone") return unknownOutcome(`${head}: исход последнего шага неизвестен (страница перешла/фрейм перезагрузился). ${UNKNOWN_TAIL}`);
+  // NEW-2 / submit-nav: шаг k ВЫПОЛНЕН (исход известен), но страница перешла или форма ушла — остаток бил бы по новой.
+  if (code === "navigated") return err(`${head}: шаг ${k} выполнен, страница перешла на другой адрес; остальные шаги НЕ делал — пересними (browser_inspect) и продолжи.`);
+  if (code === "submitted") return err(`${head}: на шаге ${k} форма отправлена; остальные шаги НЕ делал (страница могла смениться) — пересними (browser_inspect) и продолжи.`);
   // Устаревший снимок и прочее → честно, без слепого повтора: пересними и продолжи.
   return err(`${head}: шаг не выполнен. Сделай browser_inspect и продолжи с актуального снимка.\n${pageErrorBlock("browser-batch-error", String(r?.error ?? "без описания"))}`);
 }

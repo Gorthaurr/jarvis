@@ -109,4 +109,37 @@ describe("W1: исход браузерных рук доходит до жур�
     expect(line).toContain("1..1");
     expect(line).not.toContain("ОШИБКА");
   }, 20_000);
+
+  // Адверс-ревью W1 р2 (srv-tests-5): расширение отдало исход последнего шага в results — клик увёл страницу посреди
+  // действия. Журнал обязан сказать «шаг 2 УШЁЛ, исход неизвестен», а не «ok» (иначе «доделай» считает берст сделанным).
+  it("берст n из n, но последний шаг uncertain → «действие шага 2 УШЛО, исход неизвестен», не «ok»", async () => {
+    const results = [
+      { step: 0, ok: true, intent: "type", result: { ok: true, value: "Антон", submitted: false } },
+      { step: 1, ok: true, intent: "click", result: { ok: true, navigated: "https://shop.example/pay", uncertain: true } },
+    ];
+    const ext = extWith({ tabBatch: async () => ({ ok: true, done: 2, total: 2, results }) });
+    const digest = await digestAfter(
+      "u-browser-last-uncertain",
+      { id: "b3", name: "browser_batch", input: { url: SITE, steps: [{ ref: "e1_0", intent: "type", params: { text: "Антон" } }, { ref: "e1_1", intent: "click" }] } },
+      ext,
+    );
+    const line = digest.split("\n").find((l) => l.includes("browser_batch(")) ?? "";
+    expect(line).toContain("1..1");
+    expect(line).toMatch(/шага 2 УШЛО, исход неизвестен/u);
+  }, 20_000);
+
+  it("стоп берста по переходу (navigated, исход известен) → «ЧАСТИЧНО 1..1; дальше — нет», без «исход неизвестен»", async () => {
+    const ext = extWith({
+      tabBatch: async () => ({ ok: false, code: "navigated", stoppedAt: 0, done: 1, total: 2, results: [{ step: 0, ok: true, intent: "click", result: { ok: true, navigated: "https://shop.example/#list" } }], error: "navigated: шаг 1 («click») — выполнен, страница перешла на другой адрес; остальные шаги НЕ выполнены" }),
+    });
+    const digest = await digestAfter(
+      "u-browser-nav-stop",
+      { id: "b4", name: "browser_batch", input: { url: SITE, steps: [{ ref: "e1_0", intent: "click" }, { ref: "e1_1", intent: "click" }] } },
+      ext,
+    );
+    const line = digest.split("\n").find((l) => l.includes("browser_batch(")) ?? "";
+    expect(line).toContain("ЧАСТИЧНО");
+    expect(line).toContain("1..1");
+    expect(line).not.toMatch(/неизвестен|НЕИЗВЕСТЕН/u);
+  }, 20_000);
 });
