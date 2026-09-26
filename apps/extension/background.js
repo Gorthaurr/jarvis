@@ -7,7 +7,8 @@
  * никакого debug-порта, вкладка в фоне → почти невидимо.
  */
 
-import { sleep, hostOf, urlPathQuery, noTabError, isPrivateHost, codedError, pageFailure, parseRef } from "./modules/utils.js";
+import { sleep, hostOf, noTabError, isPrivateHost, codedError, pageFailure, parseRef } from "./modules/utils.js";
+import { openOrFocus } from "./modules/open-tab.js";
 import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from "./modules/tab-find.js";
 import { replyFor } from "./modules/reply.js";
 import { historyNav } from "./modules/history-nav.js";
@@ -2219,50 +2220,6 @@ async function pageActInPage(intent, params) {
     return { ok: false, error: "неизвестный intent: " + intent };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
-  }
-}
-
-/**
- * Открыть URL в ТВОЁМ браузере (твоя сессия/логин) С УЧЁТОМ уже открытых вкладок:
- * если вкладка того же сервиса уже есть — ФОКУСИРУЕМ её (не плодим дубль), иначе открываем новую.
- * Это решает «постоянно новые вкладки»: Джарвис видит, что открыто (chrome.tabs.query), и не дублирует.
- */
-async function openOrFocus(url) {
-  if (!url) throw new Error("нужен url");
-  const host = hostOf(url);
-  const tabs = await chrome.tabs.query({});
-  const match = host ? tabs.find((t) => hostOf(t.url || "") === host) : null;
-  if (match && match.id != null) {
-    // Запрошен КОНКРЕТНЫЙ URL (путь/запрос — /results?search_query=…, /watch?v=…), а вкладка стоит на
-    // ДРУГОЙ странице → НАВИГИРУЕМ её на этот URL. Иначе был баг «фокус без перехода»: поиск/страница
-    // не открывались (фокусили старую вкладку хоста), а Джарвис рапортовал успех («ты ничего не вводишь
-    // в поиск» = ложь). Голый хост (homepage) → просто фокус, не перезагружаем (анти-дубль вкладок).
-    const want = urlPathQuery(url);
-    const have = urlPathQuery(match.url || "");
-    if (want !== "/" && want !== have) {
-      await chrome.tabs.update(match.id, { active: true, url });
-      await raiseWindow(match.windowId);
-      return { navigated: true, tabId: match.id, url };
-    }
-    // Вкладку активной + окно Chrome НА ПЕРЕДНИЙ ПЛАН: browser_open = «открой/покажи», Джарвис САМ берёт
-    // фокус, чтобы пользователь увидел результат — пользователь НЕ фокусит руками. (Фоновые действия идут
-    // через browser_act{tabId} — те окно не трогают.)
-    await chrome.tabs.update(match.id, { active: true });
-    await raiseWindow(match.windowId);
-    return { focused: true, tabId: match.id, url: match.url || url };
-  }
-  const tab = await chrome.tabs.create({ url, active: true });
-  await raiseWindow(tab.windowId);
-  return { created: true, tabId: tab.id, url };
-}
-
-/** Вывести окно Chrome на ПЕРЕДНИЙ ПЛАН (Джарвис сам берёт фокус для «покажи» — пользователь не фокусит руками). */
-async function raiseWindow(windowId) {
-  if (windowId == null) return;
-  try {
-    await chrome.windows.update(windowId, { focused: true, drawAttention: true });
-  } catch (e) {
-    /* окно закрыто/недоступно — не критично */
   }
 }
 

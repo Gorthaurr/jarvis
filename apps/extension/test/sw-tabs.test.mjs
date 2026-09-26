@@ -70,6 +70,53 @@ describe("B-9: закрытая явная вкладка → tab_closed, а н�
   });
 });
 
+describe("B-15: browser_open не уводит вкладку владельца", () => {
+  function openEnv(tabs) {
+    const updates = [];
+    const created = [];
+    const env = loadServiceWorker({
+      tabs: {
+        query: async () => tabs,
+        update: async (id, o) => { updates.push({ id, ...o }); return { id, ...o }; },
+        create: async (o) => { created.push(o); return { id: 50, windowId: 1, ...o }; },
+      },
+      windows: { update: async () => ({}) },
+    });
+    return { env, updates, created };
+  }
+  const DRAFT = { id: 1, windowId: 1, url: "https://mail.example/inbox/draft?id=5", active: false };
+
+  it("другой адрес того же сайта → НОВАЯ вкладка; вкладку с черновиком не трогаем", async () => {
+    const { env, updates, created } = openEnv([{ ...DRAFT }]);
+    const r = await env.openOrFocus("https://mail.example/settings");
+    assert.equal(r.created, true);
+    assert.equal(created.length, 1);
+    assert.ok(!updates.some((u) => u.id === 1 && u.url), "вкладку владельца увели на другой адрес");
+  });
+
+  it("тот же адрес (якорь не в счёт) → фокус без перехода", async () => {
+    const { env, updates, created } = openEnv([{ ...DRAFT }]);
+    const r = await env.openOrFocus("https://mail.example/inbox/draft?id=5#top");
+    assert.deepEqual([r.focused, r.tabId, created.length], [true, 1, 0]);
+    assert.equal(updates[0].url, undefined);
+  });
+
+  it("голый хост → фокус на вкладку сайта (анти-дубль), без перехода", async () => {
+    const { env, updates } = openEnv([{ ...DRAFT }]);
+    const r = await env.openOrFocus("mail.example");
+    assert.equal(r.focused, true);
+    assert.equal(updates[0].url, undefined);
+  });
+
+  it("пустая вкладка → открываем в ней, а не плодим новую", async () => {
+    const { env, updates, created } = openEnv([{ ...DRAFT }, { id: 2, windowId: 1, url: "chrome://newtab/" }]);
+    const r = await env.openOrFocus("https://news.example/today");
+    assert.equal(r.tabId, 2);
+    assert.equal(created.length, 0);
+    assert.equal(updates.find((u) => u.id === 2).url, "https://news.example/today");
+  });
+});
+
 describe("конверт ответа: code и label отдельными полями (контракт W1 §7)", () => {
   it("код отказа — первым словом текста и полем code", async () => {
     const r = await replyFor({ id: "m1" }, async () => { throw codedError("secret_field", "поле пароля — вводит владелец"); });
