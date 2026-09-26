@@ -500,10 +500,13 @@ function inspectPageInPage(query, cap) {
   const finding = qTok.length > 0;
   const seen = new Set();
   const cands = [];
+  let truncated = false;
   for (const el of collectDeep()) {
     if (seen.has(el)) continue;
     seen.add(el);
     if (!visible(el)) continue;
+    // Снимок без query — выходим на капе (подпись/innerText каждого узла дорогие: сотни на ленте). find ранжирует всё.
+    if (!finding && cands.length >= cap) { truncated = true; break; }
     const name = axName(el);
     const isField = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
     const text = isField ? "" : clip(el.innerText || el.getAttribute("title"));
@@ -518,7 +521,7 @@ function inspectPageInPage(query, cap) {
     cands.push({ el, name, text, label, score });
   }
   if (finding) cands.sort((a, b) => b.score - a.score); // стабильная сортировка: при равенстве — порядок документа
-  const truncated = cands.length > cap;
+  if (cands.length > cap) truncated = true;
   const out = [];
   for (const c of cands.slice(0, cap)) {
     const el = c.el;
@@ -1735,8 +1738,9 @@ async function robustClickMain(params) {
     if (!q) return null;
     let best = null;
     let bestScore = 0;
-    // Наведение цепляет и неинтерактивные контейнеры (пункт меню-li, карточка): меню часто раскрывается по mouseenter.
-    for (const e of deepAll(P.action === "hover" ? CAND + ",li,div,span,p,img,td,th,h1,h2,h3,h4,h5,h6" : CAND)) {
+    // Наведение цепляет и пункты меню-li, картинки, заголовки (меню часто раскрывается по mouseenter). div/span не берём:
+    // подпись каждого — innerText, на большой странице это секунды блокировки. Их цель — по ref из browser_inspect.
+    for (const e of deepAll(P.action === "hover" ? CAND + ",li,img,td,th,h1,h2,h3,h4,h5,h6" : CAND)) {
       // isConnected вместо document.contains: contains НЕ пересекает shadow-границу (ложно отсекал бы shadow-элементы)
       if (!e.isConnected) continue;
       if (e.closest && e.closest(".swiper-slide-duplicate")) continue;

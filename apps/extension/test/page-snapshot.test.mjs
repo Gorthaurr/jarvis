@@ -27,6 +27,13 @@ describe("снимок и реестр ref", { skip: !findChrome() && "нет Ch
     assert.ok(!JSON.stringify(els).includes("Hunter2"));
   });
 
+  it("снимок без query останавливается на капе и честно помечает усечение", async () => {
+    await page.open(fixtureUrl("find.html"));
+    const r = await page.callIsolated(fns.inspectPageInPage, "", 5);
+    assert.equal(r.elements.length, 5);
+    assert.equal(r.truncated, true);
+  });
+
   it("тот же элемент — тот же ref в следующем снимке; ref снимка живы после find", async () => {
     await page.open(fixtureUrl("find.html"));
     const first = await snap();
