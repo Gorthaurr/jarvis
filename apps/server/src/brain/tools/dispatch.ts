@@ -214,6 +214,9 @@ export interface ToolContext {
     // §AX-Ref: берст веб-шагов по ref одним вызовом (веб-аналог input_batch). Опционально — старые
     // структурные ext-моки/провайдеры без него остаются валидны; browserBatch guard'ит наличие.
     tabBatch?(url: string, steps: unknown[], tabId?: number): Promise<unknown>;
+    // W1: снимок/зум вкладки (browser_read{view:"image"}). Опционально — старые моки без него валидны, хендлер
+    // честно отказывает, если метода нет.
+    tabCapture?(url: string, tabId: number | undefined, opts?: { rect?: { x: number; y: number; w: number; h: number }; ref?: string; scale?: number }): Promise<unknown>;
     tabList(): Promise<unknown>;
     tabClose(url?: string, tabId?: number): Promise<unknown>;
     exportCookies(domains?: string[]): Promise<unknown>;

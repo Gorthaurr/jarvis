@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { dispatchTool, type ToolContext } from "./dispatch.js";
+import { extReplyError } from "./ext-errors.js";
 
 type Send = (cmd: ActionCommand, timeoutMs?: number) => Promise<ActionResult>;
 const okSend: Send = async () => ({ commandId: "c", ok: true, durationMs: 1 });
@@ -107,6 +108,19 @@ describe("Moodle: учебная LMS узнаётся по пути страни
     expect(typeof paramsOf(tabAct, 0).guard).toBe("string");
     expect(paramsOf(tabAct, 0).guardApproved).toBeUndefined();
     expect(paramsOf(tabAct, 1).guardApproved).toBe(true);
+  });
+
+  it("W1: новое расширение — подпись в e.label (мост), а не в тексте: вопрос с этой подписью, повтор с approvedLabel", async () => {
+    const tabAct = vi
+      .fn()
+      .mockRejectedValueOnce(extReplyError("commit_confirm", "commit_confirm", "Отправить всё и завершить тест"))
+      .mockResolvedValueOnce({ ok: true, changed: true });
+    const e = ext([{ tabId: 4, url: quiz("summary.php?attempt=42") }], tabAct);
+    const c = makeCtx(e, true);
+    const r = await act(c, { tabId: 4, intent: "click", params: { selector: ".btn-finishattempt button" } });
+    expect(r.isError).toBe(false);
+    expect(String(c.confirm.mock.calls[0]?.[0])).toMatch(/Отправить всё и завершить тест/u);
+    expect(paramsOf(tabAct, 1).approvedLabel).toBe("Отправить всё и завершить тест");
   });
 
   it("commit_confirm и отказ владельца — второго клика нет", async () => {

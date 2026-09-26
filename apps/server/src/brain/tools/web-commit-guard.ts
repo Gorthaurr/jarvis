@@ -25,8 +25,16 @@ export function pageGuardFor(place: WebPlace, riskyHost: boolean): string | unde
   return undefined;
 }
 
-/** Подпись из ошибки расширения «commit_confirm: <подпись>» (элемент похож на коммит, клика не было). */
-export function commitConfirmLabel(msg: string): string | null {
+/**
+ * Подпись из отказа расширения commit_confirm (элемент похож на коммит, клика не было): новое расширение кладёт её в
+ * `label` ошибки (мост, контракт W1 §7), старое — в текст «commit_confirm: <подпись>». Не commit_confirm → null.
+ */
+export function commitConfirmLabel(e: unknown): string | null {
+  if (e && typeof e === "object") {
+    const x = e as { code?: unknown; label?: unknown };
+    if (x.code === "commit_confirm" && typeof x.label === "string") return x.label.trim();
+  }
+  const msg = e instanceof Error ? e.message : typeof e === "string" ? e : "";
   const m = /commit_confirm:\s*(.*)$/su.exec(msg);
   return m ? m[1]!.trim() : null;
 }
