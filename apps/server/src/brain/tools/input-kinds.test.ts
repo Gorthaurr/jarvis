@@ -15,7 +15,6 @@ describe("классификация аренды ввода (§20)", () => {
         "app.close",
         "app.focus",
         "app.launch",
-        "browser.act",
         "browser.open",
       "gui.act", // W4 «Руки»: фокус окна + клик/печать
         "input.click",
@@ -37,6 +36,7 @@ describe("классификация аренды ввода (§20)", () => {
   it("чтение/файлы/код/память/Office/system не требуют аренды (параллелятся)", () => {
     const free: ActionKind[] = [
       "browser.read",
+      "browser.act", // W1 (L-11): руки во вкладке — синтетические события расширения, не мышь ОС
       "ui.ground",
       "context.read",
       "code.run",
@@ -63,6 +63,11 @@ describe("классификация аренды ввода (§20)", () => {
     expect(toolNeedsInput("memory_search")).toBe(false);
     expect(toolNeedsInput("fs_write")).toBe(false);
     expect(toolNeedsInput("code_run")).toBe(false);
+    // W1 (L-11): руки во вкладке (расширение) — без аренды, одинаково у browser_act и browser_batch; окно Chrome
+    // вперёд (browser_open) — под арендой.
+    expect(toolNeedsInput("browser_act")).toBe(false);
+    expect(toolNeedsInput("browser_batch")).toBe(false);
+    expect(toolNeedsInput("browser_open")).toBe(true);
     // Неизвестное имя (самописный инструмент → code.run) — не блокирует ввод.
     expect(toolNeedsInput("totally_made_up")).toBe(false);
   });

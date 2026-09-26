@@ -45,6 +45,12 @@ const SELECTION_STUB: ToolResultContent = {
   text: '[кадр выделенной области устарел и вырезан — актуальный вид смотри свежим screen_selection{op:"view"}]',
 };
 
+/** W1: снимок вкладки браузера — устаревает (страница живёт), свежий берётся тем же browser_read{view:"image"}. */
+const TAB_STUB: ToolResultContent = {
+  type: "text",
+  text: '[снимок вкладки устарел и вырезан из контекста — актуальный вид смотри свежим browser_read{view:"image"}]',
+};
+
 /** Картинка НЕ с экрана и НЕ документ (MCP-инструмент): нейтрально, без ложного совета «сними экран». */
 const OTHER_STUB: ToolResultContent = {
   type: "text",
@@ -85,7 +91,7 @@ export function pruneStaleImages(convo: LlmMessage[], keep = 2, keepDocs = 2, ke
     const m = convo[i]!;
     if (m.role === "user" && typeof m.content !== "string") lastUserIdx = i;
   }
-  const byClass: Record<ImageClass, ImageRef[]> = { doc: [], screenshot: [], selection: [], other: [] };
+  const byClass: Record<ImageClass, ImageRef[]> = { doc: [], screenshot: [], selection: [], tab: [], other: [] };
   convo.forEach((msg, msgIdx) => {
     if (msg.role !== "user" || typeof msg.content === "string") return;
     for (const block of msg.content) {
@@ -118,6 +124,7 @@ export function pruneStaleImages(convo: LlmMessage[], keep = 2, keepDocs = 2, ke
   // Кроп области владельца — свой бюджет: «деталь» и «контекст» (screen_capture) должны уживаться в
   // контексте вместе, иначе добор одного вырезает другой (пинг-понг view↔capture).
   prune(byClass.selection, keepSelection, () => SELECTION_STUB);
+  prune(byClass.tab, keep, () => TAB_STUB); // W1: снимки вкладки — свой бюджет (не вытесняют скриншоты экрана)
   prune(byClass.other, keep, () => OTHER_STUB);
   prune(byClass.doc, keepDocs, (r) => docStub(r.marker ?? ""));
   return pruned;

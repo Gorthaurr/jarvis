@@ -1,6 +1,7 @@
 /** §14 гейт необратимых кликов (причина №4 USER_SCENARIOS_2026-09-02) — чистые правила. */
 import { describe, expect, it } from "vitest";
 import {
+  COMMIT_WORDS_RE,
   assessGuiCommit,
   assessWebCommit,
   hostOfUrl,
@@ -38,6 +39,15 @@ describe("assessWebCommit", () => {
     expect(assessWebCommit({ host: "www.wildberries.ru", intent: "submit" })?.what).toMatch(/отправка формы/u);
     expect(assessWebCommit({ host: "docs.example.com", intent: "type", params: { text: "x", enter: true } })).toBeNull();
   });
+  it("W1: key-сочетания Enter (Ctrl+Enter, Shift+Enter) в мессенджере — коммит; Tab/Ctrl+A — нет; поле combo, как в схеме", () => {
+    for (const combo of ["Enter", "Ctrl+Enter", "shift+enter", "Return"]) {
+      expect(assessWebCommit({ host: "web.telegram.org", intent: "key", params: { combo } }), combo).not.toBeNull();
+    }
+    for (const combo of ["Tab", "Ctrl+A", "Escape", "Alt+Enter"]) {
+      expect(assessWebCommit({ host: "web.telegram.org", intent: "key", params: { combo } }), combo).toBeNull();
+    }
+    expect(assessWebCommit({ host: "docs.example.com", intent: "key", params: { combo: "Ctrl+Enter" } })).toBeNull(); // не опасное место
+  });
   it("подпись ref из последнего inspect судится как текст клика («Оплатить» по ref)", () => {
     expect(assessWebCommit({ host: "www.ozon.ru", intent: "click", params: { ref: "e3_5" }, label: "button Оплатить заказ" })?.summary).toMatch(/маркетплейс/u);
     expect(assessWebCommit({ host: "www.ozon.ru", intent: "click", params: { ref: "e3_5" } })).toBeNull(); // подписи нет — судить нечего
@@ -45,6 +55,25 @@ describe("assessWebCommit", () => {
   it("клик без имени (селектор/координаты) на опасном хосте — не гейтится (осознанный предел)", () => {
     expect(assessWebCommit({ host: "online.sberbank.ru", intent: "click", params: { selector: "#btn-7" } })).toBeNull();
     expect(assessWebCommit({ host: "online.sberbank.ru", intent: "scroll", params: { dy: 300 } })).toBeNull();
+  });
+});
+
+// W1 (B-5): удаление необратимо так же, как отправка — «Удалить навсегда» в почте уходило без вопроса владельцу.
+describe("W1: глаголы удаления в COMMIT_WORDS_RE (общий список веба, GUI-гейта и клиентского рубежа)", () => {
+  it("«Удалить», «Удалить навсегда», «Удаление аккаунта», «Стереть», Delete/Erase — коммит", () => {
+    for (const s of ["Удалить", "Удалить навсегда", "Удаление аккаунта", "удалите чат", "Стереть всё", "Delete", "Delete forever", "Erase disk"]) {
+      expect(COMMIT_WORDS_RE.test(s), s).toBe(true);
+    }
+  });
+  it("не удаление: «Удалённый рабочий стол», «удаленный доступ», «удалёнка», «Не удалось», папка «Deleted», undelete — НЕ коммит", () => {
+    for (const s of ["Удалённый рабочий стол", "удаленный доступ", "Работа на удалёнке", "Не удалось загрузить", "Deleted items", "Undelete", "Eraser tool"]) {
+      expect(COMMIT_WORDS_RE.test(s), s).toBe(false);
+    }
+  });
+  it("проводка: клик «Удалить навсегда» в веб-почте спрашивает, клик по папке «Удалённые» — нет; act «Удалить» в Telegram — коммит", () => {
+    expect(assessWebCommit({ host: "mail.google.com", intent: "click", params: { text: "Удалить навсегда" } })?.what).toMatch(/Удалить навсегда/u);
+    expect(assessWebCommit({ host: "mail.google.com", intent: "click", params: { text: "Удалённые" } })).toBeNull();
+    expect(assessGuiCommit({ foregroundProcess: "Telegram", tool: "act", input: { target: "Удалить для всех" } })?.what).toMatch(/Удалить/u);
   });
 });
 

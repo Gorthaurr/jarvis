@@ -1,7 +1,7 @@
 /**
  * §14 для browser_act/browser_batch, часть 2 (боевой прогон 26.09, Moodle). Где судим — `web-place.ts`.
  *
- * 1. Клик по селектору/ref сервер судить не мог (подписи не видно). На опасном месте отдаём странице guard — регэксп
+ * 1. Клик по селектору/ref сервер судить не мог (подписи не видно). На ЛЮБОМ месте (W1) отдаём странице guard — регэксп
  *    глаголов коммита; расширение сверяет подпись РЕАЛЬНОГО элемента и, если похоже на коммит, не жмёт, а возвращает
  *    commit_confirm с подписью. Спрашиваем владельца и повторяем с guardApproved + approvedLabel (флаги ставит только
  *    сервер; страница сверит, что жмёт ту самую подпись).
@@ -11,22 +11,33 @@
 import { COMMIT_WORDS_RE } from "@jarvis/shared";
 import type { ToolContext, ToolResult } from "./dispatch.js";
 import { confirmDeclineText, err, gateDeclined } from "./dispatch-util.js";
-import type { CommitRisk } from "./commit-gate.js";
+import { type CommitRisk, riskyHostCategory } from "./commit-gate.js";
 import { LMS_COMMIT_RE, LMS_TWO_STEP_RE, isLmsPage } from "./commit-lms.js";
 import type { WebPlace } from "./web-place.js";
 
 export { resolvePlace, type WebPlace } from "./web-place.js";
 
-/** Регэксп подписи-коммита для проверки на странице: только для опасного/учебного/неизвестного места. */
-export function pageGuardFor(place: WebPlace, riskyHost: boolean): string | undefined {
+/**
+ * Регэксп подписи-коммита для проверки на странице — на ЛЮБОМ хосте (W1, B-5): список опасных хостов неполон, и
+ * «Оплатить»/«Опубликовать»/«Удалить навсегда» по селектору/ref на незнакомом сайте раньше не судил никто. Список
+ * хостов на сервере лишь добавляет свой суд (Enter в мессенджере, клик по тексту на банке).
+ */
+export function pageGuardFor(place: WebPlace): string {
   // Неизвестная вкладка может оказаться и LMS (мёртвый tabId → расширение берёт активную) — учебные слова тоже.
   if (isLmsPage(place.url) || place.unknown) return `${COMMIT_WORDS_RE.source}|${LMS_COMMIT_RE.source}`;
-  if (riskyHost) return COMMIT_WORDS_RE.source;
-  return undefined;
+  return COMMIT_WORDS_RE.source;
 }
 
-/** Подпись из ошибки расширения «commit_confirm: <подпись>» (элемент похож на коммит, клика не было). */
-export function commitConfirmLabel(msg: string): string | null {
+/**
+ * Подпись из отказа расширения commit_confirm (элемент похож на коммит, клика не было): новое расширение кладёт её в
+ * `label` ошибки (мост, контракт W1 §7), старое — в текст «commit_confirm: <подпись>». Не commit_confirm → null.
+ */
+export function commitConfirmLabel(e: unknown): string | null {
+  if (e && typeof e === "object") {
+    const x = e as { code?: unknown; label?: unknown };
+    if (x.code === "commit_confirm" && typeof x.label === "string") return x.label.trim();
+  }
+  const msg = e instanceof Error ? e.message : typeof e === "string" ? e : "";
   const m = /commit_confirm:\s*(.*)$/su.exec(msg);
   return m ? m[1]!.trim() : null;
 }
@@ -72,6 +83,7 @@ export async function confirmWebCommit(ctx: ToolContext, place: WebPlace, risk: 
 export function pageCommitRisk(place: WebPlace, label: string): Pick<CommitRisk, "summary" | "what" | "where"> {
   const where = place.host || "неизвестной вкладке";
   const shown = label.replace(/[<>]/gu, " ").slice(0, 60);
-  const kind = isLmsPage(place.url) ? "учебная система — тест/задание" : place.unknown ? "сайт вкладки не определён" : "опасный сайт";
+  // Гард уходит на любой хост (W1) — «опасный сайт» про обычный сайт было бы неправдой в модалке владельца.
+  const kind = isLmsPage(place.url) ? "учебная система — тест/задание" : place.unknown ? "сайт вкладки не определён" : riskyHostCategory(place.host) ? "опасный сайт" : "сайт";
   return { where, what: "клик по кнопке-коммиту (подпись показана владельцу)", summary: `Необратимое действие в браузере (${kind}): клик «${shown}» на ${where}.` };
 }

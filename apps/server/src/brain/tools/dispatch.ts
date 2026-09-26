@@ -54,7 +54,7 @@ import {
   browserTabs,
   canvasClickAllowed,
   inBrowserTask,
-  refFieldHint,
+  refFieldInfo,
   syncLogins,
 } from "./handlers/browser.js";
 import {
@@ -208,11 +208,15 @@ export interface ToolContext {
     readonly connected: boolean;
     openOrFocus(url: string): Promise<unknown>;
     tabRead(url?: string, tabId?: number, query?: string): Promise<unknown>;
-    tabInspect(url?: string, query?: string, cap?: number, tabId?: number, refMode?: boolean): Promise<unknown>;
-    tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number, refMode?: boolean): Promise<unknown>;
+    // W1: ref-режим единственный — мост сам шлёт refMode:true, аргумента больше нет.
+    tabInspect(url?: string, query?: string, cap?: number, tabId?: number): Promise<unknown>;
+    tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown>;
     // §AX-Ref: берст веб-шагов по ref одним вызовом (веб-аналог input_batch). Опционально — старые
     // структурные ext-моки/провайдеры без него остаются валидны; browserBatch guard'ит наличие.
-    tabBatch?(url: string, steps: unknown[], tabId?: number, refMode?: boolean): Promise<unknown>;
+    tabBatch?(url: string, steps: unknown[], tabId?: number): Promise<unknown>;
+    // W1: снимок/зум вкладки (browser_read{view:"image"}). Опционально — старые моки без него валидны, хендлер
+    // честно отказывает, если метода нет.
+    tabCapture?(url: string, tabId: number | undefined, opts?: { rect?: { x: number; y: number; w: number; h: number }; ref?: string; scale?: number }): Promise<unknown>;
     tabList(): Promise<unknown>;
     tabClose(url?: string, tabId?: number): Promise<unknown>;
     exportCookies(domains?: string[]): Promise<unknown>;
@@ -405,7 +409,7 @@ export async function dispatchTool(
   const cred = checkCredentialInput(
     name,
     typesIntoFocus ? { ...input, target: lastActTarget(sessKey) } : input,
-    (ref) => refFieldHint(ctx, ref),
+    (ref) => refFieldInfo(ctx, ref), // W1: подпись И признак secret из снимков browser_inspect
     (handle) => uiHandleLabel(ctx.session as unknown as object, typeof handle === "string" ? Number(handle) : handle),
   );
   if (cred.block) return err(cred.block);

@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { dispatchTool, type ToolContext } from "./dispatch.js";
+import { extReplyError } from "./ext-errors.js";
 
 type Send = (cmd: ActionCommand, timeoutMs?: number) => Promise<ActionResult>;
 const okSend: Send = async () => ({ commandId: "c", ok: true, durationMs: 1 });
@@ -53,10 +54,39 @@ describe("browser_act по tabId — место судится по ЖИВОМУ
     expect(typeof paramsOf((c2.ext as ReturnType<typeof ext>).tabAct).guard).toBe("string");
   });
 
-  it("обычный сайт — гард на страницу НЕ шлём (лишняя работа и ложные вопросы)", async () => {
+  // W1 (B-5): перевёрнуто — раньше на «обычном» сайте гард не слали, и «Оплатить»/«Удалить» по ref на незнакомом
+  // магазине не судил никто (список опасных хостов неполон). Теперь подпись судит страница на любом сайте.
+  it("обычный сайт — гард на страницу УХОДИТ (незнакомый магазин: «Оплатить» по ref судит страница)", async () => {
     const e = ext([{ tabId: 3, url: "https://example.org/page" }]);
     await act(makeCtx(e), { tabId: 3, intent: "click", params: { selector: "#go" } });
-    expect(paramsOf(e.tabAct).guard).toBeUndefined();
+    const guard = String(paramsOf(e.tabAct).guard);
+    for (const lbl of ["Оплатить заказ", "Удалить навсегда"]) expect(new RegExp(guard, "iu").test(lbl), lbl).toBe(true);
+  });
+
+  it("W1: commit_confirm на обычном сайте — вопрос владельцу («сайт», а не «опасный сайт»), повтор с approvedLabel", async () => {
+    const tabAct = vi
+      .fn()
+      .mockRejectedValueOnce(extReplyError("commit_confirm: Удалить аккаунт", "commit_confirm", "Удалить аккаунт"))
+      .mockResolvedValueOnce({ ok: true, changed: true });
+    const e = ext([{ tabId: 3, url: "https://forum.example.org/settings" }], tabAct);
+    const c = makeCtx(e, true);
+    await act(c, { tabId: 3, intent: "click", ref: "e2_7" });
+    const q = String(c.confirm.mock.calls[0]?.[0]);
+    expect(q).toMatch(/Удалить аккаунт/u);
+    expect(q).toMatch(/\(сайт\)/u);
+    expect(q).not.toMatch(/опасный сайт/u);
+    expect(paramsOf(tabAct, 1).approvedLabel).toBe("Удалить аккаунт");
+  });
+
+  it("W1: hover и scroll_to ничего не жмут — гард им не шлём (контракт §7), клик — шлём", async () => {
+    const e = ext([{ tabId: 3, url: "https://example.org/page" }]);
+    const c = makeCtx(e);
+    await act(c, { tabId: 3, intent: "hover", ref: "e1_1" });
+    await act(c, { tabId: 3, intent: "scroll_to", ref: "e1_1" });
+    await act(c, { tabId: 3, intent: "click", ref: "e1_1" });
+    expect(paramsOf(e.tabAct, 0).guard).toBeUndefined();
+    expect(paramsOf(e.tabAct, 1).guard).toBeUndefined();
+    expect(typeof paramsOf(e.tabAct, 2).guard).toBe("string");
   });
 });
 
@@ -107,6 +137,19 @@ describe("Moodle: учебная LMS узнаётся по пути страни
     expect(typeof paramsOf(tabAct, 0).guard).toBe("string");
     expect(paramsOf(tabAct, 0).guardApproved).toBeUndefined();
     expect(paramsOf(tabAct, 1).guardApproved).toBe(true);
+  });
+
+  it("W1: новое расширение — подпись в e.label (мост), а не в тексте: вопрос с этой подписью, повтор с approvedLabel", async () => {
+    const tabAct = vi
+      .fn()
+      .mockRejectedValueOnce(extReplyError("commit_confirm", "commit_confirm", "Отправить всё и завершить тест"))
+      .mockResolvedValueOnce({ ok: true, changed: true });
+    const e = ext([{ tabId: 4, url: quiz("summary.php?attempt=42") }], tabAct);
+    const c = makeCtx(e, true);
+    const r = await act(c, { tabId: 4, intent: "click", params: { selector: ".btn-finishattempt button" } });
+    expect(r.isError).toBe(false);
+    expect(String(c.confirm.mock.calls[0]?.[0])).toMatch(/Отправить всё и завершить тест/u);
+    expect(paramsOf(tabAct, 1).approvedLabel).toBe("Отправить всё и завершить тест");
   });
 
   it("commit_confirm и отказ владельца — второго клика нет", async () => {
@@ -287,20 +330,36 @@ describe("ревью 26.09: web_act судит ТЕКУЩУЮ страницу �
   });
 });
 
+describe("W1: Enter-сочетания в мессенджере и гард шагов берста на любом сайте", () => {
+  it("browser_act{key} Ctrl+Enter / Enter в веб-мессенджере — вопрос владельцу; Ctrl+A — без вопроса", async () => {
+    const e = ext([{ tabId: 8, url: "https://web.whatsapp.com/" }]);
+    const c = makeCtx(e, false);
+    const r = await act(c, { tabId: 8, intent: "key", combo: "Ctrl+Enter", ref: "e1_2" });
+    expect(r.declined).toBe(true);
+    await act(c, { tabId: 8, intent: "key", params: { combo: "Enter" } });
+    expect(c.confirm).toHaveBeenCalledTimes(2);
+    expect(e.tabAct).not.toHaveBeenCalled();
+    const c2 = makeCtx(ext([{ tabId: 8, url: "https://web.whatsapp.com/" }]), false);
+    await act(c2, { tabId: 8, intent: "key", combo: "Ctrl+A" });
+    expect(c2.confirm).not.toHaveBeenCalled();
+  });
+
+  it("берст на обычном сайте: шагу-клику гард уходит, шагу hover — нет", async () => {
+    const e = { ...ext([{ tabId: 3, url: "https://example.org/" }]), tabBatch: vi.fn(async () => ({ ok: true, done: 2, total: 2 })) };
+    await dispatchTool("browser_batch", { tabId: 3, steps: [{ ref: "e1_1", intent: "hover" }, { ref: "e1_2", intent: "click" }] }, makeCtx(e));
+    const steps = (e.tabBatch.mock.calls[0] as unknown[] | undefined)?.[1] as Array<{ params: Record<string, unknown> }>;
+    expect(steps[0]?.params.guard).toBeUndefined();
+    expect(typeof steps[1]?.params.guard).toBe("string");
+  });
+});
+
 describe("ревью 26.09: browser_batch читает поля шага из params, как расширение", () => {
   it("шаг {intent:'type', params:{text, enter:true}} в мессенджере — вопрос владельцу", async () => {
-    const prev = process.env.JARVIS_BROWSER_REF;
-    process.env.JARVIS_BROWSER_REF = "1";
-    try {
-      const e = { ...ext([{ tabId: 8, url: "https://web.whatsapp.com/" }]), tabBatch: vi.fn(async () => ({ ok: true, done: 1, total: 1 })) };
-      const c = makeCtx(e, false);
-      await dispatchTool("browser_batch", { tabId: 8, steps: [{ ref: "e1_2", intent: "type", params: { text: "привет", enter: true, guardApproved: true } }] }, c);
-      expect(c.confirm).toHaveBeenCalledTimes(1);
-      expect(e.tabBatch).not.toHaveBeenCalled();
-    } finally {
-      if (prev === undefined) delete process.env.JARVIS_BROWSER_REF;
-      else process.env.JARVIS_BROWSER_REF = prev;
-    }
+    const e = { ...ext([{ tabId: 8, url: "https://web.whatsapp.com/" }]), tabBatch: vi.fn(async () => ({ ok: true, done: 1, total: 1 })) };
+    const c = makeCtx(e, false);
+    await dispatchTool("browser_batch", { tabId: 8, steps: [{ ref: "e1_2", intent: "type", params: { text: "привет", enter: true, guardApproved: true } }] }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(e.tabBatch).not.toHaveBeenCalled();
   });
 });
 
