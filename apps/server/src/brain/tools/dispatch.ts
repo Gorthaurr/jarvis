@@ -860,6 +860,10 @@ async function dispatchToolCore(
     if (kind === "jbrowser.open" || kind === "jbrowser.read" || kind === "jbrowser.inspect" || kind === "jbrowser.act") {
       const wrapped = untrustedCapped("jarvis-browser", result.data !== undefined ? JSON.stringify(result.data) : `ok (${kind})`, "Сузь: web_inspect{query} или читай нужный фрагмент.");
       if (result.data !== undefined) wrapped.data = result.data;
+      // Ревью 26.09: гейт web_act судил по адресу последнего web_open, а клики уводят страницу (курсы → тест) —
+      // запоминаем ТЕКУЩИЙ адрес невидимого браузера, иначе учебная страница по пути не узнавалась.
+      const cur = (result.data as { url?: unknown } | undefined)?.url;
+      if (typeof cur === "string" && cur) rememberWebTarget(ctx.session as unknown as object, cur);
       return wrapped;
     }
     // M11 (ревью 2026-09-01): содержимое ФАЙЛА — внешний контент (загрузки, письма, чужие репозитории), как и

@@ -100,9 +100,13 @@ export function assessWebCommit(a: {
   const intent = a.intent.trim().toLowerCase();
   const parts = [p.text, p.name, p.title, a.label].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
   const text = parts.join(" ");
+  // Ревью 26.09: type{submit:true} постит так же, как enter:true; web_act{key} без key — это Enter (jarvis-browser.ts).
+  const keyEnter = intent === "key" && /^(?:enter|return)?$/iu.test(String(p.key ?? p.combo ?? "").trim());
   const commitByKey =
-    (intent === "enter" || intent === "submit" || (intent === "type" && truthy(p.enter))) && (category !== "edu" || lmsKeyCommits(url));
-  const commitByClick = intent === "click" && (COMMIT_WORDS_RE.test(text) || (category === "edu" && parts.some((s) => LMS_COMMIT_RE.test(s))));
+    (intent === "enter" || intent === "submit" || keyEnter || (intent === "type" && (truthy(p.enter) || truthy(p.submit)))) &&
+    (category !== "edu" || lmsKeyCommits(url));
+  const lmsWords = category === "edu" || category === "unknown"; // неизвестная вкладка может оказаться учебной
+  const commitByClick = intent === "click" && (COMMIT_WORDS_RE.test(text) || (lmsWords && parts.some((s) => LMS_COMMIT_RE.test(s))));
   if (!commitByKey && !commitByClick) return null;
   const what = commitByKey
     ? category === "messenger"

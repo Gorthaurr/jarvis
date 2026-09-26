@@ -16,8 +16,12 @@ const LMS_PAGES: ReadonlyArray<RegExp> = [
 /** Страница попытки: Enter/submit формы тут = переход по страницам с сохранением ответов (обратимо). */
 const ATTEMPT_PAGE = /\/mod\/quiz\/attempt\.php/iu;
 
+// «Сохранить изменения» — кнопка формы ответа в задании (assign savechanges); без черновиков это и есть сдача (ревью 26.09).
 export const LMS_COMMIT_RE =
-  /(?:пройти тест|начать попытку|начать тестирование|отправить на проверку|attempt quiz|start attempt|re-?attempt quiz|submit assignment|^\s*(?:проверить|сохранить|продолжить|check|save|save changes|continue)\s*$)/iu;
+  /(?:пройти тест|начать попытку|начать тестирование|отправить на проверку|attempt quiz|start attempt|re-?attempt quiz|submit assignment|^\s*(?:проверить|сохранить(?: изменения)?|продолжить|check|save|save changes|continue)\s*$)/iu;
+
+/** Двухшаговая сдача теста: кнопка страницы → окно подтверждения с ТОЙ ЖЕ подписью. Одно «да» на связку. */
+export const LMS_TWO_STEP_RE = /отправить вс[её] и завершить тест|submit all and finish/iu;
 
 export function isLmsPage(url: string): boolean {
   return LMS_PAGES.some((re) => re.test(url));

@@ -313,11 +313,12 @@ function inspectPageInPage(query, cap, refMode) {
     const parts = [];
     let n = node;
     let d = 0;
-    while (n && n.nodeType === 1 && d < 5) {
-      // Якорим цепочку к БЛИЖАЙШЕМУ стабильному предку и обрываем — короткий устойчивый путь.
+    while (n && n.nodeType === 1 && d < 8) {
+      // Якорим цепочку к БЛИЖАЙШЕМУ стабильному И УНИКАЛЬНОМУ предку и обрываем — короткий устойчивый путь.
+      // Неуникальный якорь (повторяющиеся id карточек, как #meta на YouTube) уводил все карточки в первую.
       if (n !== node) {
         const a = anchorFor(n);
-        if (a) { parts.unshift(a); break; }
+        if (a && uniqueIn(n, a)) { parts.unshift(a); break; }
       }
       const p = n.parentElement;
       let seg = n.tagName.toLowerCase();
@@ -331,6 +332,12 @@ function inspectPageInPage(query, cap, refMode) {
     }
     return parts.join(" > ");
   };
+  // Ревью 26.09 (HIGH): значение СЕКРЕТНОГО поля (пароль, одноразовый код, карта) не отдаём ни в name, ни в text —
+  // маскировался только state.value, а введённый владельцем пароль уходил в контекст модели и логи открытым текстом.
+  const isSecret = (el) =>
+    el.tagName === "INPUT" &&
+    (/^password$/i.test(el.getAttribute("type") || "") || /one-time-code|^cc-/i.test(el.getAttribute("autocomplete") || ""));
+  const valueOf = (el) => (isSecret(el) ? (el.value ? "•••" : "") : String(el.value || ""));
   // accessibleName — прагматичный subset accname-1.2 (aria-labelledby → aria-label → <label> → текст →
   // placeholder/title). Для выбора элемента моделью; при refMode адресация всё равно по идентичности ref.
   const axName = (el) => {
@@ -344,7 +351,7 @@ function inspectPageInPage(query, cap, refMode) {
     if (el.id) { try { const lab = document.querySelector('label[for="' + esc(el.id) + '"]'); if (lab && (lab.innerText || "").trim()) return lab.innerText.trim().replace(/\s+/g, " ").slice(0, 80); } catch { /* ignore */ } }
     const lab2 = el.closest && el.closest("label");
     if (lab2 && (lab2.innerText || "").trim()) return lab2.innerText.trim().replace(/\s+/g, " ").slice(0, 80);
-    const txt = (el.innerText || el.value || "").replace(/\s+/g, " ").trim();
+    const txt = (el.innerText || valueOf(el)).replace(/\s+/g, " ").trim();
     if (txt) return txt.slice(0, 80);
     return ((el.getAttribute("placeholder") || el.getAttribute("title") || "").trim()).slice(0, 80);
   };
@@ -356,7 +363,7 @@ function inspectPageInPage(query, cap, refMode) {
     const type = (el.getAttribute("type") || "").toLowerCase();
     if (/^(INPUT|TEXTAREA)$/.test(tag) || el.isContentEditable) {
       const v = el.isContentEditable ? (el.innerText || "") : (el.value || "");
-      st.value = type === "password" ? (v ? "•••" : "") : v.slice(0, 60);
+      st.value = isSecret(el) ? (v ? "•••" : "") : v.slice(0, 60);
       if (!v) st.empty = true;
     }
     if (type === "checkbox" || type === "radio") st.checked = Boolean(el.checked);
@@ -423,18 +430,21 @@ function inspectPageInPage(query, cap, refMode) {
     const role = el.getAttribute("role") || el.tagName.toLowerCase();
     const name = axName(el);
     const aria = el.getAttribute("aria-label") || "";
-    const text = (el.innerText || el.value || el.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    const text = (el.innerText || valueOf(el) || el.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 80);
     if (q && !(lc(name) + " " + lc(text) + " " + lc(aria) + " " + lc(role)).includes(q)) continue;
     if (out.length >= cap) {
       truncated = true;
       break;
     }
     const state = stateOf(el);
+    const selector = selForDeep(el);
+    // Селектор без shadow-звеньев, который бьёт не только в этот узел, — честно помечаем: клик по нему попадёт в первый.
+    const amb = !selector.includes(">>>") && !uniqueIn(el, selector) ? { ambiguous: true } : {};
     if (refMode) {
       // Компактная форма: ref (адресация по идентичности) + role + name + state + селектор-fallback.
       const ref = "e" + gen + "_" + out.length;
       REG.map.set(ref, el);
-      out.push({ idx: out.length, ref, role, name: name || null, state, selector: selForDeep(el), href: el.tagName === "A" ? el.getAttribute("href") : null });
+      out.push({ idx: out.length, ref, role, name: name || null, state, selector, ...amb, href: el.tagName === "A" ? el.getAttribute("href") : null });
     } else {
       // Legacy-форма (refMode off) сохранена бит-в-бит + добавлено state (аддитивно, поведение не меняет).
       // label — подпись поля/варианта (26.09): у radio текст = value «0/1/2», модель не знала, какой вариант какой.
@@ -446,7 +456,8 @@ function inspectPageInPage(query, cap, refMode) {
         text,
         ...(isCtl && name && name !== text ? { label: name } : {}),
         aria: aria.slice(0, 80) || null,
-        selector: selForDeep(el),
+        selector,
+        ...amb,
         disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
         state,
         href: el.tagName === "A" ? el.getAttribute("href") : null,
@@ -624,7 +635,8 @@ async function tabAct(url, intent, params, tabId, refMode) {
   // side-effect (ревью #C). Ошибка без code (исключение/навигация) — тоже НЕ щупаем.
   const shouldProbe = (r) => Boolean(r) && r.ok !== true && r.code === "not_found" && explicitFrame === undefined;
   const ptext = String(P.text || "");
-  const isShake = /встрях|стряхн|обнов/.test(ptext.toLowerCase());
+  // Встряхивание — только у клика: раньше type{text:"обновить"} превращался в клик по selector (мимо §14 и ввода).
+  const isShake = (intent === "click" || intent === "shake") && /встрях|стряхн|обнов/.test(ptext.toLowerCase());
   // REF-ПУТЬ: адресуем по идентичности из реестра снимка. click-подобные (click/shake/play/pause/next/prev) —
   // через nonce-мост в MAIN (React-onClick минует Swiper-гейт, точнее синтетики); type/seek/scroll/enter/submit —
   // в ISOLATED (там же реестр) с нативным readback (value) как STRONG-сигналом. ref_stale → честный провал,
@@ -635,7 +647,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
       const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
       const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
       if (!stamp.ok) throw new Error("tab.act " + intent + ": " + (stamp.error || "ref не разрешён"));
-      const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved }], explicitFrame);
+      const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel }], explicitFrame);
       if (!rc.ok) throw new Error("tab.act " + intent + ": " + (rc.error || "не вышло"));
       // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
       // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
@@ -1199,15 +1211,25 @@ async function actByRefIsolated(localRef, intent, params) {
     if (intent === "select") {
       // Как в pageActInPage: вариант <select> по тексту (или value), нативный сеттер + input/change.
       if (el.tagName !== "SELECT") return { ok: false, error: "элемент не <select>: у самодельного списка — click по нему, затем по пункту" };
+      // Тот же порядок, что в pageActInPage (функции self-contained — общий код не вынести): точный текст → value →
+      // целое слово → подстрока (≥ 3 символов, «1» не выбирает «10»); disabled — мимо.
       const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
       const want = fold(P.option != null ? P.option : P.text);
-      const opts = [...el.options];
-      const best = opts.find((o) => fold(o.text) === want || String(o.value) === String(P.option)) || opts.find((o) => want && fold(o.text).includes(want));
-      if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + opts.map((o) => o.text.trim()).join(" | ").slice(0, 400) };
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, best.value);
+      if (!want) return { ok: false, error: "select: укажи params.option — текст варианта из state.options" };
+      const opts = [...el.options].filter((o) => !o.disabled);
+      const word = (t) => (" " + t + " ").includes(" " + want + " ");
+      const best =
+        opts.find((o) => fold(o.text) === want) ||
+        (P.option != null && String(P.option) !== "" ? opts.find((o) => String(o.value) === String(P.option)) : undefined) ||
+        opts.find((o) => want && word(fold(o.text))) ||
+        opts.find((o) => want.length >= 3 && fold(o.text).includes(want));
+      if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + [...el.options].map((o) => o.text.trim()).join(" | ").slice(0, 400) };
+      if (el.multiple) best.selected = true;
+      else el.selectedIndex = best.index;
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      return { ok: el.value === best.value, value: best.text.trim().slice(0, 60) };
+      const chosen = [...el.selectedOptions];
+      return { ok: chosen.includes(best), value: chosen.map((o) => o.text.trim()).join(", ").slice(0, 60) };
     }
     return { ok: false, error: "intent «" + intent + "» не поддержан по ref — используй click/type/seek/scroll/enter" };
   } catch (e) {
@@ -1289,26 +1311,37 @@ async function robustClickMain(params) {
   // Боевой прогон 26.09 (Moodle): подпись radio/checkbox живёт вне элемента — aria-labelledby / label[for] /
   // обёртка <label>; у кнопки-input текст в value (в innerText его нет). Без этого «выбери Париж» и
   // «Следующая страница» не находились вовсе.
-  const nameOf = (e) => {
+  // Источники подписи элемента — по отдельности (accname-подмножество, как axName в inspect): для поиска их
+  // склеиваем, а гард §14 проверяет КАЖДЫЙ (якорные слова LMS «^сохранить$» не должны ломаться о склейку с title).
+  const labelParts = (e) => {
     const tag = e.tagName;
     const type = String(e.getAttribute("type") || "").toLowerCase();
-    if (tag === "INPUT" && /^(submit|button|reset|image)$/.test(type)) return (e.value || e.getAttribute("alt") || "") + " " + (e.getAttribute("aria-label") || "");
-    if (tag === "INPUT" && (type === "radio" || type === "checkbox")) {
-      const lb = e.getAttribute("aria-labelledby");
-      if (lb) {
-        const t = lb.split(/\s+/).map((id) => { const nd = document.getElementById(id); return nd ? nd.innerText || "" : ""; }).join(" ");
-        if (t.trim()) return t;
-      }
-      if (e.id) { try { const lab = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (lab) return lab.innerText || ""; } catch { /* ignore */ } }
+    const parts = [];
+    const byIds = (ids) => String(ids || "").split(/\s+/).map((id) => { const nd = id && document.getElementById(id); return nd ? nd.innerText || nd.getAttribute("aria-label") || "" : ""; }).join(" ");
+    parts.push(byIds(e.getAttribute("aria-labelledby")), e.getAttribute("aria-label") || "", e.title || "");
+    if (tag === "INPUT" && /^(submit|button|reset|image)$/.test(type)) parts.push(e.value || "", e.getAttribute("alt") || "");
+    else if (tag === "INPUT" && (type === "radio" || type === "checkbox")) {
+      if (e.id) { try { const lab = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (lab) parts.push(lab.innerText || ""); } catch { /* ignore */ } }
       const wrap = e.closest && e.closest("label");
-      return (wrap && wrap.innerText) || e.getAttribute("aria-label") || "";
+      if (wrap) parts.push(wrap.innerText || "");
+    } else if (tag !== "INPUT") {
+      parts.push(e.innerText || "");
+      // Кнопка-иконка: подпись в alt картинки или <title> внутри svg.
+      for (const im of e.querySelectorAll ? e.querySelectorAll("img[alt], svg title") : []) parts.push(im.getAttribute("alt") || im.textContent || "");
     }
-    return (e.innerText || "") + " " + (e.getAttribute("aria-label") || "") + " " + (e.title || "");
+    return parts.map((p) => String(p).replace(/\s+/g, " ").trim()).filter(Boolean);
   };
-  // Открытое модальное окно — единственное, что доступно живой руке: одноимённая кнопка страницы под затемнением
-  // проигрывает кнопке окна (Moodle «Отправить всё и завершить тест» — две одинаковые подписи).
-  const DIALOG = 'dialog[open],[role="dialog"],[role="alertdialog"],[aria-modal="true"]';
-  const inOpenDialog = (e) => { const d = e.closest && e.closest(DIALOG); return Boolean(d && visible(d)); };
+  const nameOf = (e) => labelParts(e).join(" ");
+  // МОДАЛЬНОЕ окно — единственное, что доступно живой руке: одноимённая кнопка страницы под затемнением проигрывает
+  // кнопке окна (Moodle «Отправить всё и завершить тест»; core/modal ставит aria-modal="true"). Немодальный
+  // role=dialog (cookie-баннер, выдвижное меню за экраном) бонуса НЕ получает — иначе забирал клик у страницы.
+  const inOpenDialog = (e) => {
+    let d = null;
+    try { d = e.closest && (e.closest('[aria-modal="true"]') || e.closest("dialog:modal")); } catch { d = e.closest && e.closest('[aria-modal="true"]'); }
+    if (!d || !visible(d)) return false;
+    const b = e.getBoundingClientRect();
+    return b.right > 0 && b.bottom > 0 && b.left < innerWidth && b.top < innerHeight;
+  };
   const covered = (e) => {
     if (e.getRootNode && e.getRootNode() !== document) return false;
     const b = e.getBoundingClientRect();
@@ -1373,11 +1406,21 @@ async function robustClickMain(params) {
   // §14 на СТРАНИЦЕ (26.09): сервер не видит подписи элемента, выбранного селектором/ref, а браузер видит. На
   // опасном сайте/LMS сервер присылает guard (регэксп глаголов коммита) — подпись совпала и одобрения нет →
   // НЕ кликаем, возвращаем подпись: сервер спросит владельца и повторит с guardApproved (флаг ставит только он).
-  if (P.guard && !P.guardApproved) {
+  if (P.guard) {
     let re = null;
     try { re = new RegExp(String(P.guard), "iu"); } catch { re = null; }
-    const label = (nameOf(target) + " " + (target !== node ? nameOf(node) : "")).replace(/\s+/g, " ").trim();
-    if (re && re.test(label)) return { ok: false, code: "commit_confirm", label: label.slice(0, 120), error: "commit_confirm: " + label.slice(0, 120) };
+    const parts = labelParts(target).concat(target !== node ? labelParts(node) : []);
+    const shown = (parts.find((p) => re && re.test(p)) || parts.join(" ")).slice(0, 120);
+    const confirmNeeded = { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
+    if (!P.guardApproved) {
+      if (re && parts.some((p) => re.test(p))) return confirmNeeded;
+    } else if (P.approvedLabel) {
+      // Одобрение — на КОНКРЕТНУЮ подпись, которую видел владелец: пока он думал, страница могла перерисоваться, а
+      // селектор/текст — попасть в другую кнопку («Оплатить 50 000 ₽» вместо одобренного «Отправить»). Не та — снова вопрос.
+      const a = foldTxt(P.approvedLabel);
+      const same = parts.some((p) => { const f = foldTxt(p); return f && (f.includes(a) || (f.length >= 4 && a.includes(f))); });
+      if (!same) return confirmNeeded;
+    }
   }
   try {
     target.scrollIntoView({ block: "center" });
@@ -1658,8 +1701,16 @@ function readPageInPage(query) {
   for (const s of scope.querySelectorAll('script[type^="math/tex"]')) { const t = (s.textContent || "").trim(); if (t) tex.push(t); }
   for (const im of scope.querySelectorAll("img.texrender[alt]")) { const t = (im.getAttribute("alt") || "").trim(); if (t) tex.push(t); }
   for (const m of scope.querySelectorAll("math[alttext]")) { const t = (m.getAttribute("alttext") || "").trim(); if (t) tex.push(t); }
-  const appendix = tex.length ? "\n\n[Формулы на странице — исходный TeX по порядку: " + tex.slice(0, 40).map((t, i) => i + 1 + ") " + t.slice(0, 200)).join("; ") + "]" : "";
-  return { title: document.title || "", url: location.href, text: text.slice(0, 8000 - appendix.length) + appendix, headings, filtered, ...(media ? { media } : {}) };
+  // В НАЧАЛО текста и с потолком: хвост режут и расширение (8000), и сервер (шапка title/URL/разделы + cutText) — в
+  // конце формулы терялись без сигнала или рвались посреди TeX (ревью 26.09).
+  let formulas = "";
+  for (const [i, t] of tex.entries()) {
+    const item = (i ? "; " : "") + (i + 1) + ") " + t.slice(0, 200);
+    if (formulas.length + item.length > 1800) { formulas += "; …(ещё " + (tex.length - i) + ")"; break; }
+    formulas += item;
+  }
+  const prefix = formulas ? "[Формулы на странице — исходный TeX по порядку: " + formulas + "]\n\n" : "";
+  return { title: document.title || "", url: location.href, text: (prefix + text).slice(0, 8000), headings, filtered, ...(media ? { media } : {}) };
 }
 
 /** Исполняется ВНУТРИ страницы: действие по интенту (self-contained, без внешних ссылок). async — play ждёт исход. */
@@ -1966,16 +2017,22 @@ async function pageActInPage(intent, params) {
       const want = foldTxt(P.option != null ? P.option : P.text);
       let best = null;
       let bestScore = 0;
+      // Текст варианта важнее value (вопрос «на соответствие» с числами: option value=2 с текстом «1»); disabled — мимо.
       for (const o of el.options) {
-        const s = Math.max(scoreText(want, foldTxt(o.text)), String(o.value) === String(P.option) ? 90 : 0);
+        if (o.disabled) continue;
+        const byValue = P.option != null && String(P.option) !== "" && String(o.value) === String(P.option);
+        const s = Math.max(scoreText(want, foldTxt(o.text)), byValue ? 90 : 0);
         if (s > bestScore) { bestScore = s; best = o; }
       }
       if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + [...el.options].map((o) => o.text.trim()).join(" | ").slice(0, 400) };
       try { el.focus(); } catch { /* ignore */ }
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, best.value);
+      // Ставим САМ пункт: value-сеттер брал первый пункт с тем же value и сбрасывал прочие в multiple.
+      if (el.multiple) best.selected = true;
+      else el.selectedIndex = best.index;
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      return { ok: el.value === best.value, value: best.text.trim().slice(0, 60) };
+      const chosen = [...el.selectedOptions];
+      return { ok: chosen.includes(best), value: chosen.map((o) => o.text.trim()).join(", ").slice(0, 60) };
     }
     if (intent === "enter" || intent === "submit") {
       // C3: нажать Enter / отправить форму (запустить поиск после type). selector опционален (вкл. shadow « >>> »).

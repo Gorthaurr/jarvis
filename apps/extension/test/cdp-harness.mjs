@@ -48,6 +48,20 @@ export function pageFunctionSources(names) {
 
 export const fixtureUrl = (name) => pathToFileURL(join(here, "fixtures", name)).href;
 
+/**
+ * НАСТОЯЩИЙ регэксп гарда, который сервер шлёт странице на учебной/неизвестной вкладке (pageGuardFor): исходники
+ * литералов из commit-risk.ts и commit-lms.ts. Самодельный «отправ|submit» не ловил склейку подписи и якоря (ревью 26.09).
+ */
+export function serverGuardSource() {
+  const lit = (file, name) => {
+    const src = readFileSync(join(here, "..", "..", "..", file), "utf8");
+    const m = new RegExp(`${name}\\s*=\\s*\\/(.+)\\/iu;`, "u").exec(src);
+    if (!m) throw new Error(`не нашёл ${name} в ${file}`);
+    return m[1];
+  };
+  return `${lit("packages/shared/src/commit-risk.ts", "COMMIT_WORDS_RE")}|${lit("apps/server/src/brain/tools/commit-lms.ts", "LMS_COMMIT_RE")}`;
+}
+
 /** Headless Chrome + одна вкладка. Возвращает { open(url), call(fnSrc, ...args), eval(expr), close() }. */
 export async function launchPage() {
   const chrome = findChrome();
