@@ -14,7 +14,10 @@ function makeCtx(ext: unknown, approved = true): ToolContext & { confirm: Return
   const confirm = vi.fn(async () => ({ approved, outcome: approved ? "approved" : "denied" }));
   return { session: { sendAction: okSend }, userId: "u1", confirm, ext } as unknown as ToolContext & { confirm: ReturnType<typeof vi.fn> };
 }
-function ext(tabs: Array<{ tabId: number; url: string }>, tabAct = vi.fn(async () => ({ ok: true, changed: true }))) {
+type Tab = { tabId: number; url: string; status?: string; active?: boolean };
+function ext(tabsIn: Tab[], tabAct = vi.fn(async () => ({ ok: true, changed: true }))) {
+  // Форма как у настоящего tab.list расширения (background.js tabList): status и active есть всегда.
+  const tabs = tabsIn.map((t) => ({ status: "complete", active: false, ...t }));
   return {
     connected: true,
     openOrFocus: vi.fn(async () => ({ focused: true, tabId: 5 })),
@@ -147,6 +150,49 @@ describe("ревью 26.09: гейт судит ту вкладку, где на
     expect(paramsOf(e.tabAct).approvedLabel).toBe("Перевести");
   });
 
+  it("контроль: цель без www, живая вкладка на www — это ТА ЖЕ вкладка (как hostOf расширения), судим её страницу", async () => {
+    const e = ext([{ tabId: 12, url: "https://www.moodle.vuz.ru/mod/quiz/summary.php?attempt=3" }]);
+    const c = makeCtx(e, false);
+    await act(c, { tabId: 12, url: "https://moodle.vuz.ru/course/view.php?id=5", intent: "click", params: { text: "Отправить всё и завершить тест" } });
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("контроль: вкладка ещё грузится на другом хосте — расширение возьмёт её, судим её адрес", async () => {
+    const e = ext([{ tabId: 5, url: "https://eos.imes.su/mod/quiz/view.php?id=5", status: "loading" }]);
+    const c = makeCtx(e, false);
+    await act(c, { tabId: 5, url: "https://example.org/", intent: "click", params: { text: "Пройти тест" } });
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("контроль: старое расширение без status и хосты разошлись — «неизвестно», судим строго", async () => {
+    const e = ext([{ tabId: 5, url: "https://eos.imes.su/mod/quiz/view.php?id=5", status: "" }]);
+    const c = makeCtx(e, false);
+    await act(c, { tabId: 5, url: "https://example.org/", intent: "click", params: { text: "Пройти тест" } });
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("по хосту берётся АКТИВНАЯ вкладка из нескольких (как findTargetTab)", async () => {
+    const e = ext([
+      { tabId: 1, url: "https://eos.imes.su/my/courses.php" },
+      { tabId: 2, url: "https://eos.imes.su/mod/quiz/summary.php?attempt=1", active: true },
+    ]);
+    const c = makeCtx(e, false);
+    await act(c, { url: "https://eos.imes.su/", intent: "click", params: { text: "Отправить всё и завершить тест" } });
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("контроль: guard уходит и на play/next по ref (расширение жмёт их через клик) на опасном сайте", async () => {
+    const e = ext([{ tabId: 3, url: "https://www.youtube.com/watch?v=x" }]);
+    await act(makeCtx(e), { tabId: 3, intent: "play", params: { ref: "e1_0" } });
+    expect(typeof paramsOf(e.tabAct).guard).toBe("string");
+  });
+
+  it("контроль: guard неизвестной вкладки узнаёт учебные слова («Сохранить»)", async () => {
+    const e = ext([]);
+    await act(makeCtx(e), { tabId: 77, intent: "click", params: { selector: "#s" } });
+    expect(new RegExp(String(paramsOf(e.tabAct).guard), "iu").test("Сохранить")).toBe(true);
+  });
+
   it("мёртвый tabId → «неизвестная вкладка» судится и учебными словами («Пройти тест»)", async () => {
     const e = ext([]);
     const c = makeCtx(e, false);
@@ -210,8 +256,8 @@ describe("ревью 26.09: web_act судит ТЕКУЩУЮ страницу �
       commandId: "c",
       ok: true,
       durationMs: 1,
-      // Как клиент: open отдаёт открытый адрес, read — текущий (клики увели страницу дальше).
-      data: cmd.kind === "jbrowser.read" ? { url: urlAfterRead, text: "Тест 1" } : { url: (cmd as { url?: string }).url ?? "" },
+      // Как клиент (jarvis-browser.ts): open отдаёт открытый адрес, read — текущий, act — строку «ok» БЕЗ адреса.
+      data: cmd.kind === "jbrowser.read" ? { url: urlAfterRead, text: "Тест 1" } : cmd.kind === "jbrowser.act" ? "ok" : { url: (cmd as { url?: string }).url ?? "" },
     }));
     return { c: { session: { sendAction }, userId: "u1", confirm } as unknown as ToolContext, confirm, sendAction };
   }
@@ -222,6 +268,15 @@ describe("ревью 26.09: web_act судит ТЕКУЩУЮ страницу �
     await dispatchTool("web_read", {}, c);
     await dispatchTool("web_act", { intent: "click", params: { text: "Пройти тест" } }, c);
     expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("контроль: клик увёл страницу (act адреса не отдаёт) — перед «Пройти тест» адрес дочитывается, вопрос есть", async () => {
+    const { c, confirm, sendAction } = webCtx("https://eos.imes.su/mod/quiz/view.php?id=5");
+    await dispatchTool("web_open", { url: "https://eos.imes.su/my/courses.php" }, c);
+    await dispatchTool("web_act", { intent: "click", params: { text: "Тест 1" } }, c);
+    await dispatchTool("web_act", { intent: "click", params: { text: "Пройти тест" } }, c);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(sendAction.mock.calls.some(([cmd]) => (cmd as ActionCommand).kind === "jbrowser.read")).toBe(true);
   });
 
   it("web_act{key} без клавиши (= Enter) в мессенджере — спрашивает", async () => {

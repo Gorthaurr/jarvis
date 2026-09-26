@@ -424,7 +424,8 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     const actTab = place.tabId ?? target.tabId;
     const label = typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params, label });
-    const riskLabel = String(params.text ?? label ?? "");
+    // Пустой text не должен затирать подпись ref (?? пропускает "") — иначе одобрение ушло бы без approvedLabel.
+    const riskLabel = (typeof params.text === "string" && params.text.trim()) || label || "";
     if (risk) {
       const decision = await confirmWebCommit(ctx, place, risk, riskLabel);
       if (decision !== true) return decision;
@@ -613,7 +614,8 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     const o = st && typeof st === "object" ? (st as Record<string, unknown>) : {};
     const { guard: _g, guardApproved: _ga, approvedLabel: _al, ...own } = { ...o, ...(o.params && typeof o.params === "object" ? (o.params as Record<string, unknown>) : {}) };
     const intent = String(o.intent ?? o.action ?? "");
-    const label = typeof o.ref === "string" ? refFieldHint(ctx, o.ref) : undefined;
+    const ref = o.ref ?? own.ref; // расширение принимает ref и на верхнем уровне шага, и в params
+    const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
     const params = guard ? { ...own, guard, ...(risk ? { guardApproved: true, ...(label ? { approvedLabel: label } : {}) } : {}) } : own;
     return { step: { ...o, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };

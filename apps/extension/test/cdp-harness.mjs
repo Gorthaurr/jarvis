@@ -46,6 +46,28 @@ export function pageFunctionSources(names) {
   return out;
 }
 
+/**
+ * Service worker расширения в vm — для юнитов SW-уровня (tabAct: какой page-функцией и с какими аргументами он зовёт
+ * страницу). `chrome.tabs`/`chrome.scripting` и функции из modules/* (импорты вырезаны) подменяются overrides;
+ * остальное chrome — глухая заглушка, таймеры и сокет — пустышки (верхний код SW не должен жить дальше теста).
+ */
+export function loadServiceWorker(overrides = {}) {
+  const src = readFileSync(join(here, "..", "background.js"), "utf8").replace(/^import .*$/gmu, "");
+  const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub });
+  const { tabs, scripting, ...globals } = overrides;
+  const chrome = new Proxy(stub, { get: (_t, k) => (k === "tabs" && tabs ? tabs : k === "scripting" && scripting ? scripting : stub) });
+  const noop = () => 0;
+  class FakeSocket { constructor() {} send() {} close() {} }
+  const sandbox = { chrome, console, setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop, URL, WebSocket: FakeSocket, ...globals };
+  vm.createContext(sandbox);
+  try {
+    vm.runInContext(src, sandbox, { filename: "background.js" });
+  } catch {
+    /* хвост верхнего кода на заглушках — функции и константы к этому моменту уже есть */
+  }
+  return sandbox;
+}
+
 export const fixtureUrl = (name) => pathToFileURL(join(here, "fixtures", name)).href;
 
 /**

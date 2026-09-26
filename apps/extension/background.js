@@ -334,9 +334,12 @@ function inspectPageInPage(query, cap, refMode) {
   };
   // Ревью 26.09 (HIGH): значение СЕКРЕТНОГО поля (пароль, одноразовый код, карта) не отдаём ни в name, ни в text —
   // маскировался только state.value, а введённый владельцем пароль уходил в контекст модели и логи открытым текстом.
+  // Контроль 26.09: «показать пароль» делает поле type=text, а autocomplete бывает составным («billing cc-number») —
+  // судим и по токенам autocomplete, не только по type.
   const isSecret = (el) =>
     el.tagName === "INPUT" &&
-    (/^password$/i.test(el.getAttribute("type") || "") || /one-time-code|^cc-/i.test(el.getAttribute("autocomplete") || ""));
+    (/^password$/i.test(el.getAttribute("type") || "") ||
+      /(?:^|\s)(?:current-password|new-password|one-time-code|cc-[a-z-]+)(?:\s|$)/i.test(el.getAttribute("autocomplete") || ""));
   const valueOf = (el) => (isSecret(el) ? (el.value ? "•••" : "") : String(el.value || ""));
   // accessibleName — прагматичный subset accname-1.2 (aria-labelledby → aria-label → <label> → текст →
   // placeholder/title). Для выбора элемента моделью; при refMode адресация всё равно по идентичности ref.
@@ -2153,6 +2156,8 @@ async function tabList() {
       active: !!t.active, // активная в своём окне
       audible: !!t.audible, // играет звук — для «вкладка с музыкой/видео»
       windowId: t.windowId,
+      status: t.status || "", // «loading» — findTargetTab берёт такую вкладку по tabId; сервер повторяет выбор для §14
+
     }))
     // звучащие и активные — выше: про них чаще спрашивают («поставь паузу там, где играет»).
     .sort((a, b) => Number(b.audible) - Number(a.audible) || Number(b.active) - Number(a.active));

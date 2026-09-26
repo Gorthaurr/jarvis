@@ -44,10 +44,12 @@ describe("ревью 26.09: гард коммита, select, снимок", { sk
 
   it("пароль, введённый владельцем, не уходит в снимок ни текстом, ни подписью", async () => {
     await page.open(fixtureUrl("plain.html"));
-    await page.eval("document.getElementById('pw').value = 'S3cret!pass'");
+    // Контроль: и «показанный» пароль (type=text + autocomplete=current-password), и составной «billing cc-number».
+    await page.eval("document.getElementById('pw').value = 'S3cret!pass'; document.getElementById('pw-shown').value = 'S3cretShown'; document.getElementById('card').value = '4111111111111111'");
     for (const refMode of [false, true]) {
       const snap = JSON.stringify(await page.call(fns.inspectPageInPage, "", 200, refMode));
       assert.ok(!snap.includes("S3cret"), `refMode=${refMode}: пароль в снимке`);
+      assert.ok(!snap.includes("4111111111111111"), `refMode=${refMode}: номер карты в снимке`);
     }
   });
 

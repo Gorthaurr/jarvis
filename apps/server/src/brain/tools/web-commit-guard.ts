@@ -1,74 +1,21 @@
 /**
- * §14 для browser_act/browser_batch, часть 2 (боевой прогон 26.09, Moodle).
+ * §14 для browser_act/browser_batch, часть 2 (боевой прогон 26.09, Moodle). Где судим — `web-place.ts`.
  *
- * 1. ДЫРА: действие по tabId без url (так велит персона после browser_tabs) судилось по host="" → гейт молчал на ЛЮБОМ
- *    сайте, включая банки и мессенджеры. Теперь адрес вкладки берём у расширения (tab.list); не узнали — судим строго.
- * 2. Клик по селектору/ref сервер судить не мог (подписи не видно). На опасном месте отдаём странице guard — регэксп
+ * 1. Клик по селектору/ref сервер судить не мог (подписи не видно). На опасном месте отдаём странице guard — регэксп
  *    глаголов коммита; расширение сверяет подпись РЕАЛЬНОГО элемента и, если похоже на коммит, не жмёт, а возвращает
- *    commit_confirm с подписью. Спрашиваем владельца и повторяем с guardApproved — флаг ставит только сервер.
- * 3. Moodle сдаёт тест в два шага одной подписью («Отправить всё и завершить тест» → окно с той же кнопкой): на
- *    учебной странице одобрение той же подписи держится 60 с, второй вопрос подряд не задаём.
+ *    commit_confirm с подписью. Спрашиваем владельца и повторяем с guardApproved + approvedLabel (флаги ставит только
+ *    сервер; страница сверит, что жмёт ту самую подпись).
+ * 2. Moodle сдаёт тест в два шага одной подписью («Отправить всё и завершить тест» → окно с той же кнопкой): одно «да»
+ *    на эту связку — один раз, та же страница, 60 с.
  */
 import { COMMIT_WORDS_RE } from "@jarvis/shared";
 import type { ToolContext, ToolResult } from "./dispatch.js";
 import { confirmDeclineText, err, gateDeclined } from "./dispatch-util.js";
-import { type CommitRisk, hostOfUrl } from "./commit-gate.js";
+import type { CommitRisk } from "./commit-gate.js";
 import { LMS_COMMIT_RE, LMS_TWO_STEP_RE, isLmsPage } from "./commit-lms.js";
+import type { WebPlace } from "./web-place.js";
 
-export interface WebPlace {
-  url: string;
-  host: string;
-  /** Адрес вкладки не определён — судим как опасное место (fail-closed). */
-  unknown: boolean;
-  /** Вкладка, которую выберет расширение (её же и судили) — действие шлём ТОЧНО в неё. */
-  tabId?: number;
-}
-
-interface ListedTab {
-  tabId?: unknown;
-  url?: unknown;
-  active?: unknown;
-}
-
-/**
- * Какую вкладку возьмёт расширение (зеркало modules/tab-find.js findTargetTab): живой tabId, если его хост совпал с
- * хостом цели (или хоста у цели нет, или вкладка ещё без адреса); иначе вкладка по хосту цели (активная, иначе первая).
- * Ревью 26.09 (HIGH): гейт судил вкладку по tabId, а расширение при несовпадении хоста жало в ДРУГУЮ вкладку по хосту —
- * «Перевести» в банке уходило без вопроса, пока tabId указывал на ушедшую на example.org вкладку.
- */
-function chooseTab(tabs: ListedTab[], target: { url: string; tabId?: number }): ListedTab | undefined {
-  const host = hostOfUrl(target.url);
-  const urlOf = (t: ListedTab): string => (typeof t.url === "string" ? t.url : "");
-  if (target.tabId !== undefined) {
-    const t = tabs.find((x) => x.tabId === target.tabId);
-    if (t && (!host || !urlOf(t) || hostOfUrl(urlOf(t)) === host)) return t;
-  }
-  if (!host) return undefined; // активную вкладку «последнего окна» список не различает — пусть будет «неизвестно»
-  const matches = tabs.filter((x) => hostOfUrl(urlOf(x)) === host);
-  return matches.find((x) => x.active === true) ?? matches[0];
-}
-
-/**
- * Место для гейта — ЖИВОЙ адрес той вкладки, где расширение реально нажмёт (запомненный url из browser_open протухает:
- * тест Moodle идёт view → attempt → summary кликами, а учебную страницу узнаём именно по пути). Не узнали — «неизвестно».
- */
-export async function resolvePlace(ctx: ToolContext, target: { url: string; tabId?: number }): Promise<WebPlace> {
-  if (!ctx.ext?.tabList) return { url: target.url, host: hostOfUrl(target.url), unknown: !hostOfUrl(target.url) };
-  try {
-    const list = (await ctx.ext.tabList()) as { tabs?: ListedTab[] } | undefined;
-    const tab = chooseTab(list?.tabs ?? [], target);
-    // Вкладки этого хоста нет — расширение само честно упадёт «нет вкладки», судим по хосту цели (как раньше).
-    // «Неизвестно» — только когда хоста нет: тогда расширение возьмёт АКТИВНУЮ вкладку, какую — не знаем.
-    if (!tab || typeof tab.tabId !== "number") {
-      const host = hostOfUrl(target.url);
-      return host ? { url: target.url, host, unknown: false } : { url: "", host: "", unknown: true };
-    }
-    const url = typeof tab.url === "string" ? tab.url : "";
-    return { url, host: hostOfUrl(url), unknown: !hostOfUrl(url), tabId: tab.tabId };
-  } catch {
-    return { url: "", host: "", unknown: true }; // расширение не ответило — судим строго
-  }
-}
+export { resolvePlace, type WebPlace } from "./web-place.js";
 
 /** Регэксп подписи-коммита для проверки на странице: только для опасного/учебного/неизвестного места. */
 export function pageGuardFor(place: WebPlace, riskyHost: boolean): string | undefined {
@@ -106,8 +53,8 @@ function rememberApproval(ctx: ToolContext, place: WebPlace, label: string): voi
 }
 
 /**
- * Спросить владельца про коммит (или пропустить, если та же учебная подпись одобрена только что). true — можно
- * жать; ToolResult — отказ/нет канала (вернуть модели как есть).
+ * Спросить владельца про коммит (или пропустить, если та же связка сдачи одобрена только что). true — можно жать;
+ * ToolResult — отказ/нет канала (вернуть модели как есть).
  */
 export async function confirmWebCommit(ctx: ToolContext, place: WebPlace, risk: Pick<CommitRisk, "summary" | "what" | "where">, label: string): Promise<true | ToolResult> {
   if (takeApproval(ctx, place, label)) return true;
