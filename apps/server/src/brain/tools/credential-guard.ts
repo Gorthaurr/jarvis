@@ -20,6 +20,7 @@
  * разойдись две копии, «номер карты» значил бы РАЗНОЕ на разных путях.
  */
 import { CardDataError, assertNoCardData } from "../orders/order-guard.js";
+import { browserActParams, browserStepFields } from "./browser-params.js";
 
 /** Единая формулировка отказа: расходящиеся тексты = расходящаяся политика. */
 export const CREDENTIAL_REFUSAL = "Пароли и коды подтверждения не ввожу, введите сами";
@@ -36,14 +37,17 @@ interface TypedField {
   text: string;
   /** Пусто = на этом пути про поле не известно НИЧЕГО → блокировать нечем (только предупреждение). */
   hints: string[];
+  /** W1 (B-3): снимок страницы пометил поле секретным (type=password, autocomplete current-password/one-time-code/cc-*). */
+  secret?: boolean;
 }
 
 /**
- * Подпись поля по ref (browser_act{params.ref} / browser_batch) — её знает ТОЛЬКО последний
- * browser_inspect, поэтому резолвер приходит снаружи (dispatch отдаёт `refFieldHint`). Без него
- * ref остаётся немым, и берст логин-формы гардом не разбирается вовсе.
+ * Что за поле за ref (browser_act{ref} / browser_batch) — это знает ТОЛЬКО browser_inspect, поэтому резолвер приходит
+ * снаружи (dispatch отдаёт `refFieldInfo`). Без него ref остаётся немым, и берст логин-формы гардом не разбирается.
+ * W1: снимок несёт и `secret` — поле пароля/кода по признаку САМОЙ страницы, даже при немой подписи («Поле 2»).
+ * Строка — прежняя форма (только подпись).
  */
-export type RefHintResolver = (ref: string) => string | undefined;
+export type RefHintResolver = (ref: string) => string | { hint?: string; secret?: boolean } | undefined;
 /** Подпись UIA-элемента по handle из последнего look{elements}/ui_snapshot — handle сам по себе немой. */
 export type HandleHintResolver = (handle: unknown) => string | undefined;
 
@@ -67,20 +71,39 @@ function asRecord(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
 }
 
-function hintsFromParams(params: Record<string, unknown> | undefined, refHint?: RefHintResolver): string[] {
-  if (!params) return [];
+function hintsFromParams(params: Record<string, unknown> | undefined, refHint?: RefHintResolver, extraKeys: readonly string[] = []): { hints: string[]; secret: boolean } {
+  if (!params) return { hints: [], secret: false };
   const out: string[] = [];
-  for (const k of HINT_KEYS) {
+  for (const k of [...HINT_KEYS, ...extraKeys]) {
     const v = params[k];
     if (typeof v === "string" && v.trim()) out.push(v);
   }
-  // Сам «e3_5» немой — но снимок browser_inspect знает подпись этого элемента (см. refFieldHint).
+  // Сам «e3_5» немой — но снимок browser_inspect знает подпись и секретность этого элемента (см. refFieldInfo).
   const ref = params.ref;
+  let secret = false;
   if (typeof ref === "string" && ref.trim() && refHint) {
-    const h = refHint(ref);
+    const info = refHint(ref);
+    const h = typeof info === "string" ? info : info?.hint;
     if (h) out.push(h);
+    secret = typeof info === "object" && info?.secret === true;
   }
-  return out;
+  return { hints: out, secret };
+}
+
+/**
+ * browser_act / шаг берста: type печатает `text`; set (form_input, W1) — `value`, а `text` там — ЛОКАТОР поля (подпись),
+ * то есть признак поля, а не печатаемое. Поля — те же, что увидит расширение (browser-params.ts).
+ */
+function browserTyped(intent: string, p: Record<string, unknown>, refHint?: RefHintResolver): TypedField[] {
+  if (intent === "type") {
+    const h = hintsFromParams(p, refHint);
+    return field(p.text, h.hints, h.secret);
+  }
+  if (intent === "set") {
+    const h = hintsFromParams(p, refHint, ["text"]);
+    return field(p.value, h.hints, h.secret);
+  }
+  return [];
 }
 
 /** Признак поля у UIA-адресации: by:"role" несёт имя/роль элемента («Пароль»); by:"handle"/"coords" — ничего. */
@@ -121,11 +144,11 @@ export function lastActTarget(session: object | undefined): unknown {
   return session ? lastActTargets.get(session) : undefined;
 }
 
-function field(text: unknown, hints: string[]): TypedField[] {
-  return typeof text === "string" && text.length > 0 ? [{ text, hints }] : [];
+function field(text: unknown, hints: string[], secret = false): TypedField[] {
+  return typeof text === "string" && text.length > 0 ? [{ text, hints, ...(secret ? { secret } : {}) }] : [];
 }
 
-/** Шаги берста: браузерный ({intent,params}) и нативный SkillStep ({action,target,params}). */
+/** Шаги берста: браузерный ({intent,ref,params}) и нативный SkillStep ({action,target,params}). */
 function stepFields(raw: unknown, shape: "browser" | "native", refHint?: RefHintResolver): TypedField[] {
   if (!Array.isArray(raw)) return [];
   const out: TypedField[] = [];
@@ -134,9 +157,9 @@ function stepFields(raw: unknown, shape: "browser" | "native", refHint?: RefHint
     if (!step) continue;
     const p = asRecord(step.params);
     if (shape === "browser") {
-      // В берсте ref лежит НА ШАГЕ, а не в params — иначе подпись поля не нашлась бы (логин-форма).
-      const withRef = { ...(p ?? {}), ...(typeof step.ref === "string" ? { ref: step.ref } : {}) };
-      if (String(step.intent ?? "") === "type") out.push(...field(p?.text, hintsFromParams(withRef, refHint)));
+      // Поля шага — с верха и из params (ровно так, как их видит хендлер берста): ref бывает на шаге, text — в params.
+      const { intent, fields } = browserStepFields(step);
+      out.push(...browserTyped(intent, fields, refHint));
       continue;
     }
     const action = String(step.action ?? "");
@@ -154,7 +177,7 @@ export function collectTypedFields(
   refHint?: RefHintResolver,
   handleHint?: HandleHintResolver,
 ): TypedField[] {
-  // browser_act допускает и плоскую форму (params отсутствует) — берём то же, что берёт хендлер.
+  // web_act допускает и плоскую форму (params отсутствует) — берём то же, что берёт его хендлер.
   const params = asRecord(input.params) ?? input;
   switch (tool) {
     case "input_type":
@@ -172,9 +195,11 @@ export function collectTypedFields(
       const verb = String(input.do ?? "click");
       return verb === "type" || verb === "set" ? field(input.text, hintsFromActTarget(input.target, handleHint)) : [];
     }
+    // W1: browser_act — те же поля, что возьмёт хендлер (плоские + params, browserActParams), и form_input (set).
     case "browser_act":
+      return browserTyped(String(input.intent ?? "").trim(), browserActParams(input), refHint);
     case "web_act":
-      return String(input.intent ?? "") === "type" ? field(params.text, hintsFromParams(params, refHint)) : [];
+      return String(input.intent ?? "") === "type" ? field(params.text, hintsFromParams(params, refHint).hints) : [];
     case "browser_batch":
       return stepFields(input.steps, "browser", refHint);
     case "input_batch":
@@ -246,7 +271,8 @@ export function checkCredentialInput(
           `Их вводит владелец сам. Могу открыть нужную страницу и подождать.`,
       };
     }
-    if (PASSWORD_FIELD_RE.test(hint) || OTP_FIELD_RE.test(hint)) {
+    // W1 (B-3): страница сама сказала «поле секретное» — отказ ДО отправки, даже если подпись немая («Поле 2»).
+    if (f.secret || PASSWORD_FIELD_RE.test(hint) || OTP_FIELD_RE.test(hint)) {
       return {
         block:
           `${tool}: поле «${sani(hint)}» — пароль или код подтверждения. ${CREDENTIAL_REFUSAL}. ` +

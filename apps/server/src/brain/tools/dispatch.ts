@@ -54,7 +54,7 @@ import {
   browserTabs,
   canvasClickAllowed,
   inBrowserTask,
-  refFieldHint,
+  refFieldInfo,
   syncLogins,
 } from "./handlers/browser.js";
 import {
@@ -409,7 +409,7 @@ export async function dispatchTool(
   const cred = checkCredentialInput(
     name,
     typesIntoFocus ? { ...input, target: lastActTarget(sessKey) } : input,
-    (ref) => refFieldHint(ctx, ref),
+    (ref) => refFieldInfo(ctx, ref), // W1: подпись И признак secret из снимков browser_inspect
     (handle) => uiHandleLabel(ctx.session as unknown as object, typeof handle === "string" ? Number(handle) : handle),
   );
   if (cred.block) return err(cred.block);
