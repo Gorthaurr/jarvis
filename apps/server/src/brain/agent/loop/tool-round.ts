@@ -3,6 +3,7 @@ import { log, notifyToolRound, isParallelReadonlyCall } from "./util.js";
 import type { LoopCtx } from "./context.js";
 import { dispatchTool } from "../../tools/dispatch.js";
 import { noteToolCall, applySuccessEffects, applyRoundFlags } from "./tool-classify.js";
+import { countFamilyCall } from "./family-count.js";
 import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
 import { isBlindMutate, toolCallEffect } from "../error-voice.js";
@@ -217,6 +218,7 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
     const { effOfCall, reportOfThisTurn } = noteToolCall(ctx, tu, r, round);
     if (!r.isError) applySuccessEffects(ctx, tu, r, effOfCall, round);
     applyRoundFlags(ctx, tu, r, effOfCall, reportOfThisTurn, round);
+    countFamilyCall(ctx, tu, r, effOfCall, round); // W1 (L-1/L-12): семейный счёт — по каноническому вызову и его исходу
     round.resultBlocks.push({
       type: "tool_result",
       tool_use_id: tu.id,

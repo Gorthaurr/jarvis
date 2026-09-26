@@ -1,9 +1,7 @@
 // W3 «Петля»: anti-runaway: повтор одного действия и флуд одним семейством инструментов.
 import { log } from "./util.js";
 import type { LoopCtx } from "./context.js";
-import type { RoundResult } from "./tool-round.js";
 import type { RoundSummary } from "./round-classify.js";
-import type { LlmResponse } from "../../../integrations/llm.js";
 
 export function antiRunawayIdentical(ctx: LoopCtx, summary: RoundSummary): "break" | "next" {
   const { st, pushSystemNote } = ctx;
@@ -35,24 +33,13 @@ export function antiRunawayIdentical(ctx: LoopCtx, summary: RoundSummary): "brea
   return "next";
 }
 
-export function familyCap(ctx: LoopCtx, resp: LlmResponse, round: RoundResult): "break" | "next" {
-  const { deps, tier, st, pushSystemNote } = ctx;
+export function familyCap(ctx: LoopCtx): "break" | "next" {
+  const { deps, st, pushSystemNote } = ctx;
   const { FAMILY_SOFT_CAP, MAX_FAMILY_NUDGES } = ctx.cfg;
-  // Мягкий anti-runaway по СЕМЕЙСТВУ инструментов (фикс «дублирует команды»): один tool NAME вызван
-  // слишком много раз за задачу → флуд без сходимости. Сначала интервент-нудж (смени подход / оцени, не
-  // достигнута ли цель) + эскалация на Opus; при упорстве — честный обрыв ДО упора в max_steps(50).
-  for (const tu of resp.toolUses) {
-    if (round.overlayDeniedIds.has(tu.id) || round.veiledIds.has(tu.id) || round.backgroundRunningIds.has(tu.id)) continue; // контроль-3/5/9: отказ вуали, опрос под ней и опрос идущего задания — состояние системы, не «топтание»
-    if (tu.name === "file_view") {
-      const inp = tu.input as { path?: unknown; page?: unknown };
-      const sig = `${String(inp.path ?? "")}#${String(inp.page ?? 1)}`;
-      if (!st.nudge.seenFileViews.has(sig)) {
-        st.nudge.seenFileViews.add(sig);
-        continue;
-      }
-    }
-    st.nudge.toolNameCount.set(tu.name, (st.nudge.toolNameCount.get(tu.name) ?? 0) + 1);
-  }
+  // Мягкий anti-runaway по СЕМЕЙСТВУ инструментов (фикс «дублирует команды»): один инструмент вызван слишком
+  // много раз без прогресса → флуд без сходимости. Сначала интервент-нудж (смени подход / оцени, не достигнута
+  // ли цель) + эскалация на Opus; при упорстве — честный обрыв ДО упора в max_steps(50). Счёт ведёт
+  // family-count.ts ПО ВЫЗОВУ (W1: руки — по сигнатуре цели, прогресс страницы обнуляет); здесь только порог.
   const worst = [...st.nudge.toolNameCount.entries()].sort((a, b) => b[1] - a[1])[0];
   if (worst && worst[1] >= FAMILY_SOFT_CAP * (st.nudge.familyNudges + 1)) {
     if (st.nudge.familyNudges < MAX_FAMILY_NUDGES) {
