@@ -2,13 +2,11 @@
  * W1 «браузерные руки»: метка чипа §20 «что делаю сейчас» для рук во вкладке — по интенту/операции, а не одним
  * «Действую на странице» на всё (жалоба владельца «не видно, что делает»). Чистая функция.
  * 🔴 Значения полей (value/text у set/type) в метку НЕ попадают: чип виден на экране, а в поле мог уйти личный текст.
+ * W1-ревью р2 (W1-T5): поля — ровно как их читает ХЕНДЛЕР: у browser_act intent с верха, прочее через browserActParams
+ * (при конфликте верха и params побеждает params — как у §14 и расширения; своя копия с «верх главнее» показывала
+ * «Нажимаю Tab», пока расширение жало Enter); у остальных — верхний уровень.
  */
-
-/** Поля вызова: новая схема — на верхнем уровне, прежняя и шаги берста — в `params` (верхний уровень главнее). */
-function fields(input: Record<string, unknown>): Record<string, unknown> {
-  const p = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : {};
-  return { ...p, ...input };
-}
+import { browserActParams } from "../tools/browser-params.js";
 
 const ACT_LABELS: Record<string, string> = {
   click: "Нажимаю на странице",
@@ -35,11 +33,11 @@ function steps(n: number): string {
 
 /** Метка браузерного вызова; null — не браузерный инструмент (решает общий stepLabelFor). */
 export function browserStepLabel(toolName: string, input: Record<string, unknown>): string | null {
-  const f = fields(input);
+  const f = toolName === "browser_act" ? browserActParams(input) : input;
   const s = (v: unknown): string => String(v ?? "").trim();
   switch (toolName) {
     case "browser_act": {
-      const intent = s(f.intent);
+      const intent = s(input.intent);
       if (intent === "set") return f.checked !== undefined ? "Отмечаю на странице" : "Заполняю поле";
       if (intent === "key") {
         const combo = s(f.combo ?? f.key);

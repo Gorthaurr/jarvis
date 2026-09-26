@@ -264,6 +264,8 @@ export interface NudgeState {
   // (новая страница теста) — счётчики рук и глаз обнуляются. Тот же вид — топтание, счёт идёт дальше.
   lookDigests: Map<string, string>;
   handActedSinceLook: boolean;
+  // W1-ревью р2: с прошлого взгляда рука действовала по НОВОЙ цели — следующий взгляд не «тот же вид» (не считается).
+  newHandSinceLook: boolean;
   // Anti-runaway (§20): сигнатура tool-вызовов прошлого раунда + счётчик одинаковых подряд.
   // Модель иногда зацикливается на ОДНОМ И ТОМ ЖЕ УСПЕШНОМ действии (открывает «до посинения»,
   // карточка задачи не закрывается) — ловим повтор и обрываем. Только УСПЕШНЫЙ повтор: подряд
@@ -491,6 +493,7 @@ function initNudgeState(): NudgeState {
     seenHandSigs: new Set<string>(),
     lookDigests: new Map<string, string>(),
     handActedSinceLook: false,
+    newHandSinceLook: false,
     lastToolSig: "",
     identicalRepeats: 0,
     continuations: 0,

@@ -16,6 +16,10 @@ export interface WebGesture {
 }
 
 const NONE: WebGesture = { commit: false, composes: false };
+const CLICK: WebGesture = { commit: true, composes: false };
+
+/** ref задан — так его проверяет расширение (tabAct: не undefined/null и непустой после trim). */
+const hasRef = (f: Record<string, unknown>): boolean => f.ref !== undefined && f.ref !== null && String(f.ref).trim() !== "";
 
 /** Жест по интенту и полям (поля уже в форме исполнителя — browser-params.ts). */
 function gestureOf(intent: string, f: Record<string, unknown>): WebGesture {
@@ -34,9 +38,17 @@ function gestureOf(intent: string, f: Record<string, unknown>): WebGesture {
     case "click":
     case "enter":
     case "submit":
-      return { commit: true, composes: false };
+    case "shake": // встряхивание — всегда клик (robustClickMain по ref/selector/подписи)
+      return CLICK;
+    case "play":
+    case "pause":
+    case "next":
+    case "prev":
+      // р2 loop-bypass-5: С ref расширение исполняет их КЛИКОМ по элементу (CLICK_LIKE) — по любой кнопке, в т.ч.
+      // «Отправить»; без ref — медиа-управление плеером вкладки (не коммит).
+      return hasRef(f) ? CLICK : NONE;
     default:
-      return NONE; // hover/scroll_to/scroll/play/pause/seek/back/forward — не набор и не коммит
+      return NONE; // hover/scroll_to/scroll/seek/back/forward — не набор и не коммит
   }
 }
 

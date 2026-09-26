@@ -207,6 +207,14 @@ describe("stepLabelFor — «что делаю сейчас» для чипа (�
     }
   });
 
+  // W1-ревью р2 (W1-T5): при конфликте верха и params чип показывает то, что ИСПОЛНЯЕТСЯ (побеждает params — как у
+  // хендлера, §14 и расширения). Реверт: верни в browser-step-label.ts слияние «верх главнее» — тест упадёт.
+  it("W1-T5: конфликт полей browser_act — метка по params (как исполняет расширение), intent — с верха", () => {
+    expect(stepLabelFor("browser_act", { intent: "key", combo: "Tab", params: { combo: "Enter" } })).toBe("Нажимаю Enter");
+    expect(stepLabelFor("browser_act", { intent: "set", ref: "e1_4", value: "да", params: { checked: true } })).toBe("Отмечаю на странице");
+    expect(stepLabelFor("browser_act", { intent: "click", params: { intent: "type" } })).toBe("Нажимаю на странице");
+  });
+
   it("browser_open/web_fetch — с хостом и глаголом", () => {
     expect(stepLabelFor("browser_open", { url: "https://music.yandex.ru/x" })).toBe("Открываю: Яндекс Музыка");
     expect(stepLabelFor("web_fetch", { url: "https://example.org/a" })).toBe("Читаю: example.org");

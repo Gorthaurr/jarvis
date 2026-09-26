@@ -3,8 +3,10 @@
  * «Открыл блокнот и напечатал X» после СВЕРЕННОГО act (verified:"met") шло лишним раундом «цель достигнута?» (на подписке
  * — новая сессия с нуля). Заявка «только о запуске» теперь — лишь пока в задаче нет сверенного НЕ-запускного дела.
  * Граница: «Запустил Доту» после app_launch + скриншота (сверена лишь ПОДЦЕЛЬ — запуск) по-прежнему сверяется с целью.
- * Реверт: убери `!st.honesty.verifiedRealAction &&` в loop/nudge-policy.ts goalCheck — первые два теста упадут
+ * Реверт: сделай launchOnlyClaim (loop/launch-claim.ts) без учёта verifiedRealAction — первые два теста упадут
  * (лишний раунд); сделай noteRealAction «любой взгляд = сверено» — упадёт третий.
+ * р2 (loop-bypass-4): сверенная ПОДГОТОВИТЕЛЬНАЯ рука (закрыть попап) не делает «Дота запущена» сверенным делом (живой
+ * случай 2026-07-02 вернулся через L-3); запуск ПОСЛЕ сверенного дела — новая подготовка.
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand } from "@jarvis/protocol";
@@ -118,6 +120,35 @@ describe("goal-check не переспрашивает уже сверенное
       { text: "Дота запущена, поиск матча ещё не начат." },
     ]);
     await handleUserText(session("met"), "запусти поиск матча в доте", deps(llm));
+    expect(goalChecked(llm)).toBe(true);
+  });
+});
+
+describe("р2 loop-bypass-4: сверенная подготовка — не цель (живой случай 2026-07-02)", () => {
+  const CLOSE = { id: "a1", name: "act", input: { target: { text: "Закрыть", role: "Button" }, do: "click" } };
+
+  it("app_launch → act «Закрыть» попап (met) → скрин → «Дота запущена» — goal-check сверяет с целью", async () => {
+    const llm = new MockLlmProvider([
+      { toolUses: [{ id: "l1", name: "app_launch", input: { app: "dota2" } }] },
+      { toolUses: [CLOSE] },
+      { toolUses: [{ id: "s1", name: "screen_capture", input: {} }] },
+      { text: "Дота запущена, сэр." },
+      { text: "Дота запущена, поиск матча ещё не начат." },
+    ]);
+    await handleUserText(session("met"), "запусти поиск матча в доте", deps(llm));
+    expect(goalChecked(llm)).toBe(true);
+  });
+
+  it("сверенное дело, ПОТОМ новый запуск → «Напечатал… и запустил Доту» — goal-check сверяет (дело — из прошлой подготовки)", async () => {
+    const llm = new MockLlmProvider([
+      { toolUses: [LAUNCH] },
+      { toolUses: [TYPE] },
+      { toolUses: [{ id: "l2", name: "app_launch", input: { app: "dota2" } }] },
+      { toolUses: [{ id: "s1", name: "screen_capture", input: {} }] },
+      { text: "Напечатал «молоко» и запустил Доту, сэр." },
+      { text: "Молоко напечатано, Дота запущена, поиск матча ещё не начат." },
+    ]);
+    await handleUserText(session("met"), "напечатай в блокноте молоко и запусти поиск матча в доте", deps(llm));
     expect(goalChecked(llm)).toBe(true);
   });
 });
