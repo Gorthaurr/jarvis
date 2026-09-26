@@ -165,3 +165,15 @@ describe("srv-regress-4: фрейм пропал ДО действия — «н�
     expect(text(r)).toMatch(/шаг не выполнен/u);
   });
 });
+
+describe("invalid_combo: страница не поняла сочетание — честный отказ, без координатного хатча", () => {
+  it("browser_act key «a+Enter»: «ничего не нажимал», хатч закрыт, без uncertain", async () => {
+    const e = ext({ tabAct: vi.fn(async () => { throw extReplyError("invalid_combo: key: не понял клавишу «a+Enter» — ничего не нажимал", "invalid_combo"); }) });
+    const ctx = makeCtx(e);
+    const r = await dispatchTool("browser_act", { tabId: 5, intent: "key", ref: "e1", combo: "a+Enter" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(r.uncertain).toBeUndefined();
+    expect(text(r)).toMatch(/сочетание клавиш не распознано — ничего не нажимал/u);
+    expect(canvasClickAllowed(ctx)).toBe(false);
+  });
+});
