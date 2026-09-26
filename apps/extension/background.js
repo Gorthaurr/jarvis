@@ -614,7 +614,7 @@ function looksBlankRead(res) {
 
 /**
  * Действие В ЦЕЛЕВОЙ вкладке через chrome.scripting. Маршрут по интенту:
- *  • click/shake/play/pause/next/prev по ref и click/shake без ref — robustClickMain (MAIN: видит React-props);
+ *  • click/shake/hover/play/pause/next/prev по ref и click/shake/hover без ref — robustClickMain (MAIN: видит React-props);
  *  • type/set/select/key/enter/submit/scroll_to (+ seek/scroll по ref) — elementActIsolated (изолированный мир, там
  *    реестр ref; §0 — отказ печатать в секретное поле);
  *  • play/pause без ref — mediaControlMain; feed_auto — feedAutoInPage; прочее (scroll/seek/next/prev/readMedia/
@@ -730,11 +730,13 @@ async function tabAct(url, intent, params, tabId) {
   const isShake = (intent === "click" || intent === "shake") && /встрях|стряхн|обнов/.test(ptext.toLowerCase());
   // REF + клик-подобное: nonce-мост ISOLATED → MAIN (React-props видны только в мире страницы). ref_stale → честный
   // провал, НЕ слепой хит по устаревшему узлу (устойчивость к ре-рендеру = вся суть механизма).
-  if (localRef && (CLICK_LIKE.includes(intent) || isShake)) {
+  if (localRef && (CLICK_LIKE.includes(intent) || isShake || intent === "hover")) {
     const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
     const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
     if (!stamp.ok) throw pageFailure(intent, stamp);
-    const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel }], explicitFrame);
+    // hover: action ставит SW (не модель), гарда нет — наведение ничего не совершает.
+    const cp = intent === "hover" ? { nonce, action: "hover" } : { nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel };
+    const rc = await runInPage("MAIN", robustClickMain, [cp], explicitFrame);
     if (!rc.ok) throw pageFailure(intent, rc);
     // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
     // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
@@ -773,8 +775,9 @@ async function tabAct(url, intent, params, tabId) {
   }
   // КЛИК (и встряхивание) по selector/text — через MAIN-world робаст-клик: указатель, React-проп цели, если клик
   // до неё не дошёл (Swiper-гейт в capture-фазе). НЕ активируем вкладку, мышь не трогаем.
-  if (intent === "click" || intent === "shake" || isShake) {
-    const clickParams = { ...P };
+  if (intent === "click" || intent === "shake" || isShake || intent === "hover") {
+    const clickParams = intent === "hover" ? { selector: P.selector, text: P.text, action: "hover" } : { ...P };
+    if (intent !== "hover") delete clickParams.action; // action задаёт только SW
     if (intent === "shake" || isShake) {
       clickParams.text = clickParams.text || "встряхнуть";
       clickParams.expectChange = true; // встряхивание подтверждаем по реальной смене контента (честность)
@@ -789,7 +792,7 @@ async function tabAct(url, intent, params, tabId) {
         if (rc.ok) { rc.frame = hit.frameId; rc.frameUrl = hit.url; }
       }
     }
-    if (!rc.ok) throw pageFailure("click", rc);
+    if (!rc.ok) throw pageFailure(intent === "hover" ? "hover" : "click", rc);
     return done(rc);
   }
   // PLAY/PAUSE — точечно В ЭТОЙ вкладке через MAIN-world React-onClick по кнопке плеера. НЕ через
@@ -1562,11 +1565,10 @@ async function elementActIsolated(localRef, intent, params) {
 }
 
 /**
- * Исполняется в MAIN-world (видит React-props страницы). РОБАСТ-клик, минующий Swiper-гейт
- * (preventClicks глушит синтетику в capture-фазе → ни el.click(), ни pointer-цепочка не срабатывают).
- * Порядок: React onClick-проп → Enter (role=button/onKeyDown) → полный pointer. Для встряхивания
- * (expectChange) сверяет, что контент РЕАЛЬНО изменился — иначе честный провал (не врём «готово»).
- * P.nonce → клик по помеченному ref-элементу (мост из ISOLATED). Функция статична → CSP-safe.
+ * Исполняется в MAIN-world (видит React-props страницы). Клик по цели (ref через nonce | selector | текст):
+ * указатель первым; React-onClick самой цели — только если клик до неё не дошёл (Swiper-гейт в capture-фазе); Enter —
+ * только во встряхивании (expectChange сверяет реальную смену). changed — наблюдатель изменений всего документа.
+ * P.action:"hover" (ставит SW) — навести указатель, без гарда. Функция статична → CSP-safe.
  */
 async function robustClickMain(params) {
   const P = params || {};
@@ -1676,7 +1678,8 @@ async function robustClickMain(params) {
     if (!q) return null;
     let best = null;
     let bestScore = 0;
-    for (const e of deepAll(CAND)) {
+    // Наведение цепляет и неинтерактивные контейнеры (пункт меню-li, карточка): меню часто раскрывается по mouseenter.
+    for (const e of deepAll(P.action === "hover" ? CAND + ",li,div,span,p,img,td,th,h1,h2,h3,h4,h5,h6" : CAND)) {
       // isConnected вместо document.contains: contains НЕ пересекает shadow-границу (ложно отсекал бы shadow-элементы)
       if (!e.isConnected) continue;
       if (e.closest && e.closest(".swiper-slide-duplicate")) continue;
@@ -1716,7 +1719,7 @@ async function robustClickMain(params) {
   // §14 на СТРАНИЦЕ (26.09): сервер не видит подписи элемента, выбранного селектором/ref, а браузер видит. На
   // опасном сайте/LMS сервер присылает guard (регэксп глаголов коммита) — подпись совпала и одобрения нет →
   // НЕ кликаем, возвращаем подпись: сервер спросит владельца и повторит с guardApproved (флаг ставит только он).
-  if (P.guard) {
+  if (P.guard && P.action !== "hover") {
     let re = null;
     try { re = new RegExp(String(P.guard), "iu"); } catch { re = null; }
     const parts = labelParts(target).concat(target !== node ? labelParts(node) : []);
@@ -1737,93 +1740,144 @@ async function robustClickMain(params) {
   } catch {
     /* ignore */
   }
-  const sigOf = () => {
-    const m = document.querySelector("main,[class*='Vibe'],[role=main]") || document.body;
-    return ((m && m.innerText) || "").replace(/[\d:.,]+/g, "").replace(/\s+/g, " ").trim().slice(0, 4000);
+  // B-7: «страница отреагировала» — MutationObserver по ВСЕМУ документу за окно действия + смена URL, числа видимых
+  // диалогов и состояния цели. Шум не считается: узлы, менявшиеся САМИ за 150 мс до действия, медиа/таймеры/прогресс,
+  // время вида 12:34. Цифры не вырезаются («Товаров 1→2» — изменение), портал вне main виден.
+  const NOISY = "video,audio,progress,meter,[role=timer],[role=progressbar],[role=marquee],[role=slider]";
+  const TIME = /^\s*\d{1,2}:\d{2}(?::\d{2})?\s*$/;
+  const MUT = { subtree: true, childList: true, characterData: true, attributes: true };
+  const elOf = (n) => (n && n.nodeType === 1 ? n : n && n.parentElement);
+  const noisy = new WeakSet();
+  const markNoisy = (recs) => { for (const rec of recs) { const e = elOf(rec.target); if (e) noisy.add(e); } };
+  const pre = new MutationObserver(markNoisy); // записи приходят в колбэк — takeRecords отдаёт лишь хвост
+  pre.observe(document, MUT);
+  await new Promise((r) => setTimeout(r, 150));
+  markNoisy(pre.takeRecords());
+  pre.disconnect();
+  const quiet = (e) => !e || (e.closest && e.closest(NOISY)) || TIME.test(e.textContent || "");
+  let changes = 0;
+  const count = (recs) => {
+    for (const rec of recs) {
+      const e = elOf(rec.target);
+      if (rec.type === "attributes") {
+        if (rec.attributeName !== "data-jarvis-act" && !noisy.has(e) && !quiet(e)) changes += 1;
+      } else if (rec.type === "characterData") {
+        if (!noisy.has(e) && !quiet(e) && !TIME.test(rec.target.data || "")) changes += 1;
+      } else {
+        // Шумный контейнер (карусель, бегущая строка) не считается; исключение — body: туда рисуют порталы (модалки),
+        // а скрипты рекламы, из-за которых body «шумит», добавляют невидимые узлы.
+        const moved = [...rec.addedNodes, ...rec.removedNodes].some((n) => (n.nodeType === 1 || (n.nodeType === 3 && n.data.trim())) && !TIME.test(n.textContent || ""));
+        const portal = e === document.body && [...rec.addedNodes].some((n) => n.nodeType === 1 && n.isConnected && !quiet(n) && n.getClientRects().length > 0);
+        if (portal || (moved && !noisy.has(e) && !quiet(e))) changes += 1;
+      }
+    }
   };
-  // §Волна2 (2.1) fused act+observe: сигнатуру контента снимаем ВСЕГДА — обычный клик тоже честно
-  // рапортует changed:true/false (страница отреагировала или нет) в том же ответе, без отдельного
-  // раунда сверки. expectChange-режим (жёсткий: не изменилось = провал) не тронут.
-  const before = sigOf();
-  // SPA-роутинг (pushState) не убивает контекст → переход виден по location.href; жёсткую навигацию
-  // (контекст умер) ловит SW-обёртка runInPage. navigated = содержательный readback (сервер снимет verify-долг).
+  const obs = new MutationObserver(count);
+  obs.observe(document, MUT);
+  const dialogs = () => [...document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal="true"]')].filter(visible).length;
+  const stateOf = (n) => [n.checked, n.value, n.getAttribute("aria-checked"), n.getAttribute("aria-expanded"), n.getAttribute("aria-pressed")].join("|");
+  const dlgBefore = dialogs();
+  const stBefore = stateOf(target);
+  // SPA-роутинг (pushState) не убивает контекст → переход виден по location.href; жёсткую навигацию (контекст умер)
+  // ловит SW-обёртка runInPage. navigated = содержательный readback (сервер снимет verify-долг).
   const hrefBefore = location.href;
-  const withNav = (res) => {
+  const changedNow = () => {
+    count(obs.takeRecords());
+    return changes > 0 || location.href !== hrefBefore || dialogs() !== dlgBefore || stateOf(target) !== stBefore;
+  };
+  const finish = (res) => {
+    obs.disconnect();
     if (location.href !== hrefBefore) res.navigated = location.href;
     return res;
   };
-
-  const reactClick = () => {
-    for (let n = target; n; n = n.parentElement) {
-      const key = Object.keys(n).find((k) => k.startsWith("__reactProps$"));
-      const props = key && n[key];
-      if (props && typeof props.onClick === "function") {
-        props.onClick({ preventDefault() {}, stopPropagation() {}, nativeEvent: {}, currentTarget: n, target: n, bubbles: true, type: "click" });
-        return true;
-      }
+  const r0 = target.getBoundingClientRect();
+  const at = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r0.left + r0.width / 2, clientY: r0.top + r0.height / 2, button: 0 };
+  const fire = (el, ty, o) => {
+    try {
+      const C = ty.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+      return el.dispatchEvent(new C(ty, o));
+    } catch {
+      return false;
     }
-    return false;
+  };
+
+  // HOVER: навести указатель (меню/подсказки по наведению). mouseenter не всплывает — шлём цели и её предкам, как
+  // настоящий указатель, входящий в каждый из них. Без гарда: наведение ничего не совершает.
+  if (P.action === "hover") {
+    fire(target, "pointerover", at);
+    fire(target, "mouseover", at);
+    for (let n = target; n && n !== document.documentElement; n = n.parentElement) {
+      fire(n, "pointerenter", { ...at, bubbles: false });
+      fire(n, "mouseenter", { ...at, bubbles: false });
+    }
+    fire(target, "pointermove", at);
+    fire(target, "mousemove", at);
+    await new Promise((r) => setTimeout(r, 400));
+    return finish({ ok: true, method: "hover", changed: changedNow() });
+  }
+
+  // B-1: указатель ПЕРВЫМ — ровно один click (синтетический click сам запускает активацию: ссылку, сабмит, галочку;
+  // react-router Link сам сделает preventDefault и переход). Слушатель capture+once на САМОЙ цели узнаёт, дошёл ли клик
+  // до неё: не дошёл (Swiper-гейт в capture-фазе предка глушит синтетику) → зовём React-onClick САМОГО элемента
+  // (не предка!) событием с button:0. Прежний подъём по предкам звал onClick обёртки фейком без button — ссылка
+  // внутри не переходила, Link молча выходил, а ответ был ok.
+  let reached = false;
+  const pointer = () => {
+    const mark = () => { reached = true; };
+    target.addEventListener("click", mark, { capture: true, once: true });
+    for (const ty of ["pointerover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) fire(target, ty, at);
+    target.removeEventListener("click", mark, { capture: true }); // once не снимет, если клик не дошёл
+    return true;
+  };
+  const reactOwn = () => {
+    if (reached) return false; // клик уже дошёл до цели — второй вызов onClick был бы двойным действием
+    const key = Object.keys(target).find((k) => k.startsWith("__reactProps$"));
+    const props = key && target[key];
+    if (!props || typeof props.onClick !== "function") return false;
+    let prevented = false;
+    const ev = {
+      type: "click", button: 0, buttons: 0, detail: 1, bubbles: true, cancelable: true, target, currentTarget: target,
+      clientX: at.clientX, clientY: at.clientY, altKey: false, ctrlKey: false, metaKey: false, shiftKey: false,
+      defaultPrevented: false, nativeEvent: { type: "click", button: 0 },
+      isDefaultPrevented: () => prevented, isPropagationStopped: () => false, persist() {},
+      preventDefault() { prevented = true; this.defaultPrevented = true; }, stopPropagation() {},
+    };
+    props.onClick(ev);
+    return true;
   };
   const pressEnter = () => {
-    try {
-      target.focus();
-    } catch {
-      /* ignore */
-    }
+    try { target.focus(); } catch { /* ignore */ }
     const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
     target.dispatchEvent(new KeyboardEvent("keydown", o));
     target.dispatchEvent(new KeyboardEvent("keyup", o));
     return true;
   };
-  const pointer = () => {
-    const r = target.getBoundingClientRect();
-    const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
-    // Ровно ОДИН click: синтетический click сам запускает активацию (ссылка/сабмит/галочка). Раньше следом шёл ещё
-    // target.click() — галочка переключалась туда и обратно, форма уходила дважды (боевой прогон 26.09).
-    for (const ty of ["pointerover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-      try {
-        const C = ty.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
-        target.dispatchEvent(new C(ty, o));
-      } catch {
-        /* ignore */
-      }
-    }
-    return true;
-  };
-
-  // H19 (ревью 02.07, подтверждён 26.09 в Chromium): синтетический Enter «срабатывал» всегда, и на обычных
-  // (не React) сайтах клик до указателя не доходил — ok без нажатия. Enter остаётся только во встряхивании
-  // (expectChange сверяет РЕАЛЬНУЮ смену контента после каждого метода — двойного действия там нет).
-  const methods = P.expectChange
-    ? [{ name: "react", fn: reactClick }, { name: "enter", fn: pressEnter }, { name: "pointer", fn: pointer }]
-    : [{ name: "react", fn: reactClick }, { name: "pointer", fn: pointer }];
+  // H19: синтетический Enter не жмёт нативную кнопку/ссылку — он только во встряхивании (expectChange сверяет
+  // РЕАЛЬНУЮ смену контента после каждого метода, двойного действия там нет).
+  const methods = [{ name: "pointer", fn: pointer }, { name: "react", fn: reactOwn }];
+  if (P.expectChange) methods.push({ name: "enter", fn: pressEnter });
   let used = null;
   for (const m of methods) {
     let fired = false;
-    try {
-      fired = m.fn();
-    } catch {
-      fired = false;
-    }
-    if (fired && !used) used = m.name;
+    try { fired = m.fn(); } catch { fired = false; }
+    if (!fired) continue;
+    used = m.name;
     if (P.expectChange) {
       await new Promise((r) => setTimeout(r, 700));
-      if (sigOf() !== before) return withNav({ ok: true, method: m.name, changed: true });
-    } else if (fired) {
-      // §Волна2 (2.1): DOM-диф в том же ответе — подождать реакцию страницы и честно доложить,
-      // изменился ли контент (changed:false = клик прошёл, но страница не отреагировала — модель
-      // видит это сразу и не ждёт отдельного verify-раунда, чтобы узнать).
-      await new Promise((r) => setTimeout(r, 500));
-      return withNav({ ok: true, method: m.name, changed: sigOf() !== before });
+      if (changedNow()) return finish({ ok: true, method: m.name, changed: true });
+    } else if (m.name === "react" || reached) {
+      break; // клик дошёл до цели (или его сделал React-проп) — ждём реакцию страницы
     }
   }
   if (P.expectChange) {
-    // no_effect: элемент НАЙДЕН и клик отработал (3 метода), но контент не сменился — probe iframe НЕ запускаем
-    // (иначе клик задублируется в другом документе). Честный провал в top.
-    return { ok: false, code: "no_effect", error: "действие не дало эффекта: перепробовал React-onClick, Enter и клик, но контент не изменился (возможно, кнопка не та или волна неактивна)" };
+    obs.disconnect();
+    // no_effect: элемент НАЙДЕН и клик отработал, но контент не сменился — probe iframe НЕ запускаем (иначе клик
+    // задублируется в другом документе). Честный провал в top.
+    return { ok: false, code: "no_effect", error: "действие не дало эффекта: клик, React-onClick и Enter не изменили страницу (возможно, кнопка не та или она неактивна)" };
   }
-  // used=null: элемент найден, но НИ ОДИН метод не выстрелил (редко) — это тоже «отработали в top», не not_found.
-  return used ? withNav({ ok: true, method: used }) : { ok: false, code: "no_effect", error: "не удалось кликнуть по «" + (P.selector || P.text || "") + "»" };
+  // Клик до цели не дошёл и React-пропа у неё нет: ответ ok (жест сделан), но changed скажет правду.
+  await new Promise((r) => setTimeout(r, 500));
+  return finish({ ok: true, method: used || "pointer", ...(reached || used === "react" ? {} : { reached: false }), changed: changedNow() });
 }
 
 /**

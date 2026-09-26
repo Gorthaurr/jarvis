@@ -165,16 +165,23 @@ export async function launchPage() {
   const hermetic = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE *.localhost, EXCLUDE 127.0.0.1";
   const proc = spawn(chrome, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", hermetic, `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], { stdio: "ignore", windowsHide: true });
   proc.unref(); // иначе дерево Chrome держит цикл событий и node --test не завершается
+  // Под параллельной нагрузкой (node --test гоняет файлы одновременно, у каждого свой Chrome) файл порта появляется
+  // пустым, а /json отвечает не сразу — ждём содержимое и цель-страницу, а не просто существование файла.
   const portFile = join(profile, "DevToolsActivePort");
-  for (let i = 0; i < 100 && !existsSync(portFile); i++) await new Promise((r) => setTimeout(r, 100));
-  const port = readFileSync(portFile, "utf8").split(/\r?\n/u)[0];
+  let port = "";
+  for (let i = 0; i < 300 && !port; i++) {
+    try { port = readFileSync(portFile, "utf8").split(/\r?\n/u)[0].trim(); } catch { /* ещё нет */ }
+    if (!port) await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!port) throw new Error("Chrome не открыл порт отладки за 30 с");
   let targets = [];
-  for (let i = 0; i < 50; i++) {
-    targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json().catch(() => []);
+  for (let i = 0; i < 200; i++) {
+    targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json()).catch(() => []);
     if (targets.some((t) => t.type === "page")) break;
     await new Promise((r) => setTimeout(r, 100));
   }
   const page = targets.find((t) => t.type === "page");
+  if (!page) throw new Error("у Chrome нет вкладки-страницы для стенда");
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   let id = 0;
