@@ -34,16 +34,25 @@ export function parseBatchSteps(steps) {
   return { parsed };
 }
 
+/** Почему берст стопится после шага (код → пояснение); порядок — приоритет: неизвестный исход главнее перехода. */
+const STOP_WHY = {
+  uncertain: "исход не подтверждён (страница перешла во время действия)",
+  navigated: "выполнен, страница перешла на другой адрес",
+  submitted: "выполнен, форма отправлена (страница могла уйти)",
+};
+
 /**
- * Шаг выполнен, но страница УШЛА (navigated) или исход не подтверждён (uncertain), а шаги ещё есть → стоп: следующие
- * selector/text-шаги ударили бы по НОВОЙ странице, а «не знаю, сработало ли» не превращается в «берст выполнен».
- * Последний шаг так не стопится — его исход (с uncertain/navigated) отдаётся как есть. Возвращает ответ-стоп или null.
+ * Шаг ещё не последний, а страница УШЛА (navigated), форма ОТПРАВЛЕНА (submitted: Enter/submit/type+enter — GET-форма
+ * уводит страницу без navigated) или исход не подтверждён (uncertain) → стоп: следующие selector/text-шаги ударили бы
+ * по НОВОЙ странице. Код — по исходу шага: uncertain (НЕ ЗНАЮ) ≠ navigated/submitted (шаг выполнен, остальное не
+ * делали). Последний шаг так не стопится — его исход отдаётся как есть. Возвращает ответ-стоп или null.
  */
 export function batchStepStop(i, intent, r, total, results) {
-  if (i >= total - 1 || !r || typeof r !== "object" || !(r.uncertain || r.navigated)) return null;
-  const why = r.uncertain ? "исход не подтверждён (страница перешла во время действия)" : "страница перешла на другой адрес";
+  if (i >= total - 1 || !r || typeof r !== "object") return null;
+  const code = r.uncertain ? "uncertain" : r.navigated ? "navigated" : r.submitted === true ? "submitted" : "";
+  if (!code) return null;
   return {
-    ok: false, code: "uncertain", stoppedAt: i, done: i + 1, total, results,
-    error: "uncertain: шаг " + (i + 1) + " («" + intent + "») — " + why + "; остальные шаги НЕ выполнены. Сверь страницу (browser_inspect), вслепую не повторяй",
+    ok: false, code, stoppedAt: i, done: i + 1, total, results,
+    error: code + ": шаг " + (i + 1) + " («" + intent + "») — " + STOP_WHY[code] + "; остальные шаги НЕ выполнены. Сверь страницу (browser_inspect), вслепую не повторяй",
   };
 }

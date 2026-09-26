@@ -2,7 +2,7 @@
 // вьюпорта), отрисовка кропа — та же функция renderCapture, исполненная в странице.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { findChrome, fixtureUrl, launchPage, swOnPage } from "./cdp-harness.mjs";
+import { findChrome, fixtureUrl, launchPage, loadServiceWorker, swOnPage } from "./cdp-harness.mjs";
 import { renderCapture } from "../modules/capture-render.js";
 import { replyFor } from "../modules/reply.js";
 
@@ -94,5 +94,53 @@ describe("tab.capture — снимок и зум вкладки", { skip: !findC
     const reply = await replyFor({ id: "c1", type: "tab.capture", url: "", tabId: 1, ref: "f3e12345_1" }, env.handle);
     assert.equal(reply.ok, true);
     assert.equal(reply.data.code, "capture_failed");
+  });
+});
+
+// Р2 (W1-T4 остаток): две задачи снимают вкладки одновременно — «прокрутить ref в центр» одной не должно вклиниться
+// между прокруткой и captureVisibleTab другой (кадр с чужой прокруткой и чужим rect).
+describe("tab.capture: снимки двух задач сериализованы", () => {
+  it("вторая задача не трогает страницу, пока первая не сняла кадр", async () => {
+    const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const TAB = { id: 1, windowId: 1, active: true, url: "https://x.example/", status: "complete" };
+    const log = [];
+    let n = 0;
+    const env = loadServiceWorker({
+      tabs: { get: async () => TAB, query: async () => [TAB], captureVisibleTab: async () => { log.push("capture"); return PNG; } },
+      windows: { get: async () => ({ state: "normal" }) },
+      scripting: {
+        executeScript: async () => {
+          const k = (n += 1);
+          log.push(`target${k}`);
+          await new Promise((r) => setTimeout(r, k === 1 ? 30 : 0)); // первая «прокрутка к ref» дольше второй
+          log.push(`target${k}:done`);
+          return [{ result: { ok: true, w: 1, h: 1, dpr: 1 } }];
+        },
+      },
+    });
+    const [a, b] = await Promise.all([env.tabCapture("", 1, {}, () => {}), env.tabCapture("", 1, {}, () => {})]);
+    assert.deepEqual([a.ok, b.ok], [true, true], JSON.stringify([a, b]));
+    assert.deepEqual(log, ["target1", "target1:done", "capture", "target2", "target2:done", "capture"]);
+  });
+
+  it("зависший снимок (страница не отвечает) не держит очередь вечно — следующий идёт по истечении слота", async () => {
+    const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const TAB = { id: 1, windowId: 1, active: true, url: "https://x.example/", status: "complete" };
+    let n = 0;
+    const slots = [];
+    const env = loadServiceWorker({
+      tabs: { get: async () => TAB, query: async () => [TAB], captureVisibleTab: async () => PNG },
+      windows: { get: async () => ({ state: "normal" }) },
+      scripting: { executeScript: () => ((n += 1) === 1 ? new Promise(() => {}) : Promise.resolve([{ result: { ok: true, w: 1, h: 1, dpr: 1 } }])) },
+      // Слот очереди «истекает» по команде теста (без реальных 15 с).
+      setTimeout: (fn) => { slots.push(fn); return slots.length; },
+      clearTimeout: () => {},
+    });
+    void env.tabCapture("", 1, {}, () => {});
+    const second = env.tabCapture("", 1, {}, () => {});
+    await new Promise((r) => setImmediate(r));
+    slots.shift()();
+    const res = await Promise.race([second, new Promise((r) => setTimeout(() => r("hung"), 500))]);
+    assert.equal(res.ok, true, `второй снимок завис за первым: ${JSON.stringify(res)}`);
   });
 });

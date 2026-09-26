@@ -64,6 +64,26 @@ function spyCtx(): Spy {
 const TAB = { url: "https://site.test/login" };
 
 describe("пароли и коды подтверждения: ввод не доходит до компьютера", () => {
+  // Адверс-ревью W1 р2 (srv-bypass-3): аргументы SDK — z.record(unknown), модель может прислать ЧИСЛО; расширение
+  // печатает String(P.text), так что судить надо строковую форму. Форма входа — ровно JSON модели (number, не строка).
+  it("browser_act type с номером карты ЧИСЛОМ → ошибка, расширению не ушло", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("browser_act", { ...TAB, intent: "type", selector: "#card", text: 4111111111111111 }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.ext).toHaveLength(0);
+    expect(String(r.content)).toMatch(/платёжные реквизиты/i);
+  });
+
+  it("browser_act type кода ЧИСЛОМ в поле «Код из СМС» → ошибка; set value числом в поле пароля по ref — тоже", async () => {
+    const s = spyCtx();
+    await dispatchTool("browser_inspect", TAB, s.ctx);
+    const r1 = await dispatchTool("browser_act", { ...TAB, intent: "type", label: "Код из СМС", text: 123456 }, s.ctx);
+    const r2 = await dispatchTool("browser_act", { ...TAB, intent: "set", ref: "e3_1", value: 20242024 }, s.ctx);
+    const r3 = await dispatchTool("browser_batch", { ...TAB, steps: [{ ref: "e3_0", intent: "type", params: { text: "anton" } }, { ref: "e3_2", intent: "type", params: { text: 987654 } }] }, s.ctx);
+    expect([r1.isError, r2.isError, r3.isError]).toEqual([true, true, true]);
+    expect(s.ext).toHaveLength(0);
+  });
+
   it("input_type с номером карты → ошибка, ActionCommand НЕ отправлен", async () => {
     const s = spyCtx();
     const r = await dispatchTool("input_type", { text: "4111 1111 1111 1111" }, s.ctx);
@@ -239,6 +259,13 @@ describe("🔴 легитимная работа по тем же путям н�
     expect(r1.isError).toBe(false);
     expect(r2.isError).toBe(false);
     expect(s.ext).toEqual(["act", "act"]);
+  });
+
+  it("р2: число в обычное поле (год) печатается — строковая форма числа не ломает легитимный ввод", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("browser_act", { ...TAB, intent: "type", selector: "#year", text: 2026 }, s.ctx);
+    expect(r.isError).toBe(false);
+    expect(s.ext).toEqual(["act"]);
   });
 
   it("browser_batch без полей-секретов исполняется целиком", async () => {

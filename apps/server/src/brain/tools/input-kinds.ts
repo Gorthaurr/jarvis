@@ -29,9 +29,8 @@ export const INPUT_BEARING_KINDS: ReadonlySet<ActionKind> = new Set<ActionKind>(
   "app.close",
   "window.focus", // §Волна2 (2.4): кража фокуса — сериализуется как app.focus
   "browser.open", // выводит окно Chrome вперёд (фокус) — под арендой
-  // W1 (L-11): browser.act из набора убран — руки во вкладке через расширение шлют СИНТЕТИЧЕСКИЕ события
-  // (chrome.scripting), мышь/клавиатуру ОС и фокус окна не трогают; CDP-отката сервера больше нет (B-12). Теперь
-  // browser_act и browser_batch одинаково идут без аренды и не ждут чужую GUI-задачу.
+  // W1 (L-11): руки во вкладке через расширение шлют СИНТЕТИЧЕСКИЕ события (chrome.scripting), мышь/клавиатуру ОС и
+  // фокус окна не трогают; вид browser.act удалён из протокола (B-12). browser_act и browser_batch идут без аренды.
   "skill.execute",
   "order.place",
 ]);

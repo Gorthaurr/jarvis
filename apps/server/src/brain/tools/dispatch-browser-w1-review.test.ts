@@ -229,7 +229,8 @@ describe("W1-5 / W1-7: frame_gone, tab_gone, uncertain берста — без �
     expect(r.isError).toBe(true);
     expect(r.uncertain).toBe(true);
     expect(text(r)).not.toMatch(/шаг не выполнен/u);
-    expect(r.partialSteps).toBe(2);
+    // Р2: шаг 2 (uncertain) в done расширения, но его исход неизвестен — журнал: 1..1 сделаны, действие шага 2 УШЛО.
+    expect([r.partialSteps, r.partialInjected]).toEqual([1, true]);
   });
 
   it("берст остановлен frame_gone и tab_gone — честные тексты", async () => {

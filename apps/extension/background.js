@@ -14,6 +14,7 @@ import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from 
 import { replyFor } from "./modules/reply.js";
 import { historyNav } from "./modules/history-nav.js";
 import { parseBatchSteps, batchStepStop } from "./modules/batch-plan.js";
+import { contextDied, contextLost } from "./modules/frame-gone.js";
 import { cookiesExport } from "./modules/cookies.js";
 import { startKeepAlive } from "./modules/keep-alive.js";
 
@@ -701,13 +702,13 @@ async function tabAct(url, intent, params, tabId) {
   /**
    * Исполнить page-функцию в top-фрейме/конкретном фрейме. Смерть контекста от навигации (executeScript
    * падает «frame was removed»/«No frame») обрабатывается ЧЕСТНО:
-   *  • frameId задан → ошибка относится к ФРЕЙМУ, не вкладке: НЕ выдаём вкладочную навигацию за успех (ревью
-   *    #4 — иначе клик в фоновом iframe рапортовался бы вкладочным navigated). Честный провал «фрейм исчез».
+   *  • frameId задан (или before — подготовка до действия) → ошибка относится к ФРЕЙМУ, не вкладке: НЕ выдаём
+   *    вкладочную навигацию за успех (ревью #4). До действия — «не выполнял», посреди — «исход неизвестен».
    *  • top-фрейм + клик + вкладка реально ушла (url сменился/грузится) → {ok:true, navigated, uncertain:true}
    *    — переход ВЕРОЯТЕН, но исход клика НЕ подтверждён (uncertain → сервер НЕ снимает verify-долг, ревью #1/#8).
    *  • иначе (не клик, или вкладка НЕ ушла) → исходная ошибка пробрасывается (провал, модель сверит/повторит).
    */
-  const runInPage = async (world, func, args, frameId) => {
+  const runInPage = async (world, func, args, frameId, before = false) => {
     const inj = { target: frameId !== undefined ? { tabId: tab.id, frameIds: [frameId] } : { tabId: tab.id }, func, args };
     if (world) inj.world = world;
     try {
@@ -715,14 +716,10 @@ async function tabAct(url, intent, params, tabId) {
       return (res && res.result) || { ok: false, error: "executeScript без результата" };
     } catch (e) {
       const msg = String((e && e.message) || e);
-      const contextDied = /(removed|destroyed|invalidated|closed|No frame)/i.test(msg);
-      if (contextDied && frameId !== undefined) {
-        // Целевой ФРЕЙМ исчез (перезагрузился/клик увёл встроенный iframe). НЕ выдаём за вкладочную
-        // навигацию-успех (ревью #4) и НЕ роняем криптичную ошибку Chrome в canvas-хатч. Честный провал +
-        // прямой запрет слепого повтора (иначе тот же selector сработал бы в перезагруженном фрейме дважды).
-        return { ok: false, code: "frame_gone", error: "целевой фрейм " + frameId + " исчез (страница/встроенный фрейм перезагрузились — возможно, действие уже сработало). Сделай свежий browser_inspect и сверься ПРЕЖДЕ чем повторять — не кликай вслепую." };
-      }
-      if (contextDied && navPlausible) {
+      const died = contextDied(msg);
+      // Фрейм исчез / контекст умер ДО действия (before, «No frame with id») или посреди него — modules/frame-gone.js.
+      if (died && (frameId !== undefined || before)) return contextLost(frameId, msg, before);
+      if (died && navPlausible) {
         await sleep(400);
         try {
           const t = await chrome.tabs.get(tab.id);
@@ -746,7 +743,7 @@ async function tabAct(url, intent, params, tabId) {
   // провал, НЕ слепой хит по устаревшему узлу (устойчивость к ре-рендеру = вся суть механизма).
   if (localRef && (CLICK_LIKE.includes(intent) || isShake || intent === "hover")) {
     const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
-    const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
+    const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame, true);
     if (!stamp.ok) throw pageFailure(intent, stamp);
     // hover: action ставит SW (не модель), гарда нет — наведение ничего не совершает.
     const cp = intent === "hover" ? { nonce, action: "hover" } : { nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel };
@@ -1518,7 +1515,15 @@ async function elementActIsolated(localRef, intent, params) {
       const b = el.getBoundingClientRect();
       return { ok: true, inViewport: b.width > 0 && b.height > 0 && b.bottom > 0 && b.right > 0 && b.top < innerHeight && b.left < innerWidth };
     }
-    if (intent === "scroll") { window.scrollBy(0, Number(P.dy) || 600); return { ok: true }; }
+    if (intent === "scroll") {
+      // EXT-9: крутим ближайший прокручиваемый контейнер ЦЕЛИ (список/чат) с цепочкой вверх до окна — как колесо над ней;
+      // ни один не сдвинулся (край / не прокручивается) — no_effect, а не ложный ok. 50 мс — и для CSS smooth-прокрутки.
+      const moved = async (box) => { const at = () => (box ? box.scrollTop : scrollY); const p0 = at(); (box || window).scrollBy(0, Number(P.dy) || 600); await new Promise((r) => setTimeout(r, 50)); return at() !== p0; };
+      for (let s = el; s && s !== document.body && s !== document.documentElement; s = s.parentElement || (s.getRootNode && s.getRootNode().host) || null) {
+        if (s.scrollHeight > s.clientHeight + 1 && /(auto|scroll|overlay)/.test(getComputedStyle(s).overflowY) && (await moved(s))) return { ok: true };
+      }
+      return (await moved(null)) ? { ok: true } : fail("no_effect", "прокрутка ничего не сдвинула — ни контейнер цели, ни страница дальше не прокручиваются (край)");
+    }
     if (intent === "seek") {
       // Только медиа САМОЙ цели (она, её плеер-предок или вложенный плеер): чужой первый плеер документа — не цель.
       const md = el.matches && el.matches("audio, video") ? el : (el.querySelector && el.querySelector("audio, video")) || (el.closest && el.closest("audio, video"));

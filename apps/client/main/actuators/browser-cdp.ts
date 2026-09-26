@@ -7,8 +7,8 @@
  * с --remote-debugging-port. За интерфейсом BrowserController — позже сюда же встанет
  * hak-browser (anti-detect) без изменения вызовов.
  *
- * Анти-инъекция: интент и параметры в eval-скрипты идут JSON-ЛИТЕРАЛАМИ (чистые данные),
- * а не конкатенацией в код. Скелет скрипта фиксирован.
+ * W1 (B-12): только open/close. Клиентские act/read по CDP (browser.act/browser.read) удалены — мертвы на Chrome 136+
+ * (дефолтный профиль не отдаёт debug-порт) и шли мимо §14; руки во вкладках владельца — расширение.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
@@ -36,21 +36,10 @@ function getFreePort(): Promise<number> {
 
 const log = createLogger("actuator:browser-cdp");
 
-export interface PageContent {
-  title: string;
-  url: string;
-  text: string;
-}
-
 export interface BrowserController {
   open(url: string): Promise<void>;
-  read(selectorIntent: string): Promise<PageContent>;
-  act(intent: string, params?: Record<string, unknown>): Promise<void>;
   close(): Promise<void>;
 }
-
-/** Допустимые интенты browser.act (валидируются — не enum в рантайме). */
-export const BROWSER_INTENTS = ["play", "pause", "next", "prev", "scroll", "click", "type", "back", "forward"] as const;
 
 /**
  * Санитайзер URL перед spawn/navigate. Защита в глубину (сервер тоже фильтрует, но клиент
@@ -88,59 +77,6 @@ export function chromeCandidates(): string[] {
 // cdpCommand вынесён в cdp-core (общий с jarvis-browser); ре-экспорт — для существующих импортёров/тестов.
 export { cdpCommand };
 
-/** Скрипт чтения читаемого контента страницы (возвращает JSON-строку). */
-export function buildReadScript(): string {
-  return `(() => {
-    const main = document.querySelector('main, article, [role=main]') || document.body;
-    const text = ((main && main.innerText) || '').replace(/[\\t ]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim().slice(0, 8000);
-    return JSON.stringify({ title: document.title || '', url: location.href, text });
-  })()`;
-}
-
-/** Скрипт действия по интенту. intent и params — JSON-литералы (анти-инъекция). */
-export function buildActScript(intent: string, params?: Record<string, unknown>): string {
-  const I = JSON.stringify(intent);
-  const P = JSON.stringify(params ?? {});
-  return `(() => {
-    const I = ${I}; const P = ${P};
-    const byText = (t) => [...document.querySelectorAll('a,button,[role=button],[role=link],[role=tab],input[type=submit]')]
-      .find(e => (e.innerText || e.value || e.getAttribute('aria-label') || '').trim().toLowerCase().includes(String(t).toLowerCase()));
-    const media = () => document.querySelector('video, audio');
-    if (I === 'scroll') { window.scrollBy(0, Number(P.dy) || 600); return 'ok'; }
-    if (I === 'back') { history.back(); return 'ok'; }
-    if (I === 'forward') { history.forward(); return 'ok'; }
-    // Аудит-2 [11]: честность — нет media-элемента → ЧЕСТНАЯ ошибка, а не ложный 'ok' (иначе модель
-    // скажет «поставил на паузу/включил», хотя воспроизведение не тронуто — тот самый HIGH-баг регион-
-    // блокнутой Я.Музыки). Как ветка 'click', которая бросает 'элемент не найден'.
-    if (I === 'play') { const m = media(); if (!m) throw new Error('нет media-элемента для воспроизведения (плеер на canvas/MSE?) — нужен клик по вкладке'); m.play(); return 'ok'; }
-    if (I === 'pause') { const m = media(); if (!m) throw new Error('нет media-элемента для паузы (плеер на canvas/MSE?) — нужен клик по вкладке'); m.pause(); return 'ok'; }
-    if (I === 'next' || I === 'prev') {
-      const labels = I === 'next' ? ['next','след','вперёд','перемотать вперёд'] : ['prev','пред','назад','предыдущ'];
-      const btn = [...document.querySelectorAll('button,[role=button],a')].find(e => {
-        const s = ((e.getAttribute('aria-label') || e.title || e.innerText || '')).toLowerCase();
-        return labels.some(l => s.includes(l));
-      });
-      if (btn) { btn.click(); return 'ok'; }
-      const m = media(); if (!m) throw new Error('нет кнопки перемотки и нет media-элемента — нужен клик по вкладке'); m.currentTime += (I === 'next' ? 10 : -10); return 'ok';
-    }
-    if (I === 'click') {
-      const el = P.selector ? document.querySelector(String(P.selector)) : (P.text ? byText(P.text) : null);
-      if (!el) throw new Error('элемент для клика не найден');
-      el.click(); return 'ok';
-    }
-    if (I === 'type') {
-      const el = P.selector ? document.querySelector(String(P.selector)) : document.activeElement;
-      if (!el) throw new Error('поле для ввода не найдено');
-      el.focus();
-      const v = String(P.text ?? '');
-      if ('value' in el) { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }
-      else { el.textContent = v; }
-      return 'ok';
-    }
-    throw new Error('неизвестный интент: ' + I);
-  })()`;
-}
-
 // ── минимальный CDP-клиент ───────────────────────────────────────
 
 export class CdpBrowserController implements BrowserController {
@@ -165,24 +101,6 @@ export class CdpBrowserController implements BrowserController {
     await this.send("Page.enable");
     if (already) await this.send("Page.navigate", { url: safe });
     await this.waitForLoad();
-  }
-
-  async read(_selectorIntent: string): Promise<PageContent> {
-    await this.ensureConnected();
-    const raw = await this.evaluate(buildReadScript());
-    try {
-      return JSON.parse(String(raw)) as PageContent;
-    } catch {
-      return { title: "", url: "", text: String(raw).slice(0, 8000) };
-    }
-  }
-
-  async act(intent: string, params?: Record<string, unknown>): Promise<void> {
-    if (!(BROWSER_INTENTS as readonly string[]).includes(intent)) {
-      throw new Error(`browser.act: неизвестный интент «${intent}»`);
-    }
-    await this.ensureConnected();
-    await this.evaluate(buildActScript(intent, params));
   }
 
   async close(): Promise<void> {

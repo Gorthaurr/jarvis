@@ -21,7 +21,7 @@ import { MockWebProvider } from "../../integrations/web.js";
 import { InMemoryEpisodicMemory } from "../../memory/episodic.js";
 import { WorkingMemory } from "../../memory/working.js";
 import { TaskManager } from "../tasks/manager.js";
-import { extNoReplyError } from "../tools/ext-errors.js";
+import { extNoReplyError, extReplyError } from "../tools/ext-errors.js";
 import { CheckpointStore } from "./checkpoint-store.js";
 import { type AgentDeps, handleUserText } from "./index.js";
 
@@ -108,5 +108,52 @@ describe("W1: исход браузерных рук доходит до жур�
     expect(line).toContain("ЧАСТИЧНО");
     expect(line).toContain("1..1");
     expect(line).not.toContain("ОШИБКА");
+  }, 20_000);
+
+  // Адверс-ревью W1 р2 (srv-tests-5): расширение отдало исход последнего шага в results — клик увёл страницу посреди
+  // действия. Журнал обязан сказать «шаг 2 УШЁЛ, исход неизвестен», а не «ok» (иначе «доделай» считает берст сделанным).
+  it("берст n из n, но последний шаг uncertain → «действие шага 2 УШЛО, исход неизвестен», не «ok»", async () => {
+    const results = [
+      { step: 0, ok: true, intent: "type", result: { ok: true, value: "Антон", submitted: false } },
+      { step: 1, ok: true, intent: "click", result: { ok: true, navigated: "https://shop.example/pay", uncertain: true } },
+    ];
+    const ext = extWith({ tabBatch: async () => ({ ok: true, done: 2, total: 2, results }) });
+    const digest = await digestAfter(
+      "u-browser-last-uncertain",
+      { id: "b3", name: "browser_batch", input: { url: SITE, steps: [{ ref: "e1_0", intent: "type", params: { text: "Антон" } }, { ref: "e1_1", intent: "click" }] } },
+      ext,
+    );
+    const line = digest.split("\n").find((l) => l.includes("browser_batch(")) ?? "";
+    expect(line).toContain("1..1");
+    expect(line).toMatch(/шага 2 УШЛО, исход неизвестен/u);
+  }, 20_000);
+
+  // Р2 srv-regress-4: фрейм пропал ДО действия — клика не было. Раньше это «исход неизвестен», uncertainCalls гасил
+  // mutationsAllFailed, и задача, где ничего не сделано, не записывалась провалом.
+  it("клик во фрейм, пропавший ДО действия (frame_missing) → «ОШИБКА», а не «ИСХОД НЕИЗВЕСТЕН»", async () => {
+    const ext = extWith({
+      tabAct: async () => {
+        throw extReplyError("frame_missing: целевой фрейм 7 пропал ДО действия — ничего не выполнял. Сделай свежий browser_inspect и повтори по новому снимку.", "frame_missing");
+      },
+    });
+    const digest = await digestAfter("u-browser-frame-missing", { id: "b5", name: "browser_act", input: { url: SITE, intent: "click", ref: "f7e1_3" } }, ext);
+    const line = digest.split("\n").find((l) => l.includes("browser_act(")) ?? "";
+    expect(line).toContain("ОШИБКА");
+    expect(line).not.toContain("ИСХОД НЕИЗВЕСТЕН");
+  }, 20_000);
+
+  it("стоп берста по переходу (navigated, исход известен) → «ЧАСТИЧНО 1..1; дальше — нет», без «исход неизвестен»", async () => {
+    const ext = extWith({
+      tabBatch: async () => ({ ok: false, code: "navigated", stoppedAt: 0, done: 1, total: 2, results: [{ step: 0, ok: true, intent: "click", result: { ok: true, navigated: "https://shop.example/#list" } }], error: "navigated: шаг 1 («click») — выполнен, страница перешла на другой адрес; остальные шаги НЕ выполнены" }),
+    });
+    const digest = await digestAfter(
+      "u-browser-nav-stop",
+      { id: "b4", name: "browser_batch", input: { url: SITE, steps: [{ ref: "e1_0", intent: "click" }, { ref: "e1_1", intent: "click" }] } },
+      ext,
+    );
+    const line = digest.split("\n").find((l) => l.includes("browser_batch(")) ?? "";
+    expect(line).toContain("ЧАСТИЧНО");
+    expect(line).toContain("1..1");
+    expect(line).not.toMatch(/неизвестен|НЕИЗВЕСТЕН/u);
   }, 20_000);
 });

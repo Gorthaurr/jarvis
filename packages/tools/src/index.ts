@@ -150,9 +150,7 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "screen.ocr": "screen_read_text", // §Волна2 (2.3): локальный OCR — текст с экрана без vision
   "screen.probe": "screen_probe", // §Волна2 (2.3): $0-проба «изменилось ли» (перцептивный хеш)
   "wait.for": "wait_for", // §Волна2 (2.3): клиентское ожидание события без LLM-поллинга
-  "browser.open": "browser_open",
-  "browser.act": "browser_act",
-  "browser.read": "browser_read",
+  "browser.open": "browser_open", // browser_act/browser_read — через расширение, ActionCommand не эмитят (W1, B-12)
   "code.run": "code_run",
   "job.status": "job_status", // фоновое задание code_run{background:true}: статус/хвост вывода/остановка
   "skill.execute": "skill_execute",
@@ -640,7 +638,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
       "Действие в открытой вкладке Chrome (после browser_open или по tabId): click, type, set, select, key, hover, scroll_to, медиа, история. " +
       "ЦЕЛЬ: ref из browser_inspect (лучше всего; ref_stale → свежий browser_inspect, не кликай вслепую), иначе selector (КАК ЕСТЬ, вкл. ' >>> ') или text (видимый текст/подпись). " +
       "ИНТЕНТЫ: click; type (text; enter:true — сразу отправить/искать, иначе запрос введён, но НЕ запущен); set = заполнить форму (поле/textarea/редактор — value; checkbox/radio/switch — checked, кликнет, только если состояние другое; <select> — value = текст пункта); select (<select>: option); " +
-      "key (combo 'Enter'|'Tab'|'Escape'|'ArrowDown'|'Ctrl+A' — в цель или в фокус; синтетическая клавиша НЕ жмёт нативную кнопку — для кнопки click); hover (меню/подсказки по наведению); scroll_to (элемент в центр); enter/submit (Enter/отправка формы); scroll (params.dy); " +
+      "key (combo 'Enter'|'Tab'|'Escape'|'ArrowDown'|'Ctrl+A' — в цель или в фокус; синтетическая клавиша НЕ жмёт нативную кнопку — для кнопки click); hover (меню/подсказки по наведению); scroll_to (элемент в центр); enter/submit (Enter/отправка формы); scroll (params.dy; с ref — прокрутит список/контейнер цели, у края — no_effect);" +
       "play/pause/seek/next/prev — плеер; back/forward — ИСТОРИЯ браузера, НЕ перемотка видео; feed_auto — автолистание Shorts. " +
       "ОТВЕТ: changed:false = страница НЕ отреагировала (не успех); navigated = переход; value/checked — фактическое состояние поля; «НЕ ЗНАЮ, сработало ли» — сверь browser_inspect/browser_read, НЕ повторяй вслепую. " +
       "Пароль/код/карту не вводит (§0) — это делает владелец; необратимое (отправить/оплатить/удалить/опубликовать, Enter в мессенджере) спросит владельца само (§14).",

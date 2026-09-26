@@ -35,6 +35,18 @@ describe("берст шагов", { skip: !findChrome() && "нет Chrome" }, ()
     assert.equal(await page.eval("document.getElementById('name').value"), "Старое", "текст ушёл не в то поле");
   });
 
+  // Р2 ext-bypass-batch-submit-nav: GET-форма уводит страницу по Enter без navigated — шаг 2 бил бы по НОВОЙ странице.
+  it("type+enter в не последнем шаге увёл страницу формой — стоп с кодом submitted, шаг 2 не исполнен", async () => {
+    await page.open(fixtureUrl("form.html"));
+    await page.eval(`document.body.insertAdjacentHTML('afterbegin','<form id=nav action="form.html" method=get><input id=qq name=qq type=text></form>'); 1`);
+    const { env } = swOnPage(page);
+    const r = await env.tabBatch("", [{ intent: "type", selector: "#qq", params: { text: "x", enter: true } }, { intent: "type", selector: "#q", params: { text: "SECOND" } }], 1);
+    assert.deepEqual([r.ok, r.code, r.done, r.stoppedAt], [false, "submitted", 1, 0], JSON.stringify({ ...r, results: undefined }));
+    await new Promise((res) => setTimeout(res, 800));
+    assert.match(await page.eval("location.href"), /form\.html\?qq=x$/u);
+    assert.equal(await page.eval("document.getElementById('q').value"), "", "шаг 2 напечатал на новой странице");
+  });
+
   it("шаг в поле пароля — стоп на нём, код secret_field полем, выполнено 1 из 2", async () => {
     await page.open(fixtureUrl("form.html"));
     const { env } = swOnPage(page);

@@ -240,13 +240,8 @@ type ActionCommandKind =
   // Джарвис/критические процессы (self-exclusion в актуаторе). Закрытие НЕ через Alt+F4.
   | { kind: "app.close"; app: string; force?: boolean }
   | { kind: "browser.open"; url: string; inDefault?: boolean } // inDefault: открыть в ДЕФОЛТНОМ (залогиненном) браузере пользователя через shell (не CDP-инстанс) — для «просто открой/включи»
-  | {
-      kind: "browser.act";
-      // CDP-драйв: медиа/прокрутка/навигация/клик/ввод по видимому тексту или селектору.
-      intent: "play" | "pause" | "next" | "prev" | "scroll" | "click" | "type" | "back" | "forward";
-      params?: Record<string, unknown>; // text/selector/dy в зависимости от intent
-    }
-  | { kind: "browser.read"; selectorIntent: string } // извлечь читаемый контент страницы
+  // W1 (B-12): browser.act/browser.read (CDP-драйв клиента, без §14, клик подстрокой) удалены — руки во вкладках
+  // владельца только через расширение (tab.act/tab.read), сервер эти виды не шлёт.
   // cwd — репозиторий для git/npm/тестов (иначе временная папка); timeoutMs — окно ЭТОГО запуска (кламп до 180 с);
   // background — фоновое задание: ответ сразу с jobId, исход по job.status (сценарии 2026-09-02, причина №2).
   | { kind: "code.run"; lang: CodeLang; code: string; cwd?: string; timeoutMs?: number; background?: boolean } // ограничения §6 обязательны

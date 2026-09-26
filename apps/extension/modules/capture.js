@@ -12,8 +12,26 @@ import { renderCapture } from "./capture-render.js";
 
 const captureFail = (code, error) => ({ ok: false, code, error });
 
+/**
+ * W1-T4: снимки СЕРИАЛИЗОВАНЫ на весь SW. Две задачи, снимающие вкладки одновременно, перемежали «прокрутить ref в
+ * центр» одной и captureVisibleTab другой — кадр с чужой прокруткой и чужим rect (плюс лимит Chrome на частоту снимков).
+ * Зависший снимок (страница не отвечает) держит очередь не дольше слота — иначе снимки встали бы до рестарта SW.
+ */
+let captureQueue = Promise.resolve();
+const CAPTURE_SLOT_MS = 15000;
+
 /** targetFn — page-функция изолированного мира (реестр ref): {ok, w, h, dpr, rect?} | {ok:false, code, error}. */
-export async function tabCapture(url, tabId, opts, targetFn) {
+export function tabCapture(url, tabId, opts, targetFn) {
+  const run = captureQueue.then(() => captureOnce(url, tabId, opts, targetFn));
+  captureQueue = new Promise((release) => {
+    const t = setTimeout(release, CAPTURE_SLOT_MS);
+    const done = () => { clearTimeout(t); release(); };
+    run.then(done, done);
+  });
+  return run;
+}
+
+async function captureOnce(url, tabId, opts, targetFn) {
   const o = opts || {};
   let tab;
   try {
