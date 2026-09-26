@@ -1444,9 +1444,7 @@ async function elementActIsolated(localRef, intent, params) {
   // это одобренный ref, либо сложенная часть подписи РАВНА одобренной (показанная владельцу — тоже часть): не подстрока —
   // одобренное «Отправить» не пропускает «Отправить перевод 50 000 ₽». guardApproved без подписи и ref — не одобрение.
   const judgeParts = (parts) => {
-    let re = null;
-    try { re = P.guard ? new RegExp(String(P.guard), "iu") : null; } catch { re = null; }
-    const shown = re ? parts.find((p) => re.test(p)) : undefined;
+    const shown = P.guard ? parts.find((p) => new RegExp(String(P.guard), "iu").test(p)) : undefined; // битый guard — throw: не жмём
     if (shown === undefined) return null;
     const a = fold(P.approvedLabel);
     const byRef = Boolean(localRef) && P.approvedRef != null && String(P.approvedRef) === String(P.ref);
@@ -1549,7 +1547,7 @@ async function elementActIsolated(localRef, intent, params) {
       if (!checkable(t) && !editable(t) && t.tagName !== "SELECT" && t.querySelector) {
         t = t.querySelector('input[type=checkbox],input[type=radio],[role=checkbox],[role=switch],[role=radio],select,textarea,input:not([type=hidden])') || t;
       }
-      // §14: подписи цели И обёртки, по которой адресовали (безымянный переключатель внутри «Опубликовать профиль»).
+      // §14 (переключатель/список — тот же гард, что у клика): подписи цели И обёртки, по которой адресовали.
       const own = labelParts(t).concat(t !== el ? labelParts(el) : []);
       if (t.tagName === "SELECT") return selectOption(t, P.value != null ? P.value : P.option, own);
       if (checkable(t)) {
@@ -1560,7 +1558,6 @@ async function elementActIsolated(localRef, intent, params) {
         if (cur() === wantOn) return { ok: true, checked: wantOn, changed: false }; // уже так — не кликаем (повторный set не снимает)
         if (!wantOn && t.tagName === "INPUT" && /^radio$/i.test(t.type)) return fail("", "radio не снимается кликом — выбери другой вариант этой группы");
         if (t.disabled || t.getAttribute("aria-disabled") === "true") return fail("", "элемент недоступен (disabled)");
-        // §14: переключатель «Опубликовать»/«Автоплатёж» — тот же гард, что у клика.
         const g = judgeParts(own);
         if (g) return g;
         const r = t.getBoundingClientRect();
@@ -1771,16 +1768,12 @@ async function robustClickMain(params) {
   // §14 на СТРАНИЦЕ (26.09): сервер не видит подписи элемента, выбранного селектором/ref, а браузер видит. На
   // опасном сайте/LMS сервер присылает guard (регэксп глаголов коммита) — подпись совпала и одобрения нет →
   // НЕ кликаем, возвращаем подпись: сервер спросит владельца и повторит с guardApproved (флаг ставит только он).
-  // Встряхивание дожимает Enter (фолбэк ниже) — в поле ввода никогда (srv-bypass-5: Enter в композер = отправка).
-  const field = target.isContentEditable || /^(TEXTAREA|SELECT)$/.test(target.tagName) || (target.tagName === "INPUT" && !/^(submit|button|reset|image)$/i.test(target.type));
   if (P.guard && P.action !== "hover") {
-    let re = null;
-    try { re = new RegExp(String(P.guard), "iu"); } catch { re = null; }
     // Enter-фолбэк — жест отправки формы: судим и все её кнопки отправки, как guardHit.
     const form = P.expectChange && (target.form || (target.closest && target.closest("form")));
     const subs = form ? [...form.getRootNode().querySelectorAll("button,input")].filter((b) => b.form === form && /^(submit|image)$/i.test(b.type || "")) : [];
     const parts = labelParts(target).concat(target !== node ? labelParts(node) : [], ...subs.map(labelParts));
-    const shown = re ? parts.find((p) => re.test(p)) : undefined;
+    const shown = parts.find((p) => new RegExp(String(P.guard), "iu").test(p)); // битый guard — throw: клика нет
     // Одобрение (контракт approve): тот же ref, либо сложенная часть подписи РАВНА одобренной (не подстрока, без обрезки)
     // — пока владелец думал, страница могла перерисоваться («Оплатить 50 000 ₽» вместо одобренного «Отправить»).
     const a = foldTxt(P.approvedLabel);
@@ -1907,9 +1900,9 @@ async function robustClickMain(params) {
     return true;
   };
   // H19: синтетический Enter не жмёт нативную кнопку/ссылку — он только во встряхивании (expectChange сверяет
-  // РЕАЛЬНУЮ смену контента после каждого метода, двойного действия там нет).
+  // РЕАЛЬНУЮ смену контента после каждого метода). В поле ввода — никогда: Enter в композер = отправка (srv-bypass-5).
   const methods = [{ name: "pointer", fn: pointer }, { name: "react", fn: reactOwn }];
-  if (P.expectChange && !field) methods.push({ name: "enter", fn: pressEnter });
+  if (P.expectChange && !target.isContentEditable && !/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) methods.push({ name: "enter", fn: pressEnter });
   let used = null;
   for (const m of methods) {
     let fired = false;
@@ -2223,9 +2216,7 @@ async function pageActInPage(intent, params) {
       // §14 (srv-bypass-8): «Далее: оплатить заказ» — гард подписей, как у клика по ref; одобрение — равенство подписи.
       const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
       const parts = [btn.getAttribute("aria-label"), btn.getAttribute("title"), btn.innerText].map((x) => String(x || "").replace(/\s+/g, " ").trim()).filter(Boolean);
-      let gre = null;
-      try { gre = P.guard ? new RegExp(String(P.guard), "iu") : null; } catch { gre = null; }
-      const shown = gre ? parts.find((x) => gre.test(x)) : undefined;
+      const shown = P.guard ? parts.find((x) => new RegExp(String(P.guard), "iu").test(x)) : undefined; // битый — throw ниже
       if (shown !== undefined && !(P.guardApproved && fold(P.approvedLabel) && parts.some((x) => fold(x) === fold(P.approvedLabel)))) return { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
       btn.click();
       return { ok: true };

@@ -100,6 +100,14 @@ describe("одобрение §14: ни шорткат P.text, ни подстр
     assert.equal(await page.eval("document.getElementById('dark').getAttribute('aria-checked')"), "false");
   });
 
+  it("битый guard — не «гарда нет»: отказ, ничего не нажато (fail-closed)", async () => {
+    await page.open(fixtureUrl("form.html"));
+    const k = await act("key", { selector: "#msg", combo: "Enter", guard: "(" });
+    assert.equal(k.ok, false, JSON.stringify(k));
+    await assert.rejects(click({ selector: "#guarded button", guard: "(" }));
+    assert.deepEqual(await page.eval("[window.__c.guarded, window.__c.keys.length]"), [0, 0]);
+  });
+
   it("длинная подпись: одобрены первые 120 символов — вопрос; одобрена вся — клик (без обрезки)", async () => {
     await page.open(fixtureUrl("approve.html"));
     const full = await page.eval("document.getElementById('long').innerText");

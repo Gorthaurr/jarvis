@@ -105,3 +105,22 @@ describe("srv-bypass-5: встряхивание в мессенджере — �
     expect(assessWebCommit({ host: "web.telegram.org", intent: "click", params: { text: "Настройки" } })).toBeNull();
   });
 });
+
+describe("srv-tests-2: у поля ввода e.text — СОДЕРЖИМОЕ, не подпись (§0 и одобрение его не видят)", () => {
+  // Форма inspectPageInPage: contenteditable с role=textbox и без роли (role = тег, value — в state), поле input.
+  const EDITOR = { ref: "e41234_2", tag: "div", role: "textbox", name: "Текст письма", text: "Привет! Напоминаю: пароль от вайфая сменили", state: { value: "Привет! Напоминаю: пароль от вайфая сменили" }, selector: "#ed" };
+  const BARE = { ref: "e41234_3", tag: "div", role: "div", name: "Заметка", text: "код подтверждения придёт по СМС", state: { value: "код подтверждения придёт по СМС" }, selector: "#note" };
+  const PW = { ref: "e41234_4", tag: "input", type: "text", role: "input", name: "Пароль", state: { value: "", empty: true }, selector: "#pw2" };
+  it("печать в редактор с «пароль»/«код подтверждения» в тексте — идёт; в поле с подписью «Пароль» — отказ §0", async () => {
+    const { ctx, ext, tabAct } = setup();
+    ext.tabInspect.mockResolvedValue({ url: "https://mail.example/", elements: [EDITOR, BARE, PW] } as never);
+    await dispatchTool("browser_inspect", { url: "https://mail.example/" }, ctx);
+    for (const ref of [EDITOR.ref, BARE.ref]) {
+      const r = await dispatchTool("browser_act", { url: "https://mail.example/", intent: "type", ref, text: "Новый текст" }, ctx);
+      expect(r.isError, `${ref}: ${String(r.content)}`).toBeFalsy();
+    }
+    const blocked = await dispatchTool("browser_act", { url: "https://mail.example/", intent: "type", ref: PW.ref, text: "hunter2" }, ctx);
+    expect(blocked.isError).toBe(true);
+    expect(tabAct).toHaveBeenCalledTimes(2);
+  });
+});
