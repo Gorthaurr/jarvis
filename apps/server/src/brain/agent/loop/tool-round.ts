@@ -4,6 +4,7 @@ import type { LoopCtx } from "./context.js";
 import { dispatchTool } from "../../tools/dispatch.js";
 import { noteToolCall, applySuccessEffects, applyRoundFlags } from "./tool-classify.js";
 import { countFamilyCall } from "./family-count.js";
+import { armUncertainDebt } from "./send-gesture.js";
 import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
 import { isBlindMutate, toolCallEffect } from "../error-voice.js";
@@ -217,6 +218,7 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
       : await dispatchTool(tu.name, tu.input, toolCtx);
     const { effOfCall, reportOfThisTurn } = noteToolCall(ctx, tu, r, round);
     if (!r.isError) applySuccessEffects(ctx, tu, r, effOfCall, round);
+    else armUncertainDebt(st, tu, r, effOfCall); // W1-ревью LOOP-2: «исход неизвестен» у руки — долг сверки, как у успеха
     applyRoundFlags(ctx, tu, r, effOfCall, reportOfThisTurn, round);
     countFamilyCall(ctx, tu, r, effOfCall, round); // W1 (L-1/L-12): семейный счёт — по каноническому вызову и его исходу
     round.resultBlocks.push({
