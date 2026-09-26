@@ -91,3 +91,12 @@ export function isCommitKeyCombo(combo: string): boolean {
  */
 export const COMMIT_WORDS_RE =
   /(?<![\p{L}])(?:опубликов|разместит|размести|отправ|оплат|заплат|подтвер|провест|провед|подпис|купит|оформ|заказат|перевес|перевод|разослат|удал(?![её]нн|[её]нк|ось)|стерет|publish|post\b|send\b|pay\b|confirm|submit|buy\b|checkout|place order|transfer|sign\b|approve|delete(?!d)|erase\b)/iu;
+
+/**
+ * Единое «включено» для флагов коммита (`enter`/`submit`) от LLM: true, 1, "true"/"1"/"yes"/"да". Сервер нормализует
+ * по нему до отправки в расширение, гейт §14 и петля судят по нему же — три потребителя, одна правда (W1-ревью LOOP-3).
+ */
+export function isOnFlag(v: unknown): boolean {
+  if (v === true || v === 1) return true;
+  return typeof v === "string" && /^(true|1|yes|да)$/iu.test(v.trim());
+}
