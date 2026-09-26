@@ -95,6 +95,13 @@ describe("set / key / scroll_to / Enter", { skip: !findChrome() && "нет Chrom
     assert.ok((await page.eval("scrollY")) > 1000);
   });
 
+  it("гард §14 на Enter без фокуса: текст страницы («Отправить отзыв…») не делает Enter в пустоту коммитом", async () => {
+    await page.open(fixtureUrl("form.html"));
+    await page.eval("document.body.insertAdjacentHTML('afterbegin', '<p>Отправить отзыв можно ниже</p>'); document.activeElement && document.activeElement.blur()");
+    const r = await act("key", { combo: "Enter", guard: GUARD });
+    assert.equal(r.ok, true, JSON.stringify(r));
+  });
+
   it("гард §14 на Enter: кнопка формы «Отправить» → commit_confirm, поле не тронуто; после одобрения — уходит", async () => {
     await page.open(fixtureUrl("form.html"));
     const no = await act("type", { selector: "#msg", text: "привет", enter: true, guard: GUARD });

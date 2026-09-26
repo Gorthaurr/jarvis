@@ -78,6 +78,12 @@ describe("find — ранжированный поиск по описанию",
     assert.equal(r.truncated, true);
   });
 
+  it("service worker: кап снимка ограничен 150 (B-16), каким бы ни пришёл", async () => {
+    const { env, calls } = swOnPage(page);
+    await env.tabInspect("", "", 100000, 1);
+    assert.equal(calls[0].args[1], 150);
+  });
+
   it("service worker: find по всем фреймам — до 20 лучших, без служебного score", async () => {
     const { env, calls } = swOnPage(page);
     const r = await env.tabInspect("", "кнопка войти", 80, 1);

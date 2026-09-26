@@ -200,7 +200,8 @@ async function tabRead(url, tabId, query) {
 async function tabInspect(url, query, cap, tabId) {
   const { tab, loading } = await readyTargetTab(url, tabId);
   const find = String(query || "").trim();
-  const capN = find ? 20 : Number(cap) || 80;
+  // B-16: кап снимка ограничен (150 — как в схеме инструмента): огромный cap раздувал ответ и контекст модели.
+  const capN = find ? 20 : Math.min(150, Math.max(1, Math.floor(Number(cap)) || 80));
   const args = [find, capN];
   // ВСЕ фреймы: интерактив часто живёт в iframe (embed-плеер/форма/оплата) — раньше inspect был слеп к ним.
   let frames;
@@ -1465,7 +1466,9 @@ async function elementActIsolated(localRef, intent, params) {
     try { re = new RegExp(String(P.guard), "iu"); } catch { return null; }
     const form = t.form || (t.closest && t.closest("form"));
     const sub = form ? form.querySelector("button[type=submit],button:not([type]),input[type=submit],input[type=image]") : null;
-    const parts = labelParts(t).concat(sub ? labelParts(sub) : [], form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []);
+    // Подписи самой цели — только у поля/кнопки: Enter «в body» не должен судиться по всему тексту страницы.
+    const control = /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName) || t.isContentEditable || /^(button|textbox|searchbox|combobox)$/.test(t.getAttribute("role") || "");
+    const parts = (control ? labelParts(t) : []).concat(sub ? labelParts(sub) : [], form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []);
     const shown = (parts.find((p) => re.test(p)) || parts.join(" ")).slice(0, 120);
     const need = { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
     if (!P.guardApproved) return parts.some((p) => re.test(p)) ? need : null;
