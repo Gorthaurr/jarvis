@@ -78,7 +78,7 @@ export function loadServiceWorker(overrides = {}) {
   const chrome = new Proxy(stub, { get: (_t, k) => own[k] || stub });
   const noop = () => 0;
   class FakeSocket { constructor() {} send() {} close() {} }
-  const sandbox = { chrome, console, setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop, URL, WebSocket: FakeSocket, ...globals };
+  const sandbox = { chrome, console, setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop, URL, atob, btoa, WebSocket: FakeSocket, ...globals };
   vm.createContext(sandbox);
   try {
     vm.runInContext(src, sandbox, { filename: "background.js" });
@@ -92,7 +92,7 @@ export function loadServiceWorker(overrides = {}) {
 /**
  * SW в vm поверх НАСТОЯЩЕЙ страницы: chrome.scripting.executeScript исполняет page-функцию в headless Chrome
  * (world:"MAIN" — в мире страницы, иначе — в изолированном мире, как у расширения), вкладка №1 = эта страница,
- * goBack/goForward — история этой страницы. Проверяет связку «маршрут SW → page-функция» целиком, без моков DOM.
+ * goBack/goForward — история этой страницы, captureVisibleTab — её снимок. Связка «маршрут SW → page-функция» целиком.
  */
 export function swOnPage(page, extra = {}) {
   const calls = [];
@@ -113,15 +113,18 @@ export function swOnPage(page, extra = {}) {
     if (!can) throw new Error(`Cannot find a ${dir === "back" ? "previous" : "next"} page in history.`);
     await page.eval(`history.${dir}()`);
   };
-  const { tabs, ...globals } = extra;
+  const { tabs, windows, ...globals } = extra;
   const env = loadServiceWorker({
     tabs: {
       get: async (id) => { if (id !== 1) throw new Error("No tab with id: " + id); return live(); },
       query: async () => [await live()],
       goBack: history("back"),
       goForward: history("forward"),
+      // captureVisibleTab = снимок вьюпорта этой страницы (CDP), в физических пикселях, как у Chrome.
+      captureVisibleTab: async () => page.screenshot(),
       ...tabs,
     },
+    windows: { get: async (id) => ({ id, state: "normal", focused: true }), ...windows },
     scripting: {
       executeScript: async (inj) => {
         calls.push(inj);
@@ -223,6 +226,10 @@ export async function launchPage() {
     call: (fnSrc, ...a) => evaluate(`(${fnSrc})${args(a)}`),
     callIsolated: async (fnSrc, ...a) => evaluate(`(${fnSrc})${args(a)}`, await isolated()),
     eval: evaluate,
+    /** Снимок вьюпорта PNG data:-URL (физические пиксели) — как chrome.tabs.captureVisibleTab. */
+    screenshot: async () => "data:image/png;base64," + (await send("Page.captureScreenshot", { format: "png" })).result.data,
+    /** Сырой CDP-вызов (эмуляция dpr и т.п.). */
+    cdp: (method, params) => send(method, params),
     async close() {
       ws.onmessage = null;
       try { ws.close(); } catch { /* ignore */ }

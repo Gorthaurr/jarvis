@@ -9,6 +9,7 @@
 
 import { sleep, hostOf, noTabError, isPrivateHost, codedError, pageFailure, parseRef } from "./modules/utils.js";
 import { openOrFocus } from "./modules/open-tab.js";
+import { tabCapture } from "./modules/capture.js";
 import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from "./modules/tab-find.js";
 import { replyFor } from "./modules/reply.js";
 import { historyNav } from "./modules/history-nav.js";
@@ -117,6 +118,9 @@ async function handle(msg) {
       return tabInspect(msg.url ? String(msg.url) : "", msg.query ? String(msg.query) : "", msg.cap, msg.tabId);
     case "tab.act":
       return tabAct(msg.url ? String(msg.url) : "", String(msg.intent || ""), msg.params || {}, msg.tabId);
+    case "tab.capture":
+      // Провал снимка — данными {ok:false, code, error}, не исключением (контракт W1 §7).
+      return tabCapture(msg.url ? String(msg.url) : "", msg.tabId, { rect: msg.rect, ref: msg.ref, scale: msg.scale }, captureTargetIsolated);
     case "tab.batch":
       return tabBatch(msg.url ? String(msg.url) : "", Array.isArray(msg.steps) ? msg.steps : [], msg.tabId);
     case "cookies.export":
@@ -1233,6 +1237,29 @@ function stampRefIsolated(localRef, nonce) {
   if (!el || !el.isConnected) return { ok: false, code: "ref_stale", error: "элемент исчез со страницы — сделай browser_inspect заново" };
   try { el.setAttribute("data-jarvis-act", String(nonce)); } catch { return { ok: false, error: "не смог пометить элемент для клика" }; }
   return { ok: true };
+}
+
+/**
+ * ИЗОЛИРОВАННЫЙ мир (там реестр ref): размеры вьюпорта и — по ref — прямоугольник элемента в CSS px для снимка вкладки
+ * (tab.capture). Элемент вне экрана прокручивается в центр и ждёт кадр, чтобы снимок видел его на месте. Self-contained.
+ */
+async function captureTargetIsolated(localRef) {
+  const vp = { ok: true, w: innerWidth, h: innerHeight, dpr: devicePixelRatio || 1 };
+  if (!localRef) return vp;
+  const REG = globalThis.__jarvisRefs;
+  if (!REG || !REG.map) return { ok: false, code: "ref_stale", error: "нет реестра снимка (страница перезагрузилась) — сделай browser_inspect заново" };
+  const m = /^e(\d+)_/.exec(String(localRef));
+  if (!m || Number(m[1]) !== REG.gen) return { ok: false, code: "ref_stale", error: "ref с прежней страницы (документ сменился) — сделай browser_inspect заново" };
+  const el = REG.map.get(localRef);
+  if (!el || !el.isConnected) return { ok: false, code: "ref_stale", error: "элемент исчез со страницы — сделай browser_inspect заново" };
+  let r = el.getBoundingClientRect();
+  if (r.top < 0 || r.left < 0 || r.bottom > innerHeight || r.right > innerWidth) {
+    el.scrollIntoView({ block: "center", inline: "center" });
+    await new Promise((res) => { const t = setTimeout(res, 150); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); res(); })); });
+    r = el.getBoundingClientRect();
+  }
+  if (r.width < 1 || r.height < 1) return { ok: false, code: "capture_failed", error: "элемент без размера (скрыт) — снимать нечего" };
+  return { ...vp, rect: { x: r.left, y: r.top, w: r.width, h: r.height } };
 }
 
 /** ISOLATED-world: состояние медиа (ground-truth play/pause). Self-contained. */
