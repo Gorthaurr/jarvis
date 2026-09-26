@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { findChrome, fixtureUrl, launchPage, pageFunctionSources } from "./cdp-harness.mjs";
 
-const fns = pageFunctionSources(["inspectPageInPage", "robustClickMain", "pageActInPage", "readPageInPage", "actByRefIsolated"]);
+const fns = pageFunctionSources(["inspectPageInPage", "robustClickMain", "readPageInPage", "elementActIsolated"]);
 
 describe("inspect на обычной странице", { skip: !findChrome() && "нет Chrome" }, () => {
   let page;
@@ -72,25 +72,26 @@ describe("inspect/select/read на тесте Moodle", { skip: !findChrome() && 
   it("intent select ставит вариант по тексту и шлёт change", async () => {
     await page.open(fixtureUrl("moodle-attempt.html"));
     await page.eval("window.__chg = 0; document.querySelector('select').addEventListener('change', () => window.__chg++)");
-    const r = await page.call(fns.pageActInPage, "select", { selector: 'select[name="q145678:3_sub0"]', option: "берлин" });
+    const r = await page.callIsolated(fns.elementActIsolated, null, "select", { selector: 'select[name="q145678:3_sub0"]', option: "берлин" });
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.value, "Берлин");
     assert.equal(await page.eval("document.querySelector('select').value"), "2");
     assert.equal(await page.eval("window.__chg"), 1);
   });
 
-  it("intent select: несуществующий вариант — честный провал со списком вариантов", async () => {
-    const r = await page.call(fns.pageActInPage, "select", { selector: 'select[name="q145678:3_sub1"]', option: "Лиссабон" });
+  it("intent select: несуществующий вариант — честный провал; тексты страницы в ошибку не идут (B-10)", async () => {
+    const r = await page.callIsolated(fns.elementActIsolated, null, "select", { selector: 'select[name="q145678:3_sub1"]', option: "Лиссабон" });
     assert.equal(r.ok, false);
-    assert.match(r.error, /Мадрид/u);
+    assert.doesNotMatch(r.error, /Мадрид|Берлин/u);
+    assert.match(r.error, /state\.options/u);
   });
 
   it("select по ref: вариант ставится по тексту, readback — выбранный текст", async () => {
     await page.open(fixtureUrl("moodle-attempt.html"));
-    const els = (await page.call(fns.inspectPageInPage, "", 80)).elements;
+    const els = (await page.callIsolated(fns.inspectPageInPage, "", 80)).elements;
     const sel = els.find((e) => e.role === "select");
     assert.ok(sel?.ref, JSON.stringify(els.map((e) => e.role)));
-    const r = await page.call(fns.actByRefIsolated, sel.ref, "select", { option: "Мадрид" });
+    const r = await page.callIsolated(fns.elementActIsolated, sel.ref, "select", { option: "Мадрид" });
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(r.value, "Мадрид");
     assert.equal(await page.eval("document.querySelector('select').value"), "1");

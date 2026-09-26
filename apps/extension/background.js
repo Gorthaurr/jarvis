@@ -7,7 +7,7 @@
  * никакого debug-порта, вкладка в фоне → почти невидимо.
  */
 
-import { sleep, hostOf, urlPathQuery, noTabError, isPrivateHost, codedError, pageFailure } from "./modules/utils.js";
+import { sleep, hostOf, urlPathQuery, noTabError, isPrivateHost, codedError, pageFailure, parseRef } from "./modules/utils.js";
 import { findTargetTab, waitForTabReady, readyTargetTab, waitTabComplete } from "./modules/tab-find.js";
 import { replyFor } from "./modules/reply.js";
 import { cookiesExport } from "./modules/cookies.js";
@@ -114,9 +114,9 @@ async function handle(msg) {
     case "tab.inspect":
       return tabInspect(msg.url ? String(msg.url) : "", msg.query ? String(msg.query) : "", msg.cap, msg.tabId);
     case "tab.act":
-      return tabAct(msg.url ? String(msg.url) : "", String(msg.intent || ""), msg.params || {}, msg.tabId, msg.refMode);
+      return tabAct(msg.url ? String(msg.url) : "", String(msg.intent || ""), msg.params || {}, msg.tabId);
     case "tab.batch":
-      return tabBatch(msg.url ? String(msg.url) : "", Array.isArray(msg.steps) ? msg.steps : [], msg.tabId, msg.refMode);
+      return tabBatch(msg.url ? String(msg.url) : "", Array.isArray(msg.steps) ? msg.steps : [], msg.tabId);
     case "cookies.export":
       return cookiesExport(Array.isArray(msg.domains) ? msg.domains : null);
     default:
@@ -612,8 +612,18 @@ function looksBlankRead(res) {
   return typeof res.value === "string" && res.value.trim() === "";
 }
 
-/** Выполнить действие В ЦЕЛЕВОЙ вкладке (play/pause/next/click/type/scroll) через chrome.scripting. */
-async function tabAct(url, intent, params, tabId, refMode) {
+/**
+ * Действие В ЦЕЛЕВОЙ вкладке через chrome.scripting. Маршрут по интенту:
+ *  • click/shake/play/pause/next/prev по ref и click/shake без ref — robustClickMain (MAIN: видит React-props);
+ *  • type/set/select/key/enter/submit/scroll_to (+ seek/scroll по ref) — elementActIsolated (изолированный мир, там
+ *    реестр ref; §0 — отказ печатать в секретное поле);
+ *  • play/pause без ref — mediaControlMain; feed_auto — feedAutoInPage; прочее (scroll/seek/next/prev/readMedia/
+ *    getValue) — pageActInPage. Поле refMode старого сервера не нужно: ref работает всегда.
+ */
+const ELEMENT_INTENTS = ["type", "set", "select", "key", "enter", "submit", "scroll_to"];
+const CLICK_LIKE = ["click", "shake", "play", "pause", "next", "prev"];
+
+async function tabAct(url, intent, params, tabId) {
   const P = params || {};
   // Self-heal (см. reviveTab) — ТОЛЬКО текстовое чтение наблюдения и только по явному recover.
   // readMedia сознательно НЕ чиним: reload сбросил бы позицию воспроизведения (а условие «видео дошло
@@ -658,17 +668,14 @@ async function tabAct(url, intent, params, tabId, refMode) {
   // Явный frameId из browser_inspect (элемент в iframe) — целимся точно в тот фрейм.
   const fidRaw = Number(P.frameId);
   let explicitFrame = Number.isFinite(fidRaw) && fidRaw > 0 ? fidRaw : undefined;
-  // REF-АДРЕСАЦИЯ (refMode): P.ref из последнего снимка — адресуем элемент по ИДЕНТИЧНОСТИ (устойчиво к
-  // ре-рендеру SPA), а не по хрупкому селектору/тексту. Формат f<frameId>e<gen>_<n> (top-фрейм без f-префикса).
+  // REF-АДРЕСАЦИЯ: элемент по ИДЕНТИЧНОСТИ из реестра снимка (устойчиво к ре-рендеру SPA). Формат f<frameId>e<gen>_<n>.
   let localRef = null;
-  if (refMode && P.ref !== undefined && P.ref !== null && String(P.ref).trim()) {
-    const m = /^(?:f(\d+))?(e\d+_\d+)$/.exec(String(P.ref).trim());
-    if (!m) throw codedError("ref_stale", "некорректный ref «" + P.ref + "» — сделай browser_inspect заново");
-    // Ревью AX-Ref #5: при наличии ref ФРЕЙМ берём ИСКЛЮЧИТЕЛЬНО из ref (источник истины адресации). Иначе
-    // стейл P.frameId + top-ref (m[1] undefined) резолвил бы ref в реестре ЧУЖОГО фрейма (gen не уникален
-    // между фреймами → сверка проходит на другом узле → клик не туда с ложным успехом). Сбрасываем P.frameId.
-    explicitFrame = m[1] !== undefined ? Number(m[1]) : undefined;
-    localRef = m[2];
+  if (P.ref !== undefined && P.ref !== null && String(P.ref).trim()) {
+    const pr = parseRef(P.ref);
+    if (!pr) throw codedError("ref_stale", "некорректный ref «" + String(P.ref).slice(0, 40) + "» — сделай browser_inspect заново");
+    // Ревью AX-Ref #5: при ref ФРЕЙМ берём ИСКЛЮЧИТЕЛЬНО из ref — стейл P.frameId не уведёт ref в реестр чужого фрейма.
+    explicitFrame = pr.frame;
+    localRef = pr.localRef;
   }
   // ⚠️ urlBefore перечитываем ПОСЛЕ waitForTabReady (снапшот findTargetTab мог быть в статусе loading с
   //  about:blank/старым URL → протухший baseline давал ложный navigated-успех, ревью critical). Свежий url.
@@ -721,54 +728,57 @@ async function tabAct(url, intent, params, tabId, refMode) {
   const ptext = String(P.text || "");
   // Встряхивание — только у клика: раньше type{text:"обновить"} превращался в клик по selector (мимо §14 и ввода).
   const isShake = (intent === "click" || intent === "shake") && /встрях|стряхн|обнов/.test(ptext.toLowerCase());
-  // REF-ПУТЬ: адресуем по идентичности из реестра снимка. click-подобные (click/shake/play/pause/next/prev) —
-  // через nonce-мост в MAIN (React-onClick минует Swiper-гейт, точнее синтетики); type/seek/scroll/enter/submit —
-  // в ISOLATED (там же реестр) с нативным readback (value) как STRONG-сигналом. ref_stale → честный провал,
-  // НЕ слепой хит по устаревшему узлу (устойчивость к ре-рендеру = вся суть механизма).
-  if (localRef) {
-    const clickLike = ["click", "shake", "play", "pause", "next", "prev"].includes(intent) || isShake;
-    if (clickLike) {
-      const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
-      const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
-      if (!stamp.ok) throw pageFailure(intent, stamp);
-      const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel }], explicitFrame);
-      if (!rc.ok) throw pageFailure(intent, rc);
-      // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
-      // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
-      // кнопке) → честный провал, как mediaControlMain (иначе observed снял бы долг на «не заигравшем» play).
-      // Нет медиаэлемента (MSE-плеер типа Я.Музыки → st.playing undefined) — rc.playing НЕ ставим: сервер долг
-      // по playing не снимет, модель сверит aria-label сама (не врём «играет» без ground-truth).
-      if (intent === "play" || intent === "pause") {
-        let st = null;
-        try { st = await runInPage(null, readMediaStateIsolated, [], explicitFrame); } catch { /* ignore */ }
-        if (st && st.playing !== undefined) {
-          const wanted = intent === "play";
-          if (st.playing !== wanted) {
-            throw new Error(
-              "tab.act " + intent + ": " + (wanted
-                ? "клик по play прошёл, но воспроизведение НЕ началось (autoplay браузера блокирует программный старт) — нужен живой клик, не ври «играет»"
-                : "клик по pause прошёл, но плеер всё ещё играет — вероятно, кнопка не та"),
-            );
-          }
-          rc.playing = st.playing;
+  // REF + клик-подобное: nonce-мост ISOLATED → MAIN (React-props видны только в мире страницы). ref_stale → честный
+  // провал, НЕ слепой хит по устаревшему узлу (устойчивость к ре-рендеру = вся суть механизма).
+  if (localRef && (CLICK_LIKE.includes(intent) || isShake)) {
+    const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
+    const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
+    if (!stamp.ok) throw pageFailure(intent, stamp);
+    const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel }], explicitFrame);
+    if (!rc.ok) throw pageFailure(intent, rc);
+    // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
+    // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
+    // кнопке) → честный провал, как mediaControlMain (иначе observed снял бы долг на «не заигравшем» play).
+    // Нет медиаэлемента (MSE-плеер → st.playing undefined) — rc.playing НЕ ставим: не врём «играет» без ground-truth.
+    if (intent === "play" || intent === "pause") {
+      let st = null;
+      try { st = await runInPage(null, readMediaStateIsolated, [], explicitFrame); } catch { /* ignore */ }
+      if (st && st.playing !== undefined) {
+        const wanted = intent === "play";
+        if (st.playing !== wanted) {
+          throw new Error(
+            "tab.act " + intent + ": " + (wanted
+              ? "клик по play прошёл, но воспроизведение НЕ началось (autoplay браузера блокирует программный старт) — нужен живой клик, не ври «играет»"
+              : "клик по pause прошёл, но плеер всё ещё играет — вероятно, кнопка не та"),
+          );
         }
+        rc.playing = st.playing;
       }
-      return done(rc);
     }
-    const rr = await runInPage(null, actByRefIsolated, [localRef, intent, P], explicitFrame);
-    if (!rr.ok) throw pageFailure(intent, rr);
-    return done(rr);
+    return done(rc);
   }
-  // КЛИК (и встряхивание) — через MAIN-world РОБАСТ-клик: React-onClick/Enter минуют Swiper-гейт,
-  // который в capture-фазе глушит синтетику (корень «встряхнуть не срабатывает», подтверждено). Остальные
-  // интенты (play/pause/next/scroll/type/back/forward) — в ISOLATED через pageActInPage, там это работает.
+  // ЭЛЕМЕНТ: ввод/форма/клавиши/прокрутка к элементу — одна функция в изолированном мире (ref|selector|подпись).
+  if (ELEMENT_INTENTS.includes(intent) || (localRef && (intent === "seek" || intent === "scroll"))) {
+    let r = await runInPage(null, elementActIsolated, [localRef, intent, P], explicitFrame);
+    // Поле может жить в iframe (embed-форма): не нашли в top и фрейм не задан → прощупать фреймы и повторить там.
+    if (shouldProbe(r) && !localRef && (intent === "type" || P.selector)) {
+      const hit = await probeFrames(tab.id, { input: intent === "type", selector: P.selector || "" });
+      if (hit) {
+        r = await runInPage(null, elementActIsolated, [null, intent, P], hit.frameId);
+        if (r.ok) { r.frame = hit.frameId; r.frameUrl = hit.url; }
+      }
+    }
+    if (!r.ok) throw pageFailure(intent, r);
+    return done(r);
+  }
+  // КЛИК (и встряхивание) по selector/text — через MAIN-world робаст-клик: указатель, React-проп цели, если клик
+  // до неё не дошёл (Swiper-гейт в capture-фазе). НЕ активируем вкладку, мышь не трогаем.
   if (intent === "click" || intent === "shake" || isShake) {
-    const clickParams = { ...P, refMode: Boolean(refMode) };
+    const clickParams = { ...P };
     if (intent === "shake" || isShake) {
       clickParams.text = clickParams.text || "встряхнуть";
       clickParams.expectChange = true; // встряхивание подтверждаем по реальной смене контента (честность)
     }
-    // НЕ активируем вкладку, мышь не трогаем; world:MAIN — чтобы видеть React-props страницы (CSP-safe: функция статична).
     let rc = await runInPage("MAIN", robustClickMain, [clickParams], explicitFrame);
     // Не найден в top-фрейме и фрейм не задан → элемент может жить в iframe: ПРОЩУПАТЬ фреймы (probe
     // только ИЩЕТ с тем же скорингом, что и клик; действие затем бьётся точно в лучший найденный фрейм).
@@ -813,8 +823,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
     if (!rr || rr.ok !== true) throw pageFailure("feed_auto", rr);
     return done(rr);
   }
-  const Pm = { ...P, refMode: Boolean(refMode) }; // refMode → pageActInPage гейтит Яндекс-навигацию хардкода
-  let r = await runInPage(null, pageActInPage, [intent, Pm], explicitFrame);
+  let r = await runInPage(null, pageActInPage, [intent, P], explicitFrame);
   // Self-heal ПОСЛЕ чтения: страница ответила, но ВЕСЬ её текст ПУСТ (Chrome выгрузил содержимое
   // перекрытой вкладки — discarded ставится не всегда) → перезагружаем и перечитываем. Иначе durable-
   // наблюдение молча считало бы «условие не выполнено» (живой эпизод: 35 минут тишины про доставку).
@@ -827,19 +836,15 @@ async function tabAct(url, intent, params, tabId, refMode) {
     if (rev.tab) {
       tab = rev.tab;
       recovered = rev.recovered;
-      if (recovered) r = await runInPage(null, pageActInPage, [intent, Pm], explicitFrame);
+      if (recovered) r = await runInPage(null, pageActInPage, [intent, P], explicitFrame);
     }
   }
-  if (shouldProbe(r)) {
-    // type: поле может жить в iframe (embed-форма); seek: медиа в embed-плеере. Прочие интенты не щупаем.
-    const probeArg =
-      intent === "type" || intent === "select" ? { input: true, selector: P.selector || "" } : intent === "seek" ? { media: true } : null;
-    if (probeArg) {
-      const hit = await probeFrames(tab.id, probeArg);
-      if (hit) {
-        r = await runInPage(null, pageActInPage, [intent, Pm], hit.frameId);
-        if (r.ok) { r.frame = hit.frameId; r.frameUrl = hit.url; }
-      }
+  // seek: медиа может жить во встроенном плеере (iframe) — прощупать фреймы с реальным медиа.
+  if (shouldProbe(r) && intent === "seek") {
+    const hit = await probeFrames(tab.id, { media: true });
+    if (hit) {
+      r = await runInPage(null, pageActInPage, [intent, P], hit.frameId);
+      if (r.ok) { r.frame = hit.frameId; r.frameUrl = hit.url; }
     }
   }
   if (!r.ok) throw pageFailure(intent, r);
@@ -1015,7 +1020,7 @@ function feedAutoInPage(cfg) {
  * валидирует ВСЕ ref ДО первого действия (устаревший снимок не маскируется успехом), исполняет
  * ПОСЛЕДОВАТЕЛЬНО, стоп на первой ошибке, честное «выполнено k из n». Многополевая форма (логин) = 1 раунд.
  */
-async function tabBatch(url, steps, tabId, refMode) {
+async function tabBatch(url, steps, tabId) {
   const { tab } = await readyTargetTab(url, tabId);
   if (!Array.isArray(steps) || !steps.length) return { ok: false, error: "batch: пустой список шагов" };
   if (steps.length > 12) return { ok: false, error: "batch: максимум 12 шагов за раз (разбей длинный флоу)" };
@@ -1048,7 +1053,7 @@ async function tabBatch(url, steps, tabId, refMode) {
     const p = parsed[i];
     const stepParams = { ...p.params, ref: (p.frame ? "f" + p.frame : "") + p.localRef };
     try {
-      const r = await tabAct(url, p.intent, stepParams, tabId, true);
+      const r = await tabAct(url, p.intent, stepParams, tabId);
       results.push({ step: i, ok: true, intent: p.intent, result: r });
     } catch (e) {
       results.push({ step: i, ok: false, intent: p.intent, error: String((e && e.message) || e) });
@@ -1229,19 +1234,193 @@ function validateRefsIsolated(localRefs) {
 }
 
 /**
- * ISOLATED-world: действие по ref без MAIN (type/seek/scroll/enter/submit). Резолв по идентичности + gen +
- * isConnected → ref_stale при устаревании. type/enter возвращают STRONG readback (value) — сервер снимает
- * verify-долг только на реальном readback, не на «ok». Self-contained.
+ * ИЗОЛИРОВАННЫЙ мир расширения (там реестр ref): действие над ЭЛЕМЕНТОМ. Цель — ref из снимка | selector | подпись
+ * (P.label; P.text — у интентов, где он не содержимое); без цели type/key/enter/submit идут в фокус страницы.
+ * Интенты: type, set (form_input), select, key, enter, submit, scroll_to; по ref — ещё seek и scroll.
+ * §0: type/set в СЕКРЕТНОЕ поле (та же isSecret, что в снимке) → secret_field, страница сама не печатает.
+ * §14: Enter/отправка формы судится гардом (P.guard) по подписям поля, формы и её кнопки отправки → commit_confirm.
+ * submitted:true — Enter реально нажат (жест отправки); форма уходит requestSubmit, только если keydown не отменён.
+ * Self-contained (executeScript сериализует функцию).
  */
-async function actByRefIsolated(localRef, intent, params) {
+async function elementActIsolated(localRef, intent, params) {
   const P = params || {};
-  const REG = globalThis.__jarvisRefs;
-  if (!REG || !REG.map) return { ok: false, code: "ref_stale", error: "нет реестра снимка — сделай browser_inspect заново" };
-  const m = /^e(\d+)_/.exec(String(localRef));
-  const gen = m ? Number(m[1]) : -1;
-  if (REG.gen !== gen) return { ok: false, code: "ref_stale", error: "ref_stale: ref с прежней страницы (документ сменился) — сделай browser_inspect заново" };
-  const el = REG.map.get(localRef);
-  if (!el || !el.isConnected) return { ok: false, code: "ref_stale", error: "элемент исчез со страницы — сделай browser_inspect заново" };
+  const fail = (code, error) => (code ? { ok: false, code, error } : { ok: false, error });
+  const isSecret = (el) =>
+    Boolean(el) &&
+    el.tagName === "INPUT" &&
+    (/^password$/i.test(el.getAttribute("type") || "") ||
+      /(?:^|\s)(?:current-password|new-password|one-time-code|cc-[a-z-]+)(?:\s|$)/i.test(el.getAttribute("autocomplete") || ""));
+  const SECRET = "secret_field: поле пароля/кода/карты — вводит владелец сам (§0), страница его не заполняет";
+  const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
+  const visible = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    const r = el.getClientRects();
+    if (!r || !r.length) return false;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || cs.display === "none" || Number(cs.opacity) === 0) return false;
+    const b = el.getBoundingClientRect();
+    return b.width > 1 && b.height > 1;
+  };
+  const deepAll = (sel) => {
+    const out = [];
+    const walk = (root) => {
+      let list = [];
+      try { list = root.querySelectorAll(sel); } catch { /* ignore */ }
+      for (const e of list) out.push(e);
+      let all = [];
+      try { all = root.querySelectorAll("*"); } catch { /* ignore */ }
+      for (const h of all) if (h.shadowRoot) walk(h.shadowRoot);
+    };
+    walk(document);
+    return out;
+  };
+  const bySelector = (sel) => {
+    let scope = document;
+    let el = null;
+    for (const p of String(sel).split(/\s*>>>\s*/)) {
+      try { el = scope.querySelector(p); } catch { return null; }
+      if (!el) return null;
+      scope = el.shadowRoot || el;
+    }
+    return el;
+  };
+  const byIds = (ids) => String(ids || "").split(/\s+/).map((id) => { const nd = id && document.getElementById(id); return nd ? nd.innerText || nd.getAttribute("aria-label") || "" : ""; }).join(" ");
+  // Подписи элемента по отдельности (accname-подмножество): поиск по подписи и гард §14 проверяют КАЖДУЮ.
+  const labelParts = (e) => {
+    const parts = [byIds(e.getAttribute("aria-labelledby")), e.getAttribute("aria-label") || "", e.getAttribute("title") || ""];
+    if (e.id) { try { const lab = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (lab) parts.push(lab.innerText || ""); } catch { /* ignore */ } }
+    const wrap = e.closest && e.closest("label");
+    if (wrap && wrap !== e) parts.push(wrap.innerText || "");
+    if (/^(INPUT|TEXTAREA)$/.test(e.tagName)) {
+      parts.push(e.getAttribute("placeholder") || "");
+      if (/^(submit|button|reset|image)$/i.test(e.type || "")) parts.push(e.value || "", e.getAttribute("alt") || "");
+    } else if (e.tagName !== "SELECT") parts.push(String(e.innerText || "").slice(0, 200));
+    return parts.map((p) => String(p).replace(/\s+/g, " ").trim()).filter(Boolean);
+  };
+  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const scoreText = (q, hay) => {
+    if (!q || !hay) return 0;
+    if (hay === q) return 100;
+    if (new RegExp("(^| )" + escRe(q) + "( |$)").test(hay)) return 80;
+    if (q.length > 3 && hay.startsWith(q)) return 60;
+    if (q.length >= 4 && hay.includes(q)) return 30;
+    return 0;
+  };
+  const FIELDS = 'input:not([type=hidden]),textarea,select,[contenteditable="true"],[role=textbox],[role=searchbox],[role=combobox],[role=checkbox],[role=radio],[role=switch],[aria-checked]';
+  const ANY = FIELDS + ",a,button,summary,label,[role],[tabindex],[aria-label],h1,h2,h3,h4,h5,h6,p,li,dt,dd,td,th";
+  // Цель по подписи: лучший балл, при ничьей — самый вложенный (карточка-контейнер не забирает цель у поля).
+  const byLabel = (want, sel) => {
+    const q = fold(want);
+    let best = null;
+    let bestScore = 0;
+    for (const e of deepAll(sel)) {
+      if (!visible(e)) continue;
+      const s = Math.max(0, ...labelParts(e).map((p) => scoreText(q, fold(p))));
+      if (s > bestScore || (s > 0 && s === bestScore && best && best.contains(e))) { bestScore = s; best = e; }
+    }
+    return best;
+  };
+  const editable = (el) =>
+    Boolean(el) &&
+    (el.isContentEditable ||
+      el.tagName === "TEXTAREA" ||
+      (el.tagName === "INPUT" && !/^(checkbox|radio|submit|button|reset|image|file|hidden|range|color)$/i.test(el.type || "")));
+  const checkable = (el) =>
+    Boolean(el) &&
+    ((el.tagName === "INPUT" && /^(checkbox|radio)$/i.test(el.type || "")) ||
+      /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/.test(el.getAttribute("role") || "") ||
+      el.hasAttribute("aria-checked"));
+  const active = () => {
+    let a = document.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    return a && a !== document.body && a !== document.documentElement ? a : null;
+  };
+
+  // ── цель ──
+  const textIsContent = intent === "type";
+  const optionGiven = P.option != null || P.value != null;
+  const want = P.label != null ? String(P.label) : !textIsContent && P.text != null && (intent !== "select" || optionGiven) ? String(P.text) : "";
+  let el = null;
+  if (localRef) {
+    const REG = globalThis.__jarvisRefs;
+    if (!REG || !REG.map) return fail("ref_stale", "нет реестра снимка (страница перезагрузилась) — сделай browser_inspect заново");
+    const m = /^e(\d+)_/.exec(String(localRef));
+    if (!m || Number(m[1]) !== REG.gen) return fail("ref_stale", "ref с прежней страницы (документ сменился) — сделай browser_inspect заново");
+    el = REG.map.get(localRef);
+    if (!el || !el.isConnected) return fail("ref_stale", "элемент исчез со страницы — сделай browser_inspect заново");
+  } else if (P.selector) {
+    el = bySelector(String(P.selector));
+    if (!el) return fail("not_found", "элемент «" + String(P.selector).slice(0, 80) + "» не найден — сделай browser_inspect");
+  } else if (want) {
+    el = byLabel(want, intent === "set" || intent === "select" || intent === "type" ? FIELDS : ANY);
+    if (!el) return fail("not_found", "не нашёл «" + want.slice(0, 80) + "» — сделай browser_inspect (find)");
+  } else if (intent === "type") {
+    // Без цели — поле в фокусе, иначе первое видимое поле ввода (прежнее поведение).
+    const a = active();
+    el = editable(a) && visible(a) ? a : deepAll('input:not([type]),input[type=text],input[type=search],input[type=email],input[type=tel],input[type=url],input[type=number],input[type=password],textarea,[contenteditable="true"]').find((n) => visible(n) && !n.disabled && !n.readOnly) || null;
+    if (!el) return fail("not_found", "поле ввода не найдено — укажи ref из browser_inspect");
+  } else if (intent === "key" || intent === "enter" || intent === "submit") {
+    el = active();
+    if (!el || el.tagName === "IFRAME" || el.tagName === "FRAME") {
+      if (intent === "key") el = document.body;
+      else return fail("not_found", "нет сфокусированного поля для Enter (фокус вне этого документа или отсутствует). Объедини ввод и отправку: browser_act{type, text, enter:true}, либо передай ref поля.");
+    }
+  } else {
+    return fail("not_found", "укажи цель: ref из browser_inspect, selector или text");
+  }
+  if (el.tagName === "LABEL" && el.control && intent !== "scroll_to") el = el.control;
+
+  // ── клавиши ──
+  const NAMED = { enter: ["Enter", 13], tab: ["Tab", 9], escape: ["Escape", 27], esc: ["Escape", 27], space: [" ", 32, "Space"], backspace: ["Backspace", 8], delete: ["Delete", 46], del: ["Delete", 46], arrowdown: ["ArrowDown", 40], down: ["ArrowDown", 40], arrowup: ["ArrowUp", 38], up: ["ArrowUp", 38], arrowleft: ["ArrowLeft", 37], left: ["ArrowLeft", 37], arrowright: ["ArrowRight", 39], right: ["ArrowRight", 39], home: ["Home", 36], end: ["End", 35], pageup: ["PageUp", 33], pagedown: ["PageDown", 34] };
+  const parseCombo = (combo) => {
+    const k = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false };
+    let key = "";
+    for (const part of String(combo || "").split("+").map((s) => s.trim()).filter(Boolean)) {
+      const l = part.toLowerCase();
+      if (l === "ctrl" || l === "control") k.ctrlKey = true;
+      else if (l === "shift") k.shiftKey = true;
+      else if (l === "alt" || l === "option") k.altKey = true;
+      else if (l === "meta" || l === "cmd" || l === "win" || l === "command") k.metaKey = true;
+      else key = part;
+    }
+    const n = NAMED[key.toLowerCase()];
+    if (n) return { ...k, key: n[0], code: n[2] || n[0], keyCode: n[1] };
+    if (/^f([1-9]|1[0-2])$/i.test(key)) return { ...k, key: key.toUpperCase(), code: key.toUpperCase(), keyCode: 111 + Number(key.slice(1)) };
+    if (key.length !== 1) return null;
+    const up = key.toUpperCase();
+    return { ...k, key: k.shiftKey ? up : key.toLowerCase(), code: /[a-z]/i.test(key) ? "Key" + up : /\d/.test(key) ? "Digit" + key : "", keyCode: up.charCodeAt(0) };
+  };
+  const IMPLICIT = /^(text|search|url|tel|email|password|number|date|month|week|time|datetime-local)$/i;
+  // Enter в цель: keydown/keypress/keyup; форма — requestSubmit, если страница не отменила клавишу (как у браузера).
+  const pressEnter = (t, forceSubmit) => {
+    const o = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
+    const down = t.dispatchEvent(new KeyboardEvent("keydown", o));
+    const press = down ? t.dispatchEvent(new KeyboardEvent("keypress", o)) : false;
+    t.dispatchEvent(new KeyboardEvent("keyup", o));
+    const form = t.form || (t.closest && t.closest("form"));
+    const eligible = forceSubmit || (t.tagName === "INPUT" && IMPLICIT.test(t.type || "text"));
+    if (form && down && press && eligible) { try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch { /* невалидная форма */ } }
+    return { submitted: true };
+  };
+  const isEnterCombo = (c) => { const p = parseCombo(c); return Boolean(p && p.key === "Enter"); };
+  // §14: Enter/отправка — подписи поля, формы и её кнопки отправки. Одобрение — на конкретную подпись.
+  const guardHit = (t) => {
+    if (!P.guard) return null;
+    let re = null;
+    try { re = new RegExp(String(P.guard), "iu"); } catch { return null; }
+    const form = t.form || (t.closest && t.closest("form"));
+    const sub = form ? form.querySelector("button[type=submit],button:not([type]),input[type=submit],input[type=image]") : null;
+    const parts = labelParts(t).concat(sub ? labelParts(sub) : [], form && form.getAttribute("aria-label") ? [form.getAttribute("aria-label")] : []);
+    const shown = (parts.find((p) => re.test(p)) || parts.join(" ")).slice(0, 120);
+    const need = { ok: false, code: "commit_confirm", label: shown, error: "commit_confirm: " + shown };
+    if (!P.guardApproved) return parts.some((p) => re.test(p)) ? need : null;
+    if (P.approvedLabel) {
+      const a = fold(P.approvedLabel);
+      const same = parts.some((p) => { const f = fold(p); return f && (f.includes(a) || (f.length >= 4 && a.includes(f))); }) || (P.text != null && fold(P.text) === a);
+      if (!same) return need;
+    }
+    return null;
+  };
   const setNativeValue = (node, val) => {
     const proto = node.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const desc = Object.getOwnPropertyDescriptor(proto, "value");
@@ -1250,18 +1429,55 @@ async function actByRefIsolated(localRef, intent, params) {
     node.dispatchEvent(new Event("input", { bubbles: true }));
     node.dispatchEvent(new Event("change", { bubbles: true }));
   };
-  const pressEnter = (node) => {
-    for (const t of ["keydown", "keypress", "keyup"]) {
-      node.dispatchEvent(new KeyboardEvent(t, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    }
-    const f = node.form || (node.closest && node.closest("form"));
-    if (f) { try { f.requestSubmit ? f.requestSubmit() : f.submit(); } catch { /* ignore */ } }
+  const readValue = (t) => (t.isContentEditable ? String(t.innerText || "").replace(/ /g, " ") : String(t.value || ""));
+  // Запись в поле. Редактор (contenteditable) не разрушаем: выделить содержимое и insertText — его события видит сам
+  // редактор (прежний textContent="" сносил разметку и рассинхронизировал модель редактора).
+  const writeText = (t, v) => {
+    try { t.focus(); } catch { /* ignore */ }
+    if (!t.isContentEditable) { setNativeValue(t, v); return null; }
+    const sel = getSelection();
+    const rg = document.createRange();
+    rg.selectNodeContents(t);
+    sel.removeAllRanges();
+    sel.addRange(rg);
+    const done = v ? document.execCommand("insertText", false, v) : document.execCommand("delete");
+    const got = fold(readValue(t));
+    if (!done || (v && !got.includes(fold(v))) || (!v && got)) return "редактор не принял ввод — сверь browser_inspect (содержимое не заменено)";
+    return null;
   };
+  const selectOption = (t, wantOpt) => {
+    const w = fold(wantOpt);
+    if (!w) return fail("", "select: укажи option (или value) — текст варианта из state.options");
+    let best = null;
+    let bestScore = 0;
+    // Текст варианта важнее value (вопрос «на соответствие»: option value=2 с текстом «1»); disabled — мимо.
+    for (const o of t.options) {
+      if (o.disabled) continue;
+      const s = Math.max(scoreText(w, fold(o.text)), String(o.value) === String(wantOpt) ? 90 : 0);
+      if (s > bestScore) { bestScore = s; best = o; }
+    }
+    if (!best) return fail("", "такого варианта в списке нет — варианты в state.options снимка (browser_inspect)");
+    const before = [...t.selectedOptions];
+    try { t.focus(); } catch { /* ignore */ }
+    if (t.multiple) best.selected = true;
+    else t.selectedIndex = best.index;
+    t.dispatchEvent(new Event("input", { bubbles: true }));
+    t.dispatchEvent(new Event("change", { bubbles: true }));
+    const chosen = [...t.selectedOptions];
+    return { ok: chosen.includes(best), value: chosen.map((o) => o.text.trim()).join(", ").slice(0, 60), changed: !before.includes(best) };
+  };
+
   try {
+    if (intent === "scroll_to") {
+      el.scrollIntoView({ block: "center", inline: "nearest" });
+      await new Promise((r) => setTimeout(r, 50));
+      const b = el.getBoundingClientRect();
+      return { ok: true, inViewport: b.width > 0 && b.height > 0 && b.bottom > 0 && b.right > 0 && b.top < innerHeight && b.left < innerWidth };
+    }
     if (intent === "scroll") { window.scrollBy(0, Number(P.dy) || 600); return { ok: true }; }
     if (intent === "seek") {
       const md = el.matches && el.matches("audio, video") ? el : (el.querySelector && el.querySelector("audio, video")) || document.querySelector("audio, video");
-      if (!md) return { ok: false, error: "нет видео/аудио для перемотки" };
+      if (!md) return fail("not_found", "нет видео/аудио для перемотки");
       const to = Number(P.to);
       const sec = Number(P.seconds);
       const dur = Number.isFinite(md.duration) ? md.duration : Infinity;
@@ -1269,53 +1485,79 @@ async function actByRefIsolated(localRef, intent, params) {
       return { ok: true, currentTime: Math.round(md.currentTime) };
     }
     if (intent === "type") {
-      try { el.focus(); } catch { /* ignore */ }
-      const v = String(P.text != null ? P.text : "");
-      if (el.isContentEditable) {
-        el.textContent = "";
-        if (document.execCommand) document.execCommand("insertText", false, v);
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: v }));
-      } else {
-        setNativeValue(el, v);
-      }
-      let submitted = false;
-      if (P.enter || P.submit) { pressEnter(el); submitted = true; }
-      // STRONG readback значения — но password-поле МАСКИРУЕМ (иначе пароль утёк бы в tool_result/логи).
-      const isPw = (el.getAttribute("type") || "").toLowerCase() === "password";
-      const val = el.isContentEditable ? (el.innerText || "") : (el.value || "");
-      return { ok: true, value: isPw ? (val ? "•••" : "") : val.slice(0, 60), submitted };
+      if (isSecret(el)) return fail("secret_field", SECRET);
+      if (!editable(el)) return fail("", "элемент не поле ввода — для кнопки click, для галочки/списка set");
+      const enter = Boolean(P.enter || P.submit);
+      if (enter) { const g = guardHit(el); if (g) return g; }
+      const bad = writeText(el, String(P.text != null ? P.text : ""));
+      if (bad) return fail("", bad);
+      const out = { ok: true, value: readValue(el).slice(0, 60), submitted: false };
+      if (enter) out.submitted = pressEnter(el, Boolean(P.submit)).submitted;
+      return out;
     }
-    if (intent === "enter" || intent === "submit") {
-      try { el.focus(); } catch { /* ignore */ }
-      pressEnter(el);
-      return { ok: true, submitted: true };
+    if (intent === "set") {
+      let t = el;
+      if (!checkable(t) && !editable(t) && t.tagName !== "SELECT" && t.querySelector) {
+        t = t.querySelector('input[type=checkbox],input[type=radio],[role=checkbox],[role=switch],[role=radio],select,textarea,input:not([type=hidden])') || t;
+      }
+      if (t.tagName === "SELECT") return selectOption(t, P.value != null ? P.value : P.option);
+      if (checkable(t)) {
+        const b = (v) => (v === true || v === "true" || v === "on" || v === 1 ? true : v === false || v === "false" || v === "off" || v === 0 ? false : undefined);
+        const wantOn = b(P.checked !== undefined ? P.checked : P.value);
+        if (wantOn === undefined) return fail("", "set для галочки/переключателя: укажи checked:true или false");
+        const cur = () => (t.tagName === "INPUT" ? t.checked : t.getAttribute("aria-checked") === "true");
+        if (cur() === wantOn) return { ok: true, checked: wantOn, changed: false }; // уже так — не кликаем (повторный set не снимает)
+        if (!wantOn && t.tagName === "INPUT" && /^radio$/i.test(t.type)) return fail("", "radio не снимается кликом — выбери другой вариант этой группы");
+        if (t.disabled || t.getAttribute("aria-disabled") === "true") return fail("", "элемент недоступен (disabled)");
+        const r = t.getBoundingClientRect();
+        const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+        for (const ty of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          const C = ty.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
+          t.dispatchEvent(new C(ty, o));
+        }
+        await new Promise((res) => setTimeout(res, 30));
+        const now = cur();
+        if (now !== wantOn) return fail("", "клик не переключил состояние — сверь browser_inspect");
+        return { ok: true, checked: now, changed: true };
+      }
+      if (editable(t)) {
+        if (isSecret(t)) return fail("secret_field", SECRET);
+        if (P.value == null) return fail("", "set для поля: укажи value");
+        const before = readValue(t);
+        const bad = writeText(t, String(P.value));
+        if (bad) return fail("", bad);
+        const after = readValue(t);
+        return { ok: true, value: after.slice(0, 60), changed: after !== before };
+      }
+      return fail("", "set — для поля, галочки, переключателя или списка; кнопку жми click");
     }
     if (intent === "select") {
-      // Как в pageActInPage: вариант <select> по тексту (или value), нативный сеттер + input/change.
-      if (el.tagName !== "SELECT") return { ok: false, error: "элемент не <select>: у самодельного списка — click по нему, затем по пункту" };
-      // Тот же порядок, что в pageActInPage (функции self-contained — общий код не вынести): точный текст → value →
-      // целое слово → подстрока (≥ 3 символов, «1» не выбирает «10»); disabled — мимо.
-      const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
-      const want = fold(P.option != null ? P.option : P.text);
-      if (!want) return { ok: false, error: "select: укажи params.option — текст варианта из state.options" };
-      const opts = [...el.options].filter((o) => !o.disabled);
-      const word = (t) => (" " + t + " ").includes(" " + want + " ");
-      const best =
-        opts.find((o) => fold(o.text) === want) ||
-        (P.option != null && String(P.option) !== "" ? opts.find((o) => String(o.value) === String(P.option)) : undefined) ||
-        opts.find((o) => want && word(fold(o.text))) ||
-        opts.find((o) => want.length >= 3 && fold(o.text).includes(want));
-      if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + [...el.options].map((o) => o.text.trim()).join(" | ").slice(0, 400) };
-      if (el.multiple) best.selected = true;
-      else el.selectedIndex = best.index;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      const chosen = [...el.selectedOptions];
-      return { ok: chosen.includes(best), value: chosen.map((o) => o.text.trim()).join(", ").slice(0, 60) };
+      if (el.tagName !== "SELECT") return fail("", "элемент не <select>: у самодельного списка — click по нему, затем по пункту");
+      return selectOption(el, P.option != null ? P.option : P.value != null ? P.value : P.text);
     }
-    return { ok: false, error: "intent «" + intent + "» не поддержан по ref — используй click/type/seek/scroll/enter" };
+    if (intent === "key") {
+      const k = parseCombo(P.combo != null ? P.combo : P.key);
+      if (!k) return fail("", "key: не понял клавишу «" + String(P.combo != null ? P.combo : P.key || "").slice(0, 30) + "» — пример: Enter, Tab, Escape, ArrowDown, Ctrl+A");
+      if (k.key === "Enter" && !k.ctrlKey && !k.altKey && !k.metaKey) {
+        const g = guardHit(el);
+        if (g) return g;
+        return { ok: true, sent: String(P.combo || P.key), ...pressEnter(el, false) };
+      }
+      const o = { key: k.key, code: k.code, keyCode: k.keyCode, which: k.keyCode, ctrlKey: k.ctrlKey, shiftKey: k.shiftKey, altKey: k.altKey, metaKey: k.metaKey, bubbles: true, cancelable: true, composed: true };
+      const down = el.dispatchEvent(new KeyboardEvent("keydown", o));
+      if (down && k.key.length === 1 && !k.ctrlKey && !k.altKey && !k.metaKey) el.dispatchEvent(new KeyboardEvent("keypress", o));
+      el.dispatchEvent(new KeyboardEvent("keyup", o));
+      return { ok: true, sent: String(P.combo || P.key), note: "синтетическая клавиша: обработчики страницы её получили, но браузер сам её действие не выполняет (Tab не двигает фокус, символ не печатается)" };
+    }
+    if (intent === "enter" || intent === "submit") {
+      const g = guardHit(el);
+      if (g) return g;
+      try { el.focus(); } catch { /* ignore */ }
+      return { ok: true, ...pressEnter(el, intent === "submit") };
+    }
+    return fail("", "intent «" + intent + "» не поддержан для элемента");
   } catch (e) {
-    return { ok: false, error: String((e && e.message) || e) };
+    return fail("", String((e && e.message) || e));
   }
 }
 
@@ -1324,24 +1566,10 @@ async function actByRefIsolated(localRef, intent, params) {
  * (preventClicks глушит синтетику в capture-фазе → ни el.click(), ни pointer-цепочка не срабатывают).
  * Порядок: React onClick-проп → Enter (role=button/onKeyDown) → полный pointer. Для встряхивания
  * (expectChange) сверяет, что контент РЕАЛЬНО изменился — иначе честный провал (не врём «готово»).
- * P.nonce → клик по помеченному ref-элементу (мост из ISOLATED). Также «вруби/открой волну» (НЕ refMode) →
- * надёжный переход на Вайб. Функция статична → CSP-safe.
+ * P.nonce → клик по помеченному ref-элементу (мост из ISOLATED). Функция статична → CSP-safe.
  */
 async function robustClickMain(params) {
   const P = params || {};
-  const lc = (s) => String(s || "").toLowerCase();
-  const t = lc(P.text || "");
-  const isShake = /встрях|стряхн|обнов/.test(t);
-  // Яндекс-навигация «вруби волну» — ГЕЙТ на !refMode: при refMode доменное знание приходит рецептом-хинтом
-  // (модель сама делает browser_open music.yandex.ru + play), а не хардкодом в движке. refMode off → как раньше.
-  if (!P.refMode && /yandex/i.test(location.host) && !isShake && /(волна|вайб|vibe)/.test(t)) {
-    const onVibe = /\/vibe\b/.test(location.pathname) || location.pathname === "/";
-    if (!onVibe) {
-      location.href = "https://music.yandex.ru/";
-      return { ok: true, navigated: "vibe", note: "перешёл на «Мою волну» (Вайб); дальше play" };
-    }
-    return { ok: true, already: "vibe", note: "уже на «Моей волне»; нужен play" };
-  }
   const visible = (el) => {
     if (!el || el.nodeType !== 1) return false;
     const r = el.getClientRects();
@@ -2143,8 +2371,13 @@ async function pageActInPage(intent, params) {
       // БЕЗОПАСНОСТЬ (ревью 2026-07-15): маскируем ЗНАЧЕНИЕ поля пароля и РЕЖЕМ длину — как соседние
       // readback-пути (inspect/type). Иначе секрет / огромный textContent утёк бы СЫРЫМ в tool_result,
       // серверный лог и durable data/watches.json.
-      const isPw = el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() === "password";
-      if (isPw && (prop === "value" || prop === "textContent")) return { ok: true, value: el.value ? "•••" : "", len: el.value ? 3 : 0 };
+      // Та же isSecret, что в снимке и elementActIsolated (B-3): «показанный пароль» (type=text + current-password),
+      // одноразовый код и карта маскируются так же, как type=password. Любое свойство секретного поля — только маска.
+      const isSecret =
+        el.tagName === "INPUT" &&
+        (/^password$/i.test(el.getAttribute("type") || "") ||
+          /(?:^|\s)(?:current-password|new-password|one-time-code|cc-[a-z-]+)(?:\s|$)/i.test(el.getAttribute("autocomplete") || ""));
+      if (isSecret) return { ok: true, value: el.value ? "•••" : "", len: el.value ? 3 : 0 };
       const raw = el[prop];
       const out = typeof raw === "object" ? String(raw) : raw;
       if (typeof out !== "string") return { ok: true, value: out };

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { findChrome, fixtureUrl, launchPage, pageFunctionSources, serverGuardSource } from "./cdp-harness.mjs";
 
-const fns = pageFunctionSources(["robustClickMain", "inspectPageInPage", "pageActInPage", "actByRefIsolated", "readPageInPage"]);
+const fns = pageFunctionSources(["robustClickMain", "inspectPageInPage", "elementActIsolated", "readPageInPage"]);
 const GUARD = serverGuardSource();
 
 describe("ревью 26.09: гард коммита, select, снимок", { skip: !findChrome() && "нет Chrome" }, () => {
@@ -11,7 +11,7 @@ describe("ревью 26.09: гард коммита, select, снимок", { sk
   before(async () => { page = await launchPage(); });
   after(async () => { await page?.close(); });
   const click = (params) => page.call(fns.robustClickMain, params);
-  const act = (intent, params) => page.call(fns.pageActInPage, intent, params);
+  const act = (intent, params) => page.callIsolated(fns.elementActIsolated, null, intent, params);
 
   it("гард видит подпись из aria-labelledby и из alt картинки (кнопка-иконка)", async () => {
     await page.open(fixtureUrl("plain.html"));
@@ -80,9 +80,9 @@ describe("ревью 26.09: гард коммита, select, снимок", { sk
 
   it("select по ref: текст варианта важнее value («2» — это вариант с текстом 2, а не value=2)", async () => {
     await page.open(fixtureUrl("plain.html"));
-    const sel = (await page.call(fns.inspectPageInPage, "", 200)).elements.find((e) => /#num|num/.test(e.selector) && e.role === "select");
+    const sel = (await page.callIsolated(fns.inspectPageInPage, "", 200)).elements.find((e) => /#num|num/.test(e.selector) && e.role === "select");
     assert.ok(sel?.ref, "нет ref у #num");
-    const r = await page.call(fns.actByRefIsolated, sel.ref, "select", { option: "2" });
+    const r = await page.callIsolated(fns.elementActIsolated, sel.ref, "select", { option: "2" });
     assert.equal(r.ok, true);
     assert.equal(await page.eval("document.getElementById('num').selectedOptions[0].text"), "2");
   });

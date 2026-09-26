@@ -27,12 +27,12 @@ function sw() {
 }
 
 describe("tabAct — маршрут в страницу", () => {
-  it("type с текстом «обновить» — это ВВОД (pageActInPage), а не клик-встряхивание", async () => {
+  it("type с текстом «обновить» — это ВВОД (elementActIsolated), а не клик-встряхивание", async () => {
     const { env, calls } = sw();
-    await env.tabAct("https://x.example/", "type", { selector: "#q", text: "обновить данные" }, 1, false);
+    await env.tabAct("https://x.example/", "type", { selector: "#q", text: "обновить данные" }, 1);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].func.name, "pageActInPage");
-    assert.equal(calls[0].args[0], "type");
+    assert.equal(calls[0].func.name, "elementActIsolated");
+    assert.equal(calls[0].args[1], "type");
   });
 
   it("click «обновить» — встряхивание: robustClickMain с expectChange", async () => {

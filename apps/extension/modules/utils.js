@@ -45,6 +45,12 @@ export function codedError(code, message) {
   return e;
 }
 
+/** ref элемента из снимка: «e<gen>_<n>» (top-фрейм) или «f<frameId>e<gen>_<n>» (iframe) → {frame, localRef}; иначе null. */
+export function parseRef(raw) {
+  const m = /^(?:f(\d+))?(e\d+_\d+)$/.exec(String(raw == null ? "" : raw).trim());
+  return m ? { frame: m[1] !== undefined ? Number(m[1]) : undefined, localRef: m[2] } : null;
+}
+
 /**
  * Провал page-функции ({ok:false, code?, error, label?}) → ошибка tab.act. С кодом — код первым словом («commit_confirm:
  * <подпись>» — после двоеточия ТОЛЬКО подпись: сервер берёт её до конца строки); без кода — «tab.act <интент>: …».
