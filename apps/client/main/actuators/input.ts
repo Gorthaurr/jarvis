@@ -19,7 +19,7 @@ import { keyGatedUnderVeil, mouseGatedUnderVeil } from "../selection/veil-policy
 import { DrawingOverlayError, assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 export { DrawingOverlayError };
 import type { Target } from "@jarvis/protocol";
-import { createLogger } from "@jarvis/shared";
+import { createLogger, isBlockedCombo, normalizeCombo } from "@jarvis/shared";
 import { sidecar } from "./sidecar-client.js";
 import { getLastCaptureMapping } from "./screen.js";
 import { ground, groundAtPoint, invoke } from "./ground.js";
@@ -31,45 +31,10 @@ function ensure(): void {
 }
 
 /**
- * Опасные глобальные комбо, которые НЕЛЬЗЯ слать вслепую эмуляцией ввода (§6 «не навреди»).
- * Инцидент: «закрой Доту» → агент сфокусировал окно и послал Alt+F4 → закрыл САМ Джарвис.
- * Alt+F4 закрывает активное окно (часто — не то), Win+L/R/D/M и Ctrl+Alt+Del трогают систему/
- * безопасность. Закрытие приложений — отдельным БЕЗОПАСНЫМ путём (app.close по процессу,
- * исключая Джарвис), а не клавишами. Блокировка нормализует регистр/порядок/алиасы.
+ * Опасные глобальные комбо (§6 «не навреди»: инцидент «закрой Доту» → Alt+F4 закрыл САМ Джарвис) и их нормализация —
+ * W2: данные в @jarvis/shared/commit-keys (один список с рубежом инжекции; + Win+V). Реэкспорт — для прежних импортов.
  */
-const BLOCKED_COMBOS: ReadonlySet<string> = new Set(
-  ["Alt+F4", "Win+L", "Win+R", "Win+D", "Win+M", "Win+Tab", "Ctrl+Alt+Delete", "Ctrl+Alt+Del", "Alt+Space"].map(
-    normalizeCombo,
-  ),
-);
-
-/** Нормализовать комбо: нижний регистр, без пробелов, алиасы (meta/super/lwin→win, del→delete), сорт. */
-export function normalizeCombo(combo: string): string {
-  return combo
-    .toLowerCase()
-    .split("+")
-    .map((k) => k.trim())
-    .filter(Boolean)
-    .map((k) =>
-      k === "meta" || k === "super" || k === "lwin" || k === "rwin" || k === "windows" || k === "cmd"
-        ? "win"
-        : k === "del"
-          ? "delete"
-          : k === "control"
-            ? "ctrl"
-            : k,
-    )
-    // Дедуп клавиш ПЕРЕД сортировкой: иначе «Alt+Alt+F4» → «alt+alt+f4» ≠ «alt+f4» обходил блок-лист
-    // (ОС трактует дубль модификатора так же). new Set схлопывает повтор.
-    .reduce<string[]>((acc, k) => (acc.includes(k) ? acc : [...acc, k]), [])
-    .sort()
-    .join("+");
-}
-
-/** Запрещённое ли это комбо (закрывает/блокирует окно/систему, в т.ч. может закрыть Джарвис). */
-export function isBlockedCombo(combo: string): boolean {
-  return BLOCKED_COMBOS.has(normalizeCombo(combo));
-}
+export { isBlockedCombo, normalizeCombo };
 
 /**
  * §6 «не навреди», H4: множество ФИЗИЧЕСКИ УДЕРЖИВАЕМЫХ клавиш между вызовами. Режимы down/up

@@ -141,13 +141,13 @@ export interface ActionResult {
     code: "timeout" | "not_found" | "denied" | "disconnected" | "channel_down" | "runtime" | "overlay_drawing";
     message: string;
   };
-  /** напр. {handle, bbox} от ui.ground, stdout от code.run. */
+  /** напр. {handle, bbox} от ui.ground, stdout от code.run; W2: при `denied` рубежа §14 — `{needsApproval}` (gui.ts). */
   data?: unknown;
   /** при skill.execute — номер шага. */
   stepIndex?: number;
   /**
-   * при skill.execute (контроль-5): действие шага stepIndex УЖЕ УШЛО в GUI (вуаль поймала ретрай или сверку
-   * постусловия) — исход шага НЕИЗВЕСТЕН, «повтори» дало бы дубль напечатанного/отправленного.
+   * W2: часть действия УЖЕ УШЛА в GUI (у ЛЮБОЙ команды; у skill.execute — действие шага stepIndex) — исход НЕИЗВЕСТЕН,
+   * «повтори» дало бы дубль напечатанного/отправленного. Сервер: uncertain, без повтора.
    */
   stepActionInjected?: boolean;
   durationMs: number;

@@ -62,6 +62,8 @@ async function focusAppWindow(app: string): Promise<string> {
 /** Проверка аргументов ДО любого действия: неверная форма — честная ошибка, а не клик наугад. */
 function validate(cmd: ActCommand): void {
   const verb = cmd.do ?? "click";
+  // W2 (пакет 0): поля схемы, исполнение которых приходит в П4. Молча игнорировать нельзя — enter:true без Enter = ложное «сделал».
+  if (cmd.clear === true || cmd.enter === true) throw new Error(`act ${cmd.clear ? "clear" : "enter"}:true пока не поддержан — ничего не нажато; нажми Enter отдельным act{do:"key"}`);
   if (verb === "key" && !cmd.combo?.trim()) throw new Error("act do:key без combo");
   if ((verb === "type" || verb === "set") && !cmd.text) throw new Error(`act do:${verb} без text`);
   // key и type без цели законны: клавиша — в фокус; печать — в поле, где уже стоит фокус (после Ctrl+K/Ctrl+L).

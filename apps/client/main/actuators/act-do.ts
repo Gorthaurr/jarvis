@@ -162,6 +162,13 @@ export async function performAct(found: FoundTarget | undefined, verb: ActVerb, 
     case "select":
     case "expand":
       return doPattern(found, verb);
+    case "triple":
+    case "middle":
+    case "hover":
+    case "drag":
+    case "scroll":
+      // W2 (пакет 0): глаголы указателя — в П4 (act-do-pointer.ts). До него честный отказ ДО любого действия.
+      throw new Error(`act do:${verb} пока не поддержан — ничего не нажато; используй click/double/right или input_mouse`);
     default: {
       const _x: never = verb;
       throw new Error(`неизвестный глагол act: ${String(_x)}`);
