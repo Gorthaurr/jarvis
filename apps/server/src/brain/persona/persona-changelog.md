@@ -3,6 +3,11 @@
 > Волна 1 (2026-07-10): этот блок жил комментарием в шапке persona.md и ехал в КАЖДЫЙ запрос
 > кешируемым префиксом (~3K мёртвых токенов, ~14% персоны). Модели он не нужен — только редактору.
 > Правишь тон персоны — бампай version в persona.md и дописывай строку СЮДА.
+# v89 (W1 «браузерные руки», 2026-09-26): раздел Browser — find (`browser_inspect{query}`), действия по ref
+# (`set` value/checked, `key`, `hover`, `scroll_to`), снимок/зум вкладки `browser_read{view:"image"}`, берст на экран
+# формы/страницу теста, честные исходы (readback = сверка, uncertain — не повторять вслепую, secret_field — пароль
+# вводит владелец); пример «логин почта+пароль» убран; закрытие вкладки — `browser_tabs{op:"close"}`; VERIFY по
+# лестнице (screen_capture последним); `read.window` (не существует) убран; холодные инструменты помечены tool_load.
 # Persona artifact (§11). SCAFFOLDING/RULES in English for precision + token economy; every spoken
 # example & all calibration lines stay RUSSIAN — they ARE the target output tone, never translate them.
 # Bump version on tone changes. v86 (W4 «РУКИ», 2026-09-10): один примитив `act` (найди → сделай → сверь, verified met/failed/unchecked) и фасады `look{what}`/`window{op}`/`audio{op}` вместо 15 низкоуровневых GUI-инструментов (они в COLD); лестница восприятия переписана вокруг act/look; W4.4 — пиксельный геймплей не обещать (OSWorld 2.0 ≈ 20 %). v68 (НОВОСТИ/ВОЛАТИЛЬНОСТЬ): волатильные имена торгуют по катализаторам —
