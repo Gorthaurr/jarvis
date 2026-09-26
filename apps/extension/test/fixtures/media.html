@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Страница с плеером</title>
+</head>
+<body>
+<main>
+  <h1>Подкаст</h1>
+  <audio id="player" controls></audio>
+  <p>Выпуск 1</p>
+  <nav>
+    <button id="offers">Предложения</button>
+    <button id="prev" aria-label="Предыдущий трек">⏮</button>
+    <button id="next" aria-label="Следующий трек">⏭</button>
+  </nav>
+</main>
+<script>
+  window.__c = { prev: 0, next: 0, offers: 0 };
+  document.getElementById("offers").addEventListener("click", () => window.__c.offers++);
+  document.getElementById("prev").addEventListener("click", () => window.__c.prev++);
+  document.getElementById("next").addEventListener("click", () => window.__c.next++);
+  // WAV тишины на 2 с (8 кГц, 8 бит, моно): у плеера появляется длительность — старый back на такой странице «мотал».
+  const n = 16000;
+  const b = new Uint8Array(44 + n);
+  const dv = new DataView(b.buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) b[o + i] = s.charCodeAt(i); };
+  str(0, "RIFF"); dv.setUint32(4, 36 + n, true); str(8, "WAVE"); str(12, "fmt ");
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+  str(36, "data"); dv.setUint32(40, n, true); b.fill(128, 44);
+  document.getElementById("player").src = URL.createObjectURL(new Blob([b], { type: "audio/wav" }));
+</script>
+</body>
+</html>

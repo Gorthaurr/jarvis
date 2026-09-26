@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Форма: поля, галочки, редактор</title>
+</head>
+<body>
+<main>
+  <form id="profile">
+    <label for="name">Имя</label> <input id="name" type="text" value="Старое">
+    <input type="checkbox" id="news"> <label for="news">Получать новости</label>
+    <span id="dark" role="switch" aria-checked="false" tabindex="0">Тёмная тема</span>
+    <select id="city"><option>Москва</option><option>Казань</option></select>
+    <input type="password" id="pw-noname" autocomplete="off">
+    <input type="text" id="pw-shown" autocomplete="current-password" value="S3cretShown">
+    <input type="text" id="card" autocomplete="billing cc-number">
+  </form>
+  <!-- «Редактор»: модель — абзацы с data-b; снесённая разметка ломает его (как у ProseMirror/Lexical). -->
+  <div id="ed" contenteditable="true"><p data-b="1">Старый текст</p></div>
+  <form id="search"><input id="q" type="search" placeholder="Поиск"><button type="submit">Найти</button></form>
+  <form id="guarded"><input id="msg" type="text" placeholder="Сообщение"><button type="submit">Отправить</button></form>
+  <form id="blocked"><input id="nope" type="text"><button type="submit">Найти</button></form>
+  <div style="height: 3000px"></div>
+  <button id="far">Кнопка внизу</button>
+</main>
+<script>
+  window.__c = { search: 0, guarded: 0, blocked: 0, edInput: 0, keys: [] };
+  for (const id of ["search", "guarded", "blocked"]) {
+    document.getElementById(id).addEventListener("submit", (e) => { e.preventDefault(); window.__c[id]++; });
+  }
+  // Страница перехватывает Enter в поле (автодополнение) — браузер в этом случае форму НЕ отправляет.
+  document.getElementById("nope").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+  const sw = document.getElementById("dark");
+  sw.addEventListener("click", () => sw.setAttribute("aria-checked", sw.getAttribute("aria-checked") === "true" ? "false" : "true"));
+  document.getElementById("ed").addEventListener("input", () => window.__c.edInput++);
+  document.addEventListener("keydown", (e) => window.__c.keys.push((e.ctrlKey ? "Ctrl+" : "") + e.key + "@" + (e.target.id || e.target.tagName)));
+</script>
+</body>
+</html>
