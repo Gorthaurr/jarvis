@@ -8,7 +8,8 @@
  * коммитили отправку без единого вопроса владельцу. Списки — данные; расширять строкой.
  */
 
-export type RiskCategory = "bank" | "payment" | "edo" | "gov" | "market" | "social" | "messenger";
+// edu — учебная LMS (тест/задание, 26.09); unknown — сайт вкладки не удалось определить (судим строго, fail-closed).
+export type RiskCategory = "bank" | "payment" | "edo" | "gov" | "market" | "social" | "messenger" | "edu" | "unknown";
 
 /** Процессы настольных программ (имя без .exe, регистр не важен) → категория + человеко-метка. */
 export const RISKY_PROCESSES: ReadonlyArray<readonly [RegExp, RiskCategory, string]> = [

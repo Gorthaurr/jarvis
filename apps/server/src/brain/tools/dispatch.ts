@@ -12,6 +12,7 @@
 import type { ActionCommand, ActionResult, ActionKind, ConfirmOutcomeKind } from "@jarvis/protocol";
 import { SCREEN_CAPTURE_MARK } from "../agent/image-marks.js";
 import { assessGuiCommit, assessWebCommit, hostOfUrl, lastWebTarget, parseForegroundProcess, rememberUiHandles, rememberWebTarget, uiHandleLabel } from "./commit-gate.js";
+import { markWebTargetStale, refreshWebTarget } from "./web-place.js";
 import { mailSend } from "./handlers/mail.js";
 import { DEFAULT_ACTION_TIMEOUT_MS, actionTimeoutMs } from "@jarvis/protocol";
 import { metrics } from "../../obs/metrics.js";
@@ -730,7 +731,10 @@ async function dispatchToolCore(
   if (name === "web_open" && typeof input.url === "string") rememberWebTarget(ctx.session as unknown as object, input.url);
   if (name === "web_act") {
     const params = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : input;
-    const risk = assessWebCommit({ host: hostOfUrl(lastWebTarget(ctx.session as unknown as object)), intent: String(input.intent ?? ""), params });
+    // Прошлый web_act мог увести страницу (act адреса не отдаёт) — перед кликом/клавишей дочитываем текущий адрес.
+    if (/^(?:click|key|submit|enter|type)$/u.test(String(input.intent ?? ""))) await refreshWebTarget(ctx);
+    const lastUrl = lastWebTarget(ctx.session as unknown as object);
+    const risk = assessWebCommit({ host: hostOfUrl(lastUrl), url: lastUrl, intent: String(input.intent ?? ""), params });
     if (risk) {
       if (!ctx.confirm) return err(`web_act: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
       const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
@@ -853,6 +857,18 @@ async function dispatchToolCore(
       }
       applyVeil(out, result.data);
       return out;
+    }
+    // M11 (26.09, разведка Moodle): страница из НЕВИДИМОГО браузера Джарвиса (web_open/read/inspect/act) — тот же
+    // внешний контент, что browser_read, а шла доверенным JSON: инструкция со страницы звучала для модели как наша.
+    if (kind === "jbrowser.open" || kind === "jbrowser.read" || kind === "jbrowser.inspect" || kind === "jbrowser.act") {
+      const wrapped = untrustedCapped("jarvis-browser", result.data !== undefined ? JSON.stringify(result.data) : `ok (${kind})`, "Сузь: web_inspect{query} или читай нужный фрагмент.");
+      if (result.data !== undefined) wrapped.data = result.data;
+      // Ревью 26.09: гейт web_act судил по адресу последнего web_open, а клики уводят страницу (курсы → тест) —
+      // запоминаем ТЕКУЩИЙ адрес невидимого браузера, иначе учебная страница по пути не узнавалась.
+      const cur = (result.data as { url?: unknown } | undefined)?.url;
+      if (typeof cur === "string" && cur) rememberWebTarget(ctx.session as unknown as object, cur);
+      else if (kind === "jbrowser.act") markWebTargetStale(ctx);
+      return wrapped;
     }
     // M11 (ревью 2026-09-01): содержимое ФАЙЛА — внешний контент (загрузки, письма, чужие репозитории), как и
     // текст страницы; file_view уже помечает текст на картинке недоверенным, а текстовая половина той же зоны

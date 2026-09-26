@@ -43,7 +43,7 @@ export interface LaunchOutcome {
 
 /**
  * Алиасы человеко-понятных имён → исполняемые/цели для Windows `start`.
- * Расширяется по мере появления навыков. tier0 (§3) опирается на тот же словарь.
+ * Расширяется по мере появления навыков.
  */
 const APP_ALIASES: Record<string, string> = {
   // браузеры
@@ -143,7 +143,7 @@ export function isProtectedProcess(name: string): boolean {
  */
 export async function launchApp(app: string): Promise<LaunchOutcome> {
   // Контроль-7 (sensors-3): новое окно (приложение/браузер по url) встаёт на передний план и отбирает клавиатуру у окна
-  // рисования; browser.open/tier0 зовут launchApp мимо раннего гейта dispatch — гард в точке действия.
+  // рисования; browser.open зовёт launchApp мимо раннего гейта dispatch — гард в точке действия.
   assertNoDrawingOverlay();
   // Алиасы (браузер→msedge, настройки→ms-settings:, стим→steam, …) — быстрый known-good путь;
   // затем умный резолвер из источников истины ОС (App Paths / Steam-манифесты / Пуск / PATH) +
@@ -225,8 +225,8 @@ export async function focusApp(app: string): Promise<FocusOutcome> {
 
   // Имя процесса без расширения и без URI-схемы — то, что AppActivate сможет сопоставить.
   const rawProbe = target.replace(/\.exe$/i, "").replace(/:$/, "");
-  // БЕЗОПАСНОСТЬ: probe попадает в PowerShell-строковый литерал. Имя приходит из tier0
-  // (текст пользователя) или с сервера — без экранирования одиночная кавычка вырывается
+  // БЕЗОПАСНОСТЬ: probe попадает в PowerShell-строковый литерал. Имя приходит с сервера
+  // (аргумент модели или серверного tier0 — по сути текст пользователя) — без экранирования одиночная кавычка вырывается
   // из литерала и исполняет произвольный PS (RCE). Удваиваем кавычки (PS-escape для '…')
   // и отсекаем заведомо не-имена (управляющие символы, перевод строки).
   const probe = rawProbe.replace(/[\r\n]/g, " ").replace(/'/g, "''");

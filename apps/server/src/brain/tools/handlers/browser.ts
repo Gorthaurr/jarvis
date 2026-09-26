@@ -8,7 +8,8 @@ import { cutText } from "@jarvis/shared";
 import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
-import { assessWebCommit, hostOfUrl } from "../commit-gate.js";
+import { assessWebCommit, hostOfUrl, riskyHostCategory } from "../commit-gate.js";
+import { commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
 
 /**
  * M11: строка, заданная САМОЙ страницей (URL после редиректа/pushState, title, значение поля), идёт в
@@ -408,29 +409,58 @@ export async function browserInspect(ctx: ToolContext, input: Record<string, unk
 export async function browserAct(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   const intent = String(input.intent ?? "").trim();
   if (!intent) return err("browser_act: нужен intent (play|pause|seek|next|prev|click|type|enter|submit|scroll|feed_auto)");
-  const params = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : input;
+  // guard/guardApproved — служебные поля СЕРВЕРА (§14 на странице): от модели их не принимаем, иначе инъекция со
+  // страницы велела бы прислать guardApproved:true и клик «Отправить» прошёл бы без вопроса владельцу.
+  const { guard: _g, guardApproved: _ga, approvedLabel: _al, ...params } = (input.params && typeof input.params === "object" ? input.params : input) as Record<string, unknown>;
   if (ctx.ext?.connected) {
     const target = resolveBrowserTarget(ctx, input);
     if (!target) return err(`browser_act: сначала открой нужную страницу (browser_open) — непонятно, в какой вкладке делать «${intent}».`);
     // §14 ГЕЙТ НЕОБРАТИМЫХ КЛИКОВ (причина №4 USER_SCENARIOS_2026-09-02): «Опубликовать»/«Оплатить»/«Подписать»/
     // Enter в мессенджере на опасном хосте — спрашиваем владельца ДО клика; подпись ref берём из последнего inspect.
-    const risk = assessWebCommit({
-      host: hostOfUrl(target.url),
-      intent,
-      params,
-      label: typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined,
-    });
+    // 26.09: место — ЖИВОЙ адрес той вкладки, где расширение нажмёт (действие шлём точно в неё) + учебные LMS по пути;
+    // клик по селектору/ref досуживает сама страница (guard → commit_confirm), см. web-commit-guard.
+    const place = await resolvePlace(ctx, target);
+    const actUrl = place.tabId !== undefined ? place.url : target.url;
+    const actTab = place.tabId ?? target.tabId;
+    const label = typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined;
+    const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params, label });
+    // Пустой text не должен затирать подпись ref (?? пропускает "") — иначе одобрение ушло бы без approvedLabel.
+    const riskLabel = (typeof params.text === "string" && params.text.trim()) || label || "";
     if (risk) {
-      if (!ctx.confirm) return err(`browser_act: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
-      const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
-      if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} на ${risk.where}`), gate.outcome);
+      const decision = await confirmWebCommit(ctx, place, risk, riskLabel);
+      if (decision !== true) return decision;
     }
+    // guard — для ЛЮБОГО интента на опасном месте: расширение превращает в клик и play/next по ref, и встряхивание.
+    const guard = pageGuardFor(place, riskyHostCategory(place.host) !== null);
+    // Одобрение привязано к подписи, которую видел владелец: страница сверит её с реальным элементом.
+    const approved = (lbl: string): Record<string, unknown> => ({ guardApproved: true, ...(lbl ? { approvedLabel: lbl } : {}) });
+    const actParams = guard ? { ...params, guard, ...(risk ? approved(riskLabel) : {}) } : params;
     try {
       // ЧЕСТНОСТЬ: пробрасываем исход расширения (navigated/already/playing/currentTime) —
       // иначе модель не видит, что play НЕ дал звук (autoplay-гейт), и врёт «готово, играет».
       // Примечание: при ok:false расширение (tab.act) бросает исключение — autoplay-провал приходит
       // ЧЕРЕЗ catch ниже (единый путь обработки, без параллельной ветки на r.ok===false).
-      const r = ((await ctx.ext.tabAct(target.url, intent, params, target.tabId, refModeOn())) ?? {}) as {
+      let raw: unknown;
+      try {
+        raw = await ctx.ext.tabAct(actUrl, intent, actParams, actTab, refModeOn());
+      } catch (e) {
+        // Страница узнала в элементе коммит (подпись видна только ей) и НЕ нажала — спрашиваем и повторяем.
+        const pageLabel = guard ? commitConfirmLabel(e instanceof Error ? e.message : String(e)) : null;
+        if (pageLabel === null) throw e;
+        const decision = await confirmWebCommit(ctx, place, pageCommitRisk(place, pageLabel), pageLabel);
+        if (decision !== true) return decision;
+        try {
+          raw = await ctx.ext.tabAct(actUrl, intent, { ...actParams, ...approved(pageLabel) }, actTab, refModeOn());
+        } catch (e2) {
+          // Пока владелец думал, кнопка сменилась (страница снова вернула commit_confirm) — не жмём и подпись не
+          // пересказываем модели (её задаёт страница, M11).
+          if (commitConfirmLabel(e2 instanceof Error ? e2.message : String(e2)) !== null) {
+            return err("browser_act: пока ждал подтверждения, кнопка на странице сменилась — не нажимал. Сделай browser_inspect и повтори.");
+          }
+          throw e2;
+        }
+      }
+      const r = (raw ?? {}) as {
         note?: string;
         navigated?: unknown;
         uncertain?: boolean;
@@ -573,23 +603,32 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
   if (!steps.length) return err("browser_batch: пустой список шагов (steps).");
   const target = resolveBrowserTarget(ctx, input);
   if (!target) return err("browser_batch: сначала открой страницу (browser_open) и сделай browser_inspect — берст адресует ref из снимка.");
-  // §14 гейт: шаги-коммиты берста на опасном хосте — один вопрос владельцу на весь берст с перечнем.
-  const risky = steps
-    .map((st, i) => {
-      const o = st && typeof st === "object" ? (st as Record<string, unknown>) : {};
-      const intent = String(o.intent ?? o.action ?? "");
-      const label = typeof o.ref === "string" ? refFieldHint(ctx, o.ref) : undefined;
-      const risk = assessWebCommit({ host: hostOfUrl(target.url), intent, params: o, label });
-      return risk ? `${i + 1}: ${risk.what}` : null;
-    })
-    .filter((x): x is string => x !== null);
+  // §14 гейт: шаги-коммиты берста на опасном хосте — один вопрос владельцу на весь берст с перечнем. Место — по живому
+  // адресу вкладки (26.09: tabId без url давал host="" и берст на банке уходил без вопроса).
+  const place = await resolvePlace(ctx, target);
+  const where = place.host || "неизвестной вкладке";
+  const guard = pageGuardFor(place, riskyHostCategory(place.host) !== null);
+  // Ревью 26.09: поля шага живут в step.params (так их читает расширение) — гейт смотрел на верхний уровень шага и
+  // type{text, enter:true} в мессенджере уходил без вопроса. Служебные поля гарда от модели не принимаем.
+  const judged = steps.map((st, i) => {
+    const o = st && typeof st === "object" ? (st as Record<string, unknown>) : {};
+    const { guard: _g, guardApproved: _ga, approvedLabel: _al, ...own } = { ...o, ...(o.params && typeof o.params === "object" ? (o.params as Record<string, unknown>) : {}) };
+    const intent = String(o.intent ?? o.action ?? "");
+    const ref = o.ref ?? own.ref; // расширение принимает ref и на верхнем уровне шага, и в params
+    const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
+    const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
+    const params = guard ? { ...own, guard, ...(risk ? { guardApproved: true, ...(label ? { approvedLabel: label } : {}) } : {}) } : own;
+    return { step: { ...o, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
+  });
+  const risky = judged.map((j) => j.risk).filter((x): x is string => x !== null);
   if (risky.length > 0) {
-    if (!ctx.confirm) return err(`browser_batch: шаги ${risky.join("; ")} на ${hostOfUrl(target.url)} — необратимые, нужно подтверждение владельца (§14), а канал недоступен.`);
-    const gate = await ctx.confirm(`Необратимые шаги берста на ${hostOfUrl(target.url)}: ${risky.join("; ")}.\nПодтвердить?`, "irreversible");
-    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `берст на ${hostOfUrl(target.url)}`), gate.outcome);
+    if (!ctx.confirm) return err(`browser_batch: шаги ${risky.join("; ")} на ${where} — необратимые, нужно подтверждение владельца (§14), а канал недоступен.`);
+    const gate = await ctx.confirm(`Необратимые шаги берста на ${where}: ${risky.join("; ")}.\nПодтвердить?`, "irreversible");
+    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `берст на ${where}`), gate.outcome);
   }
+  const actUrl = place.tabId !== undefined ? place.url : target.url;
   try {
-    const r = (await ctx.ext.tabBatch(target.url, steps, target.tabId, refModeOn())) as
+    const r = (await ctx.ext.tabBatch(actUrl, judged.map((j) => j.step), place.tabId ?? target.tabId, refModeOn())) as
       | { ok?: boolean; done?: number; total?: number; stoppedAt?: number; error?: string; code?: string }
       | undefined;
     const done = r?.done ?? 0;
@@ -600,6 +639,11 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
       return ok(`Берст выполнен: ${done} из ${total} шагов по ref. Сверь ИСХОД (browser_inspect/browser_read) прежде чем говорить «готово».`);
     }
     const at = r?.stoppedAt !== undefined ? ` (стоп на шаге ${(r.stoppedAt ?? 0) + 1})` : "";
+    // Шаг упёрся в кнопку-коммит, которую сервер не распознал (подпись видна только странице): не жали. Подпись не
+    // пересказываем (её задаёт страница, M11) — этот шаг отдельным browser_act, там будет вопрос владельцу.
+    if (commitConfirmLabel(String(r?.error ?? "")) !== null) {
+      return err(`browser_batch: выполнено ${done} из ${total}${at} — следующий шаг жмёт кнопку-коммит. Сделай его отдельным browser_act (спросит владельца).`);
+    }
     // Устаревший снимок → честно, без слепого повтора: пересними и продолжи.
     return err(`browser_batch: выполнено ${done} из ${total}${at}: ${r?.error ?? "шаг не выполнен"}. Сделай browser_inspect и продолжи с актуального снимка.`);
   } catch (e) {

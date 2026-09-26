@@ -181,6 +181,11 @@ describe("выученные навыки-процедуры (§8 HERMES)", () =
     expect([...detectPlatforms("найди матч в доте")]).toEqual(["dota"]);
     expect([...detectPlatforms("запусти поиск в доти")]).toEqual(["dota"]); // ревью: STT-форма «доти»
     // без ложных срабатываний коротких алиасов:
+    // 26.09: учебная система вуза — «в мудле», «в ЭИОС», по хосту eos.imes.su.
+    expect([...detectPlatforms("пройди тест в мудле")]).toEqual(["lms"]);
+    expect([...detectPlatforms("что задали в эиос")]).toEqual(["lms"]);
+    expect([...detectPlatforms("зайди на eos.imes.su")]).toEqual(["lms"]);
+    expect(detectPlatforms("мудрый совет").size).toBe(0); // «мудрый» ≠ «мудл»
     expect(detectPlatforms("вкусный обед").size).toBe(0); // «вкусный» ≠ «вк»
     expect(detectPlatforms("какая погода").size).toBe(0);
     // ревью: почтовая «телеграмму/телеграмма» (номинатив/аккузатив существительного) ≠ приложение Telegram:

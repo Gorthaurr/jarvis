@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Тонкий клиент Jarvis — Electron на Windows (§3). Окно, transport, tier0, актуаторы.",
+  "description": "Тонкий клиент Jarvis — Electron на Windows (§3). Окно, transport, актуаторы.",
   "main": "dist/main/index.cjs",
   "scripts": {
     "build": "node scripts/build.mjs",

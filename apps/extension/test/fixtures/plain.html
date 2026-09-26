@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Обычная страница без React</title>
+</head>
+<body>
+<main>
+  <h1>Настройки</h1>
+  <button id="save" type="button">Сохранить черновик</button>
+  <a id="more" href="#details">Подробнее</a>
+  <p><input type="checkbox" id="agree"> <label for="agree">Согласен с правилами</label></p>
+  <div id="tile" class="card" tabindex="0">Плитка без роли</div>
+  <form id="search"><input type="text" name="q" placeholder="Поиск"><input type="submit" value="Найти"></form>
+  <form id="f1"><input type="text" name="city" placeholder="Город"></form>
+  <form id="f2"><input type="text" name="city" placeholder="Город"></form>
+  <div id="card2" class="card" tabindex="0"><input type="checkbox" id="opt"> <label for="opt">Опция в карточке</label></div>
+  <p><button id="send-icon" aria-labelledby="lbl-send"><svg width="12" height="12"></svg></button> <span id="lbl-send">Отправить</span></p>
+  <p><button id="pay-img"><img alt="Оплатить" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" width="12" height="12"></button></p>
+  <p><button id="save-dup" title="Сохранить">Сохранить</button> <button id="send-now">Отправить сейчас</button> <button id="pay-now">Оплатить 50 000 ₽</button></p>
+  <p><input type="password" id="pw" name="pw"> <input type="text" id="login" name="login">
+     <input type="text" id="pw-shown" name="pw2" autocomplete="current-password"> <input type="text" id="card" name="card" autocomplete="billing cc-number"></p>
+  <div class="grid">
+    <div id="meta"><h3><a href="#v1" id="video-title">Видео один</a></h3></div>
+    <div id="meta"><h3><a href="#v2" id="video-title">Видео два</a></h3></div>
+    <div id="meta"><h3><a href="#v3" id="video-title">Видео три</a></h3></div>
+  </div>
+  <p><select id="dup"><option value="1">Мадрид</option><option value="1">Берлин</option></select>
+     <select id="multi" multiple><option selected>Python</option><option selected>Go</option><option>Rust</option></select>
+     <select id="num"><option value="0">Выберите...</option><option value="1">3</option><option value="2">1</option><option value="3">2</option></select></p>
+  <div id="details">Детали</div>
+  <div role="dialog" aria-label="Cookies" style="position:fixed;left:0;right:0;bottom:0;background:#eee">Мы используем cookies. <a id="cookie-more" href="#cookie">Подробнее</a></div>
+  <div id="shake" role="button" tabindex="0">Встряхнуть</div>
+  <p id="shaken">исходная подборка</p>
+</main>
+<script>
+  window.__c = { save: 0, tile: 0, search: 0, shake: 0, card2: 0 };
+  document.getElementById("card2").addEventListener("click", () => window.__c.card2++);
+  document.getElementById("save").addEventListener("click", () => window.__c.save++);
+  document.getElementById("tile").addEventListener("click", () => window.__c.tile++);
+  document.getElementById("search").addEventListener("submit", (e) => { e.preventDefault(); window.__c.search++; });
+  // «Свайпер»: синтетический клик глушится в capture-фазе (preventClicks), кнопка живёт только на Enter.
+  const sh = document.getElementById("shake");
+  sh.addEventListener("click", (e) => { e.preventDefault(); e.stopImmediatePropagation(); }, true);
+  sh.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    window.__c.shake++;
+    document.getElementById("shaken").textContent = "новая подборка " + window.__c.shake;
+  });
+</script>
+</body>
+</html>

@@ -637,14 +637,14 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
     name: "browser_act",
     description:
       "Действие в вкладке пользователя через расширение (§6). " +
-      "intent: play/pause (плеер), seek (ПЕРЕМОТКА видео/аудио: params.seconds ±сек, или params.to абсолютно сек), next/prev (трек), scroll (params.dy), click (params.text по видимому тексту/aria, или params.selector из browser_inspect — копируй selector КАК ЕСТЬ, включая формы с ' >>> ' для shadow DOM), type (params.text в поле; params.selector или авто-поиск видимого поля; params.enter:true — сразу искать/сабмитить), enter/submit (нажать Enter/отправить форму — ЗАПУСТИТЬ поиск после type), back/forward (ИСТОРИЯ браузера, НЕ перемотка видео). " +
+      "intent: play/pause (плеер), seek (ПЕРЕМОТКА видео/аудио: params.seconds ±сек, или params.to абсолютно сек), next/prev (трек), scroll (params.dy), click (params.text по видимому тексту/aria, или params.selector из browser_inspect — копируй selector КАК ЕСТЬ, включая формы с ' >>> ' для shadow DOM), type (params.text в поле; params.selector или авто-поиск видимого поля; params.enter:true — сразу искать/сабмитить), select (выпадающий список <select>: params.selector/ref + params.option — ТЕКСТ варианта из state.options снимка), enter/submit (нажать Enter/отправить форму — ЗАПУСТИТЬ поиск после type), back/forward (ИСТОРИЯ браузера, НЕ перемотка видео). " +
       "ПОИСК на сайте: browser_act{type, text:'запрос', enter:true} ИЛИ type затем enter — иначе запрос введён, но поиск НЕ запущен. Для перемотки ролика — seek, НЕ back/forward. Клик не сработал → browser_inspect, выбери элемент, повтори. Элемент в iframe (browser_inspect пометил его frameId) → передай params.frameId; без него click/type/play/pause/seek сами прощупывают фреймы. В ответе клика changed:false = страница НЕ отреагировала (не считай успехом), navigated = состоялся переход. " +
       "АДРЕСАЦИЯ: если browser_inspect дал ref у элементов — целься params.ref (по ИДЕНТИЧНОСТИ, устойчиво к ре-рендеру); ref устарел (ref_stale) → сделай свежий browser_inspect, НЕ кликай вслепую. text/selector — fallback, когда свежего снимка нет. УЧЁТНЫЕ ДАННЫЕ: ввод в поле пароля/кода подтверждения/карты (это видно по селектору или лейблу) гард отклоняет — попроси владельца ввести самому и продолжай после (§0).",
     input_schema: obj(
       {
         intent: {
           type: "string",
-          enum: ["play", "pause", "seek", "next", "prev", "scroll", "click", "type", "enter", "submit", "back", "forward", "feed_auto"],
+          enum: ["play", "pause", "seek", "next", "prev", "scroll", "click", "type", "select", "enter", "submit", "back", "forward", "feed_auto"],
           description:
             "Интент действия в браузере. feed_auto — АВТОЛИСТАНИЕ ленты коротких видео (YouTube Shorts и " +
             "подобные): страница сама переключает следующий ролик, как только текущий доигрывает. Это " +
@@ -655,7 +655,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
           type: "object",
           additionalProperties: true,
           description:
-            "Параметры: ref (АДРЕСАЦИЯ ПО ИДЕНТИЧНОСТИ из browser_inspect — предпочтительно), text/selector (fallback; selector как есть, вкл. ' >>> '), enter/submit:true (type — сразу запустить поиск), dy (scroll), seconds (seek ±сек) или to (seek абсолютно, сек), frameId (элемент в iframe — число из browser_inspect; в ref уже зашит). " +
+            "Параметры: ref (АДРЕСАЦИЯ ПО ИДЕНТИЧНОСТИ из browser_inspect — предпочтительно), text/selector (fallback; selector как есть, вкл. ' >>> '), option (select — текст варианта), enter/submit:true (type — сразу запустить поиск), dy (scroll), seconds (seek ±сек) или to (seek абсолютно, сек), frameId (элемент в iframe — число из browser_inspect; в ref уже зашит). " +
             "Для feed_auto: action ('start' | 'stop' | 'status'), maxCount (сколько роликов пролистать, деф 50), maxMinutes (сколько минут листать, деф 60).",
         },
         tabId: {
@@ -680,8 +680,8 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
             additionalProperties: true,
             properties: {
               ref: { type: "string", description: "ref элемента из последнего browser_inspect ('e3_5' или 'f2e3_5' для iframe)." },
-              intent: { type: "string", description: "click/type/seek/scroll/enter/submit/play/pause/next/prev." },
-              params: { type: "object", additionalProperties: true, description: "text (type), enter:true, dy (scroll), seconds/to (seek)." },
+              intent: { type: "string", description: "click/type/select/seek/scroll/enter/submit/play/pause/next/prev." },
+              params: { type: "object", additionalProperties: true, description: "text (type), option (select — текст варианта), enter:true, dy (scroll), seconds/to (seek)." },
             },
           },
         },

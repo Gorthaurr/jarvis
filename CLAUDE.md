@@ -35,17 +35,16 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 
 ## Запуск / тесты
 - **Боевой запуск — супервизор**: задача Windows `JarvisSupervisor` (при входе) → `node infra/supervisor.mjs` держит
-  сервер (рестарт, /healthz-watchdog, голосовой доклад о падениях) и КЛИЕНТ (`infra/client-keeper.mjs`, с 24.09:
-  упал → перезапуск; «Выйти» из трея → маркер, не поднимает до следующего входа). Регистрация: `infra/register-autostart.ps1`.
+  сервер (рестарт, /healthz-watchdog, голосовой доклад о падениях) и КЛИЕНТ (`infra/client-keeper.mjs`: упал →
+  перезапуск; «Выйти» из трея → маркер до следующего входа). Регистрация: `infra/register-autostart.ps1`.
 - Сервер руками: `apps/server` → `npx tsx src/index.ts` (порт **8787**; НЕ `tsx watch`). Логи: `apps/server/data/logs/
   server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl` (task/round/mouth_to_ear/degradation), `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
-  под супервизором — `apps/client/client.{out,err}.log`. ⚠️ Electron из песочницы агента падает на GPU (артефакт среды
-  агента) — «работает ли у владельца» проверять через супервизор.
-- Текст-драйвер: `node _jarvis_cmd.mjs "реплика"` (dev-сессия, действия клиента в нём — фейк; `JARVIS_WS_URL` —
-  другой инстанс). Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
-- Тесты: `apps/server` `npx vitest run` (~3030), `apps/client` `npx vitest run` (~780), `packages/*`, `node --test
-  infra/client-keeper.test.mjs`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутационная таблица петли:
+  под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU — артефакт среды.
+- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS → кадры → STT);
+  dev-сессия, действия клиента — фейк. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
+- Тесты: `apps/server` `npx vitest run` (~3050), `apps/client` `npx vitest run` (~790), `packages/*`, `node --test
+  infra/client-keeper.test.mjs`, `node --test "apps/extension/test/*.test.mjs"`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутационная таблица петли:
   `node apps/server/scripts/mutate-loop.cjs`. Длины функций: `node apps/server/scripts/fn-lengths.mjs`.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
   Фолбэк PGlite. Docker не используется.
@@ -110,16 +109,15 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - **Режим выделения**: `screen_selection{view}` — всегда свежий кадр рамки; под вуалью ввод гейтится `overlay_drawing`.
 - **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт по тиру (haiku medium / sonnet high / fable max);
   thinking всегда adaptive; до `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` только персона (кеш CLI между задачами); `persistSession:false`.
-- **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`), ack «Берусь» окно не
-  продлевает; реакции («нет, не надо») — разговор (`router/reaction.ts`), «да» на свежий вопрос — согласие-действие;
-  «заткнись/замолчи» — перестать говорить (задачи живы; в тишине глотается, с командой — идёт дальше), «тишина/помолчи
-  час» — режим тишины, «вырубись» — стоп всего, голое «хватит» — модели (`tasks/control.ts`); goal-check — при мутации
-  или своей заявке «открыл…» первым словом; подсказка навыка — команде при raw ≥ 0.86; исход — навыку, чей макрос шёл.
+- **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`); реакции — разговор
+  (`router/reaction.ts`); «заткнись» / «тишина» / «вырубись» / голое «хватит» — разные действия (`tasks/control.ts`,
+  таблица — CHANGELOG 24.09); goal-check — при мутации или заявке «открыл…»; подсказка навыка — при raw ≥ 0.86.
 - **Dev-сессия изолирована** (`AgentDeps.devSession`): своя память; задачи `dev` не в истории/на диске и отделены от
   задач владельца (`activeForUser/cancelUser(…, dev)`); без самообучения/memory_write/skill_save/рефлексов.
 - **Гейты §0/§14**: act{type|set}, слоты skill_execute — под гардом паролей/карт; Enter и печать с `\n` в мессенджере/
   банке/1С — вопрос владельцу (почта — нет); act-коммит без `commitApproved` (ставит только сервер после «да»)
-  клиент сверяет с РЕАЛЬНО сфокусированным процессом; мост и реплей — тот же рубеж (`commit-guard.ts`).
+  клиент сверяет с РЕАЛЬНО сфокусированным процессом; мост и реплей — тот же рубеж (`commit-guard.ts`). Веб: место —
+  по живой вкладке (`web-place.ts`), LMS — по пути; клик по селектору/ref судит страница (`web-commit-guard.ts`).
 - **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается
   (`gate-closer.ts`); mute посреди фразы → VAD `speech_cancel` (обрубок не исполняется); PTT — Ctrl+Alt+J (окно
   адресации), кнопка микрофона — только открывает гейт; микрофон повторяется 1→30 с; renderer-guard.
@@ -142,13 +140,13 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Opus: не слать temperature/top_p; thinking только `adaptive`; пустые thinking-блоки не реплеить.
 - sherpa и onnxruntime (e5) в одном процессе конфликтуют → диктор в сайдкаре, на клиенте только sherpa.
 - Chrome 136+ игнорирует CDP на дефолтном профиле → руки в вкладках только через расширение.
-- tier0 жадный: фраза-инструкция/контент должна уходить модели; `not_found` запуска → откат в модель.
+- tier0 только серверный (клиентский убран 26.09): фраза-инструкция — модели; `not_found` запуска → откат в модель.
+- Синтетический Enter не жмёт нативную кнопку/ссылку/галочку → клик расширения по ним — pointer (H19).
 - Денилисты неполны → позитивные allowlist'ы; исключение «рядом хорошее слово» — ключ для атакующего.
 - Свежий фикс — главный источник следующего дефекта (24.09: 3 из 10 находок — в моих же правках): контроль обязателен.
-- Фикстура теста обязана совпадать с реальной формой входа (гейт Enter читал `key`, схема шлёт `combo` — тесты молчали).
+- Фикстура теста = реальная форма входа (гейт читал `key`, схема шлёт `combo` — тесты молчали).
 - Строка прозы навыка, начинающаяся с имени шага (`verify`/`wait`/`launch`), становится шагом слепого реплея.
 
 ## Где искать
-- История и «почему»: `docs/CHANGELOG.md`. Механика/тестирование: `docs/HOW_IT_WORKS.md`. Архитектура: `docs/ARCHITECTURE.md`.
-- План и вердикты: `docs/REVIEW_2026-09-24.md`, `docs/REVIEW_2026-09-09.md`, `docs/NEXT_SESSION.md`.
+- `docs/ARCHITECTURE.md` (история, механика — ссылки в шапке). План и вердикты: `docs/REVIEW_2026-09-24.md`, `docs/REVIEW_2026-09-09.md`, `docs/NEXT_SESSION.md`.
 - `docs/SECURITY.md`, `docs/USER_SCENARIOS_2026-09-02.md`, `docs/GUI_MANUALS_RESEARCH_2026-09-05.md`, `docs/PRODUCT_FRAMEWORK_PLAN_2026-09-02.md`.
