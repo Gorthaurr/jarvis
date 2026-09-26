@@ -14,12 +14,25 @@
 import type { ToolContext } from "../dispatch.js";
 
 export interface RefInfo {
+  /** Подпись для суда о риске (§14) и §0: имя/текст/подпись + selector/role/type. */
   hint: string;
+  /** Подпись ОДОБРЕНИЯ §14 — видимое имя элемента (без selector/role/type): её страница сверяет с подписью цели. */
+  approval: string;
   secret: boolean;
 }
 
 const refInfos = new WeakMap<object, Map<string, RefInfo>>();
 const REF_INFOS_MAX = 400;
+const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+
+/**
+ * Поле ввода по снимку (tag/role/state ровно как их отдаёт inspectPageInPage): у него `text` — СОДЕРЖИМОЕ (редактор,
+ * contenteditable), а не подпись. W1-ревью р2 (srv-tests-2): текст письма «…пароль от вайфая…» в хинте давал §0-отказ.
+ */
+function isEditable(e: Record<string, unknown>): boolean {
+  const state = e.state && typeof e.state === "object" ? (e.state as Record<string, unknown>) : {};
+  return /^(input|textarea)$/u.test(str(e.tag)) || /^(textbox|searchbox)$/u.test(str(e.role)) || (str(e.tag) !== "select" && "value" in state);
+}
 
 export function rememberRefHints(ctx: ToolContext, elements: unknown): void {
   const sess = ctx.session as unknown as object | undefined;
@@ -30,14 +43,14 @@ export function rememberRefHints(ctx: ToolContext, elements: unknown): void {
     if (!raw || typeof raw !== "object") continue;
     const e = raw as Record<string, unknown>;
     if (typeof e.ref !== "string" || !e.ref) continue;
-    // W1-T9: видимый текст (e.text — у кнопок, чьё aria-имя расходится с надписью) — тоже подпись: без него §14 и
-    // approvedLabel судили бы «Действие» вместо «Оплатить заказ».
-    const hint = [e.name, e.text, e.label, e.aria, e.selector, e.role, e.type]
-      .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-      .join(" ")
-      .slice(0, 160);
+    // W1-T9: видимый текст (e.text — у кнопок, чьё aria-имя расходится с надписью) — тоже подпись: без него §14
+    // судил бы «Действие» вместо «Оплатить заказ». Кроме полей ввода: там e.text — содержимое, не подпись.
+    const text = isEditable(e) ? "" : str(e.text);
+    const hint = [e.name, text, e.label, e.aria, e.selector, e.role, e.type].map(str).filter(Boolean).join(" ").slice(0, 160);
+    // Контракт одобрения (W1-ревью р2, NEW-1): одна видимая подпись — её страница сравнивает с частью подписи цели.
+    const approval = [e.name, text, e.label, e.aria].map(str).find(Boolean) ?? "";
     map.delete(e.ref); // свежая запись — в конец порядка вытеснения
-    map.set(e.ref, { hint, secret: e.secret === true });
+    map.set(e.ref, { hint, approval, secret: e.secret === true });
   }
   while (map.size > REF_INFOS_MAX) {
     const oldest = map.keys().next().value;
@@ -55,6 +68,11 @@ export function refFieldInfo(ctx: ToolContext, ref: string): RefInfo | undefined
 /** Подпись элемента по ref (для §14: «клик по ref с подписью-коммитом»). Пустая подпись → undefined. */
 export function refFieldHint(ctx: ToolContext, ref: string): string | undefined {
   return refFieldInfo(ctx, ref)?.hint || undefined;
+}
+
+/** Подпись одобрения §14 для цели по ref (видимое имя). Нет снимка или имени → undefined. */
+export function refApprovalLabel(ctx: ToolContext, ref: unknown): string | undefined {
+  return typeof ref === "string" ? refFieldInfo(ctx, ref)?.approval || undefined : undefined;
 }
 
 // ── B-16: кап снимка ────────────────────────────────────────────────────────────────────────────────────────────

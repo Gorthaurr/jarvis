@@ -13,7 +13,7 @@ import { assessWebCommit } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
 import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
-import { capInspectElements, clampInspectCap, refFieldHint, rememberRefHints } from "./browser-refs.js";
+import { capInspectElements, clampInspectCap, refApprovalLabel, refFieldHint, rememberRefHints } from "./browser-refs.js";
 import { nonDomFailure, pageErrorBlock } from "./browser-failure.js";
 import { type BatchReply, batchOutcome } from "./browser-batch-outcome.js";
 import { actObserved, historySeekMismatch, loadingNote, navigatedTo } from "./browser-act-outcome.js";
@@ -333,18 +333,18 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     const actTab = place.tabId ?? target.tabId;
     const label = typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params, label });
-    // W1-2: подпись одобрения — из тех же частей, по которым судили риск (text/name/title/подпись ref).
-    const riskLabel = commitApprovalLabel(intent, params, label);
+    // W1-2 + контракт approve: одобрение — видимое имя цели по ref (не склейка хинта) или text/name/title модели.
+    const riskLabel = commitApprovalLabel(intent, params, refApprovalLabel(ctx, params.ref));
     if (risk) {
       const decision = await confirmWebCommit(ctx, place, risk, riskLabel);
       if (decision !== true) return decision;
     }
-    // guard — на ЛЮБОМ сайте (W1, B-5) для интентов, которые жмут цель (клик, play/next по ref, set кнопки, key Enter);
+    // guard — на ЛЮБОМ сайте (W1, B-5) для интентов, которые жмут цель (клик, next/prev, set галочки/списка, key/enter);
     // hover/scroll_to ничего не жмут — без гарда (контракт §7).
     const guard = intentNeedsPageGuard(intent) ? pageGuardFor(place) : undefined;
     // Одобрение привязано к подписи, которую видел владелец: страница сверит её с реальным элементом; без подписи
     // одобрения не шлём вовсе (approvalFields) — страница, узнав коммит, спросит заново.
-    const actParams = guard ? { ...params, guard, ...(risk ? approvalFields(riskLabel) : {}) } : params;
+    const actParams = guard ? { ...params, guard, ...(risk ? approvalFields(riskLabel, params.ref) : {}) } : params;
     try {
       // ЧЕСТНОСТЬ: пробрасываем исход расширения (navigated/already/playing/currentTime) —
       // иначе модель не видит, что play НЕ дал звук (autoplay-гейт), и врёт «готово, играет».
@@ -360,7 +360,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
         const decision = await confirmWebCommit(ctx, place, pageCommitRisk(place, pageLabel), pageLabel);
         if (decision !== true) return decision;
         try {
-          raw = await ctx.ext.tabAct(actUrl, intent, { ...actParams, ...approvalFields(pageLabel) }, actTab);
+          raw = await ctx.ext.tabAct(actUrl, intent, { ...params, guard, ...approvalFields(pageLabel, params.ref) }, actTab); // прежнее одобрение заменяем
         } catch (e2) {
           // Пока владелец думал, кнопка сменилась (страница снова вернула commit_confirm) — не жмём и подпись не
           // пересказываем модели (её задаёт страница, M11).
@@ -530,7 +530,7 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
     // W1-T3: одобрение — только с подписью (text/name/title шага или подпись ref), как у browser_act.
-    const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? approvalFields(commitApprovalLabel(intent, own, label)) : {}) } : own;
+    const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? approvalFields(commitApprovalLabel(intent, own, refApprovalLabel(ctx, ref)), ref) : {}) } : own;
     // Шаг уходит в ОДНОЙ форме — ровно то, что судили гарды §0/§14 (W1-1/W1-T1): нормализованный intent (без action,
     // иначе расширение взяло бы другой), все поля в params; ref на верху = судимый (расширение берёт s.ref раньше
     // params.ref — {ref:"пароль", params:{ref:"поиск"}} судился бы по полю поиска, а печатал в поле пароля).

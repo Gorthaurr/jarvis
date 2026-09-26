@@ -8,6 +8,8 @@
  * коммитили отправку без единого вопроса владельцу. Списки — данные; расширять строкой.
  */
 
+import { comboMentionsEnter } from "./key-combo.js";
+
 // edu — учебная LMS (тест/задание, 26.09); unknown — сайт вкладки не удалось определить (судим строго, fail-closed).
 export type RiskCategory = "bank" | "payment" | "edo" | "gov" | "market" | "social" | "messenger" | "edu" | "unknown";
 
@@ -66,18 +68,13 @@ export function riskyAppCategory(app: string): { category: RiskCategory; human: 
 }
 
 /**
- * Клавиша-коммит: Enter и его сочетания (Ctrl+Enter — «отправить» в Telegram/Discord/почте,
- * Shift+Enter в некоторых клиентах — перенос строки, но в других — отправка; считаем коммитом
- * консервативно). «Return» — синоним Enter у части клавиатурных API.
+ * Клавиша-коммит: основная клавиша Enter/Return с ЛЮБЫМИ модификаторами (Ctrl+Enter — «отправить» в Telegram/Discord/
+ * почте, Alt/Meta/Cmd+Enter — в части клиентов; Shift+Enter где-то перенос строки, где-то отправка — считаем коммитом
+ * консервативно) и в любом порядке («Enter+Ctrl»). Разбор — общий с расширением (key-combo.ts); недействительная
+ * строка с Enter («a+Enter», «Enter+Enter») — тоже коммит: старое расширение нажало бы в ней Enter (W1-ревью р2).
  */
 export function isCommitKeyCombo(combo: string): boolean {
-  const c = combo.trim().toLowerCase().replace(/\s+/g, "");
-  if (!c) return false;
-  const parts = c.split("+");
-  const key = parts[parts.length - 1] ?? "";
-  if (key !== "enter" && key !== "return") return false;
-  const mods = parts.slice(0, -1);
-  return mods.every((m) => m === "ctrl" || m === "control" || m === "shift" || m === "");
+  return comboMentionsEnter(combo);
 }
 
 /**
@@ -90,10 +87,13 @@ export function isCommitKeyCombo(combo: string): boolean {
  * W1-9: синонимы удаления — Remove, Move to trash/bin, «Переместить/перенести в корзину», Deactivate, Close account.
  * Голое «в корзину» НЕ берём: на любом магазине это «Добавить в корзину» (гард страницы стоит на ЛЮБОМ сайте) — вопрос
  * на каждую покупку; удаление в корзину звучит глаголом перемещения, а кнопка «Удалить» ловится основой «удал».
+ * W1-ревью р2 (srv-bypass-6): заказ/покупка (Place your order, Purchase, Complete order, Order now), публичный
+ * комментарий (Comment — голое: лишний вопрос дешевле публичного коммента; «Оставить комментарий»), очистка корзины/
+ * папки (Empty trash, «Очистить корзину/папку»). «Добавить в корзину» по-прежнему НЕ ловим (тест).
  * ⚠️ Литерал — ОДНОЙ строкой `/…/iu;`: его исходник читает стенд расширения (apps/extension/test/cdp-harness.mjs).
  */
 export const COMMIT_WORDS_RE =
-  /(?<![\p{L}])(?:опубликов|разместит|размести|отправ|оплат|заплат|подтвер|провест|провед|подпис|купит|оформ|заказат|перевес|перевод|разослат|удал(?![её]нн|[её]нк|ось)|стерет|publish|post\b|send\b|pay\b|confirm|submit|buy\b|checkout|place order|transfer|sign\b|approve|delete(?!d)|erase\b|remove\b|to\s+(?:the\s+)?(?:trash|bin)\b|(?:перемест|перенес)\p{L}*\s+в\s+корзин|deactivate|close\s+account)/iu;
+  /(?<![\p{L}])(?:опубликов|разместит|размести|отправ|оплат|заплат|подтвер|провест|провед|подпис|купит|оформ|заказат|перевес|перевод|разослат|удал(?![её]нн|[её]нк|ось)|стерет|publish|post\b|send\b|pay\b|confirm|submit|buy\b|checkout|place\s+(?:your\s+)?order|purchas|complete\s+(?:order|purchase)|order\s+now|comment\b|оставит\p{L}*\s+коммент|transfer|sign\b|approve|delete(?!d)|erase\b|remove\b|to\s+(?:the\s+)?(?:trash|bin)\b|(?:перемест|перенес)\p{L}*\s+в\s+корзин|deactivate|close\s+account|empty\s+(?:the\s+)?trash|очист\p{L}*\s+(?:корзин|папк))/iu;
 
 /**
  * Единое «включено» для флагов коммита (`enter`/`submit`) от LLM: true, 1, "true"/"1"/"yes"/"да". Сервер нормализует

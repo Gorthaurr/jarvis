@@ -55,6 +55,11 @@ describe("planCapture — один масштаб на обе оси (W1-T7)", (
     assert.ok(planCapture({ imgW: 800, imgH: 624, viewW: 800, viewH: 600 }).error);
   });
 
+  it("снимок НИЖЕ вьюпорта (инфобар съел 24 px) — тоже отказ, с rect и без (ext-tests-6)", () => {
+    assert.ok(planCapture({ imgW: 800, imgH: 576, viewW: 800, viewH: 600 }).error);
+    assert.ok(planCapture({ imgW: 800, imgH: 576, viewW: 800, viewH: 600, rect: { x: 40, y: 30, w: 100, h: 50 } }).error);
+  });
+
   it("расхождение в пределах округления (≤ 2 px) — кроп по ОДНОМУ масштабу ширины", () => {
     // По высоте масштаб был бы 1202/600 ≈ 2,0033 → sy = 1002: кроп «поехал» бы вниз.
     const p = planCapture({ imgW: 1600, imgH: 1202, viewW: 800, viewH: 600, rect: { x: 40, y: 500, w: 100, h: 90 } });

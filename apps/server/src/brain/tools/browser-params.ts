@@ -5,13 +5,13 @@
  *
  * Модель шлёт поля плоско рядом с intent (схема W1: `browser_act{intent, ref, value}`) или в `params:{…}` (навыки и
  * прежняя форма) — принимаем обе; при конфликте побеждает `params`. Служебные поля §14 (guard/guardApproved/
- * approvedLabel) ставит ТОЛЬКО сервер: от модели их вырезаем, иначе инъекция со страницы велела бы прислать
+ * approvedLabel/approvedRef) ставит ТОЛЬКО сервер: от модели их вырезаем, иначе инъекция со страницы велела бы прислать
  * guardApproved:true.
  */
 
 import { isOnFlag } from "@jarvis/shared";
 
-const SERVER_ONLY = new Set(["guard", "guardApproved", "approvedLabel"]);
+const SERVER_ONLY = new Set(["guard", "guardApproved", "approvedLabel", "approvedRef"]);
 /** Флаги коммита печати: уходят расширению УЖЕ булевыми (LOOP-3) — гейт §14, петля и страница судят одну правду. */
 const COMMIT_FLAGS = ["enter", "submit"] as const;
 

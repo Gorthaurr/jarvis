@@ -110,8 +110,11 @@ export function assessWebCommit(a: {
   // и клиентским рубежом isCommitKeyCombo). Пустая клавиша — Enter (web_act{key} без key).
   const combo = String(p.combo ?? p.key ?? "").trim();
   const keyEnter = intent === "key" && (combo === "" || isCommitKeyCombo(combo));
+  // W1-ревью р2 (srv-bypass-5): встряхивание (shake, клик «обновить…») расширение досылает Enter-фолбэком — в
+  // мессенджере это возможная отправка. Основы — зеркало isShake в tabAct расширения.
+  const shakeEnter = category === "messenger" && (intent === "shake" || (intent === "click" && /встрях|стряхн|обнов/iu.test(String(p.text ?? ""))));
   const commitByKey =
-    (intent === "enter" || intent === "submit" || keyEnter || (intent === "type" && (isOnFlag(p.enter) || isOnFlag(p.submit)))) &&
+    (intent === "enter" || intent === "submit" || keyEnter || shakeEnter || (intent === "type" && (isOnFlag(p.enter) || isOnFlag(p.submit)))) &&
     (category !== "edu" || lmsKeyCommits(url));
   const lmsWords = category === "edu" || category === "unknown"; // неизвестная вкладка может оказаться учебной
   const commitByClick = intent === "click" && (COMMIT_WORDS_RE.test(text) || (lmsWords && parts.some((s) => LMS_COMMIT_RE.test(s))));

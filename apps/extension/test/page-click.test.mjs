@@ -99,9 +99,12 @@ describe("robustClickMain — тест Moodle", { skip: !findChrome() && "нет
     assert.equal(await page.eval("window.__opened"), 0);
   });
 
-  it("гард коммита: после одобрения (guardApproved) клик проходит", async () => {
+  it("гард коммита: после одобрения показанной подписи клик проходит; guardApproved без подписи и ref — не одобрение", async () => {
     await page.open(fixtureUrl("moodle-summary.html"));
-    const r = await click(page, { selector: "#single_button_fin", guard: "отправ|submit", guardApproved: true });
+    const bare = await click(page, { selector: "#single_button_fin", guard: "отправ|submit", guardApproved: true });
+    assert.equal(bare.code, "commit_confirm", JSON.stringify(bare));
+    assert.equal(await page.eval("window.__opened"), 0);
+    const r = await click(page, { selector: "#single_button_fin", guard: "отправ|submit", guardApproved: true, approvedLabel: bare.label });
     assert.equal(r.ok, true);
     assert.equal(await page.eval("window.__opened"), 1);
   });

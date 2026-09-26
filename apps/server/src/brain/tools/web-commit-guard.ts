@@ -29,20 +29,35 @@ export function pageGuardFor(place: WebPlace): string {
 }
 
 /**
- * W1-2/W1-T3: подпись, к которой привязываем одобрение владельца, — из ТЕХ ЖЕ частей, по которым судили риск
- * (text/name/title/подпись ref; у type — подпись поля, не печатаемое). Пустая строка — подписи нет.
+ * W1-2/W1-T3: подпись, к которой привязываем одобрение владельца. Цель по ref — видимое имя из снимка (refApproval,
+ * без selector/role/type: страница сравнивает РАВЕНСТВОМ с частью подписи цели — склейка хинта не совпала бы никогда,
+ * W1-ревью р2 NEW-1); иначе — text/name/title модели (у type — подпись поля, не печатаемое). "" — подписи нет.
  */
-export function commitApprovalLabel(intent: string, params: Record<string, unknown>, refHint?: string): string {
-  return webCommitLabelParts(intent, params, refHint)[0]?.slice(0, 160) ?? "";
+export function commitApprovalLabel(intent: string, params: Record<string, unknown>, refApproval?: string): string {
+  return refApproval?.trim() || (webCommitLabelParts(intent, params)[0] ?? "");
 }
 
 /**
- * Служебные поля одобрения: guardApproved ТОЛЬКО вместе с approvedLabel (страница сверит, что жмёт ту самую подпись).
- * Без подписи одобрения не шлём — страница, узнав коммит, спросит заново (commit_confirm), а не нажмёт что попало.
+ * Служебные поля одобрения (контракт approve): guardApproved ТОЛЬКО вместе с привязкой — approvedLabel (подпись, что
+ * видел владелец) и/или approvedRef (ref цели: идентичность элемента зафиксирована снимком). Без привязки не шлём —
+ * страница, узнав коммит, спросит заново (commit_confirm), а не нажмёт что попало.
  */
-export function approvalFields(label: string): Record<string, unknown> {
+export function approvalFields(label: string, ref?: unknown): Record<string, unknown> {
   const lbl = label.trim();
-  return lbl ? { guardApproved: true, approvedLabel: lbl } : {};
+  const r = typeof ref === "string" && ref.trim() ? ref : "";
+  if (!lbl && !r) return {};
+  return { guardApproved: true, ...(lbl ? { approvedLabel: lbl } : {}), ...(r ? { approvedRef: r } : {}) };
+}
+
+/**
+ * web_act (невидимый браузер, srv-bypass-2): гейт судит ровно то, что исполнит jarvis-browser.act. Клиент берёт поля
+ * только из `params` — у key это `params.key`, по умолчанию Enter (плоское `{key:"Tab"}` и `params.combo` он не читает).
+ * Прочие интенты — params или плоская форма (лишний вопрос дешевле пропуска).
+ */
+export function webActGateParams(input: Record<string, unknown>): Record<string, unknown> {
+  const own = input.params && typeof input.params === "object" && !Array.isArray(input.params) ? (input.params as Record<string, unknown>) : undefined;
+  if (String(input.intent ?? "").trim() !== "key") return own ?? input;
+  return { key: String(own?.key ?? "Enter") };
 }
 
 /**

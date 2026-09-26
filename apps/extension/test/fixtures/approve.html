@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Контракт одобрения §14 и клавиш</title>
+</head>
+<body>
+<main>
+  <!-- Композер мессенджера: подписи без слов-коммитов, отправка — по keydown Enter (как у web.telegram/whatsapp). -->
+  <form id="chat" aria-label="Чат"><textarea id="chatbox" aria-label="Сообщение" placeholder="Написать сообщение…"></textarea></form>
+  <div id="composer" contenteditable="true" role="textbox" aria-label="Текст письма">Привет! Напоминаю: пароль от вайфая сменили</div>
+  <div id="comp2" contenteditable="true" aria-label="Message"></div>
+  <p><label for="pw2">Пароль</label> <input id="pw2" type="text"></p>
+  <button id="pay" type="button">Оплатить заказ</button>
+  <button id="act" type="button" aria-label="Действие">Оплатить заказ</button>
+  <!-- Поиск как на YouTube: поле и кнопка с одной подписью, слов-коммитов нет. -->
+  <form id="yt"><input id="ytq" aria-label="Поиск" placeholder="Введите запрос"><button type="submit" aria-label="Поиск">🔍</button></form>
+  <!-- Кнопко-подобные цели на JS: Space/Enter — их активация. -->
+  <div id="pay2" role="button" tabindex="0">Оплатить 50 000 ₽</div>
+  <ul><li id="del" role="menuitem" tabindex="-1">Удалить навсегда</li></ul>
+  <a id="paylink" href="#paid">Оплатить заказ</a>
+  <!-- Первая кнопка формы безобидна, настоящая отправка — вторая; у второй формы кнопка вне формы (form=id). -->
+  <form id="chk"><input id="holder" type="text" placeholder="Имя на карте"><button id="apply">Применить</button><button type="submit">Оплатить заказ</button></form>
+  <form id="chk2"><input id="holder2" type="text" placeholder="Имя"></form>
+  <button type="submit" form="chk2">Оплатить</button>
+  <button id="nextpay" type="button">Далее: оплатить заказ 50 000 ₽</button>
+  <select id="bulk" aria-label="Действие с письмами"><option>Выберите</option><option>Пометить прочитанным</option><option>Удалить навсегда</option></select>
+  <div id="row" role="button" tabindex="0">Опубликовать профиль <span id="sw" role="switch" aria-checked="false" tabindex="0"></span></div>
+  <button id="long" type="button">Отправить перевод на сумму 500 ₽ получателю Иванову Ивану Ивановичу по номеру телефона +7 900 000-00-00 с комментарием «за обед» и уведомлением</button>
+  <form id="lf"><input id="lfq" type="text" placeholder="Сумма"><button id="longsub" type="submit">Отправить перевод на сумму 500 ₽ получателю Иванову Ивану Ивановичу по номеру телефона +7 900 000-00-00 с комментарием «за обед в среду», уведомлением по СМС, по электронной почте, в мессенджере и в личном кабинете банка</button></form>
+  <div id="keys" tabindex="0">журнал клавиш</div>
+</main>
+<script>
+  window.__c = { chatbox: 0, composer: 0, comp2: 0, pay: 0, act: 0, yt: 0, pay2: 0, del: 0, paylink: 0, chk: 0, chk2: 0, nextpay: 0, bulk: 0, long: 0, lf: 0 };
+  window.__k = [];
+  const on = (id, ev, fn) => document.getElementById(id).addEventListener(ev, fn);
+  const enter = (id) => on(id, "keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) window.__c[id]++; });
+  enter("chatbox"); enter("composer"); enter("comp2"); enter("del"); enter("paylink");
+  for (const id of ["pay", "act", "nextpay", "long"]) on(id, "click", () => window.__c[id]++);
+  on("pay2", "keydown", (e) => { if (e.key === "Enter" || e.key === " ") window.__c.pay2++; });
+  on("paylink", "click", (e) => { e.preventDefault(); window.__c.paylink++; });
+  for (const id of ["yt", "chk", "chk2", "lf"]) on(id, "submit", (e) => { e.preventDefault(); window.__c[id]++; });
+  on("bulk", "change", () => { if (document.getElementById("bulk").value === "Удалить навсегда") window.__c.bulk++; });
+  const sw = document.getElementById("sw");
+  sw.addEventListener("click", (e) => { e.stopPropagation(); sw.setAttribute("aria-checked", sw.getAttribute("aria-checked") === "true" ? "false" : "true"); });
+  on("keys", "keydown", (e) => window.__k.push([e.key, e.ctrlKey, e.shiftKey, e.altKey, e.metaKey].join(",")));
+</script>
+</body>
+</html>
