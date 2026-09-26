@@ -46,16 +46,16 @@ describe("ревью 26.09: гард коммита, select, снимок", { sk
     await page.open(fixtureUrl("plain.html"));
     // Контроль: и «показанный» пароль (type=text + autocomplete=current-password), и составной «billing cc-number».
     await page.eval("document.getElementById('pw').value = 'S3cret!pass'; document.getElementById('pw-shown').value = 'S3cretShown'; document.getElementById('card').value = '4111111111111111'");
-    for (const refMode of [false, true]) {
-      const snap = JSON.stringify(await page.call(fns.inspectPageInPage, "", 200, refMode));
-      assert.ok(!snap.includes("S3cret"), `refMode=${refMode}: пароль в снимке`);
-      assert.ok(!snap.includes("4111111111111111"), `refMode=${refMode}: номер карты в снимке`);
+    for (const query of ["", "пароль"]) {
+      const snap = JSON.stringify(await page.call(fns.inspectPageInPage, query, 200));
+      assert.ok(!snap.includes("S3cret"), `query=«${query}»: пароль в снимке`);
+      assert.ok(!snap.includes("4111111111111111"), `query=«${query}»: номер карты в снимке`);
     }
   });
 
   it("повторяющиеся id карточек: селекторы уникальны или честно помечены ambiguous", async () => {
     await page.open(fixtureUrl("plain.html"));
-    const els = (await page.call(fns.inspectPageInPage, "Видео", 200, false)).elements.filter((e) => e.tag === "a");
+    const els = (await page.call(fns.inspectPageInPage, "Видео", 200)).elements.filter((e) => e.tag === "a");
     assert.equal(els.length, 3);
     for (const e of els) {
       const n = await page.eval(`document.querySelectorAll(${JSON.stringify(e.selector)}).length`);
@@ -80,7 +80,7 @@ describe("ревью 26.09: гард коммита, select, снимок", { sk
 
   it("select по ref: текст варианта важнее value («2» — это вариант с текстом 2, а не value=2)", async () => {
     await page.open(fixtureUrl("plain.html"));
-    const sel = (await page.call(fns.inspectPageInPage, "", 200, true)).elements.find((e) => /#num|num/.test(e.selector) && e.role === "select");
+    const sel = (await page.call(fns.inspectPageInPage, "", 200)).elements.find((e) => /#num|num/.test(e.selector) && e.role === "select");
     assert.ok(sel?.ref, "нет ref у #num");
     const r = await page.call(fns.actByRefIsolated, sel.ref, "select", { option: "2" });
     assert.equal(r.ok, true);

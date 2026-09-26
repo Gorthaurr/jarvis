@@ -112,7 +112,7 @@ async function handle(msg) {
     case "tab.read":
       return tabRead(msg.url ? String(msg.url) : "", msg.tabId, msg.query ? String(msg.query) : "");
     case "tab.inspect":
-      return tabInspect(msg.url ? String(msg.url) : "", msg.query ? String(msg.query) : "", msg.cap, msg.tabId, msg.refMode);
+      return tabInspect(msg.url ? String(msg.url) : "", msg.query ? String(msg.query) : "", msg.cap, msg.tabId);
     case "tab.act":
       return tabAct(msg.url ? String(msg.url) : "", String(msg.intent || ""), msg.params || {}, msg.tabId, msg.refMode);
     case "tab.batch":
@@ -186,14 +186,16 @@ async function tabRead(url, tabId, query) {
 }
 
 /**
- * ГЛАЗА В DOM: снимок интерактивных элементов вкладки (кнопки/ссылки/инпуты) с УСТОЙЧИВЫМИ селекторами,
- * текстом, aria-label, ролью, состоянием. Чтобы модель САМА видела реальную страницу и прицельно
- * действовала browser_act{selector}, а не угадывала. Универсально (любой сайт), без хардкода под сервис.
+ * ГЛАЗА В DOM: снимок интерактивных элементов вкладки (кнопки/ссылки/поля) — у каждого ref (адресация по
+ * идентичности), роль, подпись, состояние и устойчивый селектор-фолбэк. query = find: ранжированный поиск, до 20
+ * лучших по всем фреймам, их ref дописываются в реестр (прежние живы). Поле refMode старого сервера игнорируется —
+ * ref-режим единственный (W1). Универсально (любой сайт), без хардкода под сервис.
  */
-async function tabInspect(url, query, cap, tabId, refMode) {
+async function tabInspect(url, query, cap, tabId) {
   const { tab, loading } = await readyTargetTab(url, tabId);
-  const capN = Number(cap) || 80;
-  const args = [query || "", capN, Boolean(refMode)];
+  const find = String(query || "").trim();
+  const capN = find ? 20 : Number(cap) || 80;
+  const args = [find, capN];
   // ВСЕ фреймы: интерактив часто живёт в iframe (embed-плеер/форма/оплата) — раньше inspect был слеп к ним.
   let frames;
   try {
@@ -205,32 +207,38 @@ async function tabInspect(url, query, cap, tabId, refMode) {
   const results = (frames || []).filter((f) => f && f.result && ((f.frameId || 0) === 0 || !isPrivateHost(f.result.url)));
   results.sort((a, b) => (a.frameId || 0) - (b.frameId || 0)); // top-фрейм первым
   const top = results.find((f) => (f.frameId || 0) === 0);
-  const elements = [];
+  let elements = [];
   const frameList = [];
   let truncated = false;
   for (const f of results) {
     const els = (f.result && f.result.elements) || [];
     if (f.result && f.result.truncated) truncated = true;
     if (!els.length) continue;
-    if ((f.frameId || 0) !== 0) frameList.push({ frameId: f.frameId, url: (f.result && f.result.url) || "", count: els.length });
+    const fid = f.frameId || 0;
+    if (fid !== 0) frameList.push({ frameId: fid, url: (f.result && f.result.url) || "", count: els.length });
     for (const el of els) {
-      if (elements.length >= capN) { truncated = true; break; }
-      // Элемент из iframe несёт frameId — модель передаёт его в browser_act{params.frameId} для точного
-      // попадания. ref frame-scoped: дочерний фрейм → префикс f<frameId> (top остаётся e<gen>_<n>); act
-      // парсит обратно, чтобы адресовать реестр НУЖНОГО фрейма (у каждого фрейма свой __jarvisRefs/gen).
-      const fid = f.frameId || 0;
+      // ref frame-scoped: дочерний фрейм → префикс f<frameId> (у каждого фрейма свой реестр); act парсит обратно.
       if (fid !== 0) {
-        if (el.ref) el.ref = "f" + fid + el.ref;
+        el.ref = "f" + fid + el.ref;
         el.frameId = fid;
       }
       elements.push(el);
     }
-    if (elements.length >= capN) break;
   }
-  elements.forEach((el, i) => { el.idx = i; }); // сквозная нумерация после слияния фреймов
+  // find: лучшие по всем фреймам (каждый фрейм отдал до 20 со своим рангом); снимок: top первым до капа.
+  if (find) elements.sort((a, b) => (b.score || 0) - (a.score || 0));
+  if (elements.length > capN) {
+    elements = elements.slice(0, capN);
+    truncated = true;
+  }
+  elements.forEach((el, i) => {
+    el.idx = i; // сквозная нумерация после слияния фреймов
+    delete el.score;
+  });
   return {
     url: (top && top.result && top.result.url) || tab.url || "",
     title: (top && top.result && top.result.title) || tab.title || "",
+    ...(top && top.result && top.result.gen ? { gen: top.result.gen } : {}),
     count: elements.length,
     truncated,
     frames: frameList,
@@ -240,16 +248,15 @@ async function tabInspect(url, query, cap, tabId, refMode) {
 }
 
 /**
- * Исполняется ВНУТРИ страницы (self-contained — инжектится через executeScript, НЕ может ссылаться на
- * модули; все хелперы инлайн). Собирает интерактив + устойчивый селектор + accessibleName + СОСТОЯНИЕ
- * (checked/expanded/pressed/selected/value/[ПУСТО]). refMode → дополнительно минтит ref-реестр в
- * globalThis.__jarvisRefs (ISOLATED-world: переживает executeScript и LLM-раунды, умирает на навигации →
- * ref честно протухает сам). ref-адресация устойчивее хрупкого nth-of-type селектора к ре-рендеру SPA.
+ * Исполняется ВНУТРИ страницы, в ИЗОЛИРОВАННОМ мире расширения (self-contained — executeScript сериализует функцию,
+ * внешние ссылки недоступны). Элемент: {ref, tag, type?, role, name, text?, label?, secret?, state, selector,
+ * ambiguous?, href?}; state — value/empty/checked/selected/expanded/pressed/disabled/options.
+ * РЕЕСТР ref (globalThis.__jarvisRefs, живёт с документом): тот же элемент → тот же ref между снимками (WeakMap), ref
+ * жив, пока жив элемент; gen — метка ДОКУМЕНТА (ref со старой страницы честно протухает, не попадает в тёзку новой).
+ * query (find) — ранг по словам запроса и синонимам ролей ru/en, до cap лучших (score — для слияния фреймов).
  */
-function inspectPageInPage(query, cap, refMode) {
+function inspectPageInPage(query, cap) {
   cap = cap > 0 ? cap : 80;
-  const q = String(query || "").toLowerCase();
-  const lc = (s) => String(s || "").toLowerCase();
   const visible = (el) => {
     if (!el || el.nodeType !== 1) return false;
     const r = el.getClientRects();
@@ -262,7 +269,7 @@ function inspectPageInPage(query, cap, refMode) {
   const SEL =
     'a[href],button,input,select,textarea,summary,[role="button"],[role="link"],[role="tab"],' +
     '[role="menuitem"],[role="option"],[role="checkbox"],[role="radio"],[role="switch"],' +
-    '[role="combobox"],[contenteditable="true"],[onclick],[tabindex]:not([tabindex="-1"]),[aria-label]';
+    '[role="combobox"],[role="textbox"],[role="searchbox"],[contenteditable="true"],[onclick],[tabindex]:not([tabindex="-1"]),[aria-label]';
   const esc = (s) => (window.CSS && CSS.escape ? CSS.escape(String(s)) : String(s).replace(/["\\\]]/g, "\\$&"));
   const stableId = (id) => id && /^[A-Za-z][\w-]*$/.test(id) && !/\d{4,}/.test(id) && !/[a-f0-9]{8,}/i.test(id);
   // Стабильный ЯКОРЬ узла: id → data-* (расширенный список test-атрибутов) → aria-label. БЕЗ хеш-классов.
@@ -276,9 +283,6 @@ function inspectPageInPage(query, cap, refMode) {
     if (al) return node.tagName.toLowerCase() + '[aria-label="' + esc(al) + '"]';
     return null;
   };
-  // Устойчивый селектор: якорь узла → name/placeholder → nth-of-type цепочка, АНКОРЁННАЯ к ближайшему
-  // стабильному предку (фикс мёртвого break: раньше seg никогда не нёс #/атрибут → цепочка не якорилась
-  // и ломалась на ре-рендере). refMode делает основной адресацией ref, селектор — fallback.
   // Селектор годится, только если в своём корне он указывает РОВНО на этот узел. Боевой прогон 26.09 (Moodle): все
   // radio вопроса получали один input[name=…] → клик по «варианту c» попадал в «a»; у галочки перед ней hidden-
   // двойник с тем же name. Неоднозначный якорь → дальше по лестнице (type/value → nth-of-type цепочка).
@@ -328,45 +332,59 @@ function inspectPageInPage(query, cap, refMode) {
     }
     return parts.join(" > ");
   };
-  // Ревью 26.09 (HIGH): значение СЕКРЕТНОГО поля (пароль, одноразовый код, карта) не отдаём ни в name, ни в text —
-  // маскировался только state.value, а введённый владельцем пароль уходил в контекст модели и логи открытым текстом.
-  // Контроль 26.09: «показать пароль» делает поле type=text, а autocomplete бывает составным («billing cc-number») —
-  // судим и по токенам autocomplete, не только по type.
+  // Селектор СКВОЗЬ shadow-границы: «host >>> inner» (act-резолвер понимает эту форму).
+  const selForDeep = (node) => {
+    const chain = [];
+    let cur = node;
+    for (let depth = 0; cur && depth < 5; depth += 1) {
+      chain.unshift(selFor(cur));
+      const root = cur.getRootNode && cur.getRootNode();
+      if (root && root.host) cur = root.host;
+      else break;
+    }
+    return chain.join(" >>> ");
+  };
+  // СЕКРЕТНОЕ поле (пароль, одноразовый код, карта): значение не отдаём ни в name, ни в text, ни в state — только
+  // «•••». «Показать пароль» делает поле type=text, autocomplete бывает составным («billing cc-number») — судим и
+  // по токенам autocomplete. ТА ЖЕ функция стоит в elementActIsolated (§0: туда не печатаем) и в pageActInPage.
   const isSecret = (el) =>
     el.tagName === "INPUT" &&
     (/^password$/i.test(el.getAttribute("type") || "") ||
       /(?:^|\s)(?:current-password|new-password|one-time-code|cc-[a-z-]+)(?:\s|$)/i.test(el.getAttribute("autocomplete") || ""));
   const valueOf = (el) => (isSecret(el) ? (el.value ? "•••" : "") : String(el.value || ""));
-  // accessibleName — прагматичный subset accname-1.2 (aria-labelledby → aria-label → <label> → текст →
-  // placeholder/title). Для выбора элемента моделью; при refMode адресация всё равно по идентичности ref.
-  const axName = (el) => {
-    const lb = el.getAttribute("aria-labelledby");
-    if (lb) {
-      const t = lb.split(/\s+/).map((id) => { try { const nd = document.getElementById(id); return nd ? (nd.innerText || nd.getAttribute("aria-label") || "").trim() : ""; } catch { return ""; } }).filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-      if (t) return t.slice(0, 80);
-    }
-    const al = el.getAttribute("aria-label");
-    if (al && al.trim()) return al.trim().slice(0, 80);
-    if (el.id) { try { const lab = document.querySelector('label[for="' + esc(el.id) + '"]'); if (lab && (lab.innerText || "").trim()) return lab.innerText.trim().replace(/\s+/g, " ").slice(0, 80); } catch { /* ignore */ } }
-    const lab2 = el.closest && el.closest("label");
-    if (lab2 && (lab2.innerText || "").trim()) return lab2.innerText.trim().replace(/\s+/g, " ").slice(0, 80);
-    const txt = (el.innerText || valueOf(el)).replace(/\s+/g, " ").trim();
-    if (txt) return txt.slice(0, 80);
-    return ((el.getAttribute("placeholder") || el.getAttribute("title") || "").trim()).slice(0, 80);
+  const clip = (s, n) => String(s || "").replace(/\s+/g, " ").trim().slice(0, n || 80);
+  const byIds = (ids) => String(ids || "").split(/\s+/).map((id) => { const nd = id && document.getElementById(id); return nd ? nd.innerText || nd.getAttribute("aria-label") || "" : ""; }).join(" ");
+  // Видимая подпись поля: aria-labelledby → <label for> → обёртка <label>.
+  const labelOf = (el) => {
+    const t = clip(byIds(el.getAttribute("aria-labelledby")));
+    if (t) return t;
+    if (el.id) { try { const lab = document.querySelector('label[for="' + esc(el.id) + '"]'); if (lab && clip(lab.innerText)) return clip(lab.innerText); } catch { /* ignore */ } }
+    const wrap = el.closest && el.closest("label");
+    return wrap ? clip(wrap.innerText) : "";
   };
-  // СОСТОЯНИЕ элемента: value/[ПУСТО] у полей + checked/selected/expanded/pressed/disabled. Раньше снимок
-  // видел только disabled → вопрос «тумблер включён?» требовал screen_capture. Теперь состояние в снимке.
+  // accessibleName — прагматичный subset accname-1.2 (aria-labelledby → aria-label → <label> → текст → placeholder/title).
+  const axName = (el) => {
+    const lb = clip(byIds(el.getAttribute("aria-labelledby")));
+    if (lb) return lb;
+    const al = clip(el.getAttribute("aria-label"));
+    if (al) return al;
+    const lab = labelOf(el);
+    if (lab) return lab;
+    const txt = clip(el.innerText || valueOf(el));
+    if (txt) return txt;
+    return clip(el.getAttribute("placeholder") || el.getAttribute("title"));
+  };
+  // СОСТОЯНИЕ: value/[ПУСТО] у полей + checked/selected/expanded/pressed/disabled; у <select> — выбранное и варианты.
   const stateOf = (el) => {
     const st = {};
     const tag = el.tagName;
     const type = (el.getAttribute("type") || "").toLowerCase();
-    if (/^(INPUT|TEXTAREA)$/.test(tag) || el.isContentEditable) {
-      const v = el.isContentEditable ? (el.innerText || "") : (el.value || "");
+    if ((/^(INPUT|TEXTAREA)$/.test(tag) && !/^(checkbox|radio|submit|button|reset|image|file|hidden)$/.test(type)) || el.isContentEditable) {
+      const v = el.isContentEditable ? el.innerText || "" : el.value || "";
       st.value = isSecret(el) ? (v ? "•••" : "") : v.slice(0, 60);
       if (!v) st.empty = true;
     }
     if (type === "checkbox" || type === "radio") st.checked = Boolean(el.checked);
-    // Выпадающий список (вопрос «на соответствие»): что выбрано и из чего выбирать — для browser_act{select}.
     if (tag === "SELECT") {
       const opt = el.options[el.selectedIndex];
       st.value = opt ? String(opt.text || "").trim().slice(0, 60) : "";
@@ -379,13 +397,30 @@ function inspectPageInPage(query, cap, refMode) {
     if (el.disabled || el.getAttribute("aria-disabled") === "true") st.disabled = true;
     return st;
   };
-  // SHADOW DOM: querySelectorAll не заглядывает в открытые shadow root'ы (веб-компоненты) — обходим
-  // дерево рекурсивно, иначе половина интерактива современных сайтов невидима «глазам».
+  // Вид элемента для find (синонимы ролей): роль → тег/тип.
+  const kindOf = (el) => {
+    const r = String(el.getAttribute("role") || "").toLowerCase();
+    const R = { searchbox: "textbox", listbox: "combobox", menuitemcheckbox: "checkbox", menuitemradio: "radio" };
+    if (/^(button|link|checkbox|radio|switch|tab|menuitem|option|combobox|textbox)$/.test(r)) return r;
+    if (R[r]) return R[r];
+    const tag = el.tagName;
+    const type = String(el.getAttribute("type") || "").toLowerCase();
+    if (tag === "BUTTON" || tag === "SUMMARY") return "button";
+    if (tag === "A") return "link";
+    if (tag === "SELECT") return "combobox";
+    if (tag === "TEXTAREA" || el.isContentEditable) return "textbox";
+    if (tag === "INPUT") {
+      if (type === "checkbox" || type === "radio") return type;
+      return /^(submit|button|reset|image)$/.test(type) ? "button" : "textbox";
+    }
+    return "other";
+  };
+  // SHADOW DOM: querySelectorAll не заглядывает в открытые shadow root'ы — обходим дерево рекурсивно.
   const collectDeep = () => {
     const found = [];
     const walk = (root) => {
       let list = [];
-      try { list = root.querySelectorAll(SEL); } catch { /* битый селектор невозможен, страховка */ }
+      try { list = root.querySelectorAll(SEL); } catch { /* страховка */ }
       for (const el of list) found.push(el);
       let all = [];
       try { all = root.querySelectorAll("*"); } catch { /* ignore */ }
@@ -394,76 +429,113 @@ function inspectPageInPage(query, cap, refMode) {
     walk(document);
     return found;
   };
-  // Селектор СКВОЗЬ shadow-границы: «host >>> inner» (act-резолвер понимает эту форму). Элемент вне
-  // shadow → обычный селектор (одно звено).
-  const selForDeep = (node) => {
-    const chain = [];
-    let cur = node;
-    for (let depth = 0; cur && depth < 5; depth += 1) {
-      chain.unshift(selFor(cur));
-      const root = cur.getRootNode && cur.getRootNode();
-      if (root && root.host) cur = root.host;
-      else break;
-    }
-    return chain.join(" >>> ");
-  };
-  // ref-реестр в ISOLATED-world (только refMode): новый gen на каждый снимок, старая map отбрасывается
-  // (detached-узлы не копятся). Инкремент per-frame (allFrames инжектит функцию в каждый фрейм отдельно) —
-  // SW добавит префикс f<frameId>; ref несёт СВОЙ gen → act сам ловит устаревший снимок (ref_stale).
-  let REG = null;
-  let gen = 0;
-  if (refMode) {
-    REG = globalThis.__jarvisRefs || (globalThis.__jarvisRefs = { gen: 0, map: null });
-    REG.gen += 1;
-    gen = REG.gen;
-    REG.map = new Map();
+  // Реестр ref документа: старый формат (без rev) пересоздаётся; отсоединённые узлы выметаются на каждом снимке.
+  let REG = globalThis.__jarvisRefs;
+  if (!REG || !(REG.map instanceof Map) || !REG.rev) {
+    REG = globalThis.__jarvisRefs = { gen: 10000 + Math.floor(Math.random() * 90000), map: new Map(), rev: new WeakMap(), next: 0 };
   }
-  const nodes = collectDeep();
+  for (const [k, v] of REG.map) if (!v || !v.isConnected) REG.map.delete(k);
+  const refFor = (el) => {
+    const old = REG.rev.get(el);
+    if (old && REG.map.get(old) === el) return old;
+    const ref = "e" + REG.gen + "_" + REG.next++;
+    REG.map.set(ref, el);
+    REG.rev.set(el, ref);
+    return ref;
+  };
+  // find: токены запроса (свёртка регистра/ё/пунктуации), слова ролей → вид элемента, прочее — по подписи.
+  const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const ROLE_WORDS = [
+    [/^(кнопк\p{L}*|button|btn)$/u, ["button"]],
+    [/^(пол[еяюи]|input|textbox|textarea|field|инпут\p{L}*|ввод\p{L}*|строк\p{L}*)$/u, ["textbox"]],
+    [/^(галочк\p{L}*|чекбокс\p{L}*|checkbox|флаж\p{L}*|флажок)$/u, ["checkbox"]],
+    [/^(переключател\p{L}*|radio|радио\p{L}*)$/u, ["radio", "switch"]],
+    [/^(тумблер\p{L}*|switch|toggle)$/u, ["switch", "checkbox"]],
+    [/^(ссылк\p{L}*|link)$/u, ["link"]],
+    [/^(список|списк\p{L}*|select|combobox|dropdown|выпадающ\p{L}*)$/u, ["combobox"]],
+    [/^(вкладк\p{L}*|tab)$/u, ["tab"]],
+    [/^(меню|menuitem|пункт\p{L}*|option)$/u, ["menuitem", "option"]],
+    [/^(вариант\p{L}*)$/u, ["radio", "option", "checkbox"]],
+  ];
+  const STOP = new Set(["на", "в", "во", "для", "по", "с", "со", "к", "и", "или", "the", "a", "an", "to", "of", "for", "on", "in", "with"]);
+  const qTok = fold(query).split(" ").filter((t) => t && !STOP.has(t));
+  const kinds = new Set();
+  const words = [];
+  for (const t of qTok) {
+    const hit = ROLE_WORDS.find(([re]) => re.test(t));
+    if (hit) hit[1].forEach((k) => kinds.add(k));
+    else words.push(t);
+  }
+  const prefix = (a, b) => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i += 1; return i; };
+  const scoreOf = (hay, name, kind) => {
+    const ws = hay.split(" ").filter(Boolean);
+    let s = 0;
+    let hits = 0;
+    for (const t of words) {
+      let w = 0;
+      if (ws.includes(t)) w = 3;
+      else if (t.length >= 3 && ws.some((x) => x.startsWith(t) || (x.length >= 3 && t.startsWith(x)))) w = 2;
+      else if (t.length >= 5 && ws.some((x) => prefix(x, t) >= Math.max(4, Math.min(x.length, t.length) - 2))) w = 1.5; // словоформа
+      else if (t.length >= 4 && hay.includes(t)) w = 1;
+      if (w) hits += 1;
+      s += w;
+    }
+    if (words.length && !hits) return 0;
+    if (words.length && hits === words.length) s += 2;
+    if (words.length && fold(name) === words.join(" ")) s += 3;
+    if (kinds.size) {
+      if (kinds.has(kind)) s += 2;
+      else if (!words.length) return 0;
+      else s -= 1;
+    }
+    return s > 0 ? s : 0;
+  };
+  const finding = qTok.length > 0;
   const seen = new Set();
-  const out = [];
-  let truncated = false;
-  for (const el of nodes) {
+  const cands = [];
+  for (const el of collectDeep()) {
     if (seen.has(el)) continue;
     seen.add(el);
     if (!visible(el)) continue;
-    const role = el.getAttribute("role") || el.tagName.toLowerCase();
     const name = axName(el);
-    const aria = el.getAttribute("aria-label") || "";
-    const text = (el.innerText || valueOf(el) || el.getAttribute("title") || "").replace(/\s+/g, " ").trim().slice(0, 80);
-    if (q && !(lc(name) + " " + lc(text) + " " + lc(aria) + " " + lc(role)).includes(q)) continue;
-    if (out.length >= cap) {
-      truncated = true;
-      break;
+    const isField = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+    const text = isField ? "" : clip(el.innerText || el.getAttribute("title"));
+    const label = isField || /^(radio|checkbox|switch|combobox|textbox)$/.test(el.getAttribute("role") || "") ? labelOf(el) : "";
+    const kind = kindOf(el);
+    let score = 0;
+    if (finding) {
+      const hay = fold([name, text, label, el.getAttribute("aria-label"), el.getAttribute("placeholder"), el.getAttribute("title"), isField && !isSecret(el) && el.type !== "hidden" ? el.value : ""].join(" "));
+      score = scoreOf(hay, name, kind);
+      if (!score) continue;
     }
-    const state = stateOf(el);
-    const selector = selForDeep(el);
-    // Селектор без shadow-звеньев, который бьёт не только в этот узел, — честно помечаем: клик по нему попадёт в первый.
-    const amb = !selector.includes(">>>") && !uniqueIn(el, selector) ? { ambiguous: true } : {};
-    if (refMode) {
-      // Компактная форма: ref (адресация по идентичности) + role + name + state + селектор-fallback.
-      const ref = "e" + gen + "_" + out.length;
-      REG.map.set(ref, el);
-      out.push({ idx: out.length, ref, role, name: name || null, state, selector, ...amb, href: el.tagName === "A" ? el.getAttribute("href") : null });
-    } else {
-      // Legacy-форма (refMode off) сохранена бит-в-бит + добавлено state (аддитивно, поведение не меняет).
-      // label — подпись поля/варианта (26.09): у radio текст = value «0/1/2», модель не знала, какой вариант какой.
-      const isCtl = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || /^(radio|checkbox|switch|combobox)$/.test(el.getAttribute("role") || "");
-      out.push({
-        idx: out.length,
-        tag: el.tagName.toLowerCase(),
-        role,
-        text,
-        ...(isCtl && name && name !== text ? { label: name } : {}),
-        aria: aria.slice(0, 80) || null,
-        selector,
-        ...amb,
-        disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
-        state,
-        href: el.tagName === "A" ? el.getAttribute("href") : null,
-      });
-    }
+    cands.push({ el, name, text, label, score });
   }
-  return { url: location.href, title: document.title || "", count: out.length, truncated, gen, elements: out };
+  if (finding) cands.sort((a, b) => b.score - a.score); // стабильная сортировка: при равенстве — порядок документа
+  const truncated = cands.length > cap;
+  const out = [];
+  for (const c of cands.slice(0, cap)) {
+    const el = c.el;
+    const selector = selForDeep(el);
+    const type = el.tagName === "INPUT" ? String(el.getAttribute("type") || "text").toLowerCase() : "";
+    const href = el.tagName === "A" ? el.getAttribute("href") : null;
+    out.push({
+      ref: refFor(el),
+      tag: el.tagName.toLowerCase(),
+      ...(type ? { type } : {}),
+      role: el.getAttribute("role") || el.tagName.toLowerCase(),
+      name: c.name || null,
+      ...(c.text && c.text !== c.name ? { text: c.text } : {}),
+      ...(c.label && c.label !== c.name ? { label: c.label } : {}),
+      ...(isSecret(el) ? { secret: true } : {}),
+      state: stateOf(el),
+      selector,
+      // Селектор без shadow-звеньев, который бьёт не только в этот узел, — честно помечаем: клик по нему попадёт в первый.
+      ...(!selector.includes(">>>") && !uniqueIn(el, selector) ? { ambiguous: true } : {}),
+      ...(href ? { href } : {}),
+      ...(finding ? { score: c.score } : {}),
+    });
+  }
+  return { url: location.href, title: document.title || "", count: out.length, truncated, gen: REG.gen, elements: out };
 }
 
 /**
@@ -1123,7 +1195,7 @@ function stampRefIsolated(localRef, nonce) {
   if (!REG || !REG.map) return { ok: false, code: "ref_stale", error: "нет реестра снимка (страница перезагрузилась) — сделай browser_inspect заново" };
   const m = /^e(\d+)_/.exec(String(localRef));
   const gen = m ? Number(m[1]) : -1;
-  if (REG.gen !== gen) return { ok: false, code: "ref_stale", error: "ref из устаревшего снимка — сделай browser_inspect заново" };
+  if (REG.gen !== gen) return { ok: false, code: "ref_stale", error: "ref_stale: ref с прежней страницы (документ сменился) — сделай browser_inspect заново" };
   const el = REG.map.get(localRef);
   if (!el || !el.isConnected) return { ok: false, code: "ref_stale", error: "элемент исчез со страницы — сделай browser_inspect заново" };
   try { el.setAttribute("data-jarvis-act", String(nonce)); } catch { return { ok: false, error: "не смог пометить элемент для клика" }; }
@@ -1167,7 +1239,7 @@ async function actByRefIsolated(localRef, intent, params) {
   if (!REG || !REG.map) return { ok: false, code: "ref_stale", error: "нет реестра снимка — сделай browser_inspect заново" };
   const m = /^e(\d+)_/.exec(String(localRef));
   const gen = m ? Number(m[1]) : -1;
-  if (REG.gen !== gen) return { ok: false, code: "ref_stale", error: "ref из устаревшего снимка — сделай browser_inspect заново" };
+  if (REG.gen !== gen) return { ok: false, code: "ref_stale", error: "ref_stale: ref с прежней страницы (документ сменился) — сделай browser_inspect заново" };
   const el = REG.map.get(localRef);
   if (!el || !el.isConnected) return { ok: false, code: "ref_stale", error: "элемент исчез со страницы — сделай browser_inspect заново" };
   const setNativeValue = (node, val) => {

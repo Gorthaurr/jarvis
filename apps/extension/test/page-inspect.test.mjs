@@ -11,7 +11,7 @@ describe("inspect на обычной странице", { skip: !findChrome() &
   after(async () => { await page?.close(); });
 
   it("одноимённые поля в двух формах получают РАЗНЫЕ селекторы, каждый — ровно на своё поле", async () => {
-    const els = (await page.call(fns.inspectPageInPage, "", 80, false)).elements.filter((e) => e.tag === "input" && e.label === "Город");
+    const els = (await page.call(fns.inspectPageInPage, "", 80)).elements.filter((e) => e.tag === "input" && e.name === "Город");
     assert.equal(els.length, 2, JSON.stringify(els));
     const forms = [];
     for (const { selector: s } of els) {
@@ -27,7 +27,7 @@ describe("inspect/select/read на тесте Moodle", { skip: !findChrome() && 
   before(async () => { page = await launchPage(); await page.open(fixtureUrl("moodle-attempt.html")); });
   after(async () => { await page?.close(); });
 
-  const snap = async (refMode = false) => (await page.call(fns.inspectPageInPage, "", 80, refMode)).elements;
+  const snap = async () => (await page.call(fns.inspectPageInPage, "", 80)).elements;
 
   it("у вариантов одного вопроса РАЗНЫЕ селекторы, и каждый указывает ровно на свой вариант", async () => {
     await page.open(fixtureUrl("moodle-attempt.html"));
@@ -41,22 +41,22 @@ describe("inspect/select/read на тесте Moodle", { skip: !findChrome() && 
     }
   });
 
-  it("в обычном (не ref) снимке у варианта видна его подпись, а не value «0/1/2»", async () => {
+  it("у варианта в снимке видна его подпись (name), а не value «0/1/2»", async () => {
     const els = await snap();
-    const labels = els.filter((e) => e.tag === "input" && e.label).map((e) => e.label);
+    const labels = els.filter((e) => e.tag === "input" && e.name).map((e) => e.name);
     assert.ok(labels.some((l) => /Париж/u.test(l)), JSON.stringify(labels));
   });
 
   it("клик по селектору из снимка выбирает именно третий вариант", async () => {
     await page.open(fixtureUrl("moodle-attempt.html"));
-    const s = (await snap()).find((e) => e.tag === "input" && e.label && /Париж/u.test(e.label)).selector;
+    const s = (await snap()).find((e) => e.tag === "input" && e.name && /Париж/u.test(e.name)).selector;
     await page.call(fns.robustClickMain, { selector: s });
     assert.equal(await page.eval("document.getElementById('q145678:1_answer2').checked"), true);
   });
 
   it("галочка с hidden-двойником: селектор бьёт в checkbox, а не в скрытый input", async () => {
     await page.open(fixtureUrl("moodle-attempt.html"));
-    const el = (await snap()).find((e) => e.tag === "input" && e.label && /(^|\s)7$/u.test(e.label.trim()));
+    const el = (await snap()).find((e) => e.tag === "input" && e.name && /(^|\s)7$/u.test(e.name.trim()));
     assert.ok(el, "нет галочки «7» в снимке");
     await page.call(fns.robustClickMain, { selector: el.selector });
     assert.equal(await page.eval("document.getElementById('q145678:2_choice1').checked"), true);
@@ -85,9 +85,9 @@ describe("inspect/select/read на тесте Moodle", { skip: !findChrome() && 
     assert.match(r.error, /Мадрид/u);
   });
 
-  it("select по ref (ref-режим): вариант ставится по тексту, readback — выбранный текст", async () => {
+  it("select по ref: вариант ставится по тексту, readback — выбранный текст", async () => {
     await page.open(fixtureUrl("moodle-attempt.html"));
-    const els = (await page.call(fns.inspectPageInPage, "", 80, true)).elements;
+    const els = (await page.call(fns.inspectPageInPage, "", 80)).elements;
     const sel = els.find((e) => e.role === "select");
     assert.ok(sel?.ref, JSON.stringify(els.map((e) => e.role)));
     const r = await page.call(fns.actByRefIsolated, sel.ref, "select", { option: "Мадрид" });
