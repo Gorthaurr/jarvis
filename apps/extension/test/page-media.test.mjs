@@ -42,3 +42,33 @@ describe("B-6: назад/вперёд на странице с плеером �
     await assert.rejects(env.tabAct("", "forward", {}, 1), (e) => e.code === "no_history");
   });
 });
+
+describe("B-13: next/prev — кнопка по целому слову, без подмены перемоткой", { skip: !findChrome() && "нет Chrome" }, () => {
+  let page;
+  before(async () => { page = await launchPage(); });
+  after(async () => { await page?.close(); });
+
+  it("prev жмёт «Предыдущий трек», а не кнопку «Предложения» (стоит раньше в DOM)", async () => {
+    await page.open(fixtureUrl("media.html"));
+    const { env } = swOnPage(page);
+    await env.tabAct("", "prev", {}, 1);
+    assert.equal(await page.eval("window.__c.prev"), 1);
+    assert.equal(await page.eval("window.__c.offers"), 0);
+  });
+
+  it("next жмёт «Следующий трек» ровно один раз", async () => {
+    await page.open(fixtureUrl("media.html"));
+    const { env } = swOnPage(page);
+    await env.tabAct("", "next", {}, 1);
+    assert.equal(await page.eval("window.__c.next"), 1);
+  });
+
+  it("кнопки переключения нет — честный провал, а не «ok» с перемоткой на 10 с", async () => {
+    await page.open(fixtureUrl("media.html"));
+    await page.eval("document.querySelector('nav').remove()");
+    for (let i = 0; i < 100 && !(await page.eval("document.getElementById('player').duration > 0")); i++) await new Promise((r) => setTimeout(r, 50));
+    const { env } = swOnPage(page);
+    await assert.rejects(env.tabAct("", "next", {}, 1), (e) => e.code === "not_found");
+    assert.equal(await page.eval("document.getElementById('player').currentTime"), 0);
+  });
+});

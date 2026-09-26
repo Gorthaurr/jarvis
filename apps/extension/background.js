@@ -2081,10 +2081,13 @@ function readPageInPage(query) {
   return { title: document.title || "", url: location.href, text: (prefix + text).slice(0, 8000), headings, filtered, ...(media ? { media } : {}) };
 }
 
-/** Исполняется ВНУТРИ страницы: действие по интенту (self-contained, без внешних ссылок). async — play ждёт исход. */
+/**
+ * Исполняется ВНУТРИ страницы (изолированный мир, self-contained): scroll, seek, next/prev, readMedia, getValue.
+ * Клик, ввод, клавиши и back/forward живут в robustClickMain / elementActIsolated / historyNav — здесь были их
+ * недостижимые дубли (B-13: play/pause/click/type/select/enter с двойным кликом и хардкодом Яндекса) — удалены.
+ */
 async function pageActInPage(intent, params) {
   const P = params || {};
-  const lc = (s) => String(s || "").toLowerCase();
   const visible = (el) => {
     if (!el) return false;
     const r = el.getClientRects();
@@ -2094,35 +2097,7 @@ async function pageActInPage(intent, params) {
     const b = el.getBoundingClientRect();
     return b.width > 1 && b.height > 1;
   };
-  // РОБАСТ-матч по тексту (зеркало packages/shared/src/ui-match.ts bestTextMatch): голый .includes()
-  // давал ложные попадания — «удалить».includes(«да»)===true → «нажми да» кликало «Удалить». fold
-  // (регистр/пунктуация/ё) с обеих сторон; короткий запрос (≤3 симв.) — ТОЛЬКО точно/целым словом
-  // (никакой подстроки), подстрока — лишь для запросов ≥4. Скоринг: точное>слово>префикс>подстрока.
-  const foldTxt = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/[.,!?;:()"'«»\-—–]+/g, " ").replace(/\s+/g, " ").trim();
-  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const scoreText = (q, hay) => {
-    if (!q || !hay) return 0;
-    if (hay === q) return 100; // точное
-    if (new RegExp("(^| )" + escRe(q) + "( |$)").test(hay)) return 80; // целое слово
-    const short = q.length <= 3;
-    if (!short && hay.startsWith(q)) return 60; // префикс (не для коротких)
-    if (!short && q.length >= 4 && hay.includes(q)) return 30; // подстрока — лишь для ≥4
-    return 0;
-  };
-  // SHADOW DOM: кандидаты сквозь открытые shadow root'ы + селектор « host >>> inner » из browser_inspect.
-  const deepAll = (sel) => {
-    const out = [];
-    const walk = (root) => {
-      let list = [];
-      try { list = root.querySelectorAll(sel); } catch { /* ignore */ }
-      for (const e of list) out.push(e);
-      let all = [];
-      try { all = root.querySelectorAll("*"); } catch { /* ignore */ }
-      for (const h of all) if (h.shadowRoot) walk(h.shadowRoot);
-    };
-    walk(document);
-    return out;
-  };
+  // Селектор из browser_inspect, в т.ч. сквозь shadow DOM (« host >>> inner »).
   const bySelector = (sel) => {
     const parts = String(sel).split(/\s*>>>\s*/);
     let scope = document;
@@ -2133,18 +2108,6 @@ async function pageActInPage(intent, params) {
       scope = el.shadowRoot || el;
     }
     return el;
-  };
-  const byText = (t) => {
-    const q = foldTxt(t);
-    if (!q) return null;
-    let best = null;
-    let bestScore = 0;
-    for (const e of deepAll("a,button,[role=button],[role=link],[role=tab],[aria-label],[data-test-id]")) {
-      if (!visible(e)) continue;
-      const s = scoreText(q, foldTxt((e.innerText || "") + " " + (e.getAttribute("aria-label") || "") + " " + (e.title || "")));
-      if (s > bestScore) { bestScore = s; best = e; }
-    }
-    return best;
   };
   // ОСНОВНОЙ плеер = самый КРУПНЫЙ ВИДИМЫЙ video/audio (ревью 2026-07-15): раньше брали ПЕРВЫЙ в DOM →
   // 1×1-трекер / hero-луп в начале страницы перехватывал readMedia (wait_for browser читал не то видео →
@@ -2173,74 +2136,6 @@ async function pageActInPage(intent, params) {
       return (a.muted ? 1 : 0) - (b.muted ? 1 : 0);
     })[0];
   };
-  // НАСТОЯЩИЙ клик: SPA Яндекса игнорировал синтетический el.click() («страница действие не отдаёт» —
-  // прямо из лога). Шлём полную последовательность pointer/mouse-событий по реальной кнопке (closest
-  // button/role), как живой указатель — тогда обработчики фреймворка срабатывают.
-  const realClick = (node) => {
-    const el = (node.closest && node.closest("button,[role=button],a,[role=link],[role=tab]")) || node;
-    el.scrollIntoView({ block: "center" });
-    const r = el.getBoundingClientRect();
-    const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
-    for (const type of ["pointerover", "pointerenter", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-      try {
-        const Ctor = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
-        el.dispatchEvent(new Ctor(type, o));
-      } catch {
-        /* событие не поддержано — пропускаем */
-      }
-    }
-    try {
-      if (typeof el.click === "function") el.click();
-    } catch {
-      /* ignore */
-    }
-    return el;
-  };
-  // Глобальная кнопка плеера (Я.Музыка и пр.): матч по aria-label RU+EN. Хэш-классы (__vnoer) волатильны —
-  // НЕ хардкодим. Состояние play/pause — по самому aria-label (на Я.Музыке media() = null, стрим через MSE).
-  const PLAY_LBL = ["воспроизвести", "воспроизведение", "play", "слушать"];
-  const PAUSE_LBL = ["пауза", "pause"];
-  const playerBtn = () =>
-    [...document.querySelectorAll("button,[role=button]")].find((b) => {
-      const a = lc(b.getAttribute("aria-label"));
-      return visible(b) && (PLAY_LBL.includes(a) || PAUSE_LBL.includes(a));
-    });
-  const isPlaying = (b) => {
-    if (!b) return false;
-    if (PAUSE_LBL.includes(lc(b.getAttribute("aria-label")))) return true; // кнопка показывает «Пауза» = играет
-    const u = b.querySelector("svg use");
-    const href = u && (u.getAttribute("href") || u.getAttribute("xlink:href"));
-    if (href && /#pause/i.test(href)) return true; // вторичный сигнал (часть сборок)
-    const m = media();
-    return Boolean(m && !m.paused);
-  };
-  // H1: нативный value-сеттер (прямое el.value= React откатывает на ре-рендере) + input/change.
-  const setNativeValue = (el, val) => {
-    const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value") && Object.getOwnPropertyDescriptor(proto, "value").set;
-    if (setter) setter.call(el, val);
-    else el.value = val;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-  };
-  // H2: поле ввода. С selector — точно (вкл. shadow « >>> »); без — ПЕРВОЕ видимое осмысленное поле
-  // (НЕ document.body/activeElement), сквозь shadow DOM.
-  const findInput = (sel) => {
-    if (sel) return bySelector(String(sel));
-    const cands = deepAll('input[type="text"],input[type="search"],input:not([type]),textarea,[contenteditable="true"]');
-    return cands.find((n) => { const b = n.getBoundingClientRect(); return b.width > 1 && b.height > 1 && !n.disabled && !n.readOnly; }) || null;
-  };
-  // C3: нажать Enter (поиск/сабмит). keydown+keypress+keyup + фолбэк requestSubmit ближайшей формы.
-  const pressEnter = (el) => {
-    const t = el || document.activeElement;
-    if (!t) return false;
-    for (const type of ["keydown", "keypress", "keyup"]) {
-      t.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    }
-    const form = t.form || (t.closest && t.closest("form"));
-    if (form) { try { form.requestSubmit ? form.requestSubmit() : form.submit(); } catch (e) { /* ignore */ } }
-    return true;
-  };
   try {
     if (intent === "scroll") { window.scrollBy(0, Number(P.dy) || 600); return { ok: true }; }
     // ПЕРЕМОТКА видео/аудио — через сам медиа-элемент (надёжно на любом плеере, в т.ч. YouTube). НЕ путать
@@ -2255,156 +2150,22 @@ async function pageActInPage(intent, params) {
       else m.currentTime = Math.min(Math.max(0, m.currentTime + (Number.isFinite(sec) ? sec : 10)), dur);
       return { ok: true, currentTime: Math.round(m.currentTime), duration: Number.isFinite(m.duration) ? Math.round(m.duration) : null };
     }
-    if (intent === "play") {
-      // «воспроизвед» — общий стем (ловит и «Воспроизведение», и «Воспроизвести»); + central-кнопку Вайба.
-      const btn = playerBtn() || byText("воспроизвед") || byText("play") || byText("слушать") || byText("включить");
-      if (!btn) { const m = media(); if (m) { m.play(); return { ok: true, via: "media" }; } return { ok: false, error: "не нашёл кнопку плеера на странице" }; }
-      if (isPlaying(btn)) return { ok: true, already: true, playing: true }; // уже играет — НЕ кликаем (иначе пауза)
-      realClick(btn);
-      // Проверка ИСХОДА: aria-label флипнется на «Пауза», если звук реально пошёл (autoplay-гейт пройден).
-      await new Promise((r) => setTimeout(r, 700));
-      if (isPlaying(playerBtn() || btn)) return { ok: true, playing: true };
-      return {
-        ok: false,
-        autoplayBlocked: true,
-        error: "клик по play прошёл, но воспроизведение не началось — вкладке плеера, похоже, нужен один живой клик пользователя (autoplay браузера блокирует программный старт)",
-      };
-    }
-    if (intent === "pause") {
-      const btn = playerBtn() || byText("пауза") || byText("pause");
-      if (!btn) { const m = media(); if (m) { m.pause(); return { ok: true, via: "media" }; } return { ok: false, error: "не нашёл кнопку плеера" }; }
-      if (!isPlaying(btn)) return { ok: true, already: true, playing: false }; // уже на паузе — НЕ кликаем
-      btn.click();
-      return { ok: true, playing: false };
-    }
     if (intent === "next" || intent === "prev") {
-      const labels = intent === "next" ? ["след", "next", "вперёд"] : ["пред", "prev", "назад"];
-      const btn = [...document.querySelectorAll("button,[role=button],a")].find((e) => {
-        const s = lc(e.getAttribute("aria-label")) + lc(e.title) + lc(e.innerText);
-        return visible(e) && labels.some((l) => s.includes(l));
-      });
-      if (btn) { btn.click(); return { ok: true }; }
-      const m = media(); if (m) { m.currentTime += intent === "next" ? 10 : -10; return { ok: true }; }
-      return { ok: false, error: "не нашёл переключение трека" };
-    }
-    if (intent === "click") {
-      const t = lc(P.text || "");
-      // «Встряхнуть/стряхнуть/обновить волну» — это ДЕЙСТВИЕ (кнопка на странице), НЕ навигация. Важно
-      // отделить от «вруби/открой волну», иначе клик «встряхнуть» ложно срабатывал как переход на Вайб
-      // и возвращал ok → модель врала «встряхнул» (реальный баг из лога).
-      const isShake = /встрях|стряхн|обнов/.test(t);
-      // ВЕРИФИЦИРУЕМОЕ встряхивание: клика мало (возвращал ok за факт клика → враньё «обновилась»).
-      // Жмём кнопку и СВЕРЯЕМ, реально ли изменилась подборка. Не изменилась → ЧЕСТНЫЙ провал (не ok),
-      // тогда и навык по ложному успеху не сохранится.
-      if (isShake) {
-        const findShake = () => byText("встряхнуть") || byText("стряхнуть") || byText("обновить волну") || byText("обновить");
-        let sb = findShake();
-        for (let i = 0; i < 8 && !sb; i += 1) {
-          window.scrollBy(0, Math.round(window.innerHeight * 0.85));
-          await new Promise((r) => setTimeout(r, 200));
-          sb = findShake();
-        }
-        if (!sb) return { ok: false, error: "не нашёл кнопку «Встряхнуть» на странице (даже прокрутив вниз)" };
-        // Подпись содержимого волны (плитки/треки), время и цифры выкидываем — иначе тикающий таймер трека даёт ложное «изменилось».
-        const sig = () => {
-          const main = document.querySelector("main, [class*='VibePage'], [class*='Vibe'], [role=main]") || document.body;
-          return ((main && main.innerText) || "").replace(/[\d:.,]+/g, "").replace(/\s+/g, " ").trim().slice(0, 4000);
-        };
-        const before = sig();
-        realClick(sb);
-        await new Promise((r) => setTimeout(r, 1000));
-        if (sig() === before) {
-          return { ok: false, error: "нажал «Встряхнуть», но подборка НЕ изменилась — вероятно, волна на паузе (встряхивание тасует подборку только у активной/играющей волны). Сменить звучащий трек — это «следующий трек»." };
-        }
-        return { ok: true, changed: true, note: "встряхнул — подборка реально обновилась (сверено до/после)" };
-      }
-      // Я.Музыка: «вруби/открой мою волну» — клик по пункту меню капризно НЕ переключает SPA → форсим
-      // переход на страницу Вайба (там живёт «Моя волна»). Дальше модель отдельным play запускает звук.
-      // ГЕЙТ на !refMode: при refMode это знание приходит рецептом-хинтом (модель сама делает browser_open),
-      // а не хардкодом в движке — общий механизм вместо site-specific ветки. refMode off → как раньше.
-      if (!P.refMode && /yandex/i.test(location.host) && !isShake && /(волна|вайб|vibe)/.test(t)) {
-        const onVibe = /\/vibe\b/.test(location.pathname) || location.pathname === "/";
-        if (!onVibe) { location.href = "https://music.yandex.ru/"; return { ok: true, navigated: "vibe", note: "перешёл на «Мою волну» (Вайб); теперь play" }; }
-        return { ok: true, already: "vibe", note: "уже на «Моей волне»; нужен play" };
-      }
-      const finder = () => (P.selector ? bySelector(String(P.selector)) : byText(P.text));
-      let el = finder();
-      if (!el) {
-        // ОБЩЕЕ «оглядеться» (НЕ хардкод под конкретную кнопку): элемент может быть ниже сгиба или
-        // лениво дорисовываться при прокрутке. Скроллим страницу шагами и переищем после каждого —
-        // так находим что угодно внизу (та же «встряхнуть»), без жёсткой инструкции «тут мотай вниз».
-        for (let i = 0; i < 8 && !el; i += 1) {
-          window.scrollBy(0, Math.round(window.innerHeight * 0.85));
-          await new Promise((r) => setTimeout(r, 200));
-          el = finder();
-        }
-        if (!el) { window.scrollTo(0, 0); await new Promise((r) => setTimeout(r, 150)); el = finder(); }
-      }
-      if (!el) return { ok: false, error: "элемент «" + (P.selector || P.text || "") + "» не найден даже после прокрутки страницы" };
-      realClick(el);
+      // Кнопка переключения — по ЦЕЛОМУ слову подписи (B-13: подстрока «пред» ловила ссылку «Предложения»), кнопки
+      // раньше ссылок. Кнопки нет — честный провал: перемотка на 10 с — не «следующий трек».
+      const re = intent === "next"
+        ? /(?:^|[^\p{L}])(?:следующ\p{L}*|далее|next|skip)(?![\p{L}])/u
+        : /(?:^|[^\p{L}])(?:предыдущ\p{L}*|prev|previous)(?![\p{L}])/u;
+      const labelOf = (e) => [e.getAttribute("aria-label"), e.getAttribute("title"), e.innerText].join(" ").toLowerCase().replace(/ё/g, "е");
+      const pick = (sel) => [...document.querySelectorAll(sel)].find((e) => visible(e) && re.test(labelOf(e)));
+      const btn = pick("button,[role=button]") || pick("a");
+      if (!btn) return { ok: false, code: "not_found", error: "не нашёл кнопку «" + (intent === "next" ? "следующий" : "предыдущий") + "» — перемотка внутри ролика это seek" };
+      btn.click();
       return { ok: true };
-    }
-    if (intent === "type") {
-      const el = findInput(P.selector);
-      // code:"not_found" → tabAct прощупает iframe (поле embed-формы). Поле есть только в чужом фрейме —
-      // tabAct вернёт frame/frameUrl, модель увидит КУДА ввела (ревью #3a).
-      if (!el) return { ok: false, code: "not_found", error: "поле ввода не найдено — укажи selector (browser_inspect показывает поля)" };
-      el.focus();
-      const v = String(P.text ?? "");
-      if (el.isContentEditable) {
-        el.textContent = "";
-        if (document.execCommand) document.execCommand("insertText", false, v);
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: v }));
-      } else {
-        setNativeValue(el, v); // H1: нативный сеттер — держится на React-инпутах
-      }
-      // C3: ввод+поиск за один вызов, если просили {enter:true} / {submit:true}. Ввод и Enter в ОДНОМ
-      // вызове идут в ОДИН документ (эта функция целиком перезапускается в найденном фрейме) — рассинхрон
-      // «type в iframe, enter в top» тут невозможен (ревью #3), в отличие от раздельных type→enter.
-      const submitted = P.enter || P.submit ? pressEnter(el) : false;
-      return { ok: true, typed: v.slice(0, 60), submitted };
-    }
-    if (intent === "select") {
-      // Выбор в <select> по ТЕКСТУ варианта (26.09: вопросы Moodle «на соответствие»; раньше setNativeValue с
-      // сеттером HTMLInputElement падал на select «Illegal invocation»). Нативный сеттер + input/change.
-      const el = P.selector ? bySelector(String(P.selector)) : null;
-      if (!el) return { ok: false, code: "not_found", error: "список не найден — передай selector из browser_inspect" };
-      if (el.tagName !== "SELECT") return { ok: false, error: "элемент не <select>: у самодельного списка кликни по нему, затем по пункту (click)" };
-      const want = foldTxt(P.option != null ? P.option : P.text);
-      let best = null;
-      let bestScore = 0;
-      // Текст варианта важнее value (вопрос «на соответствие» с числами: option value=2 с текстом «1»); disabled — мимо.
-      for (const o of el.options) {
-        if (o.disabled) continue;
-        const byValue = P.option != null && String(P.option) !== "" && String(o.value) === String(P.option);
-        const s = Math.max(scoreText(want, foldTxt(o.text)), byValue ? 90 : 0);
-        if (s > bestScore) { bestScore = s; best = o; }
-      }
-      if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + [...el.options].map((o) => o.text.trim()).join(" | ").slice(0, 400) };
-      try { el.focus(); } catch { /* ignore */ }
-      // Ставим САМ пункт: value-сеттер брал первый пункт с тем же value и сбрасывал прочие в multiple.
-      if (el.multiple) best.selected = true;
-      else el.selectedIndex = best.index;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      const chosen = [...el.selectedOptions];
-      return { ok: chosen.includes(best), value: chosen.map((o) => o.text.trim()).join(", ").slice(0, 60) };
-    }
-    if (intent === "enter" || intent === "submit") {
-      // C3: нажать Enter / отправить форму (запустить поиск после type). selector опционален (вкл. shadow « >>> »).
-      const el = P.selector ? bySelector(String(P.selector)) : document.activeElement;
-      const ae = el || document.activeElement;
-      // ЧЕСТНОСТЬ (ревью #3b): без selector, если фокус в ДРУГОМ фрейме (activeElement === <iframe>) или его
-      // нет (body/null) — Enter уйдёт «в никуда» (событие на iframe внутрь не проникает). Не врём submitted:true.
-      if (!P.selector && (!ae || ae === document.body || ae.tagName === "IFRAME" || ae.tagName === "FRAME")) {
-        return { ok: false, code: "not_found", error: "нет сфокусированного поля для Enter (фокус вне этого документа или отсутствует). Объедини ввод и отправку одним вызовом: browser_act{type, text, enter:true}; либо передай selector/frameId поля." };
-      }
-      pressEnter(ae);
-      return { ok: true, submitted: true };
     }
     if (intent === "readMedia") {
       // ЧТЕНИЕ состояния медиа (fix 2026-07-15: серверная проверка «видео дошло до N секунд» вместо
-      // хрупкого OCR таймера). media() уже в scope (video/audio). Возвращаем позицию/длительность/паузу.
+      // хрупкого OCR таймера). Возвращаем позицию/длительность/паузу.
       const m = media();
       if (!m) return { ok: false, code: "not_found", error: "на странице нет video/audio" };
       return { ok: true, currentTime: m.currentTime, duration: Number.isFinite(m.duration) ? m.duration : null, paused: m.paused };
@@ -2414,11 +2175,9 @@ async function pageActInPage(intent, params) {
       const el = P.selector ? bySelector(String(P.selector)) : media();
       if (!el) return { ok: false, code: "not_found", error: "элемент не найден" };
       const prop = String(P.prop || "textContent");
-      // БЕЗОПАСНОСТЬ (ревью 2026-07-15): маскируем ЗНАЧЕНИЕ поля пароля и РЕЖЕМ длину — как соседние
-      // readback-пути (inspect/type). Иначе секрет / огромный textContent утёк бы СЫРЫМ в tool_result,
-      // серверный лог и durable data/watches.json.
-      // Та же isSecret, что в снимке и elementActIsolated (B-3): «показанный пароль» (type=text + current-password),
-      // одноразовый код и карта маскируются так же, как type=password. Любое свойство секретного поля — только маска.
+      // БЕЗОПАСНОСТЬ: секретное поле (та же isSecret, что в снимке и elementActIsolated, B-3) — только маска, любое
+      // свойство; «показанный пароль» (type=text + current-password), одноразовый код и карта — как type=password.
+      // Длину режем: секрет / огромный textContent иначе утёк бы в tool_result, лог и durable data/watches.json.
       const isSecret =
         el.tagName === "INPUT" &&
         (/^password$/i.test(el.getAttribute("type") || "") ||
