@@ -3,7 +3,7 @@
 // jsdom/моки тут бесполезны: дефект H19 (синтетический Enter вместо клика) виден только на реальной семантике
 // активации элементов браузером.
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -47,15 +47,35 @@ export function pageFunctionSources(names) {
 }
 
 /**
+ * НАСТОЯЩИЕ модули SW (modules/*.js) одним скриптом для vm: импорты вырезаны, экспорт → глобальные var/function —
+ * их видит background.js, а overrides теста перекрывают (var и function — свойства глобального объекта).
+ */
+function moduleSources() {
+  const dir = join(here, "..", "modules");
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".js"))
+    .sort()
+    .map((f) =>
+      readFileSync(join(dir, f), "utf8")
+        .replace(/^import .*$/gmu, "")
+        .replace(/^export (async function|function|class) /gmu, "$1 ")
+        .replace(/^export (const|let) /gmu, "var "),
+    )
+    .join("\n");
+}
+
+/**
  * Service worker расширения в vm — для юнитов SW-уровня (tabAct: какой page-функцией и с какими аргументами он зовёт
- * страницу). `chrome.tabs`/`chrome.scripting` и функции из modules/* (импорты вырезаны) подменяются overrides;
- * остальное chrome — глухая заглушка, таймеры и сокет — пустышки (верхний код SW не должен жить дальше теста).
+ * страницу). Функции modules/* — НАСТОЯЩИЕ (см. moduleSources); `chrome.tabs`/`chrome.scripting`/`chrome.windows` и
+ * любые глобалы подменяются overrides (они побеждают модули); остальное chrome — глухая заглушка, таймеры и сокет —
+ * пустышки (верхний код SW не должен жить дальше теста). Настоящие таймеры — передать setTimeout в overrides.
  */
 export function loadServiceWorker(overrides = {}) {
-  const src = readFileSync(join(here, "..", "background.js"), "utf8").replace(/^import .*$/gmu, "");
+  const src = moduleSources() + "\n" + readFileSync(join(here, "..", "background.js"), "utf8").replace(/^import .*$/gmu, "");
   const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub });
-  const { tabs, scripting, ...globals } = overrides;
-  const chrome = new Proxy(stub, { get: (_t, k) => (k === "tabs" && tabs ? tabs : k === "scripting" && scripting ? scripting : stub) });
+  const { tabs, scripting, windows, ...globals } = overrides;
+  const own = { tabs, scripting, windows };
+  const chrome = new Proxy(stub, { get: (_t, k) => own[k] || stub });
   const noop = () => 0;
   class FakeSocket { constructor() {} send() {} close() {} }
   const sandbox = { chrome, console, setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop, URL, WebSocket: FakeSocket, ...globals };
@@ -65,7 +85,56 @@ export function loadServiceWorker(overrides = {}) {
   } catch {
     /* хвост верхнего кода на заглушках — функции и константы к этому моменту уже есть */
   }
+  Object.assign(sandbox, globals); // объявления модулей перезаписали одноимённые overrides — возвращаем подмены теста
   return sandbox;
+}
+
+/**
+ * SW в vm поверх НАСТОЯЩЕЙ страницы: chrome.scripting.executeScript исполняет page-функцию в headless Chrome
+ * (world:"MAIN" — в мире страницы, иначе — в изолированном мире, как у расширения), вкладка №1 = эта страница,
+ * goBack/goForward — история этой страницы. Проверяет связку «маршрут SW → page-функция» целиком, без моков DOM.
+ */
+export function swOnPage(page, extra = {}) {
+  const calls = [];
+  const live = async () => {
+    for (let i = 0; i < 40; i++) {
+      try {
+        const [url, title, ready] = await page.eval("[location.href, document.title, document.readyState]");
+        return { id: 1, windowId: 1, active: true, status: ready === "complete" ? "complete" : "loading", url, title };
+      } catch {
+        await new Promise((r) => setTimeout(r, 50)); // документ сменяется — ждём новый контекст
+      }
+    }
+    throw new Error("страница не отвечает");
+  };
+  const history = (dir) => async (id) => {
+    if (id !== 1) throw new Error("No tab with id: " + id);
+    const can = await page.eval(`navigation.${dir === "back" ? "canGoBack" : "canGoForward"}`);
+    if (!can) throw new Error(`Cannot find a ${dir === "back" ? "previous" : "next"} page in history.`);
+    await page.eval(`history.${dir}()`);
+  };
+  const { tabs, ...globals } = extra;
+  const env = loadServiceWorker({
+    tabs: {
+      get: async (id) => { if (id !== 1) throw new Error("No tab with id: " + id); return live(); },
+      query: async () => [await live()],
+      goBack: history("back"),
+      goForward: history("forward"),
+      ...tabs,
+    },
+    scripting: {
+      executeScript: async (inj) => {
+        calls.push(inj);
+        const src = inj.func.toString();
+        const result = inj.world === "MAIN" ? await page.call(src, ...(inj.args || [])) : await page.callIsolated(src, ...(inj.args || []));
+        return [{ frameId: 0, result }];
+      },
+    },
+    setTimeout,
+    clearTimeout,
+    ...globals,
+  });
+  return { env, calls };
 }
 
 export const fixtureUrl = (name) => pathToFileURL(join(here, "fixtures", name)).href;
@@ -84,12 +153,17 @@ export function serverGuardSource() {
   return `${lit("packages/shared/src/commit-risk.ts", "COMMIT_WORDS_RE")}|${lit("apps/server/src/brain/tools/commit-lms.ts", "LMS_COMMIT_RE")}`;
 }
 
-/** Headless Chrome + одна вкладка. Возвращает { open(url), call(fnSrc, ...args), eval(expr), close() }. */
+/**
+ * Headless Chrome + одна вкладка. Возвращает { open(url), call(fnSrc, ...args) — в мире страницы (как world:"MAIN"),
+ * callIsolated(fnSrc, ...args) — в изолированном мире (как executeScript расширения по умолчанию; реестр ref живёт
+ * там, пока жив документ), eval(expr), close() }. Сеть наружу закрыта (host-resolver): стенд герметичен.
+ */
 export async function launchPage() {
   const chrome = findChrome();
   if (!chrome) return null;
   const profile = mkdtempSync(join(tmpdir(), "jarvis-ext-test-"));
-  const proc = spawn(chrome, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], { stdio: "ignore", windowsHide: true });
+  const hermetic = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE *.localhost, EXCLUDE 127.0.0.1";
+  const proc = spawn(chrome, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", hermetic, `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], { stdio: "ignore", windowsHide: true });
   proc.unref(); // иначе дерево Chrome держит цикл событий и node --test не завершается
   const portFile = join(profile, "DevToolsActivePort");
   for (let i = 0; i < 100 && !existsSync(portFile); i++) await new Promise((r) => setTimeout(r, 100));
@@ -110,13 +184,28 @@ export async function launchPage() {
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
   };
   const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
-  const evaluate = async (expression) => {
-    const m = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+  const evaluate = async (expression, contextId) => {
+    const m = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, ...(contextId ? { contextId } : {}) });
+    if (m.error) throw new Error(m.error.message);
     if (m.result?.exceptionDetails) throw new Error(m.result.exceptionDetails.exception?.description ?? m.result.exceptionDetails.text);
     return m.result?.result?.value;
   };
+  // Фоновая вкладка без фокуса не даёт execCommand/requestSubmit вести себя как у живой вкладки — эмулируем фокус.
+  await send("Emulation.setFocusEmulationEnabled", { enabled: true });
+  // Изолированный мир — один на документ (как у расширения): реестр ref переживает вызовы, умирает с навигацией.
+  let iso = null;
+  const isolated = async () => {
+    // Жив ли мир (смена документа его уничтожает; смена #hash — нет, как у расширения).
+    if (iso && (await evaluate("1", iso.ctx).then(() => true, () => false))) return iso.ctx;
+    const tree = await send("Page.getFrameTree");
+    const r = await send("Page.createIsolatedWorld", { frameId: tree.result.frameTree.frame.id, worldName: "jarvis-ext-test" });
+    iso = { ctx: r.result.executionContextId };
+    return iso.ctx;
+  };
+  const args = (a) => `(...${JSON.stringify(a)})`;
   return {
     async open(url) {
+      iso = null;
       await send("Page.enable");
       await send("Page.navigate", { url });
       for (let i = 0; i < 100; i++) {
@@ -124,7 +213,8 @@ export async function launchPage() {
         await new Promise((r) => setTimeout(r, 50));
       }
     },
-    call: (fnSrc, ...args) => evaluate(`(${fnSrc})(...${JSON.stringify(args)})`),
+    call: (fnSrc, ...a) => evaluate(`(${fnSrc})${args(a)}`),
+    callIsolated: async (fnSrc, ...a) => evaluate(`(${fnSrc})${args(a)}`, await isolated()),
     eval: evaluate,
     async close() {
       ws.onmessage = null;
