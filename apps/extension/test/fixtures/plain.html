@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Обычная страница без React</title>
+</head>
+<body>
+<main>
+  <h1>Настройки</h1>
+  <button id="save" type="button">Сохранить черновик</button>
+  <a id="more" href="#details">Подробнее</a>
+  <p><input type="checkbox" id="agree"> <label for="agree">Согласен с правилами</label></p>
+  <div id="tile" class="card" tabindex="0">Плитка без роли</div>
+  <form id="search"><input type="text" name="q" placeholder="Поиск"><input type="submit" value="Найти"></form>
+  <form id="f1"><input type="text" name="city" placeholder="Город"></form>
+  <form id="f2"><input type="text" name="city" placeholder="Город"></form>
+  <div id="card2" class="card" tabindex="0"><input type="checkbox" id="opt"> <label for="opt">Опция в карточке</label></div>
+  <div id="details">Детали</div>
+  <div id="shake" role="button" tabindex="0">Встряхнуть</div>
+  <p id="shaken">исходная подборка</p>
+</main>
+<script>
+  window.__c = { save: 0, tile: 0, search: 0, shake: 0, card2: 0 };
+  document.getElementById("card2").addEventListener("click", () => window.__c.card2++);
+  document.getElementById("save").addEventListener("click", () => window.__c.save++);
+  document.getElementById("tile").addEventListener("click", () => window.__c.tile++);
+  document.getElementById("search").addEventListener("submit", (e) => { e.preventDefault(); window.__c.search++; });
+  // «Свайпер»: синтетический клик глушится в capture-фазе (preventClicks), кнопка живёт только на Enter.
+  const sh = document.getElementById("shake");
+  sh.addEventListener("click", (e) => { e.preventDefault(); e.stopImmediatePropagation(); }, true);
+  sh.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    window.__c.shake++;
+    document.getElementById("shaken").textContent = "новая подборка " + window.__c.shake;
+  });
+</script>
+</body>
+</html>

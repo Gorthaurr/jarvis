@@ -14,6 +14,7 @@
  */
 
 import { COMMIT_WORDS_RE, type RiskCategory, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
+import { LMS_COMMIT_RE, isLmsPage, lmsKeyCommits } from "./commit-lms.js";
 
 export type { RiskCategory };
 // W0: список процессов и riskyProcessCategory переехали в @jarvis/shared/commit-risk — их же читает
@@ -28,6 +29,8 @@ const CATEGORY_HUMAN: Record<RiskCategory, string> = {
   market: "маркетплейс/магазин",
   social: "публичная площадка",
   messenger: "мессенджер/почта",
+  edu: "учебная система — тест/задание",
+  unknown: "сайт вкладки не определён",
 };
 
 /** Хосты (суффиксы) → категория. Расширять строкой; порядок не важен. */
@@ -80,21 +83,33 @@ function truthy(v: unknown): boolean {
  * Веб: browser_act / browser_batch / web_act. `label` — подпись элемента, если известна (ref-хинт из
  * последнего browser_inspect). Коммит = enter/submit/type+enter либо клик по элементу с глаголом коммита.
  */
-export function assessWebCommit(a: { host: string; intent: string; params?: Record<string, unknown>; label?: string }): CommitRisk | null {
-  const category = riskyHostCategory(a.host);
+export function assessWebCommit(a: {
+  host: string;
+  /** Полный адрес страницы — LMS узнаётся по пути (хост у каждого вуза свой). */
+  url?: string;
+  /** Адрес вкладки определить не удалось (действие по tabId без url) — судим строго, как опасное место. */
+  unknownSite?: boolean;
+  intent: string;
+  params?: Record<string, unknown>;
+  label?: string;
+}): CommitRisk | null {
+  const url = a.url ?? "";
+  const category: RiskCategory | null = riskyHostCategory(a.host) ?? (isLmsPage(url) ? "edu" : a.unknownSite ? "unknown" : null);
   if (!category) return null;
   const p = a.params ?? {};
   const intent = a.intent.trim().toLowerCase();
-  const text = [p.text, p.name, p.title, a.label].filter((v): v is string => typeof v === "string" && v.trim().length > 0).join(" ");
-  const commitByKey = intent === "enter" || intent === "submit" || (intent === "type" && truthy(p.enter));
-  const commitByClick = intent === "click" && COMMIT_WORDS_RE.test(text);
+  const parts = [p.text, p.name, p.title, a.label].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  const text = parts.join(" ");
+  const commitByKey =
+    (intent === "enter" || intent === "submit" || (intent === "type" && truthy(p.enter))) && (category !== "edu" || lmsKeyCommits(url));
+  const commitByClick = intent === "click" && (COMMIT_WORDS_RE.test(text) || (category === "edu" && parts.some((s) => LMS_COMMIT_RE.test(s))));
   if (!commitByKey && !commitByClick) return null;
   const what = commitByKey
     ? category === "messenger"
       ? "Enter — отправка сообщения"
       : "Enter/submit — отправка формы"
     : `клик «${text.trim().slice(0, 60)}»`;
-  const where = a.host.toLowerCase().replace(/^www\./u, "");
+  const where = a.host.toLowerCase().replace(/^www\./u, "") || "неизвестной вкладке";
   return { category, where, what, summary: `Необратимое действие в браузере (${CATEGORY_HUMAN[category]}): ${what} на ${where}.` };
 }
 

@@ -730,7 +730,8 @@ async function dispatchToolCore(
   if (name === "web_open" && typeof input.url === "string") rememberWebTarget(ctx.session as unknown as object, input.url);
   if (name === "web_act") {
     const params = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : input;
-    const risk = assessWebCommit({ host: hostOfUrl(lastWebTarget(ctx.session as unknown as object)), intent: String(input.intent ?? ""), params });
+    const lastUrl = lastWebTarget(ctx.session as unknown as object);
+    const risk = assessWebCommit({ host: hostOfUrl(lastUrl), url: lastUrl, intent: String(input.intent ?? ""), params });
     if (risk) {
       if (!ctx.confirm) return err(`web_act: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
       const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
@@ -853,6 +854,13 @@ async function dispatchToolCore(
       }
       applyVeil(out, result.data);
       return out;
+    }
+    // M11 (26.09, разведка Moodle): страница из НЕВИДИМОГО браузера Джарвиса (web_open/read/inspect/act) — тот же
+    // внешний контент, что browser_read, а шла доверенным JSON: инструкция со страницы звучала для модели как наша.
+    if (kind === "jbrowser.open" || kind === "jbrowser.read" || kind === "jbrowser.inspect" || kind === "jbrowser.act") {
+      const wrapped = untrustedCapped("jarvis-browser", result.data !== undefined ? JSON.stringify(result.data) : `ok (${kind})`, "Сузь: web_inspect{query} или читай нужный фрагмент.");
+      if (result.data !== undefined) wrapped.data = result.data;
+      return wrapped;
     }
     // M11 (ревью 2026-09-01): содержимое ФАЙЛА — внешний контент (загрузки, письма, чужие репозитории), как и
     // текст страницы; file_view уже помечает текст на картинке недоверенным, а текстовая половина той же зоны

@@ -283,14 +283,32 @@ function inspectPageInPage(query, cap, refMode) {
   // Устойчивый селектор: якорь узла → name/placeholder → nth-of-type цепочка, АНКОРЁННАЯ к ближайшему
   // стабильному предку (фикс мёртвого break: раньше seg никогда не нёс #/атрибут → цепочка не якорилась
   // и ломалась на ре-рендере). refMode делает основной адресацией ref, селектор — fallback.
+  // Селектор годится, только если в своём корне он указывает РОВНО на этот узел. Боевой прогон 26.09 (Moodle): все
+  // radio вопроса получали один input[name=…] → клик по «варианту c» попадал в «a»; у галочки перед ней hidden-
+  // двойник с тем же name. Неоднозначный якорь → дальше по лестнице (type/value → nth-of-type цепочка).
+  const uniqueIn = (node, sel) => {
+    try {
+      const all = node.getRootNode().querySelectorAll(sel);
+      return all.length === 1 && all[0] === node;
+    } catch {
+      return false;
+    }
+  };
   const selFor = (node) => {
     const self = anchorFor(node);
-    if (self) return self;
+    if (self && uniqueIn(node, self)) return self;
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName)) {
+      const tag = node.tagName.toLowerCase();
+      const type = String(node.getAttribute("type") || "").toLowerCase();
+      const typed = tag === "input" && type ? tag + '[type="' + esc(type) + '"]' : tag;
       const nm = node.getAttribute("name");
-      if (nm) return node.tagName.toLowerCase() + '[name="' + esc(nm) + '"]';
+      if (nm) {
+        let s = typed + '[name="' + esc(nm) + '"]';
+        if ((type === "radio" || type === "checkbox") && node.hasAttribute("value")) s += '[value="' + esc(node.getAttribute("value")) + '"]';
+        if (uniqueIn(node, s)) return s;
+      }
       const ph = node.getAttribute("placeholder");
-      if (ph) return node.tagName.toLowerCase() + '[placeholder="' + esc(ph) + '"]';
+      if (ph && uniqueIn(node, typed + '[placeholder="' + esc(ph) + '"]')) return typed + '[placeholder="' + esc(ph) + '"]';
     }
     const parts = [];
     let n = node;
@@ -318,7 +336,7 @@ function inspectPageInPage(query, cap, refMode) {
   const axName = (el) => {
     const lb = el.getAttribute("aria-labelledby");
     if (lb) {
-      const t = lb.split(/\s+/).map((id) => { try { const nd = document.getElementById(id); return nd ? (nd.innerText || nd.getAttribute("aria-label") || "").trim() : ""; } catch { return ""; } }).filter(Boolean).join(" ").trim();
+      const t = lb.split(/\s+/).map((id) => { try { const nd = document.getElementById(id); return nd ? (nd.innerText || nd.getAttribute("aria-label") || "").trim() : ""; } catch { return ""; } }).filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
       if (t) return t.slice(0, 80);
     }
     const al = el.getAttribute("aria-label");
@@ -342,6 +360,12 @@ function inspectPageInPage(query, cap, refMode) {
       if (!v) st.empty = true;
     }
     if (type === "checkbox" || type === "radio") st.checked = Boolean(el.checked);
+    // Выпадающий список (вопрос «на соответствие»): что выбрано и из чего выбирать — для browser_act{select}.
+    if (tag === "SELECT") {
+      const opt = el.options[el.selectedIndex];
+      st.value = opt ? String(opt.text || "").trim().slice(0, 60) : "";
+      st.options = [...el.options].slice(0, 25).map((o) => String(o.text || "").trim().slice(0, 40));
+    }
     const ac = el.getAttribute("aria-checked"); if (ac != null) st.checked = ac === "true" ? true : ac === "false" ? false : ac;
     const asel = el.getAttribute("aria-selected"); if (asel != null) st.selected = asel === "true";
     const aexp = el.getAttribute("aria-expanded"); if (aexp != null) st.expanded = aexp === "true";
@@ -413,11 +437,14 @@ function inspectPageInPage(query, cap, refMode) {
       out.push({ idx: out.length, ref, role, name: name || null, state, selector: selForDeep(el), href: el.tagName === "A" ? el.getAttribute("href") : null });
     } else {
       // Legacy-форма (refMode off) сохранена бит-в-бит + добавлено state (аддитивно, поведение не меняет).
+      // label — подпись поля/варианта (26.09): у radio текст = value «0/1/2», модель не знала, какой вариант какой.
+      const isCtl = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || /^(radio|checkbox|switch|combobox)$/.test(el.getAttribute("role") || "");
       out.push({
         idx: out.length,
         tag: el.tagName.toLowerCase(),
         role,
         text,
+        ...(isCtl && name && name !== text ? { label: name } : {}),
         aria: aria.slice(0, 80) || null,
         selector: selForDeep(el),
         disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
@@ -608,7 +635,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
       const nonce = "jn" + Date.now() + "_" + Math.floor(Math.random() * 1e9);
       const stamp = await runInPage(null, stampRefIsolated, [localRef, nonce], explicitFrame);
       if (!stamp.ok) throw new Error("tab.act " + intent + ": " + (stamp.error || "ref не разрешён"));
-      const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake }], explicitFrame);
+      const rc = await runInPage("MAIN", robustClickMain, [{ nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved }], explicitFrame);
       if (!rc.ok) throw new Error("tab.act " + intent + ": " + (rc.error || "не вышло"));
       // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
       // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
@@ -710,7 +737,7 @@ async function tabAct(url, intent, params, tabId, refMode) {
   if (shouldProbe(r)) {
     // type: поле может жить в iframe (embed-форма); seek: медиа в embed-плеере. Прочие интенты не щупаем.
     const probeArg =
-      intent === "type" ? { input: true, selector: P.selector || "" } : intent === "seek" ? { media: true } : null;
+      intent === "type" || intent === "select" ? { input: true, selector: P.selector || "" } : intent === "seek" ? { media: true } : null;
     if (probeArg) {
       const hit = await probeFrames(tab.id, probeArg);
       if (hit) {
@@ -1169,6 +1196,19 @@ async function actByRefIsolated(localRef, intent, params) {
       pressEnter(el);
       return { ok: true, submitted: true };
     }
+    if (intent === "select") {
+      // Как в pageActInPage: вариант <select> по тексту (или value), нативный сеттер + input/change.
+      if (el.tagName !== "SELECT") return { ok: false, error: "элемент не <select>: у самодельного списка — click по нему, затем по пункту" };
+      const fold = (s) => String(s || "").toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim();
+      const want = fold(P.option != null ? P.option : P.text);
+      const opts = [...el.options];
+      const best = opts.find((o) => fold(o.text) === want || String(o.value) === String(P.option)) || opts.find((o) => want && fold(o.text).includes(want));
+      if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + opts.map((o) => o.text.trim()).join(" | ").slice(0, 400) };
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, best.value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: el.value === best.value, value: best.text.trim().slice(0, 60) };
+    }
     return { ok: false, error: "intent «" + intent + "» не поддержан по ref — используй click/type/seek/scroll/enter" };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e) };
@@ -1246,6 +1286,41 @@ async function robustClickMain(params) {
     }
     return el;
   };
+  // Боевой прогон 26.09 (Moodle): подпись radio/checkbox живёт вне элемента — aria-labelledby / label[for] /
+  // обёртка <label>; у кнопки-input текст в value (в innerText его нет). Без этого «выбери Париж» и
+  // «Следующая страница» не находились вовсе.
+  const nameOf = (e) => {
+    const tag = e.tagName;
+    const type = String(e.getAttribute("type") || "").toLowerCase();
+    if (tag === "INPUT" && /^(submit|button|reset|image)$/.test(type)) return (e.value || e.getAttribute("alt") || "") + " " + (e.getAttribute("aria-label") || "");
+    if (tag === "INPUT" && (type === "radio" || type === "checkbox")) {
+      const lb = e.getAttribute("aria-labelledby");
+      if (lb) {
+        const t = lb.split(/\s+/).map((id) => { const nd = document.getElementById(id); return nd ? nd.innerText || "" : ""; }).join(" ");
+        if (t.trim()) return t;
+      }
+      if (e.id) { try { const lab = document.querySelector('label[for="' + CSS.escape(e.id) + '"]'); if (lab) return lab.innerText || ""; } catch { /* ignore */ } }
+      const wrap = e.closest && e.closest("label");
+      return (wrap && wrap.innerText) || e.getAttribute("aria-label") || "";
+    }
+    return (e.innerText || "") + " " + (e.getAttribute("aria-label") || "") + " " + (e.title || "");
+  };
+  // Открытое модальное окно — единственное, что доступно живой руке: одноимённая кнопка страницы под затемнением
+  // проигрывает кнопке окна (Moodle «Отправить всё и завершить тест» — две одинаковые подписи).
+  const DIALOG = 'dialog[open],[role="dialog"],[role="alertdialog"],[aria-modal="true"]';
+  const inOpenDialog = (e) => { const d = e.closest && e.closest(DIALOG); return Boolean(d && visible(d)); };
+  const covered = (e) => {
+    if (e.getRootNode && e.getRootNode() !== document) return false;
+    const b = e.getBoundingClientRect();
+    const x = b.left + b.width / 2;
+    const y = b.top + b.height / 2;
+    if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+    const hit = document.elementFromPoint(x, y);
+    return Boolean(hit) && hit !== e && !e.contains(hit) && !hit.contains(e);
+  };
+  const CAND =
+    "a,button,input[type=submit],input[type=button],input[type=reset],input[type=image],input[type=radio],input[type=checkbox]," +
+    "summary,label,[role=button],[role=link],[role=tab],[role=menuitem],[role=option],[role=radio],[role=checkbox],[aria-label],[data-test-id],[tabindex]";
   const resolve = () => {
     if (P.nonce) {
       // Клик по ref: элемент помечен data-jarvis-act=nonce (stampRefIsolated в ISOLATED). Ищем СКВОЗЬ shadow.
@@ -1258,13 +1333,15 @@ async function robustClickMain(params) {
     if (!q) return null;
     let best = null;
     let bestScore = 0;
-    for (const e of deepAll("a,button,[role=button],[role=link],[role=tab],[aria-label],[data-test-id],[tabindex]")) {
+    for (const e of deepAll(CAND)) {
       // isConnected вместо document.contains: contains НЕ пересекает shadow-границу (ложно отсекал бы shadow-элементы)
       if (!e.isConnected) continue;
       if (e.closest && e.closest(".swiper-slide-duplicate")) continue;
       if (!visible(e)) continue;
-      const s = scoreText(q, foldTxt((e.innerText || "") + " " + (e.getAttribute("aria-label") || "") + " " + (e.title || "")));
-      if (s > bestScore) { bestScore = s; best = e; }
+      let s = scoreText(q, foldTxt(nameOf(e)));
+      if (s > 0) s += (inOpenDialog(e) ? 5 : 0) - (covered(e) ? 15 : 0);
+      // Ничья → самый ВЛОЖЕННЫЙ: карточка [tabindex] с тем же текстом, что у галочки внутри, забирала клик себе.
+      if (s > bestScore || (s > 0 && s === bestScore && best && best.contains(e))) { bestScore = s; best = e; }
     }
     return best;
   };
@@ -1289,7 +1366,19 @@ async function robustClickMain(params) {
   // code:"not_found" → tabAct.shouldProbe щупает iframe (элемент мог жить во фрейме). expectChange-провал
   // ниже помечается code:"no_effect" (клик УЖЕ отработал → повтор в iframe = двойной side-effect, ревью #C).
   if (!node) return { ok: false, code: "not_found", error: "элемент «" + (P.selector || P.text || "") + "» не найден" };
-  const target = (node.closest && node.closest("button,[role=button],a,[role=link],[tabindex]")) || node;
+  // Нативный элемент кликаем САМ (radio/label/input-кнопка): подъём к [tabindex]-предку уводил клик в контейнер.
+  const NATIVE = "a[href],area[href],button,input,select,textarea,summary,label,option";
+  const isNative = (el) => Boolean(el && el.matches && el.matches(NATIVE));
+  const target = isNative(node) ? node : (node.closest && node.closest("button,[role=button],a,[role=link],[tabindex]")) || node;
+  // §14 на СТРАНИЦЕ (26.09): сервер не видит подписи элемента, выбранного селектором/ref, а браузер видит. На
+  // опасном сайте/LMS сервер присылает guard (регэксп глаголов коммита) — подпись совпала и одобрения нет →
+  // НЕ кликаем, возвращаем подпись: сервер спросит владельца и повторит с guardApproved (флаг ставит только он).
+  if (P.guard && !P.guardApproved) {
+    let re = null;
+    try { re = new RegExp(String(P.guard), "iu"); } catch { re = null; }
+    const label = (nameOf(target) + " " + (target !== node ? nameOf(node) : "")).replace(/\s+/g, " ").trim();
+    if (re && re.test(label)) return { ok: false, code: "commit_confirm", label: label.slice(0, 120), error: "commit_confirm: " + label.slice(0, 120) };
+  }
   try {
     target.scrollIntoView({ block: "center" });
   } catch {
@@ -1336,6 +1425,8 @@ async function robustClickMain(params) {
   const pointer = () => {
     const r = target.getBoundingClientRect();
     const o = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+    // Ровно ОДИН click: синтетический click сам запускает активацию (ссылка/сабмит/галочка). Раньше следом шёл ещё
+    // target.click() — галочка переключалась туда и обратно, форма уходила дважды (боевой прогон 26.09).
     for (const ty of ["pointerover", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
       try {
         const C = ty.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
@@ -1344,19 +1435,15 @@ async function robustClickMain(params) {
         /* ignore */
       }
     }
-    try {
-      target.click();
-    } catch {
-      /* ignore */
-    }
     return true;
   };
 
-  const methods = [
-    { name: "react", fn: reactClick },
-    { name: "enter", fn: pressEnter },
-    { name: "pointer", fn: pointer },
-  ];
+  // H19 (ревью 02.07, подтверждён 26.09 в Chromium): синтетический Enter «срабатывал» всегда, и на обычных
+  // (не React) сайтах клик до указателя не доходил — ok без нажатия. Enter остаётся только во встряхивании
+  // (expectChange сверяет РЕАЛЬНУЮ смену контента после каждого метода — двойного действия там нет).
+  const methods = P.expectChange
+    ? [{ name: "react", fn: reactClick }, { name: "enter", fn: pressEnter }, { name: "pointer", fn: pointer }]
+    : [{ name: "react", fn: reactClick }, { name: "pointer", fn: pointer }];
   let used = null;
   for (const m of methods) {
     let fired = false;
@@ -1563,7 +1650,16 @@ function readPageInPage(query) {
       area: Math.round(areaOf(m)), // для межкадрового выбора в tabRead
     };
   }
-  return { title: document.title || "", url: location.href, text: text.slice(0, 8000), headings, filtered, ...(media ? { media } : {}) };
+  // Формулы (26.09, тесты Moodle): innerText отдаёт отрисованные глифы MathJax кашей («ab» вместо a/b), а исходный
+  // TeX лежит рядом — <script type="math/tex"> (MathJax 2), alt у картинок фильтра TeX, alttext у <math>. Отдаём его
+  // приложением к тексту, чтобы модель решала задачу по формуле, а не по обломкам вёрстки.
+  const tex = [];
+  const scope = main || document;
+  for (const s of scope.querySelectorAll('script[type^="math/tex"]')) { const t = (s.textContent || "").trim(); if (t) tex.push(t); }
+  for (const im of scope.querySelectorAll("img.texrender[alt]")) { const t = (im.getAttribute("alt") || "").trim(); if (t) tex.push(t); }
+  for (const m of scope.querySelectorAll("math[alttext]")) { const t = (m.getAttribute("alttext") || "").trim(); if (t) tex.push(t); }
+  const appendix = tex.length ? "\n\n[Формулы на странице — исходный TeX по порядку: " + tex.slice(0, 40).map((t, i) => i + 1 + ") " + t.slice(0, 200)).join("; ") + "]" : "";
+  return { title: document.title || "", url: location.href, text: text.slice(0, 8000 - appendix.length) + appendix, headings, filtered, ...(media ? { media } : {}) };
 }
 
 /** Исполняется ВНУТРИ страницы: действие по интенту (self-contained, без внешних ссылок). async — play ждёт исход. */
@@ -1860,6 +1956,26 @@ async function pageActInPage(intent, params) {
       // «type в iframe, enter в top» тут невозможен (ревью #3), в отличие от раздельных type→enter.
       const submitted = P.enter || P.submit ? pressEnter(el) : false;
       return { ok: true, typed: v.slice(0, 60), submitted };
+    }
+    if (intent === "select") {
+      // Выбор в <select> по ТЕКСТУ варианта (26.09: вопросы Moodle «на соответствие»; раньше setNativeValue с
+      // сеттером HTMLInputElement падал на select «Illegal invocation»). Нативный сеттер + input/change.
+      const el = P.selector ? bySelector(String(P.selector)) : null;
+      if (!el) return { ok: false, code: "not_found", error: "список не найден — передай selector из browser_inspect" };
+      if (el.tagName !== "SELECT") return { ok: false, error: "элемент не <select>: у самодельного списка кликни по нему, затем по пункту (click)" };
+      const want = foldTxt(P.option != null ? P.option : P.text);
+      let best = null;
+      let bestScore = 0;
+      for (const o of el.options) {
+        const s = Math.max(scoreText(want, foldTxt(o.text)), String(o.value) === String(P.option) ? 90 : 0);
+        if (s > bestScore) { bestScore = s; best = o; }
+      }
+      if (!best) return { ok: false, error: "вариант «" + String(P.option ?? P.text ?? "") + "» не найден; варианты: " + [...el.options].map((o) => o.text.trim()).join(" | ").slice(0, 400) };
+      try { el.focus(); } catch { /* ignore */ }
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(el, best.value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: el.value === best.value, value: best.text.trim().slice(0, 60) };
     }
     if (intent === "enter" || intent === "submit") {
       // C3: нажать Enter / отправить форму (запустить поиск после type). selector опционален (вкл. shadow « >>> »).

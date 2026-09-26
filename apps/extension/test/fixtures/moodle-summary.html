@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Тест 1: Результат попытки | ИМЭС</title>
+<!-- summary.php + mod_quiz/submission_confirmation.js (4.1+): кнопка страницы открывает core/modal_save_cancel,
+     фиксирует попытку только [data-action=save] в окне — с ТОЙ ЖЕ подписью, что и кнопка под затемнением. -->
+<style>
+  .modal { display: none; position: fixed; inset: 0; z-index: 1050; background: rgba(0, 0, 0, .5); }
+  .modal.show { display: block; }
+  .modal-dialog { margin: 120px auto; width: 420px; background: #fff; padding: 16px; }
+</style>
+</head>
+<body>
+<div role="main" id="region-main">
+  <h2>Результат попытки</h2>
+  <table class="generaltable quizsummaryofattempt"><tbody>
+    <tr class="quizsummary1 answersaved"><td>1</td><td>Ответ сохранен</td></tr>
+    <tr class="quizsummary2 notyetanswered"><td>2</td><td>Пока нет ответа</td></tr>
+  </tbody></table>
+  <div class="controls">
+    <form method="get" action="attempt.php"><button type="submit" class="btn btn-secondary" id="back">Вернуться к попытке</button></form>
+    <div class="btn-finishattempt"><form id="frm-finishattempt" method="post" action="processattempt.php">
+      <input type="hidden" name="finishattempt" value="1">
+      <button type="submit" class="btn btn-primary" id="single_button_fin">Отправить всё и завершить тест</button>
+    </form></div>
+  </div>
+</div>
+<div class="modal moodle-has-zindex" data-region="modal-container" role="dialog" aria-modal="true" aria-labelledby="mt">
+  <div class="modal-dialog" data-region="modal" tabindex="0"><div class="modal-content">
+    <div class="modal-header"><h2 id="mt" class="modal-title h5">Отправить все свои ответы и закончить?</h2></div>
+    <div class="modal-body"><div class="quiz-submission-confirmation-content">После отправки Вы больше не сможете изменить свои ответы на эту попытку.</div></div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-action="cancel">Отмена</button><button type="button" class="btn btn-primary" data-action="save">Отправить всё и завершить тест</button></div>
+  </div></div>
+</div>
+<script>
+  window.__opened = 0;
+  window.__finished = 0;
+  const modal = document.querySelector(".modal");
+  document.getElementById("single_button_fin").addEventListener("click", (e) => { e.preventDefault(); window.__opened++; modal.classList.add("show"); });
+  modal.querySelector('[data-action="save"]').addEventListener("click", () => { window.__finished++; modal.classList.remove("show"); });
+  modal.querySelector('[data-action="cancel"]').addEventListener("click", () => modal.classList.remove("show"));
+</script>
+</body>
+</html>
