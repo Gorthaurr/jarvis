@@ -163,7 +163,8 @@ describe("W1: параллельные чтения вкладки", () => {
   });
 
   it("browser_tabs{op:\"close\"} рядом с чтением — НЕ параллельно (закрытие — не чтение)", async () => {
-    raceFakes("browser_tabs", "browser_read");
+    // Фасад канонизирует browser_tabs{op:"close"} в browser_close ДО петли и dispatch (facades.ts).
+    raceFakes("browser_close", "browser_read");
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "c1", name: "browser_tabs", input: { op: "close", tabId: 7 } }, { id: "r1", name: "browser_read", input: { selectorIntent: "итого" } }] },
       { text: "Закрыл вкладку, итог — 1200 рублей." },
@@ -194,7 +195,7 @@ describe("W1: журнал чекпойнта судит эффект по вх�
     process.env.JARVIS_CONTEXT_SOFT_TOKENS = "20000";
     process.env.JARVIS_CONTEXT_HARD_TOKENS = "30000";
     fakes.browser_act = (i) => okRes(`Сделал «${String(i.intent)}» в браузере.`);
-    fakes.browser_tabs = () => okRes("Закрыл вкладку 7.");
+    fakes.browser_close = () => okRes("Закрыл вкладку 7.");
     const checkpoints = new CheckpointStore(dir);
     const llm = new MockLlmProvider([
       {
@@ -210,7 +211,7 @@ describe("W1: журнал чекпойнта судит эффект по вх�
     await handleUserText(session(), "закрой лишнюю вкладку и заполни анкету на сайте", deps(llm, { checkpoints }));
     const digest = checkpoints.peek("u1")?.digest ?? "";
     const doneSection = digest.split("⟪подробности захода⟫")[0] ?? "";
-    expect(doneSection).toMatch(/browser_tabs\([^)]*close/u);
+    expect(doneSection).toMatch(/browser_close\([^)]*close/u);
     expect(doneSection).toMatch(/browser_act\([^)]*set/u);
     expect(doneSection).not.toMatch(/hover/u);
   });
