@@ -9,7 +9,11 @@
  * guardApproved:true.
  */
 
+import { isOnFlag } from "@jarvis/shared";
+
 const SERVER_ONLY = new Set(["guard", "guardApproved", "approvedLabel"]);
+/** Флаги коммита печати: уходят расширению УЖЕ булевыми (LOOP-3) — гейт §14, петля и страница судят одну правду. */
+const COMMIT_FLAGS = ["enter", "submit"] as const;
 
 function asRecord(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
@@ -18,7 +22,14 @@ function asRecord(v: unknown): Record<string, unknown> | undefined {
 function withoutServerOnly(o: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(o)) if (!SERVER_ONLY.has(k)) out[k] = v;
+  for (const k of COMMIT_FLAGS) if (k in out) out[k] = isOnFlag(out[k]);
   return out;
+}
+
+/** Первая непустая строка (intent || action — так их берёт расширение: "" пропускается, W1-1). */
+function firstText(...vs: unknown[]): string {
+  for (const v of vs) if (typeof v === "string" && v.trim()) return v.trim();
+  return "";
 }
 
 /** Параметры browser_act: плоские поля (кроме intent/url/tabId) + params поверх; служебные поля §14 вырезаны. */
@@ -27,12 +38,19 @@ export function browserActParams(input: Record<string, unknown>): Record<string,
   return withoutServerOnly({ ...flat, ...(asRecord(params) ?? {}) });
 }
 
-/** Шаг берста: поля с верха шага + params поверх (так их читает расширение), без служебных полей §14. */
+/**
+ * Шаг берста: поля с верха шага + params поверх (так их читает расширение), без служебных полей §14. Intent — первое
+ * непустое из intent/action (пустой → "", берст такой шаг не шлёт). type с разными text на верху и в params: верхний —
+ * ПОДПИСЬ поля (расширение кладёт его в P.label), params.text — что печатать; §0-гард обязан видеть эту подпись (W1-T1).
+ */
 export function browserStepFields(step: unknown): { intent: string; fields: Record<string, unknown> } {
   const o = asRecord(step) ?? {};
-  const { params, intent, action, ...top } = o;
-  const fields = withoutServerOnly({ ...top, ...(asRecord(params) ?? {}) });
-  return { intent: String(intent ?? action ?? "").trim(), fields };
+  const { params, intent: rawIntent, action, ...top } = o;
+  const p = asRecord(params) ?? {};
+  const intent = firstText(rawIntent, action);
+  const fields = withoutServerOnly({ ...top, ...p });
+  if (intent === "type" && typeof top.text === "string" && typeof p.text === "string" && p.text !== top.text) fields.label = top.text;
+  return { intent, fields };
 }
 
 /**

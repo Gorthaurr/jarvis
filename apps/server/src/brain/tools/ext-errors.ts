@@ -43,7 +43,7 @@ export function isExtNoReply(e: unknown): boolean {
 }
 
 /** Известные коды страницы — токеном в тексте их шлёт старое расширение. */
-const PAGE_CODES = ["secret_field", "tab_closed", "tab_not_visible", "ref_stale", "commit_confirm", "not_found", "capture_failed", "ambiguous"] as const;
+const PAGE_CODES = ["secret_field", "tab_closed", "tab_not_visible", "ref_stale", "commit_confirm", "not_found", "capture_failed", "ambiguous", "frame_gone", "tab_gone", "no_effect"] as const;
 const CODE_TOKEN_RE = new RegExp(`(?<![\\p{L}\\p{N}_])(${PAGE_CODES.join("|")})(?![\\p{L}\\p{N}_])`, "u");
 
 /** Код отказа страницы: из `code` ошибки/данных либо токеном из текста. Нет → undefined. */

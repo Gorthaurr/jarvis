@@ -6,7 +6,7 @@
  * Жест ОТПРАВКИ (Enter/submit/type+enter/key Enter) наблюдением поля долг не снимает: исход отправки сверяется
  * отдельно. Старое расширение `submitted` у key не возвращает — поэтому жест распознаём и по самому вызову.
  */
-import { isCommitKeyCombo } from "@jarvis/shared";
+import { isCommitKeyCombo, isOnFlag } from "@jarvis/shared";
 import type { ToolResult } from "../dispatch.js";
 import { err } from "../dispatch-util.js";
 
@@ -22,8 +22,6 @@ export interface ActReply {
 
 const HISTORY_INTENTS: ReadonlySet<string> = new Set(["back", "forward"]);
 
-const truthy = (v: unknown): boolean => v === true || v === "true" || v === 1 || v === "1";
-
 /** Переход состоялся: navigated:true (новое расширение) или адрес строкой (старое). false/"" — перехода не было. */
 export function navigatedTo(r: ActReply): boolean {
   return r.navigated === true || (typeof r.navigated === "string" && r.navigated.length > 0);
@@ -32,7 +30,7 @@ export function navigatedTo(r: ActReply): boolean {
 /** Жест отправки: расширение сказало submitted, либо сам вызов — Enter/submit/type+enter/key Enter (пустой combo = Enter). */
 export function actCommits(intent: string, params: Record<string, unknown>, r: ActReply): boolean {
   if (r.submitted === true || intent === "enter" || intent === "submit") return true;
-  if (intent === "type") return truthy(params.enter) || truthy(params.submit);
+  if (intent === "type") return isOnFlag(params.enter) || isOnFlag(params.submit);
   if (intent === "key") {
     const combo = String(params.combo ?? params.key ?? "").trim();
     return combo === "" || isCommitKeyCombo(combo);

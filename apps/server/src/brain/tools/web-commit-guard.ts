@@ -11,7 +11,7 @@
 import { COMMIT_WORDS_RE } from "@jarvis/shared";
 import type { ToolContext, ToolResult } from "./dispatch.js";
 import { confirmDeclineText, err, gateDeclined } from "./dispatch-util.js";
-import { type CommitRisk, riskyHostCategory } from "./commit-gate.js";
+import { type CommitRisk, riskyHostCategory, webCommitLabelParts } from "./commit-gate.js";
 import { LMS_COMMIT_RE, LMS_TWO_STEP_RE, isLmsPage } from "./commit-lms.js";
 import type { WebPlace } from "./web-place.js";
 
@@ -26,6 +26,23 @@ export function pageGuardFor(place: WebPlace): string {
   // Неизвестная вкладка может оказаться и LMS (мёртвый tabId → расширение берёт активную) — учебные слова тоже.
   if (isLmsPage(place.url) || place.unknown) return `${COMMIT_WORDS_RE.source}|${LMS_COMMIT_RE.source}`;
   return COMMIT_WORDS_RE.source;
+}
+
+/**
+ * W1-2/W1-T3: подпись, к которой привязываем одобрение владельца, — из ТЕХ ЖЕ частей, по которым судили риск
+ * (text/name/title/подпись ref; у type — подпись поля, не печатаемое). Пустая строка — подписи нет.
+ */
+export function commitApprovalLabel(intent: string, params: Record<string, unknown>, refHint?: string): string {
+  return webCommitLabelParts(intent, params, refHint)[0]?.slice(0, 160) ?? "";
+}
+
+/**
+ * Служебные поля одобрения: guardApproved ТОЛЬКО вместе с approvedLabel (страница сверит, что жмёт ту самую подпись).
+ * Без подписи одобрения не шлём — страница, узнав коммит, спросит заново (commit_confirm), а не нажмёт что попало.
+ */
+export function approvalFields(label: string): Record<string, unknown> {
+  const lbl = label.trim();
+  return lbl ? { guardApproved: true, approvedLabel: lbl } : {};
 }
 
 /**
