@@ -38,13 +38,13 @@ export async function runTool(hub: BenchHub, body: Record<string, unknown>): Pro
   if (!policy) return bad(400, "confirm: yes|no|expire|undelivered или их массив");
   const ctx = await hub.ctx();
   const ext = await waitExt(hub.deps.brain.extBridge, numIn(body.waitExtMs, 0, 30_000, 5_000));
-  const r = resolvePlaceholders(input, hub.lastInspectText, hub.lastResultText);
+  const r = resolvePlaceholders(input, hub.inspectTexts, hub.lastResultText);
   if (r.unresolved.length) return bad(400, "плейсхолдеры не разрешены — инструмент НЕ вызван", { unresolved: r.unresolved });
   const call = newBenchCall(policy);
   const out = await hub.run(call, () => dispatchTool(name, r.value, makeToolCtx(ctx.agentDeps, ctx.session, undefined)));
   if (out === "busy") return bad(409, "стенд занят другим вызовом");
   const result = serializeToolResult(out);
-  if (isInspectText(result.text)) hub.lastInspectText = result.text;
+  if (isInspectText(result.text)) hub.noteInspect(result.text);
   hub.lastResultText = result.text;
   return {
     code: 200,

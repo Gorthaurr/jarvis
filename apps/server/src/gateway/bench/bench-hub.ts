@@ -27,14 +27,15 @@ export interface BenchHubDeps {
 }
 
 const BUSY_WAIT_MS = 5_000;
+const INSPECTS_KEPT = 8;
 
 export class BenchHub {
   private ctxP?: Promise<SessionContext>;
   private sock?: BenchSocket;
   private readonly mutex = new AsyncMutex();
   busy = false;
-  /** Текст последнего результата browser_inspect (для $ref в /dev/bench/tool) и последнего результата вообще. */
-  lastInspectText = "";
+  /** Тексты последних снимков browser_inspect, свежий первым (для $ref в /dev/bench/tool), и последний результат. */
+  inspectTexts: string[] = [];
   lastResultText = "";
 
   constructor(readonly deps: BenchHubDeps) {}
@@ -94,12 +95,16 @@ export class BenchHub {
     return true;
   }
 
+  noteInspect(text: string): void {
+    this.inspectTexts = [text, ...this.inspectTexts].slice(0, INSPECTS_KEPT);
+  }
+
   /** Снести bench-сессию (задачи отменяются teardown'ом сессии). Следующий вызов поднимет новую. */
   async reset(): Promise<{ removed: string | null; wasBusy: boolean }> {
     const wasBusy = this.busy;
     const p = this.ctxP;
     this.ctxP = undefined;
-    this.lastInspectText = "";
+    this.inspectTexts = [];
     this.lastResultText = "";
     if (!p) return { removed: null, wasBusy };
     const ctx = await p.catch(() => undefined);

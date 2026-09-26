@@ -10,7 +10,25 @@ export const DEFECTS = {
   // («Оплатить #payform > button:nth-of-type(1) button»); страница сверяет approvedLabel со своей подписью «Оплатить»,
   // не совпадает → commit_confirm → ВТОРОЙ вопрос владельцу на один клик. В модалке владелец видит CSS-селектор.
   DOUBLE_CONFIRM: "W1-D2: один клик по ref на опасном хосте → два §14-вопроса (одобрение не узнаёт свою подпись)",
+  // apps/extension/background.js judgeParts (Enter/type+enter): ни одна подпись поля не совпала с guard-регэкспом →
+  // label = parts.join(" ") («Сообщение Сообщение»), а одобрение сверяется с КАЖДОЙ подписью по отдельности — равенства
+  // не бывает по построению. Итог: владелец отвечает «да» ДВАЖДЫ, сообщение НЕ уходит, модели — «кнопка сменилась».
+  ENTER_APPROVAL: "W1-D4: Enter/Ctrl+Enter в мессенджере по ref после «да» не отправляет (одобрение страницы не узнаёт свою же подпись)",
+  // brain/tools/handlers/browser-target.ts resolveBrowserTarget: явный url отбрасывает запомненный tabId из browser_open,
+  // а extension/modules/tab-find.js ищет по хосту только ЗАКОММИЧЕННЫЙ tab.url (pendingUrl — нет). Сразу после
+  // browser_open (страница ещё грузится) browser_inspect{url} → «вкладка … не открыта».
+  OPEN_RACE: "W1-D3: browser_inspect{url} сразу после browser_open (навигация не закоммичена) → «вкладка не открыта»",
+  // apps/extension/modules/capture.js: chrome.tabs.captureVisibleTab ограничен квотой Chrome (2 вызова/с); второй
+  // снимок подряд (полный кадр → зум, два image-чтения в одном раунде) падает capture_failed вместо выжидания.
+  CAPTURE_QUOTA: "W1-D5: два browser_read{view:image} подряд → capture_failed (квота captureVisibleTab), без повтора",
+  // Корень тот же, что у W1-D2 (подпись ref = name+selector+role+type): у кнопки навигации теста
+  // `input[type=submit][name=next]` в «подписи» оказывается слово submit ИЗ СЕЛЕКТОРА → «Следующая страница» и
+  // «Закончить попытку...» судятся как сдача — владельцу задают вопрос на каждой странице теста.
+  LMS_NAV_ASKS: "W1-D6: навигация по страницам теста Moodle («Следующая страница») спрашивает владельца",
+  // web-commit-guard takeApproval/rememberApproval: одобрение запомнено под подписью-с-селектором кнопки страницы
+  // («… #single_button_fin button»), у кнопки модалки селектор другой → двухшаговая сдача спрашивает ЕЩЁ раз.
+  LMS_TWO_STEP: "W1-D7: «Отправить всё и завершить тест» (кнопка → модалка) — второй вопрос вместо одного «да» на связку",
 };
 
 /** Опции node:test для теста, который ждёт фикса. */
-export const waitsFix = (id) => ({ todo: `ждёт фикса W1 — ${DEFECTS[id]}` });
+export const waitsFix = (id) => ({ todo: `ждёт фикса W1 — ${DEFECTS[id]}`, timeout: 120_000 });

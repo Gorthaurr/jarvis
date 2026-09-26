@@ -106,7 +106,10 @@ export async function begin() {
 
 /** Открыть страницу фикстуры через browser_open и дождаться, пока вкладка ЗАКОММИТИТ навигацию на этот хост (иначе
  *  поиск вкладки по хосту сразу после open видит about:blank — это отдельный дефект, см. scenarios/defects.mjs). */
-export async function open(url, { waitMs = 10_000 } = {}) {
+export async function open(url, { waitMs = 10_000, fresh = true } = {}) {
+  // browser_open ФОКУСИРУЕТ уже открытую вкладку сайта (не перезагружает с новым ?run=) — для чистого сценария
+  // закрываем всё лишнее заранее.
+  if (fresh) await resetTabs();
   const r = await tool("browser_open", { url });
   if (r.result.isError) throw new Error(`browser_open ${url}: ${r.result.text}`);
   const origin = new URL(url).origin;

@@ -68,16 +68,21 @@ describe("script-refs", () => {
     { ref: "e1_3", label: "Сумма", role: "textbox" },
   ];
   it("точная подпись важнее вхождения; ё = е; без регистра", () => {
-    expect(findRef(els, "отправить")).toBe("e1_2");
-    expect(findRef(els, "завершить тест")).toBe("e1_1");
-    expect(findRef([{ ref: "e9", name: "Ещё" }], "еще")).toBe("e9");
+    expect(findRef([els], "отправить")).toBe("e1_2");
+    expect(findRef([els], "завершить тест")).toBe("e1_1");
+    expect(findRef([[{ ref: "e9", name: "Ещё" }]], "еще")).toBe("e9");
+  });
+  it("снимки: свежий первым; неполный снимок find не прячет ref из прежнего", () => {
+    const fresh = [{ ref: "e2_0", name: "Отправить" }];
+    expect(findRef([fresh, els], "Отправить")).toBe("e2_0");
+    expect(findRef([fresh, els], "Сумма")).toBe("e1_3");
   });
   it("inspectElements читает JSON из untrusted-обёртки", () => {
     expect(inspectElements(snapshot(els)).map((e) => e.ref)).toEqual(["e1_1", "e1_2", "e1_3"]);
     expect(inspectElements("просто текст")).toEqual([]);
   });
   it("$match берёт первую группу из последнего результата; вложенные объекты обходятся", () => {
-    const r = resolvePlaceholders({ steps: [{ params: { to: "$match:tabId=(\\d+)" } }] }, "", "Открыл, tabId=42");
+    const r = resolvePlaceholders({ steps: [{ params: { to: "$match:tabId=(\\d+)" } }] }, [], "Открыл, tabId=42");
     expect(r.value).toEqual({ steps: [{ params: { to: "42" } }] });
     expect(r.resolved).toEqual({ "$match:tabId=(\\d+)": "42" });
   });

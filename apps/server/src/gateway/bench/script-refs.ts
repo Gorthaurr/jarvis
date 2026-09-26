@@ -1,7 +1,8 @@
 /**
  * Стенд: плейсхолдеры во входах инструментов — одна реализация для /dev/bench/tool и сценарного LLM (/dev/bench/say).
- *   "$ref:<подпись>"  → ref элемента из ПОСЛЕДНЕГО снимка browser_inspect (name|text|label|aria; ё→е, без регистра;
- *                       сначала точное совпадение подписи, потом вхождение).
+ *   "$ref:<подпись>"  → ref элемента из снимков browser_inspect, свежий снимок первым (name|text|label|aria; ё→е, без
+ *                       регистра; сначала точное совпадение подписи во всех снимках, потом вхождение). Снимки find
+ *                       (inspect{query}) неполные, а прежние ref в расширении живы — поэтому ищем не только в последнем.
  *   "$match:<regex>"  → первая группа (или всё совпадение) в тексте последнего результата инструмента.
  * Неразрешённый плейсхолдер остаётся литералом и попадает в `unresolved` — вызывающий решает, звать ли инструмент.
  */
@@ -32,15 +33,21 @@ export function isInspectText(text: string): boolean {
   return text.includes(DOM_MARK);
 }
 
-/** ref по подписи: точное совпадение одного из полей подписи, иначе вхождение. */
-export function findRef(elements: Array<Record<string, unknown>>, label: string): string | undefined {
+/** ref по подписи в снимках (свежий первым): точное совпадение одного из полей подписи, иначе вхождение. */
+export function findRef(snapshots: Array<Array<Record<string, unknown>>>, label: string): string | undefined {
   const want = norm(label);
   if (!want) return undefined;
   const labels = (e: Record<string, unknown>): string[] => ["name", "text", "label", "aria"].map((k) => norm(e[k])).filter(Boolean);
-  const withRef = elements.filter((e) => typeof e.ref === "string" && e.ref);
-  const exact = withRef.find((e) => labels(e).includes(want));
-  const loose = exact ?? withRef.find((e) => labels(e).some((l) => l.includes(want)));
-  return loose ? String(loose.ref) : undefined;
+  const all = snapshots.map((els) => els.filter((e) => typeof e.ref === "string" && e.ref));
+  for (const els of all) {
+    const exact = els.find((e) => labels(e).includes(want));
+    if (exact) return String(exact.ref);
+  }
+  for (const els of all) {
+    const loose = els.find((e) => labels(e).some((l) => l.includes(want)));
+    if (loose) return String(loose.ref);
+  }
+  return undefined;
 }
 
 /** Тексты tool_result из истории петли (хронологически). */
@@ -62,14 +69,14 @@ export interface Resolution {
   unresolved: string[];
 }
 
-/** Подставить плейсхолдеры во входе инструмента (глубоко: объекты/массивы). */
-export function resolvePlaceholders(input: Record<string, unknown>, inspectText: string, lastText: string): Resolution {
+/** Подставить плейсхолдеры во входе инструмента (глубоко: объекты/массивы). inspectTexts — тексты снимков, свежий первым. */
+export function resolvePlaceholders(input: Record<string, unknown>, inspectTexts: string[], lastText: string): Resolution {
   const resolved: Record<string, string> = {};
   const unresolved: string[] = [];
-  const elements = inspectElements(inspectText);
+  const snapshots = inspectTexts.map(inspectElements);
   const one = (s: string): string => {
     if (s.startsWith("$ref:")) {
-      const ref = findRef(elements, s.slice(5));
+      const ref = findRef(snapshots, s.slice(5));
       if (ref) return (resolved[s] = ref);
     } else if (s.startsWith("$match:")) {
       let m: RegExpMatchArray | null = null;

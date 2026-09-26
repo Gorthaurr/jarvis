@@ -97,10 +97,10 @@ export class ScriptedLlm implements ILlmProvider {
     }
     this.next += 1;
     const results = toolResultTexts(req.messages);
-    const inspect = [...results].reverse().find(isInspectText) ?? "";
+    const inspects = [...results].reverse().filter(isInspectText);
     const last = results[results.length - 1] ?? "";
     const toolUses = (turn.tool_uses ?? []).map((u, j) => {
-      const r = resolvePlaceholders(u.input ?? {}, inspect, last);
+      const r = resolvePlaceholders(u.input ?? {}, inspects, last);
       round.unresolved.push(...r.unresolved);
       return { id: `toolu_bench_${this.seq}_${round.i}_${j}`, name: u.name, input: r.value };
     });
