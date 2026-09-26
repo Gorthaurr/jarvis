@@ -41,11 +41,7 @@ export interface BenchCall {
 }
 
 /** Вопрос вне живого вызова (фоновая задача пережила вызов) — ответ «нет», запись для диагностики. */
-export interface StrayQuestion {
-  kind: string;
-  summary: string;
-  at: number;
-}
+export type StrayQuestion = { kind: string; summary: string; at: number };
 
 const FRAMES_MAX = 500;
 const STRAY_MAX = 50;
@@ -82,11 +78,9 @@ export class BenchSocket implements SessionSocket {
   get readyState(): number {
     return this.state;
   }
-
   bind(session: Session): void {
     this.session = session;
   }
-
   close(): void {
     this.state = 3;
   }

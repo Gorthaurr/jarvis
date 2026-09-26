@@ -38,14 +38,17 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   сервер (рестарт, /healthz-watchdog, голосовой доклад о падениях) и КЛИЕНТ (`infra/client-keeper.mjs`: упал →
   перезапуск; «Выйти» из трея → маркер до следующего входа). Регистрация: `infra/register-autostart.ps1`.
 - Сервер руками: `apps/server` → `npx tsx src/index.ts` (порт **8787**; НЕ `tsx watch`). Логи: `apps/server/data/logs/
-  server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl` (task/round/mouth_to_ear/degradation), `server.out.log`.
+  server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl`, `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
-  под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU — артефакт среды.
-- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS → кадры → STT);
+  под супервизором — `apps/client/client.{out,err}.log`.
+- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS→кадры→STT);
   dev-сессия, действия клиента — фейк. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
-- Тесты: `apps/server` `npx vitest run` (~3050), `apps/client` `npx vitest run` (~790), `packages/*`, `node --test
-  infra/client-keeper.test.mjs`, `node --test "apps/extension/test/*.test.mjs"`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутационная таблица петли:
+- Тесты: `npx vitest run` в `apps/server`, `apps/client`, `packages/*`; `node --test` — `infra/client-keeper.test.mjs`,
+  `"apps/extension/test/*.test.mjs"`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутации петли:
   `node apps/server/scripts/mutate-loop.cjs`. Длины функций: `node apps/server/scripts/fn-lengths.mjs`.
+- **Стенд (облако)**: `node infra/bench/bench.mjs up|status|tool|say|shot|log|down` — сервер + Chromium с расширением
+  на Xvfb + HTTPS-фикстуры на настоящих хостах §14, `/dev/bench/*`; `infra/bench/README.md`.
+- Сценарии: `node --test --test-concurrency=1 "infra/bench/scenarios/*.test.mjs"` — факт по журналу фикстур.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
   Фолбэк PGlite. Docker не используется.
 - Модели (ASCII-путь!): `~/.jarvis/models` — слух (`fetch-hearing-models.mjs`), e5 в `hf/` (качается сам с `HF_ENDPOINT`).
@@ -107,7 +110,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - **Лестница восприятия**: `look` (UIA/OCR/окна) → `browser_read/inspect` → `screen_capture` последним.
 - **Проактив**: одна очередь озвучки на всех, retriable-реплики помечаются доставленными только по факту звука.
 - **Режим выделения**: `screen_selection{view}` — всегда свежий кадр рамки; под вуалью ввод гейтится `overlay_drawing`.
-- **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт по тиру (haiku medium / sonnet high / fable max);
+- **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт haiku/sonnet/fable → medium/high/max;
   thinking всегда adaptive; до `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` только персона (кеш CLI между задачами); `persistSession:false`.
 - **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`); реакции — разговор
   (`router/reaction.ts`); «заткнись» / «тишина» / «вырубись» / голое «хватит» — разные действия (`tasks/control.ts`,
@@ -148,5 +151,5 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Строка прозы навыка, начинающаяся с имени шага (`verify`/`wait`/`launch`), становится шагом слепого реплея.
 
 ## Где искать
-- `docs/ARCHITECTURE.md` (история, механика — ссылки в шапке). План и вердикты: `docs/REVIEW_2026-09-24.md`, `docs/REVIEW_2026-09-09.md`, `docs/NEXT_SESSION.md`.
+- `docs/ARCHITECTURE.md` (история, механика — ссылки в шапке). План и вердикты: `docs/REVIEW_2026-09-09.md`, `docs/NEXT_SESSION.md`.
 - `docs/SECURITY.md`, `docs/USER_SCENARIOS_2026-09-02.md`, `docs/GUI_MANUALS_RESEARCH_2026-09-05.md`, `docs/PRODUCT_FRAMEWORK_PLAN_2026-09-02.md`.

@@ -21,7 +21,10 @@ export async function status() {
   const up = Object.values(procs).every((x) => x.alive);
   const out = { dir: p.root, up, procs, startedAt: state?.startedAt ?? null };
   if (!Object.values(procs).some((x) => x.alive)) return out;
-  out.healthz = await safe(healthz);
+  out.healthz = await safe(async () => {
+    const h = await healthz();
+    return h ? { ok: h.ok, sessions: h.sessions } : null;
+  });
   const st = await safe(() => server("GET", "/dev/bench/state", undefined, 5_000));
   out.ext = { connected: st?.ext?.connected === true, swAlive: state?.extId ? await safe(() => cdp.swAlive(state.extId)) : null };
   out.bench = st?.error ? { error: st.error } : { session: st?.session ?? null, busy: st?.busy, activeTasks: st?.activeTasks?.length ?? 0, stray: st?.stray?.length ?? 0 };

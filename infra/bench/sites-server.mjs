@@ -68,7 +68,7 @@ async function handle(req, res) {
   }
   const body = req.method === "POST" ? await readBody(req) : {};
   const cookieRun = /(?:^|;\s*)bench_run=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
-  const run = String(u.searchParams.get("run") ?? body.run ?? (cookieRun ? decodeURIComponent(cookieRun) : "") ?? "");
+  const run = String(u.searchParams.get("run") ?? body.run ?? (cookieRun ? decodeURIComponent(cookieRun) : ""));
   let aborted = false;
   res.on("close", () => {
     if (!res.writableEnded) aborted = true;
