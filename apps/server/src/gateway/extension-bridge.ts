@@ -10,6 +10,14 @@
  */
 import { newId } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
+import { extNoReplyError, extReplyError } from "../brain/tools/ext-errors.js";
+
+/** Параметры снимка вкладки (контракт W1 §1): rect — CSS px вьюпорта; ref — элемент из снимка; scale — масштаб кропа. */
+export interface TabCaptureOpts {
+  rect?: { x: number; y: number; w: number; h: number };
+  ref?: string;
+  scale?: number;
+}
 
 /** Минимальный контракт сокета расширения (Fastify ws / мок в тестах). */
 export interface ExtSocket {
@@ -61,18 +69,18 @@ export class ExtensionBridge {
     this.log.info("расширение отключено");
   }
 
-  /** Отклонить все ожидающие запросы (вытеснение/отключение). */
+  /** Отклонить все ожидающие запросы (вытеснение/отключение). Запросы УЖЕ ушли — ответа нет, исход неизвестен (B-4). */
   private rejectAllPending(reason: string): void {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(new Error(reason));
+      p.reject(extNoReplyError(reason));
     }
     this.pending.clear();
   }
 
   /** Входящее сообщение от расширения: hello / ответ {id, ok, data|error}. */
   handleMessage(raw: string): void {
-    let msg: { id?: string; type?: string; ok?: boolean; data?: unknown; error?: string };
+    let msg: { id?: string; type?: string; ok?: boolean; data?: unknown; error?: string; code?: unknown; label?: unknown };
     try {
       msg = JSON.parse(raw);
     } catch {
@@ -88,7 +96,8 @@ export class ExtensionBridge {
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
     if (msg.ok) p.resolve(msg.data);
-    else p.reject(new Error(msg.error || "ошибка расширения"));
+    // W1 (контракт §7): код отказа страницы/SW и подпись (commit_confirm) — в поля ошибки; сервер читает e.code.
+    else p.reject(extReplyError(msg.error || "ошибка расширения", msg.code, msg.label));
   }
 
   /**
@@ -102,7 +111,8 @@ export class ExtensionBridge {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("расширение не ответило за " + timeoutMs + "мс"));
+        // Запрос УЖЕ ушёл: расширение могло нажать и не успеть ответить — это «неизвестно», не «не вышло» (B-4).
+        reject(extNoReplyError("расширение не ответило за " + timeoutMs + "мс"));
       }, timeoutMs);
       if (typeof timer === "object" && "unref" in timer) (timer as { unref?: () => void }).unref?.();
       this.pending.set(id, { resolve, reject, timer });
@@ -176,21 +186,27 @@ export class ExtensionBridge {
     return this.request({ type: "tab.close", url: url ?? "", tabId }, 10_000);
   }
 
-  /** ГЛАЗА В DOM: снимок интерактивных элементов вкладки с устойчивыми селекторами + СОСТОЯНИЕ (для
-   *  прицельного act). refMode → минтит ref-реестр (адресация по идентичности, устойчивее селектора). */
-  tabInspect(url?: string, query?: string, cap?: number, tabId?: number, refMode?: boolean): Promise<unknown> {
-    return this.request({ type: "tab.inspect", url: url ?? "", query: query ?? "", cap, tabId, refMode: Boolean(refMode) }, 15_000);
+  // W1: ref-режим — единственный (флаг JARVIS_BROWSER_REF удалён). `refMode:true` шлём ВСЕГДА — для старой версии
+  // расширения (пока владелец не нажал «Обновить» в chrome://extensions); новое поле игнорирует.
+
+  /** ГЛАЗА В DOM: снимок интерактивных элементов вкладки (ref у каждого, состояние, secret у секретных полей).
+   *  query — ранжированный поиск (find): результаты дописываются в реестр ref, прежние ref живы. */
+  tabInspect(url?: string, query?: string, cap?: number, tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.inspect", url: url ?? "", query: query ?? "", cap, tabId, refMode: true }, 15_000);
   }
 
-  /** Действие В вкладке пользователя (play/pause/next/click/type/scroll) через chrome.scripting.
-   *  refMode → адресация по params.ref (идентичность из последнего снимка), устойчивее селектора. */
-  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number, refMode?: boolean): Promise<unknown> {
-    return this.request({ type: "tab.act", url, intent, params: params ?? {}, tabId, refMode: Boolean(refMode) }, 20_000);
+  /** Действие В вкладке пользователя (click/type/set/select/key/hover/scroll_to/play/…) через chrome.scripting. */
+  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.act", url, intent, params: params ?? {}, tabId, refMode: true }, 20_000);
   }
 
-  /** §Волна2-веб: БЕРСТ шагов по ref одним вызовом (веб-аналог input_batch) — многополевая форма за 1 раунд.
-   *  Все шаги адресуют ref из ОДНОГО снимка; стоп на первой ошибке, честное «выполнено k из n». */
-  tabBatch(url: string, steps: unknown[], tabId?: number, refMode?: boolean): Promise<unknown> {
-    return this.request({ type: "tab.batch", url, steps, tabId, refMode: Boolean(refMode) }, 60_000);
+  /** §Волна2-веб: БЕРСТ шагов по ref/selector/text одним вызовом — многополевая форма за 1 раунд, стоп на первой ошибке. */
+  tabBatch(url: string, steps: unknown[], tabId?: number): Promise<unknown> {
+    return this.request({ type: "tab.batch", url, steps, tabId, refMode: true }, 60_000);
+  }
+
+  /** W1: снимок ВИДИМОЙ области активной вкладки (или кроп rect/ref). Не активна → {ok:false, code:"tab_not_visible"}. */
+  tabCapture(url: string, tabId: number | undefined, opts: TabCaptureOpts = {}): Promise<unknown> {
+    return this.request({ type: "tab.capture", url, tabId, ...opts }, 15_000);
   }
 }
