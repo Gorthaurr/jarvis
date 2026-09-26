@@ -28,10 +28,13 @@ export function urlPathQuery(u) {
   }
 }
 
-/** Ошибка «целевой вкладки нет» — НЕ бьём в чужую активную (был баг: play/read уходили в Telegram). */
+/**
+ * Ошибка «целевой вкладки нет» — НЕ бьём в чужую активную (был баг: play/read уходили в Telegram). Код tab_gone: сервер
+ * отличает «вкладки нет» от «элемента нет в DOM» (иначе предлагал бы координатный клик — в чужое окно).
+ */
 export function noTabError(url) {
   const host = hostOf(url);
-  return new Error(host ? "вкладка " + host + " не открыта" : "нет подходящей вкладки");
+  return codedError("tab_gone", host ? "вкладка " + host + " не открыта — открой её (browser_open)" : "нет подходящей вкладки — открой страницу (browser_open)");
 }
 
 /**
