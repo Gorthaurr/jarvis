@@ -61,9 +61,11 @@ const commands = {
   },
   async shot() {
     const file = lib.shot(pos[1]);
+    // OCR — по полному разрешению (на уменьшенном кадре tesseract путает кириллицу), масштаб — потом.
+    const text = opts.ocr ? execFileSync("tesseract", [file, "-", "-l", "rus+eng"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }) : "";
     if (opts.scale) execFileSync("convert", [file, "-resize", opts.scale, file]);
     print(file);
-    if (opts.ocr) print(execFileSync("tesseract", [file, "-", "-l", "rus+eng"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    if (text) print(text);
   },
   async log() {
     const n = Number(pos[1] ?? 40);
