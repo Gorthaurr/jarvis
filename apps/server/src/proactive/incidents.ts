@@ -73,11 +73,10 @@ export function markIncidentsReported(upToMs: number): void {
   }
 }
 
-/** Прочитать инциденты, о которых владельцу ещё не докладывали (в порядке появления). */
-export function readUnreportedIncidents(now = Date.now()): Incident[] {
+/** Разобранный хвост журнала: записи с валидным штампом, в порядке появления (битые строки пропускаются). */
+function journalTail(): Array<{ inc: Incident; ts: number }> {
   const file = incidentsFile();
   if (!existsSync(file)) return [];
-  const since = lastReportedAt();
   let lines: string[];
   try {
     lines = readFileSync(file, "utf8").split("\n").filter(Boolean);
@@ -85,19 +84,25 @@ export function readUnreportedIncidents(now = Date.now()): Incident[] {
     log.warn("не удалось прочитать инциденты", { error: e instanceof Error ? e.message : String(e) });
     return [];
   }
-  const out: Incident[] = [];
+  const out: Array<{ inc: Incident; ts: number }> = [];
   for (const line of lines.slice(-MAX_INCIDENTS * 4)) {
     try {
       const inc = JSON.parse(line) as Incident;
       const ts = Date.parse(inc.ts);
-      if (!Number.isFinite(ts) || ts <= since) continue; // уже доложено
-      if (now - ts > REPORT_WINDOW_MS) continue; // слишком старое — не тревожим (маркер сдвинет вызывающий)
-      out.push(inc);
+      if (Number.isFinite(ts)) out.push({ inc, ts });
     } catch {
       /* битая строка — пропускаем */
     }
   }
-  return out.slice(-MAX_INCIDENTS);
+  return out;
+}
+
+/** Прочитать инциденты, о которых владельцу ещё не докладывали (в порядке появления). */
+export function readUnreportedIncidents(now = Date.now()): Incident[] {
+  const since = lastReportedAt();
+  // ts <= since — уже доложено; старше окна — не тревожим (маркер сдвинет вызывающий)
+  const fresh = journalTail().filter(({ ts }) => ts > since && now - ts <= REPORT_WINDOW_MS);
+  return fresh.map(({ inc }) => inc).slice(-MAX_INCIDENTS);
 }
 
 /** Час:минута по-русски для короткой фразы («в 3:40»). Чистая функция. */
@@ -144,8 +149,11 @@ export function takeIncidentReport(now = Date.now()): string | null {
   const fresh = readUnreportedIncidents(now);
   const line = formatIncidentReport(fresh);
   // Маркер двигаем ВСЕГДА (даже если всё устарело/пусто) — иначе старые записи каждый коннект
-  // перечитываются заново; при этом свежие уже озвучены, повтора не будет.
-  markIncidentsReported(now);
+  // перечитываются заново; при этом свежие уже озвучены, повтора не будет. Двигаем до штампа ПОСЛЕДНЕЙ
+  // прочитанной записи, а не до `now`: инцидент, записанный в ту же миллисекунду после доклада, иначе
+  // считался «уже доложенным» и терялся навсегда (26.09: тест краснел на быстрой машине).
+  const seen = Math.max(0, ...journalTail().map(({ ts }) => ts));
+  if (seen > lastReportedAt()) markIncidentsReported(seen);
   if (line) log.info("инциденты: готова сводка для владельца", { count: fresh.length });
   return line;
 }
