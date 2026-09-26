@@ -218,7 +218,7 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
       : await dispatchTool(tu.name, tu.input, toolCtx);
     const { effOfCall, reportOfThisTurn } = noteToolCall(ctx, tu, r, round);
     if (!r.isError) applySuccessEffects(ctx, tu, r, effOfCall, round);
-    else armUncertainDebt(st, tu, r, effOfCall); // W1-ревью LOOP-2: «исход неизвестен» у руки — долг сверки, как у успеха
+    else armUncertainDebt(st, tu, r, effOfCall); // W1-ревью LOOP-2/р2: исход неизвестен / берст исполнен частично — долг сверки
     applyRoundFlags(ctx, tu, r, effOfCall, reportOfThisTurn, round);
     countFamilyCall(ctx, tu, r, effOfCall, round); // W1 (L-1/L-12): семейный счёт — по каноническому вызову и его исходу
     round.resultBlocks.push({

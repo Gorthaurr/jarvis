@@ -53,12 +53,23 @@ export function armSendDebt(st: LoopState, g: SendGesture, blindUnobserved: bool
   if (g.composes) st.honesty.composedPending = true; // взвод «набрал текст» — любым путём
 }
 
+/** Исполненный префикс берста (k шагов до остановки) — вход только ради ЖЕСТА: новый объект, вызов модели не трогаем. */
+function executedPrefix(tu: ToolUse, k: number): ToolUse {
+  const input = tu.input as { steps?: unknown };
+  return Array.isArray(input.steps) ? { ...tu, input: { ...input, steps: input.steps.slice(0, k) } } : tu;
+}
+
 /**
- * LOOP-2: «исход неизвестен» у слепой руки (таймаут/разрыв ПОСЛЕ отправки клика/берста) — дело могло уйти: тот же долг
- * сверки, что у успеха без наблюдения (и долг исхода отправки, если жест — коммит). Вуальный отказ сюда не идёт: у него
- * свой учёт (overlayActionInjected → терминал «исход не подтверждён»).
+ * Ошибка слепой руки, которая МОГЛА что-то сделать. LOOP-2: «исход неизвестен» (таймаут/разрыв ПОСЛЕ отправки клика/
+ * берста) — дело могло уйти: тот же долг сверки, что у успеха без наблюдения (и долг исхода отправки, если жест —
+ * коммит). р2 loop-regress-3: берст остановлен после k ИСПОЛНЕННЫХ шагов (partialSteps) — долг по исполненному
+ * префиксу (набор → composedPending, набор+коммит → долг отправки): сервер сам велит «доделай шаг отдельным
+ * browser_act», и следующий клик — коммит набранного. Вуальный отказ сюда не идёт: у него свой учёт
+ * (overlayActionInjected → терминал «исход не подтверждён»).
  */
 export function armUncertainDebt(st: LoopState, tu: ToolUse, r: ToolResult, eff: "verify" | "mutate" | "neutral"): void {
-  if (!r.isError || r.uncertain !== true || r.overlayDenied === true || eff !== "mutate" || !isBlindMutate(tu.name)) return;
-  armSendDebt(st, sendGestureOf(tu, st.honesty.composedPending), true);
+  if (!r.isError || r.overlayDenied === true || eff !== "mutate" || !isBlindMutate(tu.name)) return;
+  const k = r.partialSteps;
+  if (r.uncertain === true) armSendDebt(st, sendGestureOf(tu, st.honesty.composedPending), true);
+  else if (typeof k === "number" && k > 0) armSendDebt(st, sendGestureOf(executedPrefix(tu, k), st.honesty.composedPending), true);
 }
