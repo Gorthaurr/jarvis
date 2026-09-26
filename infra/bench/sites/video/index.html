@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Видеохостинг — Тестовый ролик</title>
+<link rel="stylesheet" href="/__bench/style.css">
+<style>:root { --brand: #b91c1c; } video { width: 100%; max-width: 640px; background: #000; border-radius: 8px; }</style>
+<script src="/__bench/bench.js"></script>
+</head>
+<body>
+<header>Видеохостинг</header>
+<main>
+  <div class="card">
+    <h2>Тестовый ролик (10 с)</h2>
+    <!-- Политику autoplay НЕ отключаем: стенд обязан видеть честность autoplay-гейта. -->
+    <video id="player" src="/media/clip.webm" controls preload="auto"></video>
+    <p class="muted" id="state">Плеер загружен</p>
+  </div>
+</main>
+<script>
+  var v = document.getElementById("player");
+  v.addEventListener("error", function () {
+    var a = document.createElement("audio");
+    a.controls = true;
+    v.replaceWith(a);
+    document.getElementById("state").textContent = "Клипа нет (ffmpeg не собрал медиа)";
+  });
+  ["play", "pause", "seeked", "ended"].forEach(function (type) {
+    v.addEventListener(type, function () {
+      document.getElementById("state").textContent = "Событие: " + type + " на " + v.currentTime.toFixed(1) + " с";
+      window.bench.api("/api/media", { event: type, paused: v.paused, currentTime: v.currentTime });
+    });
+  });
+</script>
+</body>
+</html>
