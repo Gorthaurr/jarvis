@@ -166,7 +166,9 @@ export async function launchPage() {
   if (!chrome) return null;
   const profile = mkdtempSync(join(tmpdir(), "jarvis-ext-test-"));
   const hermetic = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE *.localhost, EXCLUDE 127.0.0.1";
-  const proc = spawn(chrome, ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", hermetic, `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], { stdio: "ignore", windowsHide: true });
+  // Под root (Linux-облако) Chromium без --no-sandbox не стартует; у владельца (Windows) флаг не нужен.
+  const rootOnly = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
+  const proc = spawn(chrome, [...rootOnly, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--allow-file-access-from-files", hermetic, `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], { stdio: "ignore", windowsHide: true });
   proc.unref(); // иначе дерево Chrome держит цикл событий и node --test не завершается
   // Под параллельной нагрузкой (node --test гоняет файлы одновременно, у каждого свой Chrome) файл порта появляется
   // пустым, а /json отвечает не сразу — ждём содержимое и цель-страницу, а не просто существование файла.
