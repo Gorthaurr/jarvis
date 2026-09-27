@@ -4,7 +4,8 @@
  *
  * Что охраняется: ПОВТОР ТОЛЬКО ЕСЛИ НИЧЕГО НЕ УШЛО (invoke бросил ДО действия → один физический клик; таймаут invoke,
  * печать упала после клика → исход неизвестен, без второго клика); длинный текст — вставкой; печать без цели — в фокус;
- * W2: глаголы и поля, исполнение которых приходит в П4, — честный отказ ДО поиска и любого ввода.
+ * W2 (П4): неверная форма новых глаголов — отказ ДО поиска и ввода; координаты авто-макроса — только у голого жеста
+ * (исполнение глаголов на настоящем dispatch и фейковом сайдкаре — act-verbs.test.ts).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -97,16 +98,35 @@ describe("act — глаголы", () => {
   });
 });
 
-describe("W2 (пакет 0): поля и глаголы П4 — честный отказ ДО поиска и любого ввода", () => {
-  it.each(["triple", "middle", "hover", "drag", "scroll"] as const)("do:%s → «пока не поддержан», ничего не нажато", async (verb) => {
-    await expect(act({ kind: "gui.act", target: "Отправить", do: verb }, OPTS)).rejects.toThrow(/пока не поддержан.*ничего не нажато/u);
+describe("W2 (П4): форма аргументов новых глаголов — ошибка ДО поиска и любого ввода", () => {
+  it.each([
+    ["clear не с type", { target: "Поиск", do: "click", clear: true }, /только с do:"type"/u],
+    ["enter не с type", { do: "key", combo: "a", enter: true }, /только с do:"type"/u],
+    ["clear без цели (роль не проверить)", { do: "type", text: "x", clear: true }, /clear:true без target/u],
+    ["to не с drag", { target: "A", to: "B" }, /только с do:"drag"/u],
+    ["drag без to", { target: "A", do: "drag" }, /без to/u],
+    ["dy не со scroll", { target: "A", dy: 3 }, /только с do:"scroll"/u],
+    ["scroll без dy/dx", { target: "A", do: "scroll" }, /без dy/u],
+    ["scroll дробными тиками", { target: "A", do: "scroll", dy: 1.5 }, /целые тики/u],
+    ["hover без цели", { do: "hover" }, /без target/u],
+  ] as const)("%s → отказ, ничего не нажато", async (_n, over, re) => {
+    await expect(act({ kind: "gui.act", ...over } as Parameters<typeof act>[0], OPTS)).rejects.toThrow(re);
     expect(st.snapshotCalls).toBe(0);
     nothingSent();
   });
+});
 
-  it("enter:true / clear:true не игнорируются молча (Enter не нажат = ложное «сделал»)", async () => {
-    await expect(act({ kind: "gui.act", target: "Поиск", do: "type", text: "кот", enter: true }, OPTS)).rejects.toThrow(/enter:true пока не поддержан/u);
-    await expect(act({ kind: "gui.act", target: "Поиск", do: "type", text: "кот", clear: true }, OPTS)).rejects.toThrow(/clear:true пока не поддержан/u);
-    nothingSent();
+describe("W2 (П4): координаты для авто-макроса §8 — только у «голого» жеста", () => {
+  it("type с enter и глаголы указателя НЕ отдают screenX (реплей повторил бы их обычным кликом); голый type — отдаёт", async () => {
+    st.click.mockResolvedValue({ screenX: 5, screenY: 6 });
+    const plain = await act({ kind: "gui.act", target: { text: "Поиск", role: "Edit" }, do: "type", text: "кот" }, OPTS);
+    expect(plain.screenX).toBe(5);
+    const withEnter = await act({ kind: "gui.act", target: { text: "Поиск", role: "Edit" }, do: "type", text: "кот", enter: true }, OPTS);
+    expect(withEnter.screenX).toBeUndefined();
+    expect(st.pressKey).toHaveBeenLastCalledWith("Enter");
+    const triple = await act({ kind: "gui.act", target: "Отправить всем", do: "triple" }, OPTS);
+    expect(triple.screenX).toBeUndefined();
+    expect(st.click).toHaveBeenLastCalledWith({ by: "handle", handle: "12" }, "physical", true, { count: 3 });
+    expect(triple.did).toMatch(/тройной клик/u);
   });
 });
