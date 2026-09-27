@@ -138,7 +138,8 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Кириллица в путях ломает sherpa/часть утилит → ASCII-пути. `.ps1` — только ASCII.
 - Кеши моделей НЕ в `node_modules` (`pnpm install --force` их молча сносит).
 - Git worktree с junction на `node_modules`: никогда `git worktree remove --force` без снятия ссылок (сносит `packages/`).
-- Распакованное расширение Chrome: ID зависит от пути, если в manifest нет `key` (есть — ID `pjkela…ajd`).
+- Распакованное расширение Chrome: ID стабилен (`key`, `pjkela…ajd`), но Chrome помнит ПУТЬ — переезд папки →
+  при рестарте Chrome молча удаляет его (24–27.09 рук в браузере не было): загрузить заново из новой папки.
 - «Пауза» = медиа-ПЕРЕКЛЮЧАТЕЛЬ: жать только если звук реально идёт (WASAPI peak), иначе включит музыку.
 - Opus: не слать temperature/top_p; thinking только `adaptive`; пустые thinking-блоки не реплеить.
 - sherpa и onnxruntime (e5) в одном процессе конфликтуют → диктор в сайдкаре, на клиенте только sherpa.
