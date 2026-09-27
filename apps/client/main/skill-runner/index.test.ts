@@ -308,9 +308,14 @@ describe("skill-runner × контроль-5 (действие ушло / про
     expect(veiled.actionInjected).toBeFalsy();
   });
 
-  it("runner-3: окно вуали для сверки постусловия — от начала ОПРОСА, а не от начала шага (вуаль, закрывшаяся во время executeStep, не делает честный «не подтвердил» сверкой под вуалью)", async () => {
+  /**
+   * runner-3: часы инъектированы — реальные Date.now() + setTimeout(25) флейкали в полном прогоне: под нагрузкой libuv
+   * (мс вниз) будил таймер через 24,6 мс, и граничное «≥ t0 + 25» падало на верной реализации. Шаг идёт 1000→1025
+   * (сдвиг ПОСЛЕ await — метка, снятая до завершения шага, видна), опрос — 1025→1030; вуаль закрылась в veilClosedAt.
+   */
+  async function runVeilWindow(veilClosedAt: number) {
+    let clock = 1_000;
     const seen: number[] = [];
-    const t0 = Date.now();
     const r = await runSkill({
       skillId: "s",
       version: 1,
@@ -318,20 +323,39 @@ describe("skill-runner × контроль-5 (действие ушло / про
       cancel: { cancelled: false },
       actuator: mockActuator({
         executeStep: async () => {
-          await new Promise((res) => setTimeout(res, 25)); // бесшумный UIA-вызов идёт, пока владелец закрывает вуаль
+          await Promise.resolve();
+          clock += 25; // бесшумный UIA-вызов идёт, пока владелец закрывает вуаль
         },
-        checkExpect: vi.fn(async () => false),
+        checkExpect: vi.fn(async () => {
+          clock += 5; // опрос тоже идёт во времени
+          return false;
+        }),
       }),
       sleep: noSleep,
+      now: () => clock,
       overlayBlockReason: () => null,
       veiledSince: (t) => {
         seen.push(t);
-        return false;
+        return veilClosedAt > t; // как selectionStore.drawingEndedAfter
       },
     });
+    return { r, seen };
+  }
+
+  it("runner-3: окно вуали для сверки постусловия — от начала ОПРОСА, а не от начала шага (вуаль, закрывшаяся во время executeStep, не делает честный «не подтвердил» сверкой под вуалью)", async () => {
+    const { r, seen } = await runVeilWindow(1_010); // вуаль закрылась посреди executeStep
+    expect(seen).toEqual([1_025]); // до фикса: 1_000 — tPoll взят ДО executeStep
     expect(r.ok).toBe(false);
-    expect(seen.length).toBe(1);
-    expect(seen[0]).toBeGreaterThanOrEqual(t0 + 25); // до фикса: tExec взят ДО executeStep
+    expect(r.overlayDrawing).toBeFalsy(); // опрос шёл по чистому экрану — честный «не подтвердил», не «сверка под вуалью»
+    expect(r.message).toMatch(/не подтвердил expect/u);
+  });
+
+  it("runner-3b: вуаль, закрывшаяся посреди ОПРОСА, — окно от начала опроса, а не от его конца: сверка шла под вуалью", async () => {
+    const { r, seen } = await runVeilWindow(1_027);
+    expect(seen).toEqual([1_025]); // не 1_030: метка после опроса пропустила бы вуаль, которую читал OCR/UIA
+    expect(r).toMatchObject({ ok: false, overlayDrawing: true, actionInjected: true });
+    expect(r.message).toMatch(/вуал/u);
+    expect(r.message).not.toMatch(/не подтвердил expect/u);
   });
 
   it("SEL-C5-2: предусловие под вуалью — честная причина «оверлей», а не «экран изменился», без грундинга и без клика", async () => {
