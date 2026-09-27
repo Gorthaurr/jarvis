@@ -294,8 +294,8 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   it("ответ помечен РЕАЛЬНОЙ моделью резерва, а не моделью тира", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "success", usage: {} }]);
     const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, model: "claude-opus-4-8" });
-    expect(r.modelUsed).toBe("claude-opus-5"); // алиас SDK «opus» развёрнут в канонический id
-    expect(subscriptionModelId()).toBe("claude-opus-5");
+    expect(r.modelUsed).toBe("claude-opus-5-5"); // алиас SDK «opus» развёрнут в канонический id (CLI 2.1.283, проба 27.09)
+    expect(subscriptionModelId()).toBe("claude-opus-5-5");
   });
 
   it("непонятное значение env отдаём как есть — id не выдумываем", () => {

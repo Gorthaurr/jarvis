@@ -176,8 +176,12 @@ function subscriptionModel(): string {
   return raw || "opus";
 }
 
-/** Алиасы SDK → канонический id каталога (для ЧЕСТНОЙ отметки «кто на самом деле ответил»). */
-const SUBSCRIPTION_MODEL_IDS: Record<string, string> = { opus: "claude-opus-5", fable: "claude-fable-5" };
+/**
+ * Алиасы SDK → канонический id каталога (для ЧЕСТНОЙ отметки «кто на самом деле ответил»). Алиас разворачивает CLI,
+ * и с его версией он меняется: проба 27.09 на SDK 0.3.283 (init/assistant.model) — opus → claude-opus-5-5, fable →
+ * claude-fable-5-1 (на 0.3.251 было opus-5 / fable-5). Поднял SDK — перепроверь пробой, иначе метрики соврут.
+ */
+const SUBSCRIPTION_MODEL_IDS: Record<string, string> = { opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
 
 /**
  * Какая модель РЕАЛЬНО отвечает по подписке — канонический id, а не алиас и не модель тира.
@@ -738,5 +742,7 @@ function argsShape(): Record<string, unknown> {
   // вызов, где модель положила поля наверх: хендлер не вызван, CLI отдаёт модели ошибку, та повторяет
   // вызов с новым id — а петля первый уже исполнила (двойное действие). Поля наверху z.object срежет,
   // но хендлер ВЫЗОВЕТСЯ и получит результат по имени (см. SubscriptionSession.handle).
-  return { args: z.record(z.string(), z.unknown()).optional() };
+  // SDK 0.3.283: z.record ронял tools/list MCP-сервера («reading 'push'» в конвертере схем) — CLI не видел НИ ОДНОГО
+  // инструмента. looseObject — тот же свободный объект (проба: args доходят целиком, верхние поля срезаются, хендлер зовётся).
+  return { args: z.looseObject({}).optional() };
 }

@@ -9,7 +9,7 @@
 Голосовой ассистент-мажордом «Джарвис» для ОДНОГО владельца на его Windows-ПК: слышит → понимает → управляет
 компьютером → отвечает голосом, сам напоминает/следит/докладывает. pnpm-монорепо, Node ≥ 20, pnpm 9.
 Мозг — Claude по **подписке Max через Agent SDK** (сессия SDK на задачу; API по ключу выключен с 31.08): модель
-Opus 5, тир задаёт эффорт (medium/high/max); на API тиры Sonnet → Opus (§7). TTS Yandex (filipp), STT Deepgram
+Opus 5.5 (алиас opus, SDK ≥ 0.3.283), тир задаёт эффорт (medium/high/max); на API тиры Sonnet → Opus (§7). TTS Yandex (filipp), STT Deepgram
 nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 
 ## Законы (нарушение = дефект, даже если тесты зелёные)
