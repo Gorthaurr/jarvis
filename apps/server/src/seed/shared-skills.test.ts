@@ -7,7 +7,7 @@
  */
 import { COLD_TOOL_NAMES } from "@jarvis/tools";
 import { describe, expect, it } from "vitest";
-import { parseSkillMd } from "../memory/skills.js";
+import { formatSkillCatalog, parseSkillMd } from "../memory/skills.js";
 import { SHARED_SKILL_SEED } from "./shared-skills.js";
 
 /**
@@ -61,5 +61,22 @@ describe("общая библиотека навыков", () => {
 
   it("проза процедуры не парсится в шаги реплея (иначе навык стал бы слепым макросом)", () => {
     for (const md of SHARED_SKILL_SEED) expect(parseSkillMd(md).steps, String(parseSkillMd(md).frontmatter.id)).toEqual([]);
+  });
+
+  // 27.09 живой прогон: на «это мой учебный портал, Пройди все мини-тесты во всех курсах.» реальный e5 давал rawCos 0.802
+  // к «name. when» (порог подсказки 0.86), а каталог навыков показывал модели 100 символов `when` без ЭИОС и сайта —
+  // модель 4 раунда искала, что за портал. Recall эмбеддит `${name}. ${description}` (skill-recall.ts triggerVec), поэтому
+  // формулировки владельца — в `when` (закон 2: знание о программе — данные). Замеры реальным e5 — в описании PR.
+  // Версия ≥ 4: иначе seedSharedSkills не перезальёт навык, а кэш вектора триггера не сбросится. Реверт: верни v3 — упадёт.
+  it("lms-quiz: триггер словами владельца (мини-тесты, учебный портал, ЭИОС/ИМЭС), каталог видит сайт, версия ≥ 4", () => {
+    const md = SHARED_SKILL_SEED.find((s) => parseSkillMd(s).frontmatter.id === "learned__lms-quiz");
+    const fm = parseSkillMd(String(md)).frontmatter;
+    const when = String(fm.description);
+    for (const phrase of ["Пройди все мини-тесты во всех курсах", "учебном портале", "ЭИОС", "ИМЭС", "мудл", "сдай тесты"]) {
+      expect(when, phrase).toContain(phrase);
+    }
+    const catalogLine = formatSkillCatalog([{ name: String(fm.name), when }]);
+    expect(catalogLine).toContain("eos.imes.su");
+    expect(Number(fm.version)).toBeGreaterThanOrEqual(4);
   });
 });

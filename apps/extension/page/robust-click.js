@@ -221,8 +221,9 @@ export async function robustClickMain(params) {
   const stateOf = (n) => [n.checked, n.value, n.getAttribute("aria-checked"), n.getAttribute("aria-expanded"), n.getAttribute("aria-pressed")].join("|");
   const dlgBefore = dialogs();
   const stBefore = stateOf(target);
-  // SPA-роутинг (pushState) не убивает контекст → переход виден по location.href; жёсткую навигацию (контекст умер)
-  // ловит SW-обёртка runInPage. navigated = содержательный readback (сервер снимет verify-долг).
+  // SPA-роутинг (pushState) не убивает контекст → переход виден по location.href (navigated = readback, сервер снимет долг).
+  // Жёсткий переход (27.09, Moodle «Вход») уводит документ в bfcache ЗАМОРОЖЕННЫМ: таймер ожидания не сработает, executeScript
+  // молчал бы минутами (мост: isError через 20 с) → ожидание после жеста — наперегонки с pagehide; ушли → маркер pageLeft.
   const hrefBefore = location.href;
   const changedNow = () => {
     count(obs.takeRecords());
@@ -233,6 +234,10 @@ export async function robustClickMain(params) {
     if (location.href !== hrefBefore) res.navigated = location.href;
     return res;
   };
+  // true — дождались на месте; false — документ ушёл (синтетический pagehide страницы — не уход: только isTrusted).
+  const settle = (ms) => new Promise((r) => { const h = (e) => e.isTrusted && r(false); addEventListener("pagehide", h); setTimeout(() => { removeEventListener("pagehide", h); r(true); }, ms); });
+  // Маркер, не исход: куда ушла вкладка и чей это уход (вкладки или фрейма) — решает SW (modules/page-left.js).
+  const left = () => { obs.disconnect(); return { ok: true, pageLeft: true, navigated: true, uncertain: true, note: "страница ушла во время действия — исход не подтверждён" }; };
   const r0 = target.getBoundingClientRect();
   const at = { bubbles: true, cancelable: true, composed: true, view: window, clientX: r0.left + r0.width / 2, clientY: r0.top + r0.height / 2, button: 0 };
   const fire = (el, ty, o) => {
@@ -255,7 +260,7 @@ export async function robustClickMain(params) {
     }
     fire(target, "pointermove", at);
     fire(target, "mousemove", at);
-    await new Promise((r) => setTimeout(r, 400));
+    if (!(await settle(400))) return left();
     return finish({ ok: true, method: "hover", changed: changedNow() });
   }
 
@@ -306,7 +311,7 @@ export async function robustClickMain(params) {
     if (!fired) continue;
     used = m.name;
     if (P.expectChange) {
-      await new Promise((r) => setTimeout(r, 700));
+      if (!(await settle(700))) return left();
       if (changedNow()) return finish({ ok: true, method: m.name, changed: true });
     } else if (m.name === "react" || reached) {
       break; // клик дошёл до цели (или его сделал React-проп) — ждём реакцию страницы
@@ -319,6 +324,6 @@ export async function robustClickMain(params) {
     return { ok: false, code: "no_effect", error: "действие не дало эффекта: клик, React-onClick и Enter не изменили страницу (возможно, кнопка не та или она неактивна)" };
   }
   // Клик до цели не дошёл и React-пропа у неё нет: ответ ok (жест сделан), но changed скажет правду.
-  await new Promise((r) => setTimeout(r, 500));
+  if (!(await settle(500))) return left();
   return finish({ ok: true, method: used || "pointer", ...(reached || used === "react" ? {} : { reached: false }), changed: changedNow() });
 }

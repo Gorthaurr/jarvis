@@ -427,8 +427,8 @@ async function tabAct(url, intent, params, tabId) {
     if (world) inj.world = world;
     try {
       const [res] = await chrome.scripting.executeScript(inj);
-      if (res && res.result) return res.result;
-      // Без результата: документ выгрузился посреди функции (клик увёл POST-форму) — исход по месту и интенту (W1-D1).
+      if (res && res.result && res.result.pageLeft !== true) return res.result;
+      // Без результата (выгрузка, W1-D1) или pageLeft (bfcache-заморозка по pagehide, 27.09) — исход по месту и интенту.
       return await pageLeftOutcome(tab.id, frameId, before, intent, urlBefore);
     } catch (e) {
       const msg = String((e && e.message) || e);

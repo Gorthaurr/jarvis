@@ -22,6 +22,7 @@ function sw(emptyFn, after, empty = "result") {
         calls.push(inj.func.name);
         if (inj.func.name !== emptyFn) return [{ frameId: 0, result: { ok: true, value: "x" } }];
         left = true;
+        if (empty === "pagehide") return [{ frameId: 0, result: { ok: true, pageLeft: true, navigated: true, uncertain: true } }];
         return empty === "array" ? [] : [{ frameId: 0, result: undefined }];
       },
     },
@@ -89,5 +90,25 @@ describe("W1-D1: пустой результат там, где действия
   it("чтение (getValue) без результата → page_gone «перезагрузилась — повтори», не переход", async () => {
     const { env } = sw("pageActInPage", LOADING_PAY);
     await assert.rejects(env.tabAct("", "getValue", { selector: "body" }, 1), (e) => e.code === "page_gone" && /Повтори/u.test(e.message));
+  });
+});
+
+// 27.09 (bfcache, боевой Moodle «Вход»): замороженный документ результата не отдаёт вовсе — robustClickMain отвечает сам
+// по pagehide маркером pageLeft. Маркер — не исход: куда ушла вкладка и чей это уход (вкладки/фрейма), решает SW.
+describe("27.09: page-функция ответила pageLeft (pagehide) — исход по месту, как у пустого результата", () => {
+  it("top-клик → navigated = КУДА ушла вкладка (адрес, а не true), uncertain", async () => {
+    const { env } = sw("robustClickMain", LOADING_PAY, "pagehide");
+    const r = await env.tabAct("", "click", { selector: "#go" }, 1);
+    assert.deepEqual([r.ok, r.navigated, r.uncertain, r.pageLeft], [true, "https://online.sberbank.ru/pay", true, undefined], JSON.stringify(r));
+  });
+
+  it("клик во фрейме (ref f7…) → frame_gone, уходом вкладки не выдаём", async () => {
+    const { env } = sw("robustClickMain", LOADING_PAY, "pagehide");
+    await assert.rejects(env.tabAct("", "click", { ref: "f7e5_0" }, 1), (e) => e.code === "frame_gone");
+  });
+
+  it("вкладка на прежнем адресе и догружена → page_gone («исход неизвестен»), не «перешла»", async () => {
+    const { env } = sw("robustClickMain", BEFORE, "pagehide");
+    await assert.rejects(env.tabAct("", "click", { selector: "#go" }, 1), (e) => e.code === "page_gone");
   });
 });
