@@ -1,12 +1,12 @@
 // Стенд: API сценариев (node --test infra/bench/scenarios/). Стенд поднимается один раз и остаётся жить (ensureUp);
 // сценарии сериализуются межпроцессным замком (node --test гоняет файлы параллельно); каждый — со своим run.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DISPLAY, paths } from "./config.mjs";
 import { cdp, resetTabs } from "./chrome.mjs";
 import { control, events, server } from "./client.mjs";
-import { alive, sleep, waitFor } from "./proc.mjs";
+import { lockDir, sleep, waitFor } from "./proc.mjs";
 import { up } from "./stack.mjs";
 import { status } from "./status.mjs";
 
@@ -24,36 +24,10 @@ export async function ensureUp() {
   return again;
 }
 
-/** Межпроцессный замок стенда (mkdir атомарен). Протухший (pid мёртв) — снимается. Возвращает release(). */
+/** Межпроцессный замок сценариев (node --test гоняет файлы параллельно). Возвращает release(). */
 export async function lock(timeoutMs = 600_000) {
-  const dir = paths().lock;
   mkdirSync(paths().root, { recursive: true });
-  const until = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      mkdirSync(dir);
-      writeFileSync(join(dir, "pid"), String(process.pid));
-      return () => rmSync(dir, { recursive: true, force: true });
-    } catch {
-      let owner = 0;
-      try {
-        owner = Number(readFileSync(join(dir, "pid"), "utf8"));
-      } catch {
-        /* замок только что создаётся */
-      }
-      // Протух: владелец мёртв, либо pid так и не записан (упал между mkdir и записью) дольше 10 с.
-      const age = (() => {
-        try {
-          return Date.now() - statSync(dir).mtimeMs;
-        } catch {
-          return 0;
-        }
-      })();
-      if ((owner && !alive(owner)) || (!owner && age > 10_000)) rmSync(dir, { recursive: true, force: true });
-      if (Date.now() > until) throw new Error("замок стенда занят слишком долго");
-      await sleep(250);
-    }
-  }
+  return lockDir(paths().lock, timeoutMs);
 }
 
 export function newRun(prefix = "run") {
@@ -106,11 +80,17 @@ export async function reset() {
   await server("POST", "/dev/bench/reset", {});
 }
 
-/** Типовой каркас сценария: стенд + замок + сброс. Возвращает release. */
+/** Типовой каркас сценария: замок → стенд → сброс. Замок ПЕРВЫМ: параллельные файлы с погашенного стенда иначе
+ *  поднимали его наперегонки (чужие pid-файлы перезаписаны, откат `down` гасил соседа, процессы-сироты). */
 export async function begin() {
-  await ensureUp();
   const release = await lock();
-  await reset();
+  try {
+    await ensureUp();
+    await reset();
+  } catch (e) {
+    release();
+    throw e;
+  }
   return release;
 }
 
@@ -124,6 +104,7 @@ export async function open(url, { waitMs = 10_000, fresh = true } = {}) {
   if (r.result.isError) throw new Error(`browser_open ${url}: ${r.result.text}`);
   const origin = new URL(url).origin;
   // chrome.tabs url (список browser_tabs) — ЗАКОММИЧЕННЫЙ адрес вкладки (pendingUrl туда не попадает).
-  await waitFor(async () => (await tool("browser_tabs", {})).result.text.includes(origin), waitMs, 150);
+  const committed = await waitFor(async () => (await tool("browser_tabs", {})).result.text.includes(origin), waitMs, 150);
+  if (!committed) throw new Error(`browser_open ${url}: за ${waitMs} мс вкладка не дошла до ${origin} (browser_tabs)`);
   return r;
 }

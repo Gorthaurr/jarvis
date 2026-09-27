@@ -1,6 +1,6 @@
 // Стенд: процессы — запуск в своей группе (detached) с pid-файлом, проверка живости, гашение ТОЛЬКО своих групп.
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 
@@ -104,4 +104,28 @@ export function displayLock(display) {
   if (!existsSync(f)) return { state: "free", file: f };
   const pid = Number.parseInt(readFileSync(f, "utf8").trim(), 10);
   return { state: alive(pid) ? "busy" : "stale", pid, file: f };
+}
+
+/** Межпроцессный замок (mkdir атомарен) с pid владельца. Протухший (владелец мёртв; pid не записан > 10 с) — снимается. */
+export async function lockDir(dir, timeoutMs, what = "замок стенда") {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      mkdirSync(dir);
+      writeFileSync(join(dir, "pid"), String(process.pid));
+      return () => rmSync(dir, { recursive: true, force: true });
+    } catch {
+      let owner = 0;
+      let age = 0;
+      try {
+        age = Date.now() - statSync(dir).mtimeMs;
+        owner = Number(readFileSync(join(dir, "pid"), "utf8"));
+      } catch {
+        /* замок только что создаётся или уже снят */
+      }
+      if ((owner && !alive(owner)) || (!owner && age > 10_000)) rmSync(dir, { recursive: true, force: true });
+      if (Date.now() > until) throw new Error(`${what} занят слишком долго (${dir})`);
+      await sleep(250);
+    }
+  }
 }

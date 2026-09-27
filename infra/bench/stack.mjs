@@ -6,7 +6,7 @@ import { DISPLAY, HERE, PORTS, SCREEN, SERVER_DIR, cleanEnv, findChrome, paths }
 import { chromeArgs, chromeEnv, cdp } from "./chrome.mjs";
 import { control, healthz, readState, server, writeState } from "./client.mjs";
 import { prepare, ensureDirs } from "./prepare.mjs";
-import { alive, displayLock, portFree, readPid, spawnDetached, stopByPid, waitFor } from "./proc.mjs";
+import { alive, displayLock, lockDir, portFree, readPid, spawnDetached, stopByPid, waitFor } from "./proc.mjs";
 
 export const PROCS = ["xvfb", "wm", "sites", "server", "chrome"];
 
@@ -22,12 +22,17 @@ async function preflight(p) {
 }
 
 export async function up(opts = {}) {
+  // Подъём — под своим замком: два `up` наперегонки перезаписали бы pid-файлы друг друга (сироты вне `down`).
+  ensureDirs(paths());
+  const release = await lockDir(paths().upLock, 180_000, "подъём стенда");
   try {
     return await upInner(opts);
   } catch (e) {
     say(`подъём не удался — гашу поднятое (логи остаются в ${paths().logs})`);
     await down();
     throw e;
+  } finally {
+    release();
   }
 }
 
@@ -36,7 +41,9 @@ async function upInner({ quiet = false } = {}) {
   ensureDirs(p);
   if (PROCS.every((n) => alive(readPid(p.run, n)))) {
     if (!quiet) say("стенд уже поднят");
-    return readState(p);
+    // Коннект расширения — живой, не из state.json (MV3 service worker мог уснуть/отвалиться).
+    const ext = await server("GET", "/dev/bench/state", undefined, 5_000).catch(() => null);
+    return { ...readState(p), extConnected: ext?.ext?.connected === true };
   }
   if (PROCS.some((n) => alive(readPid(p.run, n)))) await down();
   await preflight(p);

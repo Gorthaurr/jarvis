@@ -17,8 +17,18 @@ function has(bin) {
   }
 }
 
+/** OCR `shot --ocr` читает кириллицу: пакет языка ставится отдельно от бинарника tesseract. */
+function hasRus() {
+  try {
+    return /\brus\b/.test(execFileSync("tesseract", ["--list-langs"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  } catch {
+    return false;
+  }
+}
+
 export function setup({ install = true } = {}) {
   const missing = Object.keys(BINS).filter((b) => !has(b));
+  if (!hasRus()) missing.push("tesseract-ocr-rus");
   const log = [];
   if (missing.length && install) {
     if (process.getuid?.() !== 0) throw new Error(`нужен root для apt-get (нет: ${missing.join(", ")})`);
@@ -38,13 +48,7 @@ export function setup({ install = true } = {}) {
         return false;
       }
     })(),
-    tesseractRus: (() => {
-      try {
-        return /\brus\b/.test(execFileSync("tesseract", ["--list-langs"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-      } catch {
-        return false;
-      }
-    })(),
+    tesseractRus: hasRus(),
   };
   const ok = Object.values(checks.bins).every(Boolean) && Boolean(checks.chromium) && checks.nodeModules && checks.esbuild;
   return { ok, log, checks, hint: ok ? "дальше: node infra/bench/bench.mjs up" : "pnpm install --frozen-lockfile; CHROME_PATH=<chrome>; повтори setup" };

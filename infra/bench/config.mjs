@@ -36,6 +36,7 @@ export function paths(b = benchDir()) {
     env: join(b, "server.env"),
     events: join(b, "sites-events.jsonl"),
     lock: join(b, "lock"),
+    upLock: join(b, "lock-up"),
   };
 }
 

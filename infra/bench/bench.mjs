@@ -4,7 +4,7 @@
 //   say "реплика" --script f.json [--confirm …] [--var k=v] [--json] | shot [file.png] [--scale 50%] [--ocr]
 //   log [n] [--out] | sites-log [--run id] [--site s] [--facts] [--json] | reset          Общий флаг: --dir <каталог>.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const argv = process.argv.slice(2);
@@ -35,7 +35,7 @@ const commands = {
   async up() {
     const { up } = await import("./stack.mjs");
     const s = await up();
-    print({ ok: true, dir: s.dir, extId: s.extId, extConnected: s.extConnected ?? true, display: s.display });
+    print({ ok: true, dir: s.dir, extId: s.extId, extConnected: s.extConnected === true, display: s.display });
   },
   async down() {
     const { down } = await import("./stack.mjs");
@@ -49,6 +49,7 @@ const commands = {
     const [name, json] = pos.slice(1);
     if (!name) throw new Error("tool <name> <json|@file>");
     const r = await server("POST", "/dev/bench/tool", { name, input: readJsonArg(json), ...(confirm ? { confirm } : {}) });
+    if (r.status !== 200) process.exitCode = 1; // транспорт/ввод (409, неразрешённый $ref) — не «ок» для скриптов
     if (r.status !== 200 || opts.json) return print(r);
     print(view.toolView(r, { full: opts.full }));
   },
@@ -70,8 +71,9 @@ const commands = {
   async log() {
     const n = Number(pos[1] ?? 40);
     const p = paths();
-    const day = new Date().toISOString().slice(0, 10);
-    const file = opts.out ? join(p.logs, "server.out.log") : join(p.data, "logs", `server-${day}.log`);
+    // Свежий файл по имени (сервер ротирует по ЛОКАЛЬНОЙ дате; UTC-дата CLI после полуночи смотрела бы мимо).
+    const dayLogs = existsSync(join(p.data, "logs")) ? readdirSync(join(p.data, "logs")).filter((f) => /^server-\d{4}-\d{2}-\d{2}\.log$/.test(f)).sort() : [];
+    const file = opts.out ? join(p.logs, "server.out.log") : join(p.data, "logs", dayLogs.at(-1) ?? "server-<нет>.log");
     if (!existsSync(file)) throw new Error(`нет лога ${file}`);
     const lines = readFileSync(file, "utf8").trimEnd().split("\n").slice(-n);
     print(opts.out ? lines.join("\n") : lines.map(view.logLine).join("\n"));
