@@ -23,11 +23,12 @@ export function findChrome() {
 }
 
 /**
- * Исходники page-функций из background.js. Скрипт исполняется в vm с заглушкой `chrome`: объявления функций
- * всплывают ДО исполнения верхнего кода, так что toString() отдаёт ровно то, что уходит в страницу.
+ * Исходники page-функций из page/*.js и background.js (W4: page-функции переезжают в page/ — стенд читает оба места).
+ * Скрипт исполняется в vm с заглушкой `chrome`: объявления функций всплывают ДО исполнения верхнего кода, так что
+ * toString() отдаёт ровно то, что уходит в страницу.
  */
 export function pageFunctionSources(names) {
-  const src = readFileSync(join(here, "..", "background.js"), "utf8").replace(/^import .*$/gmu, "");
+  const src = dirSources("page") + "\n" + readFileSync(join(here, "..", "background.js"), "utf8").replace(/^import .*$/gmu, "");
   const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub });
   // Таймеры — заглушки: верхний код SW (реконнект, keep-alive) иначе завёл бы НАСТОЯЩИЕ таймеры и держал node --test.
   const noop = () => 0;
@@ -40,18 +41,19 @@ export function pageFunctionSources(names) {
   }
   const out = {};
   for (const n of names) {
-    if (typeof sandbox[n] !== "function") throw new Error(`page-функция ${n} не найдена в background.js`);
+    if (typeof sandbox[n] !== "function") throw new Error(`page-функция ${n} не найдена ни в page/*.js, ни в background.js`);
     out[n] = sandbox[n].toString();
   }
   return out;
 }
 
 /**
- * НАСТОЯЩИЕ модули SW (modules/*.js) одним скриптом для vm: импорты вырезаны, экспорт → глобальные var/function —
- * их видит background.js, а overrides теста перекрывают (var и function — свойства глобального объекта).
+ * НАСТОЯЩИЕ модули расширения из каталога (modules/ — SW, page/ — page-функции) одним скриптом для vm: импорты
+ * вырезаны, экспорт → глобальные var/function — их видит background.js, а overrides теста перекрывают (var и
+ * function — свойства глобального объекта).
  */
-function moduleSources() {
-  const dir = join(here, "..", "modules");
+function dirSources(sub) {
+  const dir = join(here, "..", sub);
   return readdirSync(dir)
     .filter((f) => f.endsWith(".js"))
     .sort()
@@ -63,6 +65,8 @@ function moduleSources() {
     )
     .join("\n");
 }
+
+const moduleSources = () => dirSources("modules") + "\n" + dirSources("page");
 
 /**
  * Service worker расширения в vm — для юнитов SW-уровня (tabAct: какой page-функцией и с какими аргументами он зовёт
