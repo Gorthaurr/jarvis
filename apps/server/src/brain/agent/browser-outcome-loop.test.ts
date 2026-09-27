@@ -111,6 +111,25 @@ describe("W1: исход браузерных рук доходит до жур�
     expect(line).not.toContain("ОШИБКА");
   }, 20_000);
 
+  // 27.09 (bfcache, ревью р1): клик увёл страницу, расширение ответило быстро {ok, navigated, uncertain} (раньше — таймаут
+  // моста 20 с). Ответ не ошибка, но исход НЕ подтверждён: журнал «неизвестен», следующая мутация раунда НЕ исполняется
+  // (иначе второй клик бил бы уже по новой странице — «Оплатить» дважды). Реверт: убери out.uncertain в browser.ts — упадёт.
+  it("клик увёл страницу (navigated + uncertain) → «ИСХОД НЕИЗВЕСТЕН», второй клик раунда НЕ исполнен", async () => {
+    const tabAct = vi.fn(async () => ({ ok: true, navigated: "https://shop.example/pay", uncertain: true, note: "страница перешла во время действия — исход не подтверждён" }));
+    const ext = extWith({ tabAct });
+    const checkpoints = new CheckpointStore(dir);
+    const two = [
+      { id: "n1", name: "browser_act", input: { url: SITE, intent: "click", ref: "e1_3" } },
+      { id: "n2", name: "browser_act", input: { url: SITE, intent: "click", ref: "e1_4" } },
+    ];
+    const llm = new MockLlmProvider([{ toolUses: two }, WRAP_ROUND, { text: "не должно вызваться" }]);
+    const deps: AgentDeps = { memory: new WorkingMemory(), llm, episodic: new InMemoryEpisodicMemory(new HashEmbeddingProvider()), web: new MockWebProvider(), models: { haiku: "h", sonnet: "s", fable: "f" }, spend: new SpendGuard(), userId: "u-browser-bfcache", tasks: new TaskManager(), checkpoints, ext };
+    await handleUserText(ownerSession("u-browser-bfcache"), "оформи заказ в корзине магазина и собери цены", deps);
+    expect(tabAct).toHaveBeenCalledTimes(1);
+    const lines = (checkpoints.peek("u-browser-bfcache")?.digest ?? "").split("\n").filter((l) => l.includes("browser_act("));
+    expect(lines[0]).toContain("ИСХОД НЕИЗВЕСТЕН");
+    expect(lines[1]).toContain("НЕ ИСПОЛНЯЛСЯ");
+  }, 20_000);
   it("берст остановился на 2-м шаге из 3 → «ЧАСТИЧНО — шаги 1..1 УЖЕ ВЫПОЛНЕНЫ», а не «ОШИБКА» (повтор не наберёт текст дважды)", async () => {
     const ext = extWith({ tabBatch: async () => ({ ok: false, code: "not_found", done: 1, total: 3, stoppedAt: 1, error: "нет элемента" }) });
     const digest = await digestAfter(

@@ -35,7 +35,7 @@ const asRecord = (v: unknown): Record<string, unknown> | undefined => (v && type
 const strs = (...v: unknown[]): string[] => v.filter((s): s is string => typeof s === "string" && s.trim().length > 0);
 
 /**
- * Р2 srv-bypass-3: судим ровно то, что НАПЕЧАТАЕТСЯ. Аргументы SDK — z.record(unknown), а расширение печатает
+ * Р2 srv-bypass-3: судим ровно то, что НАПЕЧАТАЕТСЯ. Аргументы SDK — свободный объект (z.looseObject), а расширение печатает
  * `String(P.text)`: номер карты или код числом (4111111111111111, 123456) раньше проходил мимо Луны и признака поля.
  */
 export function field(text: unknown, hints: string[], secret = false): TypedField[] {

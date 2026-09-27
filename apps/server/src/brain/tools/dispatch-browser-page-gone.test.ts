@@ -62,6 +62,7 @@ describe("W1-D1: клик увёл страницу без результата 
     const nav = { ok: true, navigated: "https://online.sberbank.ru/pay", uncertain: true, note: "страница перешла во время действия — исход не подтверждён" };
     const { r } = await payClick(ext({ tabAct: vi.fn(async () => nav) }));
     expect(r.isError).toBe(false);
+    expect(r.uncertain).toBe(true); // 27.09: сигнал «неизвестно» доходит до петли (стоп раунда, журнал), не только текстом
     expect(r.observed).not.toBe(true);
     expect(text(r)).toMatch(/исход самого действия НЕ подтверждён/u);
   });

@@ -15,7 +15,7 @@ import { replyFor } from "./modules/reply.js";
 import { historyNav } from "./modules/history-nav.js";
 import { parseBatchSteps, batchStepStop } from "./modules/batch-plan.js";
 import { contextDied, contextLost } from "./modules/frame-gone.js";
-import { pageLeftOutcome } from "./modules/page-left.js";
+import { pageLeftOutcome, slowNavOutcome } from "./modules/page-left.js";
 import { cookiesExport } from "./modules/cookies.js";
 import { startKeepAlive } from "./modules/keep-alive.js";
 import { stampRefIsolated, captureTargetIsolated, readMediaStateIsolated, validateRefsIsolated } from "./page/ref.js";
@@ -463,7 +463,7 @@ async function tabAct(url, intent, params, tabId) {
     if (!stamp.ok) throw pageFailure(intent, stamp);
     // hover: action ставит SW (не модель), гарда нет — наведение ничего не совершает.
     const cp = intent === "hover" ? { nonce, action: "hover" } : { nonce, expectChange: intent === "shake" || isShake, guard: P.guard, guardApproved: P.guardApproved, approvedLabel: P.approvedLabel, approvedRef: P.approvedRef, ref: P.ref };
-    const rc = await runInPage("MAIN", robustClickMain, [cp], explicitFrame);
+    const rc = await slowNavOutcome(tab.id, explicitFrame, await runInPage("MAIN", robustClickMain, [cp], explicitFrame), intent);
     if (!rc.ok) throw pageFailure(intent, rc);
     // play/pause: подтвердить исход media ground-truth. Ревью AX-Ref #4: rc.playing взводим ТОЛЬКО когда
     // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
@@ -522,7 +522,7 @@ async function tabAct(url, intent, params, tabId) {
       }
     }
     if (!rc.ok) throw pageFailure(intent === "hover" ? "hover" : "click", rc);
-    return done(rc);
+    return done(await slowNavOutcome(tab.id, explicitFrame, rc, intent));
   }
   // PLAY/PAUSE — точечно В ЭТОЙ вкладке через MAIN-world React-onClick по кнопке плеера. НЕ через
   // системную медиа-клавишу (она глобальная — снимала с паузы YouTube/чужой плеер, реальный баг).

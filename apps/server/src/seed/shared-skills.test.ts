@@ -72,7 +72,7 @@ describe("общая библиотека навыков", () => {
     const md = SHARED_SKILL_SEED.find((s) => parseSkillMd(s).frontmatter.id === "learned__lms-quiz");
     const fm = parseSkillMd(String(md)).frontmatter;
     const when = String(fm.description);
-    for (const phrase of ["Пройди все мини-тесты во всех курсах", "учебном портале", "ЭИОС", "ИМЭС", "мудл", "сдай тесты"]) {
+    for (const phrase of ["пройти все мини-тесты во всех курсах", "учебном портале", "ЭИОС", "ИМЭС", "мудл", "сдать тесты"]) {
       expect(when, phrase).toContain(phrase);
     }
     const catalogLine = formatSkillCatalog([{ name: String(fm.name), when }]);

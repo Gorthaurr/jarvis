@@ -298,6 +298,20 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
     expect(subscriptionModelId()).toBe("claude-opus-5-5");
   });
 
+  // Адверс-ревью р1: алиас SDK с версией CLI меняется (0.3.251: opus = Opus 5; 0.3.283: Opus 5.5) — метка из таблицы
+  // однажды соврёт. Кто ответил — НАБЛЮДЕНИЕ (assistant.message.model); кадр-ошибка SDK (<synthetic>) его не подменяет.
+  // Реверт: верни modelUsed: subscriptionModelId() — первый кейс упадёт.
+  it("модель ответа — из assistant.message.model, а не из таблицы алиасов; <synthetic> не в счёт", async () => {
+    const said = { type: "assistant", message: { id: "m1", model: "claude-opus-9-test", content: [{ type: "text", text: "ок" }] } };
+    const sdk = fakeSdk([said, { type: "result", subtype: "success", usage: {} }]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE });
+    expect(r.modelUsed).toBe("claude-opus-9-test");
+    const synth = { type: "assistant", message: { id: "m2", model: "<synthetic>", content: [{ type: "text", text: "ок" }] } };
+    const sdk2 = fakeSdk([synth, { type: "result", subtype: "success", usage: {} }]);
+    const r2 = await new SubscriptionLlmProvider({ loadSdk: async () => sdk2 }).complete({ ...BASE });
+    expect(r2.modelUsed).toBe("claude-opus-5-5");
+  });
+
   it("непонятное значение env отдаём как есть — id не выдумываем", () => {
     process.env.JARVIS_SUBSCRIPTION_MODEL = "claude-неизвестная-9";
     try {

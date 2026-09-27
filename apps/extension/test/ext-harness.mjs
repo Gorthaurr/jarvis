@@ -31,17 +31,24 @@ function pipeCdp(proc) {
   const [, , , toChrome, fromChrome] = proc.stdio;
   const pending = new Map();
   let id = 0;
-  let buf = "";
+  // Буфер байтов, а не строка: чанк может разрезать кириллицу посреди символа (подписи кнопок сравниваются дословно).
+  let buf = Buffer.alloc(0);
   fromChrome.on("data", (d) => {
-    buf += d.toString("utf8");
-    for (let i = buf.indexOf("\0"); i >= 0; i = buf.indexOf("\0")) {
-      const m = JSON.parse(buf.slice(0, i));
-      buf = buf.slice(i + 1);
+    buf = Buffer.concat([buf, d]);
+    for (let i = buf.indexOf(0); i >= 0; i = buf.indexOf(0)) {
+      const m = JSON.parse(buf.subarray(0, i).toString("utf8"));
+      buf = buf.subarray(i + 1);
       if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
     }
   });
+  // Chrome упал / завис → вызов не висит вечно (иначе before-хук держал бы набор 120 с и оставлял процесс).
   const send = (method, params = {}, sessionId) =>
-    new Promise((res) => { const i = ++id; pending.set(i, res); toChrome.write(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0"); });
+    new Promise((res) => {
+      const i = ++id;
+      const timer = setTimeout(() => { pending.delete(i); res({ error: { message: `CDP ${method}: нет ответа 15 с` } }); }, 15_000);
+      pending.set(i, (m) => { clearTimeout(timer); res(m); });
+      toChrome.write(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
+    });
   return { send, end: () => { try { toChrome.end(); fromChrome.destroy(); } catch { /* уже закрыт */ } } };
 }
 
@@ -76,7 +83,9 @@ export async function launchExtension() {
     if (!target) await new Promise((r) => setTimeout(r, 100));
   }
   if (!target) { await close(); throw new Error("стенд: service worker расширения не поднялся"); }
-  const { result } = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+  const attached = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+  if (attached.error) { await close(); throw new Error("стенд: не подключился к service worker — " + attached.error.message); }
+  const { result } = attached;
   const sw = async (expression) => {
     const m = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, result.sessionId);
     if (m.error) throw new Error(m.error.message);

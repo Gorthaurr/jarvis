@@ -9,20 +9,23 @@ import { after, before, describe, it } from "node:test";
 import { serverGuardSource } from "./cdp-harness.mjs";
 import { launchExtension } from "./ext-harness.mjs";
 
-const CAP = 4000; // мост ждёт 20 с; честный ответ — к pagehide (≈1 с)
+const CAP = 12_000; // мост ждёт 20 с — зависание на замороженной странице кап ловит; фоновая вкладка троттлит таймеры до 1 с
 const GUARD = serverGuardSource();
 const posts = new Map();
 const html = (title, body) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body>${body}</body>`;
 const LOGIN = html("Вход", `<form method="post" action="/do-login"><input name="u" value="a"><button type="submit" id="go">Вход</button></form>
 <form method="post" action="/do-send"><button type="submit" id="send">Отправить</button></form>
-<a id="lnk" href="/home">Дальше</a><button id="noop" onclick="this.textContent='нажато'">Пусто</button>`);
+<form method="post" action="/do-slow"><button type="submit" id="slow">Сдать</button></form>
+<a id="lnk" href="/home">Дальше</a><button id="noop" onclick="this.textContent='нажато'">Пусто</button>
+<button id="fake" onclick="this.textContent='нажато';Promise.resolve().then(()=>window.dispatchEvent(new PageTransitionEvent('pagehide')))">Подделка</button>`);
 
 const server = http.createServer((req, res) => {
   const path = new URL(req.url, "http://x").pathname;
   if (req.method === "POST") {
     posts.set(path, (posts.get(path) ?? 0) + 1);
     req.resume();
-    req.on("end", () => { res.writeHead(303, { location: "/home" }); res.end(); });
+    // /do-slow — ответ сайта дольше ожидания клика (ревью р1): документ ещё на месте, вкладка уже грузится.
+    req.on("end", () => setTimeout(() => { res.writeHead(303, { location: "/home" }); res.end(); }, path === "/do-slow" ? 2500 : 0));
     return;
   }
   const body = path === "/login" ? LOGIN : path === "/home" ? html("Главная", "<h1>Добро пожаловать</h1>") : null;
@@ -80,6 +83,23 @@ describe("tab.act click, уводящий страницу (bfcache), отвеч
     assert.match(tab.url, /\/login$/u);
   });
 
+  it("медленный POST (ответ сайта 2,5 с): не «не отреагировала», а переход вероятен — uncertain, форма ровно одна", async (t) => {
+    if (!ext) return t.skip("нет Chrome с Extensions.loadUnpacked");
+    const { reply, ms } = await act("click", { selector: "#slow" });
+    assert.ok(!reply.timeout, `tab.act не ответил за ${CAP} мс`);
+    assert.deepEqual([reply.ok, reply.data?.uncertain, reply.data?.changed], [true, true, undefined], JSON.stringify(reply));
+    assert.match(String(reply.data.navigated), /\/(do-slow|home)$/u, JSON.stringify(reply));
+    assert.ok(ms < CAP, `ms=${ms}`);
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(posts.get("/do-slow"), 1, "форма отправлена ровно один раз");
+  });
+
+  it("синтетический pagehide от самой страницы — не уход (isTrusted): ответ по факту клика, без navigated", async (t) => {
+    if (!ext) return t.skip("нет Chrome с Extensions.loadUnpacked");
+    const { reply, tab } = await act("click", { selector: "#fake" });
+    assert.deepEqual([reply.ok, reply.data?.changed, reply.data?.navigated, reply.data?.uncertain], [true, true, undefined, undefined], JSON.stringify(reply));
+    assert.match(tab.url, /\/login$/u);
+  });
   it("§14: опасная подпись без одобрения — commit_confirm ДО клика (формы нет на сервере), с одобрением — ровно один клик", async (t) => {
     if (!ext) return t.skip("нет Chrome с Extensions.loadUnpacked");
     const no = await act("click", { selector: "#send", guard: GUARD });

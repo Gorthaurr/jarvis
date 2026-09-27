@@ -23,6 +23,7 @@ function sw(emptyFn, after, empty = "result") {
         if (inj.func.name !== emptyFn) return [{ frameId: 0, result: { ok: true, value: "x" } }];
         left = true;
         if (empty === "pagehide") return [{ frameId: 0, result: { ok: true, pageLeft: true, navigated: true, uncertain: true } }];
+        if (empty === "slow") return [{ frameId: 0, result: { ok: true, method: "pointer", changed: false } }];
         return empty === "array" ? [] : [{ frameId: 0, result: undefined }];
       },
     },
@@ -110,5 +111,29 @@ describe("27.09: page-функция ответила pageLeft (pagehide) — и
   it("вкладка на прежнем адресе и догружена → page_gone («исход неизвестен»), не «перешла»", async () => {
     const { env } = sw("robustClickMain", BEFORE, "pagehide");
     await assert.rejects(env.tabAct("", "click", { selector: "#go" }, 1), (e) => e.code === "page_gone");
+  });
+});
+
+// Ревью р1 (27.09): медленный POST — ответ сайта дольше ожидания клика: документ на месте, контент не менялся, но вкладка
+// УЖЕ грузится. «Не отреагировала» (changed:false) — ложь, модель кликнула бы снова (двойная отправка).
+describe("27.09: клик без изменений, но вкладка грузится (медленный POST) — переход вероятен, исход не подтверждён", () => {
+  it("top-клик, вкладка loading + pendingUrl → navigated = pendingUrl, uncertain", async () => {
+    const { env } = sw("robustClickMain", { ...BEFORE, pendingUrl: "https://online.sberbank.ru/pay", status: "loading" }, "slow");
+    const r = await env.tabAct("", "click", { selector: "#go" }, 1);
+    assert.deepEqual([r.ok, r.navigated, r.uncertain], [true, "https://online.sberbank.ru/pay", true], JSON.stringify(r));
+  });
+
+  it("контроль: вкладка догружена и на месте → прежний честный ответ changed:false (не выдумываем переход)", async () => {
+    const { env } = sw("robustClickMain", BEFORE, "slow");
+    const r = await env.tabAct("", "click", { ref: "e5_0" }, 1);
+    assert.deepEqual([r.ok, r.changed, r.navigated, r.uncertain], [true, false, undefined, undefined], JSON.stringify(r));
+  });
+
+  it("наведение (hover) и клик во фрейме не превращаются в «переход»", async () => {
+    const loading = { ...BEFORE, pendingUrl: "https://online.sberbank.ru/pay", status: "loading" };
+    const hover = await sw("robustClickMain", loading, "slow").env.tabAct("", "hover", { selector: "#go" }, 1);
+    assert.equal(hover.navigated, undefined, JSON.stringify(hover));
+    const framed = await sw("robustClickMain", loading, "slow").env.tabAct("", "click", { ref: "f7e5_0" }, 1);
+    assert.equal(framed.navigated, undefined, JSON.stringify(framed));
   });
 });

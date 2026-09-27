@@ -163,24 +163,20 @@ export function subscriptionFallbackEnabled(): boolean {
 }
 
 /**
- * Модель резерва. Проверено живым зондом на подписке владельца: доступны `fable` (→ claude-fable-5),
- * `opus` (→ claude-opus-5), а также полные id `claude-fable-5` / `claude-opus-5`.
+ * Модель резерва: алиас SDK (`opus`, `fable`) или полный id. Проба 27.09 на подписке владельца (SDK 0.3.283):
+ * `opus` → claude-opus-5-5, `fable` → claude-fable-5-1 (на SDK 0.3.251 были Opus 5 / Fable 5).
  *
- * Решение владельца (2026-08-31): резерв работает на СИЛЬНОЙ модели — либо Fable 5, либо Opus 5.
- * Дефолт — **`opus`** (claude-opus-5): по замерам скорость у них одинаковая (латентность держит
- * оверхед SDK, а не модель), но Opus 5 экономнее расходует общий лимит подписки, который делится
- * с Claude Code владельца. Fable 5 остаётся доступен через `JARVIS_SUBSCRIPTION_MODEL=fable`.
+ * Решение владельца (2026-08-31): резерв работает на СИЛЬНОЙ модели — Opus или Fable. Дефолт — **`opus`**:
+ * по замерам скорость у них одинаковая (латентность держит оверхед SDK, а не модель), но Opus экономнее
+ * расходует общий лимит подписки, который делится с Claude Code владельца (27.09 — Opus 5.5, его решение).
+ * Fable остаётся доступен через `JARVIS_SUBSCRIPTION_MODEL=fable`.
  */
 function subscriptionModel(): string {
   const raw = process.env.JARVIS_SUBSCRIPTION_MODEL?.trim();
   return raw || "opus";
 }
 
-/**
- * Алиасы SDK → канонический id каталога (для ЧЕСТНОЙ отметки «кто на самом деле ответил»). Алиас разворачивает CLI,
- * и с его версией он меняется: проба 27.09 на SDK 0.3.283 (init/assistant.model) — opus → claude-opus-5-5, fable →
- * claude-fable-5-1 (на 0.3.251 было opus-5 / fable-5). Поднял SDK — перепроверь пробой, иначе метрики соврут.
- */
+/** Алиас SDK → id: фолбэк отметки «кто ответил», если ход не принёс свою модель (SessionTurn.model — наблюдение). */
 const SUBSCRIPTION_MODEL_IDS: Record<string, string> = { opus: "claude-opus-5-5", fable: "claude-fable-5-1" };
 
 /**
@@ -686,7 +682,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       channel: "subscription", // расход считается лимитами подписки, а не долларами API
       // Кто РЕАЛЬНО ответил: модель тира основного канала тут ни при чём (у SDK свой параметр), а
       // метрики/логи писали именно её — по ним нельзя было ответить «там точно Opus 5?».
-      modelUsed: subscriptionModelId(),
+      modelUsed: turn.model ?? subscriptionModelId(),
     };
   }
 }

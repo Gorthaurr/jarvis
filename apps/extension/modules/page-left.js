@@ -33,3 +33,16 @@ export async function pageLeftOutcome(tabId, frameId, before, intent, urlBefore)
   }
   return { ok: false, code: "page_gone", error: "страница сменила документ во время «" + intent + "» и результата не вернула — исход неизвестен, действие могло сработать" };
 }
+
+/**
+ * Медленный POST (ревью р1, 27.09): клик в top отправил форму, а ответ сервера идёт дольше ожидания robustClickMain —
+ * документ ещё на месте, контент не менялся ({changed:false}), но вкладка УЖЕ грузится. «Не отреагировала» здесь — ложь:
+ * модель кликнула бы снова (двойная отправка). Грузится / есть pendingUrl → переход вероятен, исход не подтверждён.
+ */
+export async function slowNavOutcome(tabId, frameId, rc, intent) {
+  if (intent === "hover" || !rc || rc.ok !== true || rc.changed !== false || rc.navigated || (frameId !== undefined && frameId !== 0) || rc.frame !== undefined) return rc;
+  let t = null;
+  try { t = await chrome.tabs.get(tabId); } catch { return rc; }
+  if (!t || (t.status !== "loading" && !t.pendingUrl)) return rc;
+  return { ok: true, navigated: t.pendingUrl || t.url || true, uncertain: true, note: "клик запустил загрузку страницы (ответ сайта ещё идёт) — исход не подтверждён" };
+}

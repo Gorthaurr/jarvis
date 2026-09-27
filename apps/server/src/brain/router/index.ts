@@ -18,6 +18,7 @@ import { type Tier, foldText } from "@jarvis/shared";
 import type { MediaOp, VolumeOp } from "@jarvis/protocol";
 import { looksLikeCommandUtterance } from "../agent/replay-gate.js";
 import { type ReactionKind, classifyReaction } from "./reaction.js";
+import { taskInfinitive } from "./task-verbs.js";
 
 /** Результат классификации: тир + (для tier0) распознанный локальный интент. */
 export interface RouteDecision {
@@ -732,15 +733,12 @@ function looksLikeAction(text: string): boolean {
   return ACTION_VERB_RE.test(text);
 }
 
-// 27.09: инфинитив-просьба «надо пройти/сдать/решить/выполнить» — ТОЧНЫЕ формы (стем «реш*» зажёгся бы на «решение/
-// решил», «сда*» — на «сдаётся мне»). Не в ACTION_VERB_RE: тот судит рассуждение-vs-действие (isHard) — «продумай, как решить…» ушло бы в фон.
-const TASK_INFINITIVE_RE = word("пройти|сдать|решить|выполнить");
 /**
  * T-F6/T-F2: есть ли в реплике командный глагол — объединение детекторов роутера и гейта реплея (reaction.ts,
  * гейт подсказки навыка в loop/retrieval.ts). Объединение, а не один список: каждый в отдельности неполон.
  */
 export function hasCommandVerb(text: string): boolean {
-  return IMPERATIVE_RE.test(text) || looksLikeAction(text) || TASK_INFINITIVE_RE.test(text) || looksLikeCommandUtterance(text);
+  return IMPERATIVE_RE.test(text) || looksLikeAction(text) || taskInfinitive(text) || looksLikeCommandUtterance(text);
 }
 
 // Частица «ли» — почти всегда вопрос («законно ЛИ парсить», «можно ЛИ», «успею ЛИ»). Ловим где угодно.
