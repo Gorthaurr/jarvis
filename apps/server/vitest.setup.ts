@@ -23,3 +23,10 @@ if (process.env.JARVIS_MEMORY_REFLECT === undefined) process.env.JARVIS_MEMORY_R
 // Сон-цикл консолидации (Б1, 2026-07-11) в юнит-тестах ВЫКЛ по той же причине: фоновый LLM-вызов на
 // первом коннекте нового дня жёг бы скриптованные ответы моков. Тест самого сон-цикла включает локально.
 if (process.env.JARVIS_CONSOLIDATION === undefined) process.env.JARVIS_CONSOLIDATION = "0";
+
+// B-14 (DNS): суд навигации (brain/tools/nav-dns.ts) по умолчанию ходит в системный DNS. В наборе — без сети: любое имя
+// «не разрешилось» (сервер такое пропускает, как раньше без DNS-суда). Тесты DNS-суда задают ctx.resolveHost явно;
+// иначе при молчащем DNS (сбой VPN, облако без сети) десятки тестов висели бы по 3 с на имя.
+(globalThis as { __jarvisTestNavLookup?: (h: string) => Promise<string[]> }).__jarvisTestNavLookup = async () => {
+  throw Object.assign(new Error("тестовый DNS: без сети"), { code: "ENOTFOUND" });
+};

@@ -10,12 +10,19 @@
  * `127.0.0.1.nip.io`), ловит второй слой — суд по ОТВЕТУ DNS (`host-resolve.ts` checkHostPublic + `isPrivateIp`).
  */
 
-/** Хост из URL или голого «host[:port]»: без [] у IPv6, без хвостовой точки, в нижнем регистре. "" — не разобрать. */
+/** Схемы, у которых WHATWG находит хост и БЕЗ «//»: `http:evil.example`, `http:\evil.example`, `https:/x` → хост x. */
+const SPECIAL_SCHEME = /^(?:https?|wss?|ftp):/iu;
+
+/**
+ * Хост из URL или голого «host[:port]»: без [] у IPv6, без хвостовой точки, в нижнем регистре. "" — не разобрать.
+ * Адверс-ревью р2: `http:evil.example` раньше шёл как голый хост (`https://http:evil.example` → "") и проходил
+ * DNS-суд пустым, хотя `new URL` и браузер открывают его как http://evil.example/ — разбор тот же, что у них.
+ */
 export function urlHostname(urlOrHost: string): string {
   const raw = String(urlOrHost ?? "").trim();
   if (!raw) return "";
   try {
-    const s = /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw) ? raw : `https://${raw}`;
+    const s = /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw) || SPECIAL_SCHEME.test(raw) ? raw : `https://${raw}`;
     return new URL(s).hostname.replace(/^\[|\]$/gu, "").replace(/\.$/u, "").toLowerCase();
   } catch {
     return "";
@@ -103,5 +110,5 @@ export function isPrivateIp(address: string): boolean {
 
 /** http(s)-адрес на приватном хосте (для перехвата навигации и ответов вкладок; прочие схемы судит свой гард). */
 export function isPrivateHttpUrl(url: string): boolean {
-  return /^https?:\/\//iu.test(String(url ?? "").trim()) && isPrivateHost(url);
+  return /^https?:/iu.test(String(url ?? "").trim()) && isPrivateHost(url); // и `http:host` без «//»
 }

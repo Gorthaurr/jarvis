@@ -12,7 +12,7 @@
 import type { ActionCommand, ActionResult, ActionKind, ConfirmOutcomeKind } from "@jarvis/protocol";
 import type { HostLookup, VisionCap } from "@jarvis/shared";
 import { rememberUiHandles, rememberWebTarget } from "./commit-gate.js";
-import { navUrlRefusal } from "./nav-dns.js";
+import { isHttpish, navUrlRefusal } from "./nav-dns.js";
 import { markWebTargetStale } from "./web-place.js";
 import { webAct } from "./handlers/web-act.js";
 import { mailSend } from "./handlers/mail.js";
@@ -697,7 +697,7 @@ async function dispatchToolCore(
   // же гард, что browser_* (раньше web_* падали в generic-путь БЕЗ проверки → file:///…/id_rsa, loopback,
   // 169.254.169.254-метаданные, chrome:// проходили в браузер с живыми куками; prompt-injection из
   // web_read мог навести открыть локальный файл/внутренний адрес). B-14: + суд по ответу DNS; всё — ДО §14 и памяти цели.
-  const navUrl = URL_NAV_TOOLS.has(name) ? input.url : name === "app_launch" && /^\s*https?:\/\//iu.test(String(input.app ?? "")) ? input.app : undefined; // app_launch{http} = shell-open браузера
+  const navUrl = URL_NAV_TOOLS.has(name) ? input.url : name === "app_launch" && isHttpish(String(input.app ?? "")) ? input.app : undefined; // app_launch{http} = shell-open браузера
   const navRefusal = typeof navUrl === "string" ? await navUrlRefusal(name, navUrl.trim(), ctx.resolveHost) : null;
   if (navRefusal) return navRefusal;
 

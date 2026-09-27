@@ -10,24 +10,28 @@
 import { type HostLookup, isPrivateHttpUrl } from "@jarvis/shared";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { err, ok } from "../dispatch-util.js";
-import { privateByDns } from "../nav-dns.js";
+import { dnsVerdict } from "../nav-dns.js";
 import { resolvePlace } from "../web-place.js";
 
 const INTERNAL = "(локальная сеть/loopback/метаданные облака)";
 const REOPEN = "Страница могла увести вкладку ссылкой или редиректом — открой нужный сайт заново (browser_open).";
 
 /** Адреса ответа расширения, по которым видно, ГДЕ вкладка/фрейм сейчас (все — page-controlled). */
-async function privateUrlOf(reply: unknown, lookup?: HostLookup): Promise<boolean> {
-  if (!reply || typeof reply !== "object") return false;
+/** "private" — внутрь (по имени или DNS); "unverified" — DNS молчит, адрес не проверить (НЕ «внутренний» — закон 1). */
+async function privateUrlOf(reply: unknown, lookup?: HostLookup): Promise<"private" | "unverified" | null> {
+  if (!reply || typeof reply !== "object") return null;
   const r = reply as Record<string, unknown>;
-  const urls = ["url", "navigated", "frameUrl"].map((k) => r[k]).filter((u): u is string => typeof u === "string" && u !== "");
-  if (urls.some((u) => isPrivateHttpUrl(u))) return true;
-  return (await Promise.all(urls.map((u) => privateByDns(u, lookup)))).some(Boolean);
+  const urls = ["url", "navigated", "frameUrl"].map((k) => r[k]).filter((u): u is string => typeof u === "string" && /^\s*https?:/iu.test(u));
+  if (urls.some((u) => isPrivateHttpUrl(u))) return "private";
+  const verdicts = await Promise.all(urls.map((u) => dnsVerdict(u, lookup)));
+  return verdicts.some((v) => v?.kind === "private") ? "private" : verdicts.some((v) => v?.kind === "timeout") ? "unverified" : null;
 }
 
 /** browser_read/browser_inspect: вкладка на внутреннем адресе → содержимое не отдаём (честный отказ). */
 export async function privateTabRead(tool: string, reply: unknown, lookup?: HostLookup): Promise<ToolResult | null> {
-  if (!(await privateUrlOf(reply, lookup))) return null;
+  const v = await privateUrlOf(reply, lookup);
+  if (!v) return null;
+  if (v === "unverified") return err(`${tool}: адрес вкладки сейчас не проверить (DNS не ответил) — содержимое не отдаю; повтори чтение чуть позже.`);
   return err(`${tool}: вкладка сейчас на внутреннем адресе ${INTERNAL} — содержимое не читаю и модели не отдаю (защита от SSRF). ${REOPEN}`);
 }
 
@@ -36,7 +40,9 @@ export async function privateTabRead(tool: string, reply: unknown, lookup?: Host
  * значение поля и прочие данные страницы не отдаём, долг сверки не снимаем, дальше там не действуем.
  */
 export async function privateActResult(intent: string, reply: unknown, lookup?: HostLookup): Promise<ToolResult | null> {
-  if (!(await privateUrlOf(reply, lookup))) return null;
+  const v = await privateUrlOf(reply, lookup);
+  if (!v) return null;
+  if (v === "unverified") return ok(`Сделал «${intent}», но куда ушла вкладка — не проверить (DNS не ответил): адрес и содержимое не показываю. Действие НЕ повторяй — сверь позже browser_read.`);
   return ok(`Сделал «${intent}», но вкладка ушла на внутренний адрес ${INTERNAL} — адрес и содержимое не показываю и там не действую. ${REOPEN}`);
 }
 

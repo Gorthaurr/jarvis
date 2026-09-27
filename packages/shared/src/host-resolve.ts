@@ -56,30 +56,41 @@ export async function checkHostPublic(host: string, opts: { lookup?: HostLookup;
 }
 
 /**
- * Резолвер для ЧАСТЫХ вызовов (перехват каждой навигации в процессе клиента): getaddrinfo идёт в пул libuv (4 потока на
- * весь процесс, fs/zlib/crypto там же), а таймаут withTimeout поток НЕ освобождает — страница с iframe на имена с
- * молчащим NS занимала бы весь пул. Здесь: ≤ concurrency одновременных запросов, одно имя в полёте — один запрос,
- * удачный ответ — кеш ttlMs (ошибки не кешируем).
+ * Резолвер для ЧАСТЫХ вызовов (перехват каждой навигации в процессе клиента, суд над каждым ответом вкладки на сервере):
+ * getaddrinfo идёт в пул libuv (4 потока на весь процесс, fs/zlib/crypto там же), а таймаут withTimeout поток НЕ
+ * освобождает. Здесь: ≤ concurrency одновременных запросов; одно имя в полёте — один запрос; удачный ответ — кеш ttlMs
+ * (ошибки не кешируем). Очередь с дедлайном (адверс-ревью р2): ждавший дольше maxWaitMs — вызывающий уже сдался по
+ * таймауту — выбывает, не запустив резолв; сверх maxQueue — сразу ETIMEOUT. Иначе страница с iframe на имена с
+ * молчащим NS держала бы очередь «мёртвыми» запросами и после ухода с неё.
  */
-export function limitLookup(lookup: HostLookup, opts: { concurrency?: number; ttlMs?: number } = {}): HostLookup {
+export function limitLookup(lookup: HostLookup, opts: { concurrency?: number; ttlMs?: number; maxWaitMs?: number; maxQueue?: number } = {}): HostLookup {
   const max = opts.concurrency ?? 2;
   const ttl = opts.ttlMs ?? 30_000;
+  const maxWait = opts.maxWaitMs ?? LOOKUP_TIMEOUT_MS;
+  const maxQueue = opts.maxQueue ?? 32;
+  const cache = new Map<string, { at: number; addresses: string[] }>();
+  const inflight = new Map<string, Promise<string[]>>();
+  const queue: Array<{ deadline: number; wake: () => void; drop: (e: Error) => void }> = [];
   let active = 0;
-  const queue: Array<() => void> = [];
-  // Слот освобождается передачей следующему в очереди (без окна, где новый вызов обгонит разбуженного).
+  const busy = (why: string) => Object.assign(new Error(`резолв отложен: ${why}`), { code: "ETIMEOUT" });
+  // Слот освобождается передачей следующему ЖИВОМУ в очереди (без окна, где новый вызов обгонит разбуженного).
+  const release = (): void => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      if (Date.now() <= next.deadline) return next.wake();
+      next.drop(busy("очередь ждала дольше таймаута"));
+    }
+    active -= 1;
+  };
   const slot = async <T>(fn: () => Promise<T>): Promise<T> => {
     if (active < max) active += 1;
-    else await new Promise<void>((r) => queue.push(r));
+    else if (queue.length >= maxQueue) throw busy("очередь резолва переполнена");
+    else await new Promise<void>((wake, drop) => queue.push({ deadline: Date.now() + maxWait, wake, drop }));
     try {
       return await fn();
     } finally {
-      const next = queue.shift();
-      if (next) next();
-      else active -= 1;
+      release();
     }
   };
-  const cache = new Map<string, { at: number; addresses: string[] }>();
-  const inflight = new Map<string, Promise<string[]>>();
   return (host) => {
     const hit = cache.get(host);
     if (hit && Date.now() - hit.at < ttl) return Promise.resolve(hit.addresses);
