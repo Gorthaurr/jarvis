@@ -95,6 +95,31 @@ describe("мост — коммит без одобрения невозможе
   });
 });
 
+describe("мост — перенос охраны commit-guard на рубеж: процесс спереди × клавиша", () => {
+  it.each([
+    ["Telegram", "Enter"],
+    ["Discord", "ctrl+enter"],
+    ["WhatsApp", "Enter"],
+    ["1cv8", "Enter"],
+    ["sbbol", "Enter"],
+    ["Telegram", "Ctrl+S"],
+  ])("%s + «%s» через мост → denied, клавиша не ушла", async (proc, combo) => {
+    fake.windows = front({ ...TELEGRAM, process: proc, title: proc });
+    const r = await post({ kind: "input.key", combo });
+    expect(r.error?.code).toBe("denied");
+    expect(fake.count("key")).toBe(0);
+  });
+
+  it("Блокнот: Enter, «строка 1\\nстрока 2» и отпускание Enter в мессенджере — проходят", async () => {
+    fake.windows = front({ ...TELEGRAM, pid: 9, process: "notepad", title: "Блокнот" });
+    expect((await post({ kind: "input.key", combo: "Enter" })).ok).toBe(true);
+    expect((await post({ kind: "input.type", text: "строка 1\nстрока 2" })).ok).toBe(true);
+    fake.windows = front(TELEGRAM);
+    expect((await post({ kind: "input.key", combo: "Enter", mode: "up" })).ok).toBe(true);
+    expect(fake.mutations().map((c) => c.op)).toEqual(["key", "type", "key", "type", "key"]);
+  });
+});
+
 describe("своё окно — отказ даже с грантом в области", () => {
   const ownGrant = approval([{ signature: "click:подтвердить", process: "jarvis", count: 5 }]);
   const asServer = (cmd: ActionCommand): Promise<ActionResult> => serverExecutor(dispatch)("srv-1", { ...cmd, approval: ownGrant });

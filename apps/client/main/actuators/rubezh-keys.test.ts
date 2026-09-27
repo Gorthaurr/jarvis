@@ -60,6 +60,8 @@ describe("клавиши — allowlist и элемент в фокусе", () =>
       expect(r.error?.code, combo).toBe("denied");
       expect(needs(r)?.category, combo).toBe("messenger");
     }
+    fake.focusedText = "ControlType.Button: Отправить"; // Enter на кнопке — клик по ней
+    expect(needs(await run({ kind: "input.key", combo: "Enter" }))?.signature).toBe("click:отправить");
     fake.focusedText = "ControlType.Document: Текст письма";
     expect((await run({ kind: "input.key", combo: "Enter" })).ok).toBe(true);
     expect((await run({ kind: "input.type", text: "Добрый день,\nспасибо" })).ok).toBe(true);
