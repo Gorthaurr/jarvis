@@ -17,6 +17,11 @@ const MUTS = {
   "verified-after-veil-rearm": [`st.honesty.verifiedAfterVeil = false;\n// Контроль-8 (verified-after-veil-rearm)`, `// Контроль-8 (verified-after-veil-rearm)`],
   "cap-by-loop-iters": [`st.progress.loopIters >= HARD_STEP_CAP && !st.progress.finalText && !st.exit.cancelled`, `st.progress.round >= HARD_STEP_CAP && !st.progress.finalText && !st.exit.cancelled`],
   "sent-required-for-outbound": [`(!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) st.honesty.anyMutateSucceeded = true;`, `true) st.honesty.anyMutateSucceeded = true;`],
+  // W2 (П4, G-8): стоп раунда после провала мутации и его края (round-stop-loop.test.ts, loop/round-stop.test.ts).
+  "round-stop": [`if (skipAfterStop(ctx, tu, round)) continue;`, `if (false) continue;`],
+  "round-stop-reads": [`if (round.stoppedBy === undefined || ctx.effectOf(tu.name, tu.input) !== "mutate") return false;`, `if (round.stoppedBy === undefined) return false;`],
+  "round-stop-count-stub": [`round.skippedIds.add(tu.id);`, `round.skippedIds.add(tu.id); round.roundErrors += 1;`],
+  "round-stop-anyerrored": [`const anyErrored = real.some((b) => b.type === "tool_result" && b.is_error === true);`, `const anyErrored = round.resultBlocks.some((b) => b.type === "tool_result" && b.is_error === true);`],
 };
 /** Найти якорь (многострочный, по trim каждой строки) в файле; вернуть {from,to} индексы строк или null. */
 function findAnchor(lines, anchor) {

@@ -9,41 +9,15 @@ import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
 import { isBlindMutate, toolCallEffect } from "../error-voice.js";
 import { canonicalToolCall } from "@jarvis/tools";
+import { type RoundResult, newRound } from "./round-result.js";
+import { noteRoundStop, skipAfterStop } from "./round-stop.js";
+export { type RoundResult, newRound };
 
 /**
  * B-F6: tool_result вызова, снятого отменой владельца (не «ошибка инструмента»). Последовательный вызов не исполнялся
  * вовсе; параллельное ЧТЕНИЕ могло успеть уйти (allowlist без побочных эффектов) — его результат отброшен.
  */
 export const CANCELLED_RESULT = "Отменено владельцем — вызов не исполнен (или его результат чтения отброшен), ничего не изменено.";
-
-/** Факты одного раунда инструментов — прежние локальные переменные цикла, теперь один объект для фаз. */
-export interface RoundResult {
-  resultBlocks: LlmContentBlock[];
-  sawVerifyThisRound: boolean; // §адаптация к цели: был ли в раунде успешный verify-инструмент
-  roundChannelDown: boolean; // Б4 (г/д): хоть одна команда не ушла — канал ПК временно мёртв
-  roundOverlayDenied: boolean; // §режим выделения: ввод не инжектировался из-за вуали — состояние системы, не провал модели
-  overlayDeniedIds: Set<string>; // контроль-3: такие вызовы не считаются «топтанием» в семейном anti-runaway
-  roundErrors: number; // контроль-4: сколько результатов раунда — ошибки (вуаль засчитывается только если ВСЕ ошибки — вуаль)
-  roundVeiled: boolean; // контроль-4: в раунде был сенсор/кадр ПОД ВУАЛЬЮ — вуаль ещё стоит
-  veiledIds: Set<string>; // контроль-5 (V4-4): опрос под вуалью — ожидание, не «топтание» и не флуд
-  backgroundRunningIds: Set<string>; // контроль-9: опрос ИДУЩЕГО фонового задания — ожидание процесса
-  backgroundWaitRound: boolean; // контроль-10: ВЕСЬ раунд — опросы идущего фонового задания (считается при закрытии раунда)
-}
-
-export function newRound(): RoundResult {
-  return {
-    resultBlocks: [],
-    sawVerifyThisRound: false,
-    roundChannelDown: false,
-    roundOverlayDenied: false,
-    overlayDeniedIds: new Set<string>(),
-    roundErrors: 0,
-    roundVeiled: false,
-    veiledIds: new Set<string>(),
-    backgroundRunningIds: new Set<string>(),
-    backgroundWaitRound: false,
-  };
-}
 
 export function pushAssistantTurn(ctx: LoopCtx, resp: LlmResponse): void {
   const { deps, text, opts, st, convo } = ctx;
@@ -206,9 +180,13 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
     // же раунда исполнялись ПОСЛЕ «Остановил». Недоисполненные вызовы закроет closeRound честным «отменено».
     if (ctx.task.cancel.cancelled) break;
     const tu = canonicalUse(raw); // W4 фасады: дальше по циклу — каноническое имя/вход; id — тот же (tool_result парен)
+    if (skipAfterStop(ctx, tu, round)) continue; // W2 (G-8): после провала мутации остальные мутации раунда не идут
     const gate = await acquireForTool(ctx, tu, round);
     if (gate === "break") break;
-    if (gate === "continue") continue;
+    if (gate === "continue") {
+      noteRoundStop(round, tu, { isError: true }, ctx.effectOf(tu.name, tu.input)); // аренда/протухший ввод: не исполнен
+      continue;
+    }
     const settled = prefetched?.get(tu.id);
     const r = settled
       ? await settled.then((s) => {
@@ -221,6 +199,7 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
     else armUncertainDebt(st, tu, r, effOfCall); // W1-ревью LOOP-2/р2: исход неизвестен / берст исполнен частично — долг сверки
     applyRoundFlags(ctx, tu, r, effOfCall, reportOfThisTurn, round);
     countFamilyCall(ctx, tu, r, effOfCall, round); // W1 (L-1/L-12): семейный счёт — по каноническому вызову и его исходу
+    noteRoundStop(round, tu, r, effOfCall); // W2 (G-8): провал/неизвестность/отказ мутации — дальше мутации раунда не идут
     round.resultBlocks.push({
       type: "tool_result",
       tool_use_id: tu.id,

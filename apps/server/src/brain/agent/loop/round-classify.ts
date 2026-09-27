@@ -10,14 +10,15 @@ export function summarizeRound(resp: LlmResponse, round: RoundResult): RoundSumm
   // Эскалация тира (§7): если раунд провалился ЦЕЛИКОМ (все инструменты вернули ошибку)
   // ESCALATE_AFTER раз подряд — модель застряла → заходим сильнее (haiku→sonnet→fable),
   // вместо того чтобы сдаться на слабой модели. Один успешный инструмент сбрасывает счётчик.
-  const allErrored =
-    round.resultBlocks.length > 0 && round.resultBlocks.every((b) => b.type === "tool_result" && b.is_error === true);
+  // W2 (G-8): заглушки стопа раунда («не исполнен») — не ошибки модели, в сводку §7 не входят (round-stop.ts).
+  const real = round.resultBlocks.filter((b) => !(b.type === "tool_result" && round.skippedIds.has(b.tool_use_id)));
+  const allErrored = real.length > 0 && real.every((b) => b.type === "tool_result" && b.is_error === true);
   // §Волна3 (3.2) + ревью Волны 3 (#4): «чистый раунд» для executor-отката = НИ ОДНОГО провалившегося
   // инструмента. Раньше считалось «не ВСЕ упали» (allErrored) → смешанный раунд (слепой input_click
   // is_error + screen_read_text ok) РОС streak, хотя КЛЮЧЕВОЕ действие валилось — даунгрейд возвращал
   // слабый тир под продолжающийся провал (пинг-понг эскалация↔откат). Любая ошибка в раунде = не
   // «чистая механика» (transient-сбой чтения лишь отложит откат на пару раундов — консервативно/безопасно).
-  const anyErrored = round.resultBlocks.some((b) => b.type === "tool_result" && b.is_error === true);
+  const anyErrored = real.some((b) => b.type === "tool_result" && b.is_error === true);
   // Anti-runaway (§20): модель повторяет ТОТ ЖЕ УСПЕШНЫЙ tool-вызов раунд за раундом
   // («открывает до посинения», карточка задачи не закрывается). H4 (ревью 2026-07-02): такой повтор —
   // типичный признак, что цель НЕ достигается, поэтому прежний обрыв с дефолтом «Готово, сэр.» был
