@@ -77,7 +77,6 @@ vi.mock("./ground.js", () => ({
 }));
 vi.mock("./screen.js", () => ({
   captureScreen: () => st.capture(),
-  getLastCaptureMapping: () => null,
   probeScreen: async () => ({ hash: "0" }),
 }));
 // W2 П5: OCR снимает натив через screen-grab (не captureScreen) — тот же управляемый захват st.capture (зависание — тоже).

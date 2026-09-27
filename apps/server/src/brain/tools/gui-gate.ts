@@ -11,7 +11,7 @@
  * Браузер через GUI — по живой вкладке (gui-browser-gate.ts): безопасный хост → грант без вопроса.
  *
  * Контракт вердикта: `denied` — готовый ToolResult (отказ/нет канала), команда не уходит; `approval` — гранты для
- * клиента; `commitApproved` — прежний флаг gui.act (удаляется в интеграции W2).
+ * клиента (единственный канал «да» до рубежа инжекции; прежний флаг gui.act `commitApproved` удалён в интеграции W2).
  */
 import type { CommitApproval, CommitGrant } from "@jarvis/protocol";
 import { actionTimeoutMs } from "@jarvis/protocol";
@@ -26,7 +26,6 @@ import { type GuiWhere, describeSignature, resolveWhere, serverIntents, targetNa
 export interface GuiGateVerdict {
   denied?: ToolResult;
   approval?: CommitApproval;
-  commitApproved: boolean;
 }
 
 /** Инструменты, которые судит гейт GUI-коммитов. */
@@ -52,23 +51,23 @@ function typedText(name: string, input: Record<string, unknown>): string[] {
 }
 
 export async function guiGate(name: string, input: Record<string, unknown>, ctx: ToolContext): Promise<GuiGateVerdict> {
-  if (!GUI_GATED.has(name)) return { commitApproved: false };
+  if (!GUI_GATED.has(name)) return {};
   const { where, intents, display } = guiPlan(name, input, ctx);
-  if (intents.length === 0 || !where.process) return { commitApproved: false };
+  if (intents.length === 0 || !where.process) return {};
   const timeoutMs = actionTimeoutMs(ACTUATOR_KIND_BY_TOOL[name] ?? "");
   let host: string | undefined;
   let placeText = `программе ${where.display} (${where.human})`;
   if (where.category === "web") {
     const place = await browserPlace(ctx, { process: where.process, title: where.title });
     host = place.host;
-    if (place.safe) return { approval: approvalFor(grantsOf(intents, where.process, host), timeoutMs), commitApproved: true };
+    if (place.safe) return { approval: approvalFor(grantsOf(intents, where.process, host), timeoutMs) };
     placeText = browserWhere(place);
   }
   const what = intents.map((i) => describeSignature(i.signature, where.category, display));
-  if (!ctx.confirm) return { denied: err(`${name}: ${what.join("; ")} в ${placeText} — нужно подтверждение владельца (§14), а канал недоступен.`), commitApproved: false };
+  if (!ctx.confirm) return { denied: err(`${name}: ${what.join("; ")} в ${placeText} — нужно подтверждение владельца (§14), а канал недоступен.`) };
   const gate = await ctx.confirm(approvalQuestion({ where: placeText, what, typed: typedText(name, input) }), "irreversible");
-  if (!gate.approved) return { denied: gateDeclined(confirmDeclineText(gate.outcome, `${what.join("; ")} в ${placeText}`), gate.outcome), commitApproved: false };
-  return { approval: approvalFor(grantsOf(intents, where.process, host), timeoutMs), commitApproved: true };
+  if (!gate.approved) return { denied: gateDeclined(confirmDeclineText(gate.outcome, `${what.join("; ")} в ${placeText}`), gate.outcome) };
+  return { approval: approvalFor(grantsOf(intents, where.process, host), timeoutMs) };
 }
 
 function grantsOf(intents: ReturnType<typeof serverIntents>, process: string, host?: string): CommitGrant[] {

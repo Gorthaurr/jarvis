@@ -14,8 +14,11 @@ import { doPointer } from "./act-do-pointer.js";
 import { doType, doTypeFocused } from "./act-do-text.js";
 import { DrawingOverlayError } from "../selection/overlay-error.js";
 import type { FoundTarget } from "./act-find.js";
+import { actionErrorOf } from "./action-error.js";
+import { physicalRectToDip } from "./coords.js";
 import { invoke } from "./ground.js";
 import { click, pressKey } from "./input.js";
+import { invokableAtPoint } from "./point-policy.js";
 
 const log = createLogger("actuator:act-do");
 
@@ -66,14 +69,19 @@ export async function physicalClick(f: FoundTarget, p: ActParams, opts: { button
   return { did: `${how} по «${f.name}»`, screenX: r?.screenX, screenY: r?.screenY, physical: true };
 }
 
+/** G-10 (как input_click): цель-ТОЧКА invoke'ится только малым элементом (строка 400×64 с «×» — клик в точку). */
+const invokeFits = (f: FoundTarget): boolean => !f.point || invokableAtPoint(f.bbox ? physicalRectToDip(f.bbox) : undefined);
+
 /** click: UIA invoke по handle; бросил ДО действия → физический клик по тому же handle; точка без handle → физический. */
 async function doClick(f: FoundTarget, p: ActParams): Promise<ActDone> {
-  if (f.handle && !p.physical) {
+  if (f.handle && !p.physical && invokeFits(f)) {
     try {
       await invoke({ by: "handle", handle: f.handle }, "invoke");
       return { did: `UIA invoke «${f.name}»`, physical: false };
     } catch (e) {
       if (e instanceof DrawingOverlayError) throw e;
+      // W2: отказ рубежа — вердикт, не «invoke не поддержан»: фолбэк судился бы вторично по другим фактам (точка).
+      if (actionErrorOf(e)?.code === "denied") throw e;
       // Ревью 2026-09-24 (H-T2): ТАЙМАУТ invoke ≠ «не сработал». Invoke Win32-кнопки блокирует до закрытия модального
       // окна, которое сам и открыл; сайдкар исполняет мутации строго по очереди — «фолбэк» физическим кликом встал
       // бы в очередь и нажал бы ещё раз после закрытия диалога. Исход неизвестен — второго клика нет.

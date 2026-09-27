@@ -18,7 +18,7 @@ function ctx(reply: Reply = okAct, over: Partial<ToolContext> = {}, approve = tr
   const confirm = vi.fn(async () => ({ approved: approve, outcome: approve ? ("approved" as const) : ("denied" as const) }));
   const sendAction = async (cmd: ActionCommand): Promise<ActionResult> => {
     sent.push(cmd);
-    if (cmd.kind === "screen.capture") return { commandId: "c", ok: true, durationMs: 1, data: { image: `IMG${++frame}`, mediaType: "image/png" } };
+    if (cmd.kind === "screen.capture") return { commandId: "c", ok: true, durationMs: 1, data: { image: `IMG${++frame}`, mediaType: "image/png", width: 1920, height: 1080, frameId: `f${frame}` } };
     if (cmd.kind === "gui.act") return { commandId: "c", durationMs: 1, ...reply(cmd) };
     return { commandId: "c", ok: true, durationMs: 1 };
   };
@@ -63,7 +63,8 @@ describe("act{steps}: исполнение по шагу через dispatchTool
     expect(t.sent.map((c) => c.kind)).toEqual(["gui.act", "screen.capture"]);
     const b = blocks(r);
     expect(b.some((x) => x.type === "image")).toBe(true);
-    expect(text(r)).toMatch(/\[кадр .* \(шаг 2\)\]/u);
+    // Интеграция W2 (п.12): метка — НАСТОЯЩИЙ frameId снимка (lookAtScreen кладёт его в data): по нему модель кликает.
+    expect(text(r)).toMatch(/\[кадр f1 \(шаг 2\)\]/u);
     expect(r.observed).toBe(true);
   });
 

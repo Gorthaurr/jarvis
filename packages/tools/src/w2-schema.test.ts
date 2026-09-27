@@ -53,6 +53,12 @@ describe("W2 схемы: поля", () => {
     for (const f of ["clear", "enter", "to", "dx", "dy", "observe", "app"]) expect(act.properties[f], f).toBeDefined();
     expect(act.properties.commitApproved).toBeUndefined();
   });
+
+  it("G-17: ui_invoke без scroll (UIA-прокрутка сайдкара только вниз) — прокрутка через act{do:'scroll'}", () => {
+    const ui = TOOLS_BY_NAME["ui_invoke"]!.input_schema as S;
+    expect(ui.properties.pattern.enum).toEqual(["invoke", "setValue", "select", "toggle", "expand"]);
+    expect(act.properties.do.enum).toContain("scroll");
+  });
 });
 
 describe("W2 allowlist по схеме (toolInputFields / pickBySchema)", () => {

@@ -17,7 +17,7 @@ const SNAPSHOT = [
 function setup(): { ctx: ToolContext; sent: ActionCommand[]; mut: () => ActionCommand[] } {
   const client = fakeClient({ snapshot: SNAPSHOT });
   const ctx = { session: { sendAction: client.sendAction }, userId: "u1", systemContext: () => "На переднем плане: chrome «Вход»" } as unknown as ToolContext;
-  const mut = () => client.sent.filter((c) => c.kind !== "ui.snapshot");
+  const mut = () => client.sent.filter((c) => c.kind !== "ui.snapshot" && c.kind !== "screen.capture");
   return { ctx, sent: client.sent, mut };
 }
 
@@ -152,6 +152,8 @@ describe("G-3(4): цепочка «клик → печать» в input_batch", 
 
   it("шаги берста — по allowlist: модельный space в цели и служебные поля params клиенту не уходят", async () => {
     const s = setup();
+    // Интеграция W2 (стык П3×П5): координаты модели — только в кадре задачи; без снимка берст честно отклоняется.
+    await dispatchTool("screen_capture", {}, s.ctx);
     await dispatchTool(
       "input_batch",
       {
@@ -164,8 +166,8 @@ describe("G-3(4): цепочка «клик → печать» в input_batch", 
     );
     const cmd = s.mut()[0] as ActionCommand & { steps: unknown[] };
     expect(cmd.steps).toEqual([
-      { action: "input.click", target: { by: "coords", x: 5, y: 6 }, params: { method: "physical" }, retries: 0 },
-      { action: "input.mouse", params: { op: "move", x: 1, y: 2 }, retries: 0 },
+      { action: "input.click", target: { by: "coords", x: 5, y: 6, frame: "f1" }, params: { method: "physical" }, retries: 0 },
+      { action: "input.mouse", params: { op: "move", x: 1, y: 2, frame: "f1" }, retries: 0 },
     ]);
   });
 });

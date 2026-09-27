@@ -1,8 +1,8 @@
 /**
  * W2 П1: исполнение команды SDK-моста — ПОСЛЕ allowlist видов (act-bridge.ts), ДО актуаторного dispatch.
  *
- *  - N-3: `approval`/`commitApproved` из тела срезаются — одобрение ставит только сервер, и читает его рубеж лишь из
- *    области транспорта; команда моста исполняется в области `bridge` без одобрения (даже изнутри code_run);
+ *  - N-3: `approval` из тела срезается — одобрение ставит только сервер, и читает его рубеж лишь из области
+ *    транспорта (прежний флаг `commitApproved` удалён из протокола в интеграции W2 — его не читает никто); команда моста исполняется в области `bridge` без одобрения (даже изнутри code_run);
  *  - N-4 / №17: `app.close{force}` и `app.launch` со схемой URI (skype:, tg:, zoommtg:, mailto:…) — отказ;
  *  - локальный вид `ui.find` (G-22) — поиск цели лестницей act, без dispatch.
  * §14/§0/своё окно здесь НЕ судятся: мост идёт в те же актуаторы, и каждую инжекцию судит рубеж (inject.ts).
@@ -19,7 +19,7 @@ const log = createLogger("actuator:act-bridge");
 export const BRIDGE_LOCAL_KINDS: ReadonlySet<string> = new Set(["ui.find"]);
 
 /** Поля, которые из тела моста в команду не попадают никогда (ставит только сервер). */
-const SERVER_ONLY_FIELDS: readonly string[] = ["approval", "commitApproved"];
+const SERVER_ONLY_FIELDS: readonly string[] = ["approval"];
 
 export type BridgeDispatch = (commandId: string, cmd: ActionCommand) => Promise<ActionResult>;
 

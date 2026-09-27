@@ -18,13 +18,24 @@ vi.mock("./paste-text.js", async () => (await import("../test-support/act-mocks.
 vi.mock("./observe.js", async () => (await import("../test-support/act-mocks.js")).actMocks.observe(st));
 vi.mock("./windows.js", async () => (await import("../test-support/act-mocks.js")).actMocks.windows(st));
 vi.mock("./apps.js", async () => (await import("../test-support/act-mocks.js")).actMocks.apps(st));
+// Интеграция W2 (стык П4×П1): ранняя проверка клавиш act (enter:true, «\n») — НАСТОЯЩИЙ рубеж; его факты — фейковый
+// сайдкар в реальной форме. Без окон процесс неизвестен → Enter честно отклонялся бы до печати.
+vi.mock("electron", async () => (await import("../test-support/electron-mock.js")).electronModule);
+vi.mock("./sidecar-client.js", async () => (await import("../test-support/fake-sidecar.js")).fakeSidecarModule());
 
 import { resetActState } from "../test-support/act-mocks.js";
+import { useFakeSidecar } from "../test-support/fake-sidecar.js";
+import { resetElectronMock } from "../test-support/electron-mock.js";
+import { NOTEPAD, front } from "../test-support/rubezh-fixtures.js";
 import { act } from "./act.js";
 import { ActPartialError } from "./act-do.js";
 
 const OPTS = { restoreCursor: true };
-beforeEach(() => resetActState(st));
+beforeEach(() => {
+  resetActState(st);
+  resetElectronMock();
+  useFakeSidecar().windows = front(NOTEPAD); // обычная программа спереди: Enter после печати — не коммит
+});
 
 const nothingSent = (): void => {
   for (const f of [st.invoke, st.click, st.typeText, st.pressKey, st.mouse, st.pasteText]) expect(f).not.toHaveBeenCalled();

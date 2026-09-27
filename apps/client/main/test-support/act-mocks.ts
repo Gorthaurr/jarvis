@@ -67,7 +67,7 @@ export const actMocks = {
     groundAtPoint: (x: number, y: number) => st.groundAt(x, y),
     invoke: (t: unknown, p: string, v?: string) => st.invoke(t, p, v),
   }),
-  screen: () => ({ getLastCaptureMapping: () => ({ boundsX: 0, boundsY: 0, scale: 1 }) }),
+  screen: () => ({}), // W2 П5: координаты — кадры (frames.ts), глобального lastMapping нет
   sensors: (st: ActState) => ({
     screenOcr: async () => {
       st.ocrCalls += 1;

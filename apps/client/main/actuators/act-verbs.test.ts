@@ -16,10 +16,11 @@ import type { FakeSidecar } from "../test-support/fake-sidecar.js";
 vi.mock("electron", async () => (await import("../test-support/electron-mock.js")).electronModule);
 vi.mock("./sidecar-client.js", async () => (await import("../test-support/fake-sidecar.js")).fakeSidecarModule());
 // Рубеж инжекции: судья коммитов по умолчанию молчит (P0); кейсы ниже включают отказ на нужную операцию.
-const judge = vi.hoisted(() => ({ deny: null as null | ((op: string, p: Record<string, unknown>) => boolean) }));
+// Третий аргумент — предпроверка (ранняя проверка act ДО первой инжекции) или живой суд самой инжекции.
+const judge = vi.hoisted(() => ({ deny: null as null | ((op: string, p: Record<string, unknown>, preflight: boolean) => boolean) }));
 vi.mock("./commit-judge.js", () => ({
-  commitJudge: async (c: { op: string; params: Record<string, unknown> }) =>
-    judge.deny?.(c.op, c.params) ? { message: "§14: нужен ответ владельца", data: { needsApproval: { signature: "key:enter", process: "telegram", category: "messenger", what: "Enter" } } } : null,
+  commitJudge: async (c: { op: string; params: Record<string, unknown>; preflight?: boolean }) =>
+    judge.deny?.(c.op, c.params, c.preflight === true) ? { message: "§14: нужен ответ владельца", data: { needsApproval: { signature: "key:enter", process: "telegram", category: "messenger", what: "Enter" } } } : null,
 }));
 
 import { useFakeSidecar } from "../test-support/fake-sidecar.js";
@@ -150,8 +151,19 @@ describe("clear / enter", () => {
     expect((r.data as { did?: string }).did).toMatch(/нажал Enter/u);
   });
 
-  it("рубеж не пропустил Enter после печати → протокольный denied с needsApproval + stepActionInjected (текст уже набран)", async () => {
+  it("enter:true, рубеж против Enter → вопрос ДО первой буквы: ни клика, ни печати, «ничего не ушло»", async () => {
     judge.deny = (op, p) => op === "key" && p.combo === "Enter";
+    const r = await act({ target: "Поиск", do: "type", text: "кот", enter: true });
+    expect(r.error?.code).toBe("denied");
+    expect(r.data).toMatchObject({ needsApproval: { signature: "key:enter" } });
+    expect(r.stepActionInjected).toBeUndefined();
+    expect(fake.mutations()).toEqual([]);
+  });
+
+  it("ранняя проверка пропустила, а живой суд Enter — нет (фокус сменился посреди act) → denied с needsApproval + stepActionInjected", async () => {
+    // Интеграция W2 (стык П4×П1): ранняя проверка act судит Enter ДО первой буквы (предыдущий кейс); после печати
+    // Enter судится ещё раз по живому переднему плану — туда и попадает отказ, когда передний план сменился.
+    judge.deny = (op, p, preflight) => op === "key" && p.combo === "Enter" && !preflight;
     const r = await act({ target: "Поиск", do: "type", text: "кот", enter: true });
     expect(r.ok).toBe(false);
     expect(r.error?.code).toBe("denied");

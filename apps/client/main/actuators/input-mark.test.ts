@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./sidecar-client.js", () => ({
   sidecar: () => ({ ready: true, request: async () => ({ ok: true }) }),
 }));
-vi.mock("./screen.js", () => ({ getLastCaptureMapping: () => undefined }));
+vi.mock("./screen.js", () => ({})); // захват экрана сценарию не нужен (W2 П5: lastMapping удалён — кадры)
 
 const { _resetJarvisInputForTest, lastJarvisInput } = await import("./input-mark.js");
 const input = await import("./input.js");
