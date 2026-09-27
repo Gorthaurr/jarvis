@@ -62,20 +62,24 @@ describe("контракт approve: одобрение = видимое имя +
   });
 });
 
-describe("srv-bypass-2: web_act судит клавишу, которую нажмёт jarvis-browser (params.key ?? Enter)", () => {
-  const jbActs = (s: ReturnType<typeof vi.fn>) => s.mock.calls.filter((c) => (c[0] as ActionCommand).kind === "jbrowser.act").length;
-  for (const [name, input, asks] of [
-    ["params.key Enter при params.combo Tab", { intent: "key", params: { key: "Enter", combo: "Tab" } }, true],
-    ["плоское key:'Tab' (до клиента params не доходит → Enter)", { intent: "key", key: "Tab" }, true],
-    ["params без key — Enter по умолчанию", { intent: "key", params: {} }, true],
-    ["params.key Tab", { intent: "key", params: { key: "Tab" } }, false],
+describe("srv-bypass-2 → W4: web_act судит ровно ту клавишу, что уходит клиенту (combo ?? key ?? Enter)", () => {
+  const jbActs = (s: ReturnType<typeof vi.fn>) => s.mock.calls.filter((c) => (c[0] as ActionCommand).kind === "jbrowser.act");
+  for (const [name, input, asks, sent] of [
+    ["params.combo Tab при params.key Enter — судим и жмём Tab", { intent: "key", params: { key: "Enter", combo: "Tab" } }, false, "Tab"],
+    ["плоское key:'Tab' — судим и жмём Tab", { intent: "key", key: "Tab" }, false, "Tab"],
+    ["плоское key:'Enter' в мессенджере — вопрос", { intent: "key", key: "Enter" }, true, null],
+    ["params без key — Enter по умолчанию", { intent: "key", params: {} }, true, null],
+    ["params.key Ctrl+Enter — вопрос", { intent: "key", params: { key: "Ctrl+Enter" } }, true, null],
+    ["params.key Tab", { intent: "key", params: { key: "Tab" } }, false, "Tab"],
   ] as const) {
     it(`${name} → ${asks ? "вопрос владельцу" : "без вопроса"}`, async () => {
       const { ctx, confirm, sendAction } = setup(undefined, false);
       await dispatchTool("web_open", { url: TG }, ctx);
       await dispatchTool("web_act", input, ctx);
       expect(confirm).toHaveBeenCalledTimes(asks ? 1 : 0);
-      expect(jbActs(sendAction)).toBe(asks ? 0 : 1);
+      const acts = jbActs(sendAction);
+      expect(acts).toHaveLength(asks ? 0 : 1);
+      if (sent) expect((acts[0]?.[0] as { params?: { combo?: string } }).params?.combo).toBe(sent);
     });
   }
 });

@@ -11,6 +11,7 @@ export * from "./commit-risk.js";
 export * from "./gui-guards.js";
 // Разбор combo клавиш — один на §14-гейт, петлю и (зеркалом) расширение; стык — key-combos.json.
 export * from "./key-combo.js";
+export * from "./private-host.js"; // B-14: одно правило «приватный хост» для всех SSRF-гардов (сервер и клиент)
 // Каталог моделей мозга (точные id, цены, роли) + наложение выбора пользователя на лестницу тиров.
 export * from "./models.js";
 

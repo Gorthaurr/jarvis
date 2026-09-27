@@ -23,6 +23,13 @@ describe("browser-cdp (§6) — построители и валидация", (
     expect(() => safeBrowserUrl("data:text/html,x")).toThrow(/схема/);
   });
 
+  it("B-14: safeBrowserUrl отклоняет внутренние адреса (то же правило, что у сервера)", () => {
+    for (const u of ["http://127.0.0.1:8787/", "192.168.1.1", "http://router.local/", "http://169.254.169.254/latest", "http://[::1]/", "http://100.64.0.1/"]) {
+      expect(() => safeBrowserUrl(u), u).toThrow(/внутренний адрес/u);
+    }
+    expect(safeBrowserUrl("https://ya.ru/")).toBe("https://ya.ru/");
+  });
+
   it("safeBrowserUrl отклоняет «-»-лидирующий аргумент (флаг-инъекция Chrome)", () => {
     // Chrome в argv принял бы «--load-extension=…» / «--proxy-server=…» за ФЛАГ, не URL.
     expect(() => safeBrowserUrl("--load-extension=/tmp/evil")).toThrow(/флаг/);
