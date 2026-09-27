@@ -7,7 +7,7 @@
  * Тело декодируется по ЗАЯВЛЕННОЙ кодировке (Content-Type / XML-пролог / meta), а `application/json`
  * отдаётся КАК ЕСТЬ (readability его бы сломал); усечение всегда помечается явно.
  */
-import { type CacheStats, type Logger, TtlCache, createLogger } from "@jarvis/shared";
+import { type CacheStats, type Logger, TtlCache, createLogger, isPrivateHost } from "@jarvis/shared";
 
 const log: Logger = createLogger("web");
 
@@ -57,29 +57,9 @@ export function isFetchUrlAllowed(raw: string): boolean {
     return false;
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") return false;
-  const host = u.hostname.toLowerCase();
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal")) return false;
-  // IPv6-литерал URL.hostname приходит В СКОБКАХ ("[::1]") — снимаем перед проверкой.
-  const v6 = host.startsWith("[") && host.endsWith("]");
-  const h = v6 ? host.slice(1, -1) : host;
-  if (v6) {
-    if (h === "::1" || h === "::") return false; // loopback / unspecified
-    if (/^(?:fc|fd|fe80)/.test(h)) return false; // ULA / link-local
-    // IPv4-mapped: ::ffff:127.0.0.1 (dotted) и ::ffff:7f00:1 (hex).
-    const mapped = /::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h);
-    if (mapped && isPrivateIpv4(mapped[1]!)) return false;
-    if (/::ffff:(?:7f|0a|a9fe|c0a8)/.test(h)) return false; // hex 127/10/169.254/192.168
-    return true;
-  }
-  if (isPrivateIpv4(h) || /^0\./.test(h)) return false;
-  return true;
-}
-
-/** Приватные/служебные IPv4-диапазоны (RFC1918 + loopback + link-local). */
-function isPrivateIpv4(host: string): boolean {
-  if (/^(?:127\.|10\.|169\.254\.|192\.168\.)/.test(host)) return true;
-  if (/^172\.(?:1[6-9]|2\d|3[01])\./.test(host)) return true;
-  return false;
+  // B-14: одно правило «приватный хост» на сервер и клиент (@jarvis/shared private-host.ts) — раньше здесь была
+  // своя копия, и она разошлась с клиентской (.local, CGNAT). Пустой хост у http(s) не бывает — на всякий случай блок.
+  return u.hostname !== "" && !isPrivateHost(u.hostname);
 }
 
 /** Кап текста страницы, уезжающего в LLM (§15). */
