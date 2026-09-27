@@ -43,6 +43,8 @@ export interface ExtBridgeLike {
   attach(sock: { send(d: string): void; close(): void }): void;
   detach(sock: { send(d: string): void; close(): void }): void;
   handleMessage(text: string): void;
+  /** Наше расширение (chrome-extension://) отклонено пиннингом по ID — для доклада владельцу (ext-absence). */
+  rejected?(extId: string): void;
 }
 
 export interface WsRouteDeps {
@@ -119,6 +121,7 @@ export function registerWsRoutes(instance: FastifyInstance, deps: WsRouteDeps): 
           пришло: origin.replace(/^chrome-extension:\/\//iu, ""),
           ожидается: pinnedExtIdOrDefault(deps.pinnedExtId),
         });
+        deps.ext.rejected?.(origin.replace(/^chrome-extension:\/\//iu, "").toLowerCase());
       }
       refuse(ws, deps.log, "ext", origin);
       return;

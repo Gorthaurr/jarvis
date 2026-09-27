@@ -97,6 +97,7 @@ import type { ISpeakerVerifier } from "../voice/speaker/verifier.js";
 import type { VoiceProfileStore } from "../voice/speaker/store.js";
 import type { HeartbeatHandle } from "./heartbeat.js";
 import type { ExtensionBridge } from "./extension-bridge.js";
+import { flushExtAbsenceForOwner, tickExtAbsence } from "./ext-absence-seam.js";
 import { channelSummary, matchChannels, sanitizeUsage } from "../brain/app-channels.js";
 import { hotPromotionsFor } from "../brain/tools/hot-promotions.js";
 import type { Session } from "./session.js";
@@ -645,6 +646,8 @@ export function makeSessionContext(
   /** ЕДИНАЯ точка «владелец здесь»: всё, что нельзя говорить в пустую комнату. */
   const onOwnerPresent = (): void => {
     flushIncidentReport();
+    // Расширение Chrome давно не на связи — проверка на КАЖДОЙ реплике, доклад раз до восстановления (ext-absence-report.ts).
+    flushExtAbsenceForOwner({ skip: devSession || !!brain.product?.policy.enabled, connected: brain.extBridge.connected, busy: ownerBusy(), voice, session });
     // Брифинг ждёт чтения календаря (сеть/расширение) — не задерживаем реплику владельца.
     void flushDailyBriefing();
     // Самоосмотр читает логи с диска — тоже фоном и тоже не в пустую комнату.
@@ -947,6 +950,7 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const c = env.payload as ClientContext;
       ctx.lastContext = c;
       noteClientContext(ctx.session.sessionId, c); // вход salience (§9)
+      tickExtAbsence(ctx.agentDeps.devSession || ctx.agentDeps.productMode, c, Boolean(ctx.agentDeps.ext?.connected)); // учёт отсутствия расширения
       ctx.voice.drainPending(); // §9: освободился (вышел из звонка/полноэкранки) → отдать отложенный фоновый итог
       break;
     }

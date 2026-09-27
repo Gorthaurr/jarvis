@@ -46,6 +46,19 @@ describe("общая библиотека навыков", () => {
     expect(offenders).toEqual([]);
   });
 
+  // 27.09, решение владельца: в ЭИОС Джарвис входит сам — «Вход» жмёт он, логин и пароль подставляет Chrome.
+  // Реверт: верни «пароль вводит ВЛАДЕЛЕЦ… попроси и подожди» или убери запрет печатать пароль — тест упадёт.
+  it("lms-quiz: на странице входа входит сам (жмёт «Вход»), пароль не печатает, владельца не ждёт", () => {
+    const md = SHARED_SKILL_SEED.find((s) => parseSkillMd(s).frontmatter.id === "learned__lms-quiz");
+    expect(md).toBeDefined();
+    const login = String(md).split("\n").filter((l) => /входа|«Вход»|Пароль|пароль/u.test(l)).join(" ");
+    expect(login).toMatch(/входи САМ/u);
+    expect(login).toMatch(/жмёшь «Вход»/u);
+    expect(login).toMatch(/Пароль сам НЕ печатаешь/u);
+    expect(login).not.toMatch(/попроси и подожди/u);
+    expect(Number(parseSkillMd(String(md)).frontmatter.version)).toBeGreaterThanOrEqual(3); // иначе не пересеется
+  });
+
   it("проза процедуры не парсится в шаги реплея (иначе навык стал бы слепым макросом)", () => {
     for (const md of SHARED_SKILL_SEED) expect(parseSkillMd(md).steps, String(parseSkillMd(md).frontmatter.id)).toEqual([]);
   });
