@@ -43,6 +43,12 @@ describe("W1-D1: executeScript без результата у МЕНЯЮЩЕГО
     });
   }
 
+  it("POST-навигация не закоммичена (url прежний, грузится) → navigated = КУДА уходит (pendingUrl)", async () => {
+    const { env } = sw("robustClickMain", { ...BEFORE, pendingUrl: "https://online.sberbank.ru/pay", status: "loading" });
+    const r = await env.tabAct("", "click", { ref: "e5_0" }, 1);
+    assert.deepEqual([r.ok, r.navigated, r.uncertain], [true, "https://online.sberbank.ru/pay", true], JSON.stringify(r));
+  });
+
   it("пустой массив результатов (фрейм выгружен до ответа) — тот же исход", async () => {
     const { env } = sw("robustClickMain", { ...BEFORE, url: "https://online.sberbank.ru/pay" }, "array");
     const r = await env.tabAct("", "click", { ref: "e5_0" }, 1);

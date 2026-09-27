@@ -26,7 +26,8 @@ export async function pageLeftOutcome(tabId, frameId, before, intent, urlBefore)
     t = null; // вкладку закрыли — исход действия тем более неизвестен
   }
   if (t && (t.status === "loading" || (t.url || "") !== urlBefore)) {
-    return { ok: true, navigated: t.url || t.pendingUrl || true, uncertain: true, note: "страница перешла во время действия — исход не подтверждён" };
+    // Навигация ещё не закоммичена (POST-форма ждёт ответа): url — прежний, КУДА уходит — pendingUrl.
+    return { ok: true, navigated: t.pendingUrl || t.url || true, uncertain: true, note: "страница перешла во время действия — исход не подтверждён" };
   }
   return { ok: false, code: "page_gone", error: "страница сменила документ во время «" + intent + "» и результата не вернула — исход неизвестен, действие могло сработать" };
 }

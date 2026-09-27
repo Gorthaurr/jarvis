@@ -1,6 +1,6 @@
 // Сценарий: банк (online.sberbank.ru — опасный хост §14). «Оплатить» по ref: «нет» → ровно один вопрос, declined,
 // денег не списано; «да» → оплата РОВНО одна. Плюс честность исхода: клик, уведший страницу (POST-форма), не должен
-// рапортоваться «не вышло», и на один клик — один вопрос (оба пока ждут фикса W1, см. defects.mjs).
+// рапортоваться «не вышло», и на один клик — один вопрос (сторожа фиксов W1-D1/D2), в вопросе — видимая подпись.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { begin, newRun, open, sleep, tool, waitFacts } from "../lib.mjs";
@@ -26,6 +26,9 @@ test("«Оплатить» + «нет» → ровно один вопрос, de
   assert.equal(r.questions.length, 1, JSON.stringify(r.questions));
   assert.equal(r.questions[0].kind, "irreversible");
   assert.match(r.questions[0].summary, /банк/);
+  // Владельцу — видимая подпись кнопки, а не CSS-селектор и роль («Оплатить #payform > button:nth-of-type(1) button»).
+  assert.match(r.questions[0].summary, /клик «Оплатить» на online\.sberbank\.ru/u);
+  assert.doesNotMatch(r.questions[0].summary, /#payform|nth-of-type|button/u);
   assert.equal(r.result.flags.declined, true, r.result.text);
   assert.notEqual(r.result.flags.sent, true);
   assert.equal((await waitFacts(run, "payment", 1, 1_500)).length, 0, "после «нет» денег не списано");
