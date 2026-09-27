@@ -4,9 +4,12 @@
  * §Волна2 (2.2): + input_batch — ad-hoc берст шагов через ТОТ ЖЕ skill-runner (одна аренда, один раунд).
  * Маршрутизация остаётся в dispatch (switch).
  */
-import { REPLAY_TYPE_MAX_CHARS, SKILL_EXECUTE_SERVER_TIMEOUT_MS, type SkillStep, newId } from "@jarvis/protocol";
+import { SKILL_EXECUTE_SERVER_TIMEOUT_MS, newId } from "@jarvis/protocol";
 import { fillSlots } from "../../../memory/skill-slots.js";
 import { isQuarantined } from "../../../memory/skills.js";
+import { batchGate } from "../batch-commit.js";
+import { batchStepsFromInput } from "../command-fields.js";
+import { credentialGate } from "../credential-gate.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { sendActionApproved } from "../send-approved.js";
 import { type PostActionObservation, channelDownResult, overlayDeniedResult, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, ok, applyVeil, stripVeilFields } from "../dispatch-util.js";
@@ -32,12 +35,6 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   if (!skillId) return err("skill_execute: нужен skillId (из skill_list)");
   const skill = await ctx.skills.get(ctx.userId, skillId);
   if (!skill) return err(`навык «${skillId}» не найден`);
-  // Навык с guard-шагами (отправка/заказ/код) — подтверждение перед запуском (§14).
-  if (skill.needsReview) {
-    if (!ctx.confirm) return err(`навык «${skillId}» содержит необратимые шаги — нужно подтверждение (§14), но канал недоступен`);
-    const gate = await ctx.confirm(`Запустить навык «${skillId}»? Он содержит необратимые шаги.`, "irreversible");
-    if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `навык ${skillId}`), gate.outcome);
-  }
   const params = input.params && typeof input.params === "object" ? (input.params as Record<string, unknown>) : {};
   // §8 параметризация: подставить переменные {{slot}} в шаги ДО исполнения. Честность: если навык
   // ссылается на слоты, которых нет в params — НЕ исполняем (иначе актуатор получит литерал «{{contact}}»),
@@ -46,11 +43,22 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   if (missing.length > 0) {
     return err(`навык «${skillId}»: не заполнены переменные ${missing.map((m) => `{{${m}}}`).join(", ")} — передай их значения в params.`);
   }
-  // Ревью фиксов Волны 3 (#12): клиент гонит runSkill под бюджетом 90с на ЛЮБОЙ skill.execute —
-  // прежний дефолтный таймаут 15с отваливался ПЕРВЫМ, и LLM-петля начинала кликать параллельно
-  // ещё идущему реплею («два писателя в GUI»). Ждём строго дольше клиентского бюджета.
-  // W2: через шов одобрения §14 (П3: needsApproval → вопрос → повтор steps.slice(k) с грантами).
-  const sent = await sendActionApproved(ctx, { kind: "skill.execute", skillId: skill.id, version: skill.version, steps, params }, SKILL_EXECUTE_SERVER_TIMEOUT_MS);
+  // W2 П3 (G-3(4)): §0 по ЗАПОЛНЕННЫМ шагам — цепочка «клик в поле пароля → печать» (слот с немым именем «value»).
+  const cred = credentialGate("input_batch", { steps }, ctx);
+  if (cred.block) return err(cred.block.replace(/^input_batch/u, `навык «${skillId}»`));
+  // W2 П3 (G-1/S-3): §14 по ЗАПОЛНЕННЫМ шагам — один вопрос с перечнем и гранты с кратностью (batch-commit.ts).
+  const gate = await batchGate(ctx, steps, `навык «${skillId}»`);
+  if (gate.denied) return gate.denied;
+  // Навык с guard-шагами (отправка/заказ/код) — подтверждение перед запуском (§14), если вопроса по шагам не было.
+  if (skill.needsReview && !gate.asked) {
+    if (!ctx.confirm) return err(`навык «${skillId}» содержит необратимые шаги — нужно подтверждение (§14), но канал недоступен`);
+    const ok = await ctx.confirm(`Запустить навык «${skillId}»? Он содержит необратимые шаги.`, "irreversible");
+    if (!ok.approved) return gateDeclined(confirmDeclineText(ok.outcome, `навык ${skillId}`), ok.outcome);
+  }
+  // Ревью фиксов Волны 3 (#12): клиент гонит runSkill под бюджетом 90с на ЛЮБОЙ skill.execute — ждём строго дольше.
+  // W2 П3: needsApproval клиента → вопрос → повтор steps.slice(k) с грантами (send-approved.ts).
+  const cmd = { kind: "skill.execute" as const, skillId: skill.id, version: skill.version, steps, params, ...(gate.approval ? { approval: gate.approval } : {}) };
+  const sent = await sendActionApproved(ctx, cmd, SKILL_EXECUTE_SERVER_TIMEOUT_MS);
   if ("tool" in sent) return sent.tool;
   const result = sent.result;
   // Б4 (ревью #4): канал ПК мёртв (resume-grace) → помечаем channelDown, чтобы петля ждала reconnect,
@@ -155,86 +163,24 @@ function stepFailure(
   return out;
 }
 
-// §Волна2 (2.2): действия, разрешённые в ad-hoc берсте. Только то, что skill-runner исполняет
-// ДЕТЕРМИНИРОВАННО и БЕЗОПАСНО; незнакомое действие клиент-актуатор молча пропустил бы (no-op) —
-// ложный успех, поэтому валидация ЗДЕСЬ, до отправки (§честность).
-const BATCH_ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
-  "app.launch", "app.focus", "browser.open",
-  "ui.invoke", "ui.ground",
-  "input.type", "input.key", "input.click", "input.mouse",
-  "wait", "ground", "verify",
-]);
-const BATCH_MAX_STEPS = 12;
-
 /**
  * §Волна2 (2.2) input_batch: серия механических шагов ОДНИМ tool-вызовом — клиентский skill-runner
  * исполняет их под одной арендой ввода, стоп на первой неподтверждённой (expect) ошибке, честный
  * итог «выполнено k из n». Форма/цепочка хоткеев = 1 LLM-раунд вместо 5. Синтетический skillId —
- * это НЕ сохранённый навык, а ad-hoc берст (ничего не персистится).
+ * это НЕ сохранённый навык, а ad-hoc берст (ничего не персистится). Шаги — по allowlist (command-fields.ts).
  */
 export async function inputBatch(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
-  const rawSteps = Array.isArray(input.steps) ? (input.steps as Array<Record<string, unknown>>) : null;
-  if (!rawSteps || rawSteps.length === 0) return err("input_batch: нужен steps[] (1..12 шагов)");
-  if (rawSteps.length > BATCH_MAX_STEPS) {
-    return err(`input_batch: слишком длинный берст (${rawSteps.length} шагов, максимум ${BATCH_MAX_STEPS}) — компаундинг-риск, разбей на части со сверкой между ними.`);
-  }
-  const steps: SkillStep[] = [];
-  for (let i = 0; i < rawSteps.length; i += 1) {
-    const s = rawSteps[i]!;
-    const action = String(s.action ?? "").trim();
-    if (!BATCH_ALLOWED_ACTIONS.has(action)) {
-      return err(
-        `input_batch: шаг ${i + 1} — действие «${action}» в берсте не поддерживается. ` +
-          `Разрешены: ${[...BATCH_ALLOWED_ACTIONS].join(", ")}. Прочее делай отдельными инструментами.`,
-      );
-    }
-    if (s.needsLlm) return err(`input_batch: шаг ${i + 1} с needsLlm в ad-hoc берсте невозможен — заполни значения сам.`);
-    // Ревью фиксов, 2-й проход (R2): длинный input.type НЕотменяем (typeText даёт себе 5с+120мс/символ,
-    // до 180с > серверного потолка 130с) → печатал бы параллельно LLM-петле в уже другое окно.
-    const params = s.params && typeof s.params === "object" ? (s.params as Record<string, unknown>) : undefined;
-    if (action === "input.type" && typeof params?.text === "string" && params.text.length > REPLAY_TYPE_MAX_CHARS) {
-      return err(
-        `input_batch: шаг ${i + 1} — текст input.type длиннее ${REPLAY_TYPE_MAX_CHARS} символов не батчится ` +
-          `(печать неотменяема и не влезает в бюджет реплея). Длинный текст — через fs_write/office_* или обычный input_type.`,
-      );
-    }
-    const expect = (s.expect && typeof s.expect === "object" ? s.expect : undefined) as SkillStep["expect"];
-    // Ревью Волны 2: expect без содержимого «подтверждается» безусловно (checkExpect: нет role →
-    // true) — итоговое «постусловия подтверждены» было бы ложью. Требуем role (a11y) / text (visual).
-    if (expect) {
-      const isVisual = expect.kind === "visual";
-      if (isVisual && !expect.text) return err(`input_batch: шаг ${i + 1} — expect visual без text (нечего проверять).`);
-      if (!isVisual && !expect.role) return err(`input_batch: шаг ${i + 1} — expect a11y без role (нечего проверять).`);
-    }
-    // ui.ground в берсте исполняется только с target.by="role" (иначе клиент делает тихий no-op).
-    const target = s.target as SkillStep["target"];
-    if (action === "ui.ground" && target?.by !== "role") {
-      return err(`input_batch: шаг ${i + 1} — ui.ground требует target {by:"role", role, name?}.`);
-    }
-    steps.push({
-      action,
-      target,
-      params: (s.params && typeof s.params === "object" ? s.params : undefined) as SkillStep["params"],
-      expect,
-      // §Волна3 (3.3): предусловие шага — живой стейт до исполнения (валидирует клиентский раннер).
-      precondition: (s.precondition && typeof s.precondition === "object" && typeof (s.precondition as { role?: unknown }).role === "string"
-        ? s.precondition
-        : undefined) as SkillStep["precondition"],
-      timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : undefined,
-      // Ревью Волны 2: у слепого шага (без expect) НЕТ критерия неудачи → ретраи переисполняли бы
-      // неидемпотентное действие (тройной клик/ввод). Без expect — 0 повторов по умолчанию.
-      // Ревью фиксов, 2-й проход (R3): retries из контента клампим — без капа sleep(200·attempt)
-      // между попытками раздувал хвостовой перебег за серверный потолок.
-      retries: typeof s.retries === "number" ? Math.max(0, Math.min(3, Math.floor(s.retries))) : expect ? undefined : 0,
-    });
-  }
-  // Ревью фиксов Волны 3 (#12): расчётный «от объёма берста» таймаут мог быть КОРОЧЕ клиентского
-  // бюджета runSkill (90с на любой skill.execute) → сервер отваливался первым и петля кликала
-  // параллельно ещё идущему берсту. Единый потолок строго выше клиентского бюджета; нормальное
-  // завершение возвращается раньше — потолок платится только на реально зависшем берсте.
+  const built = batchStepsFromInput(input);
+  if ("error" in built) return err(built.error);
+  const steps = built.steps;
+  // W2 П3 (G-1/S-3): коммиты шагов с известной меткой — один вопрос с перечнем текста, гранты с кратностью.
+  const gate = await batchGate(ctx, steps, "берст");
+  if (gate.denied) return gate.denied;
+  // Ревью фиксов Волны 3 (#12): единый потолок строго выше клиентского бюджета runSkill (90с) — иначе петля кликала
+  // бы параллельно ещё идущему берсту. origin — как у прочих команд (H5: USER_BUSY-гейт проактивного берста).
   const timeoutMs = SKILL_EXECUTE_SERVER_TIMEOUT_MS;
-  // origin — как у прочих команд (H5: USER_BUSY-гейт проактивного берста на клиенте).
-  const sent = await sendActionApproved(ctx, { kind: "skill.execute", skillId: `adhoc-batch-${newId()}`, version: 0, steps, params: {}, origin: ctx.origin ?? "user" }, timeoutMs);
+  const cmd = { kind: "skill.execute" as const, skillId: `adhoc-batch-${newId()}`, version: 0, steps, params: {}, origin: ctx.origin ?? "user", ...(gate.approval ? { approval: gate.approval } : {}) };
+  const sent = await sendActionApproved(ctx, cmd, timeoutMs);
   if ("tool" in sent) return sent.tool;
   const result = sent.result;
   const n = steps.length;

@@ -123,20 +123,24 @@ describe("GUI — коммит в опасном процессе на пере�
     expect(sendAction).toHaveBeenCalledTimes(2);
   });
 
-  it("ui_invoke по handle «Провести» при 1cv8: подпись берётся из последнего ui_snapshot → спрашивает", async () => {
+  // W2 П3 (S-1): фикстура — в РЕАЛЬНОЙ форме: снимок отдаёт handle числом, схема ui_invoke — цель {by:"handle",
+  // handle:"41"} строкой (прежний `{handle: 42}` верхним полем схема не знает — гейт читал поле, которого нет).
+  it("ui_invoke по handle «Провести» при 1cv8: подпись берётся из последнего ui_snapshot → спрашивает; грант уходит в команде", async () => {
     const sendAction = vi.fn<Send>(async (cmd) =>
       cmd.kind === "ui.snapshot"
-        ? { commandId: "c", ok: true, data: { items: [{ handle: 41, role: "Button", name: "Провести и закрыть" }, { handle: 42, role: "Button", name: "Печать" }] }, durationMs: 1 }
+        ? { commandId: "c", ok: true, data: { items: [{ handle: 41, role: "Button", name: "Провести и закрыть" }, { handle: 42, role: "Button", name: "Закрыть" }] }, durationMs: 1 }
         : { commandId: "c", ok: true, durationMs: 1 },
     );
     const session = { sendAction } as unknown as ToolContext["session"];
     const c = makeCtx({ session, foreground: "1cv8", approved: true });
     await dispatchTool("ui_snapshot", {}, c);
-    await dispatchTool("ui_invoke", { handle: 42 }, c); // «Печать» — не коммит
+    await dispatchTool("ui_invoke", { target: { by: "handle", handle: "42" }, pattern: "invoke" }, c); // «Закрыть» — навигация
     expect(c.confirm).not.toHaveBeenCalled();
-    await dispatchTool("ui_invoke", { handle: 41 }, c); // «Провести и закрыть» — коммит
+    await dispatchTool("ui_invoke", { target: { by: "handle", handle: "41" }, pattern: "invoke" }, c); // «Провести и закрыть» — коммит
     expect(c.confirm).toHaveBeenCalledTimes(1);
     expect(String(c.confirm.mock.calls[0]?.[0])).toMatch(/Провести/u);
+    const invoke = sendAction.mock.calls.map((x) => x[0]).filter((x) => x.kind === "ui.invoke")[1] as ActionCommand & { approval?: { grants: unknown[] } };
+    expect(invoke.approval?.grants).toEqual([{ signature: "click:провести и закрыть", process: "1cv8", count: 1 }]);
   });
 });
 
