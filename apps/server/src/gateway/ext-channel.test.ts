@@ -9,15 +9,19 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { createLogger } from "@jarvis/shared";
-import { registerWsRoutes } from "./ws-routes.js";
+import { type ExtBridgeLike, registerWsRoutes } from "./ws-routes.js";
 import { ExtensionBridge } from "./extension-bridge.js";
 import { JARVIS_WEB_HANDS_EXT_ID, extIdFromManifestKey } from "./ext-id.js";
 import { EXT_BUSY_CLOSE } from "./ext-liveness.js";
 import { isExtNoReply } from "../brain/tools/ext-errors.js";
+import { ExtAbsence } from "./ext-absence.js";
+import { trackExtPresence } from "./ext-absence-seam.js";
 
 const req = createRequire(import.meta.url);
 type WsClient = {
@@ -43,12 +47,12 @@ afterEach(async () => {
   app = null;
 });
 
-async function boot(pinnedExtId?: string): Promise<{ port: number; bridge: ExtensionBridge }> {
+async function boot(pinnedExtId?: string, wrap: (b: ExtensionBridge) => ExtBridgeLike = (b) => b): Promise<{ port: number; bridge: ExtensionBridge }> {
   const bridge = new ExtensionBridge(log);
   app = Fastify({ logger: false });
   await app.register(fastifyWebsocket);
   await app.register(async (instance) => {
-    registerWsRoutes(instance, { onClient: () => {}, ext: bridge, rawToText: (r) => String(r), log, pinnedExtId, extPingTimeoutMs: 400 });
+    registerWsRoutes(instance, { onClient: () => {}, ext: wrap(bridge), rawToText: (r) => String(r), log, pinnedExtId, extPingTimeoutMs: 400 });
   });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const addr = app.server.address();
@@ -161,5 +165,28 @@ describe("S-12: /ext не отдаётся самозванцу и не выши
     extClient(port, "override", { origin: `chrome-extension://${override}` });
     await until(() => bridge.connected);
     await expect(bridge.request({ type: "tab.list" }, 2000)).resolves.toEqual({ who: "override" });
+  });
+});
+
+describe("учёт отсутствия (ext-absence): отказ пиннингом доходит до трекера по настоящему /ext", () => {
+  it("наше расширение с чужим ID отклонено → улика с этим ID; настоящее подключилось → улика погашена", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ext-channel-absence-"));
+    const clock = { t: Date.UTC(2026, 8, 24, 18, 0) };
+    const tracker = new ExtAbsence(() => join(dir, "ext-presence.json"), () => clock.t);
+    const observe = () => {
+      tracker.tick("explorer", false);
+      for (let i = 0; i < 2 * 240 + 4; i++) {
+        clock.t += 15_000;
+        tracker.tick("explorer", false);
+      }
+    };
+    const { port, bridge } = await boot(undefined, (b) => trackExtPresence(b, () => tracker));
+    const other = extClient(port, "other", { origin: "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+    await until(() => other.state.closedWith !== null);
+    observe();
+    expect(tracker.due(false)).toMatchObject({ kind: "chrome", pinRejectedId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+    extClient(port, "real", { origin: PINNED });
+    await until(() => bridge.connected);
+    expect(tracker.due(false)).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 /**
  * ШВЫ учёта отсутствия расширения (ext-absence.ts) в раздутые файлы шлюза — по одной строке на место:
- *  • server.ts: мост на маршруте /ext обёрнут `trackExtPresence` (события attach/detach → lastSeenAt);
+ *  • server.ts: мост на маршруте /ext обёрнут `trackExtPresence` (attach/detach → lastSeenAt; отказ пиннингом);
  *  • router-ws `client.context`: `tickExtAbsence` (наблюдённое время, Chrome на переднем плане);
  *  • router-ws `onOwnerPresent`: `flushExtAbsenceForOwner` — доклад владельцу (ext-absence-report.ts).
  */
@@ -27,12 +27,16 @@ export function trackExtPresence(bridge: ExtBridgeLike & { readonly connected: b
       if (was && !bridge.connected) tracker().noteBridge(false);
     },
     handleMessage: (text) => bridge.handleMessage(text),
+    // Отказ пиннингом важен, только пока нашего нет: самозванец при живом расширении не должен оставлять «улику».
+    rejected: (extId) => {
+      if (!bridge.connected) tracker().notePinRejected(extId);
+    },
   };
 }
 
-/** Тик `client.context`. Dev-сессия (текст-драйвер) — не наблюдение за ПК владельца. */
-export function tickExtAbsence(devSession: boolean | undefined, activeApp: string | undefined, connected: boolean): void {
-  if (!devSession) extAbsence().tick(activeApp, connected);
+/** Тик `client.context`. skip: dev-сессия (текст-драйвер) или продуктовый режим (ПК арендатора) — не наблюдение за ПК владельца. */
+export function tickExtAbsence(skip: boolean | undefined, c: { activeApp?: unknown; locked?: unknown } | undefined, connected: boolean): void {
+  if (!skip) extAbsence().tick(c?.activeApp, connected, c?.locked === true);
 }
 
 export interface OwnerChannel {

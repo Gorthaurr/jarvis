@@ -5,7 +5,8 @@
  *
  * Реверт-проверки: убрать `extAbsence().tick(...)` из case "client.context" → падает первый кейс;
  * убрать `flushExtAbsenceForOwner(...)` из onOwnerPresent → тоже он; убрать гейт ownerBusy → кейс «занят»;
- * игнорировать `skip` (dev-сессия) → кейс dev-сессии.
+ * игнорировать `skip` → кейсы dev-сессии и продуктового режима; не передать locked в тик → кейс «экран заблокирован»;
+ * убрать голос из флаша → первый кейс.
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,7 +43,7 @@ function fakeSession(sent: Sent): Session {
   } as unknown as Session;
 }
 
-function setup(opts: { clientVersion?: string; connected?: boolean } = {}) {
+function setup(opts: { clientVersion?: string; connected?: boolean; product?: boolean } = {}) {
   const clock = { t: Date.UTC(2026, 8, 24, 18, 0) };
   const tracker = new ExtAbsence(() => join(mkdtempSync(join(tmpdir(), "ext-abs-wire-")), "ext-presence.json"), () => clock.t);
   setExtAbsenceForTests(tracker);
@@ -55,9 +56,11 @@ function setup(opts: { clientVersion?: string; connected?: boolean } = {}) {
     spend: { forUser: () => new SpendGuard() },
     tasks: new TaskManager(),
     extBridge: { connected: opts.connected ?? false, telegramSend: vi.fn(), telegramSendVoice: vi.fn(), openOrFocus: vi.fn() },
+    ...(opts.product ? { product: productStub() } : {}),
   } as unknown as BrainProviders;
   const providers = { stt: new MockSttProvider(), tts: new MockTtsProvider() } as never;
   const ctx = makeSessionContext(fakeSession(sent), { stop: vi.fn() } as never, providers, brain, opts.clientVersion ?? "0.1.0");
+  const speakQueued = vi.spyOn(ctx.voice, "speakQueued");
   const context = (c: Partial<ClientContext>) =>
     dispatch(ctx, { id: "e", type: "client.context", payload: { activeApp: "chrome", fullscreen: false, micBusyByOtherApp: false, locked: false, ...c } } as never);
   /** Клиент живёт ms, шлёт client.context раз в 15 с (Chrome на переднем плане). */
@@ -76,18 +79,36 @@ function setup(opts: { clientVersion?: string; connected?: boolean } = {}) {
       tracker.tick("chrome", false);
     }
   };
-  return { tracker, live, say, context, extReports, ownerObserved };
+  return { tracker, live, say, context, extReports, ownerObserved, speakQueued };
+}
+
+/** Продуктовый режим (арендаторы): ровно то, что makeSessionContext трогает при включённом режиме. */
+function productStub() {
+  const models = { haiku: "h", sonnet: "s", fable: "f" };
+  return {
+    policy: { enabled: true, quotas: false },
+    modelsSync: () => models,
+    modelsFor: async () => ({ models }),
+    modelsCatalogFor: async () => ({}),
+    modelsCatalogFallback: () => ({}),
+    quotaExhaustedText: () => undefined,
+    usageSinkFor: () => undefined,
+    attachThreshold: vi.fn(),
+    detachThreshold: vi.fn(),
+  };
 }
 
 afterEach(() => setExtAbsenceForTests(undefined));
 
 describe("доклад об отсутствии расширения доходит до владельца", () => {
-  it("Chrome открыт 2+ ч без расширения → на реплике владельца доклад в чат (с путём), один раз", async () => {
+  it("Chrome открыт 2+ ч без расширения → на реплике владельца доклад в чат (с шагами) и голосом, один раз", async () => {
     const s = setup();
     await s.live(STRONG_ABSENT_MS + CHROME_EVIDENCE_MS);
     await s.say("который час");
     expect(s.extReports()).toHaveLength(1);
-    expect(s.extReports()[0]?.payload.text).toMatch(/Chrome открыт.*Загрузить распакованное/);
+    expect(s.extReports()[0]?.payload.text).toMatch(/Chrome был у вас на экране.*Загрузить распакованное/);
+    const voiced = s.speakQueued.mock.calls.map((c) => String(c[0]));
+    expect(voiced.filter((v) => v.includes("расширение так и не вышло на связь"))).toHaveLength(1); // голос — основной канал
     await s.live(60 * 60_000);
     await s.say("а сейчас");
     expect(s.extReports()).toHaveLength(1); // не спамим до восстановления связи
@@ -110,6 +131,25 @@ describe("доклад об отсутствии расширения доход
     await s.say("который час");
     expect(s.extReports()).toHaveLength(0);
     expect(s.tracker.due(false)).toBeNull();
+  });
+
+  it("экран заблокирован (ночь с включённым ПК) — не наблюдение: тики не копят отсутствие", async () => {
+    const s = setup();
+    await s.live(13 * 60 * 60_000, { activeApp: "explorer", locked: true });
+    await s.context({ activeApp: "explorer", locked: false });
+    await s.say("доброе утро");
+    expect(s.extReports()).toHaveLength(0);
+    expect(s.tracker.due(false)).toBeNull();
+  });
+
+  it("продуктовый режим: ПК арендатора не копит учёт, доклад владельца арендатору не уходит", async () => {
+    const s = setup({ product: true });
+    await s.live(STRONG_ABSENT_MS + CHROME_EVIDENCE_MS);
+    expect(s.tracker.due(false)).toBeNull();
+    s.ownerObserved(STRONG_ABSENT_MS + CHROME_EVIDENCE_MS);
+    await s.say("который час");
+    expect(s.extReports()).toHaveLength(0);
+    expect(s.tracker.due(false)).not.toBeNull();
   });
 
   it("dev-сессия (текст-драйвер) не копит учёт и не съедает доклад владельца", async () => {

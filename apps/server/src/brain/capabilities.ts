@@ -98,7 +98,7 @@ export function renderCapabilityPassport(c: CapabilityInput): string {
       ? "- Расширение Chrome: ПОДКЛЮЧЕНО (browser_open/act/read, telegram_*, calendar_read/mail_read доступны)."
       : // Контроль-2: telegram_send здесь НЕ объявляется недоступным — его ОСНОВНОЙ путь клиентский
         // CDP-Chrome, расширение лишь фолбэк (ложное «недоступно» — тоже нечестность).
-        "- Расширение Chrome: НЕ ПОДКЛЮЧЕНО — browser_act/read/tabs и calendar/mail-чтение сейчас честно откажут (не обещай их; уместно подсказать владельцу chrome://extensions: нет в списке → «Загрузить распакованное», папка apps/extension). Просто ОТКРЫТЬ сайт можешь: browser_open уйдёт shell-фолбэком в дефолтный браузер, но без вкладочного tabId. telegram_* могут пройти основным CDP-путём клиента — сверяйся исходом инструмента.",
+        "- Расширение Chrome: НЕ ПОДКЛЮЧЕНО — browser_act/read/tabs и calendar/mail-чтение сейчас честно откажут (не обещай их; подскажи владельцу chrome://extensions → «Загрузить распакованное»). Просто ОТКРЫТЬ сайт можешь: browser_open уйдёт shell-фолбэком в дефолтный браузер, но без вкладочного tabId. telegram_* могут пройти основным CDP-путём клиента — сверяйся исходом инструмента.",
   );
   const up = c.mcpServers.filter((s) => s.state === "connected");
   const down = c.mcpServers.filter((s) => s.state !== "connected");

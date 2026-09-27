@@ -950,7 +950,7 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
       const c = env.payload as ClientContext;
       ctx.lastContext = c;
       noteClientContext(ctx.session.sessionId, c); // вход salience (§9)
-      tickExtAbsence(ctx.agentDeps.devSession, c?.activeApp, Boolean(ctx.agentDeps.ext?.connected)); // учёт отсутствия расширения
+      tickExtAbsence(ctx.agentDeps.devSession || ctx.agentDeps.productMode, c, Boolean(ctx.agentDeps.ext?.connected)); // учёт отсутствия расширения
       ctx.voice.drainPending(); // §9: освободился (вышел из звонка/полноэкранки) → отдать отложенный фоновый итог
       break;
     }
