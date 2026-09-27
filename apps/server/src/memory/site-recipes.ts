@@ -206,7 +206,8 @@ export function seedSiteRecipes(store: SiteRecipeStore): void {
       host: "eos.imes.su",
       hint:
         "ЭИОС ИМЭС на Moodle (тема opentechnology — блоки могут стоять не там, где в стандартной теме, но подписи и адреса " +
-        "ядра те же). Без входа всё ведёт на /login/index.php: логин и пароль вводит ВЛАДЕЛЕЦ. Курсы — /my/courses.php, " +
+        "ядра те же). Без входа всё ведёт на /login/index.php: логин и пароль подставляет Chrome владельца — жми «Вход» сам " +
+          "(пароль не печатай). Курсы — /my/courses.php, " +
         "тест — /mod/quiz/view.php?id=…, задание — /mod/assign/view.php?id=…. Порядок работы с тестами и заданиями — " +
         "навык «Учёба в Moodle»; старт попытки и сдача идут через подтверждение владельца.",
     },
