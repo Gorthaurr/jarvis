@@ -302,10 +302,10 @@ export interface ProgressState {
   finalText: string;
   // #5: последний непустой ответ модели (нудж мог обнулить finalText для переспроса)
   lastAnswer: string;
-  // §10 realtime: финальная (конверсационная) реплика уже отдана в sink пофразно на 1-м ходе
-  // (без tool_use) → терминал не дублирует её. На tool-ходах остаётся false → финал стримится
-  // в конце целиком (пофразно). Стримим ТОЛЬКО 1-й ход: tool-результаты не произносим.
+  // §10 realtime: финальная реплика ПОСЛЕДНЕГО вызова модели уже отдана в sink пофразно (шаг 0 или, W3 V-4, финал
+  // разговорного хода без дел — stream-final.ts) → терминал не дублирует её. Иначе false → финал звучит из терминала.
   streamedFinal: boolean;
+  streamedThisRound: boolean; // W3 (V-4): из ТЕКУЩЕГО вызова модели в sink уже ушла фраза (докрутка/анти-капитуляция молчат)
   // §10: уже произнесли пользователю хоть фразу (стрим преамбулы/ответа)? Тогда в сбойном терминале
   // НЕ говорим противоречивое «не смог» — иначе после куска ответа звучит «не смог выполнить».
   spokeAny: boolean;
@@ -511,7 +511,7 @@ function initProgressState(): ProgressState {
     loopIters: 0,
     finalText: "",
     lastAnswer: "",
-    streamedFinal: false,
+    streamedFinal: false, streamedThisRound: false,
     spokeAny: false,
     shown: false,
     holdsInput: false,
