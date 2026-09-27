@@ -5,6 +5,7 @@
 import { isBlind, lastOkSince } from "../../../proactive/watch/watch.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, confirmDeclineText, err, ok } from "../dispatch-util.js";
+import { navDnsRefusal } from "../nav-dns.js";
 
 /**
  * §Волна3 ревью (#12): валидация предиката ПО СТРУКТУРЕ на постановке. Раньше проверялось лишь
@@ -91,6 +92,9 @@ export async function watchCreate(ctx: ToolContext, input: Record<string, unknow
     const v = validatePredicate(rawPredicate);
     if (!v.ok) return err(`watch_create: ${v.reason}`);
     predicate = v.predicate; // нормализованная копия (#9: gsi-критерий коэрсирован к строке)
+    const purl = (v.predicate as { url?: unknown }).url; // B-14 (DNS): self-heal переоткроет url в Chrome владельца
+    const dns = typeof purl === "string" && purl ? await navDnsRefusal("watch_create (predicate.url)", purl, ctx.resolveHost) : null;
+    if (dns) return dns;
   }
   const everySec = Number(input.every_seconds);
   const intervalMs = Number.isFinite(everySec) && everySec > 0 ? everySec * 1000 : predicate ? 10_000 : 300_000; // деф: предикат 10с, LLM 5 мин

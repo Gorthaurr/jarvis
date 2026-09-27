@@ -83,12 +83,13 @@ export async function webAct(ctx: ToolContext, input: Record<string, unknown>): 
 }
 
 function webActDone(intent: string, r: ActionResult): ToolResult {
-  const d = (r.data ?? {}) as { uncertain?: unknown; changed?: unknown; blockedNav?: unknown };
+  const d = (r.data ?? {}) as { uncertain?: unknown; changed?: unknown; blockedNav?: unknown; blockedNavReason?: unknown };
   const head =
     d.uncertain === true
       ? `Похоже, страница ПЕРЕШЛА во время «${intent}», исход действия НЕ подтверждён — сверь web_read прежде чем говорить «готово».`
       : `Сделал «${intent}» в браузере Джарвиса.${d.changed === false ? " ВНИМАНИЕ: страница не отреагировала — сверь web_read." : ""}`;
-  const blocked = typeof d.blockedNav === "string" ? ` Переход на внутренний адрес ЗАБЛОКИРОВАН (B-14) — там ничего не открыто.` : "";
+  // B-14 (DNS): исход по причине — «не прошёл DNS» (мёртвое/молчащее имя) ≠ «внутренний адрес» (закон 1).
+  const blocked = typeof d.blockedNav !== "string" ? "" : d.blockedNavReason === "unresolved" ? " Переход НЕ выполнен — адрес не прошёл проверку DNS (B-14)." : " Переход на внутренний адрес ЗАБЛОКИРОВАН (B-14) — там ничего не открыто.";
   const out = untrustedCapped("jarvis-browser", JSON.stringify(r.data ?? { ok: true }), "Сузь: web_inspect{query} или читай нужный фрагмент.");
   out.content = `${head}${blocked}\n${out.content}`;
   if (r.data !== undefined) out.data = r.data;
