@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { addLogSink, createLogger } from "@jarvis/shared";
 import { FileLogSink, pruneOldLogs } from "./file-log.js";
 
 function today(): string {
@@ -88,6 +89,15 @@ describe("FileLogSink — сбой записи не теряет строки �
     expect(fileLogWarns()).toHaveLength(1);
   });
 
+  it("каталог логов удалили на ходу → пересоздан, строка легла в основной без предупреждений", () => {
+    const s = new FileLogSink({ dir });
+    rmSync(dir, { recursive: true });
+    s.sink(entry("после удаления каталога"));
+    s.flush();
+    expect(msgsIn(primary)).toEqual(["после удаления каталога"]);
+    expect(fileLogWarns()).toHaveLength(0);
+  });
+
   it("pruneOldLogs удаляет и старые запасные server-<день>.<pid>.log", () => {
     const now = new Date(2026, 8, 27);
     for (const n of ["server-2026-09-01.log", "server-2026-09-01.4242.log", "server-2026-09-26.4242.log"]) {
@@ -97,5 +107,52 @@ describe("FileLogSink — сбой записи не теряет строки �
     expect(existsSync(join(dir, "server-2026-09-01.log"))).toBe(false);
     expect(existsSync(join(dir, "server-2026-09-01.4242.log"))).toBe(false);
     expect(existsSync(join(dir, "server-2026-09-26.4242.log"))).toBe(true);
+  });
+});
+
+/**
+ * р1 (27.09): проводка как в проде — sink зарегистрирован в логгере (addLogSink), поэтому предупреждения самого
+ * durable-лога идут через тот же логгер в тот же sink и следующим флашем — в файл. Раньше тесты звали sink() руками.
+ */
+describe("FileLogSink в логгере (addLogSink) — предупреждения durable-лога сами ложатся в файл", () => {
+  let dir: string;
+  let primary: string;
+  let fallback: string;
+  let s: FileLogSink;
+  let off: () => void;
+  const app = createLogger("test:app");
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "jarvis-filelog-wire-"));
+    primary = join(dir, `server-${today()}.log`);
+    fallback = join(dir, `server-${today()}.${process.pid}.log`);
+    for (const m of ["log", "warn", "error"] as const) vi.spyOn(console, m).mockImplementation(() => {});
+    mkdirSync(primary); // основной файл дня занят
+    s = new FileLogSink({ dir });
+    off = addLogSink(s.sink);
+  });
+  afterEach(() => {
+    off();
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("основной занят → в запасном и строки, и предупреждения, по порядку; предупреждений под спамом ровно два", () => {
+    for (let i = 0; i < 50; i++) {
+      app.warn(`спам ${i}`);
+      s.flush();
+    }
+    const msgs = msgsIn(fallback);
+    const own = msgs.filter((m) => m.startsWith("durable-лог"));
+    expect(own).toHaveLength(2); // первый сбой + переход в запасной — не по строке на флаш
+    // Предупреждение о сбое — сразу после первой строки, о переходе — после строки сбоя 3 (порядок событий).
+    expect(msgs.slice(0, 5)).toEqual(["спам 0", own[0], "спам 1", "спам 2", own[1]]);
+    expect(msgs.filter((m) => m.startsWith("спам"))).toEqual(Array.from({ length: 50 }, (_, i) => `спам ${i}`));
+  });
+
+  it("dispose при сбое (фатальный выход до N сбоев подряд) → причина падения и предупреждения — в запасном", () => {
+    app.error("FATAL crash line");
+    s.dispose();
+    expect(msgsIn(fallback)).toEqual(["FATAL crash line", expect.stringMatching(/^durable-лог: запись/), expect.stringMatching(/запасной/)]);
   });
 });

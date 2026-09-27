@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AnthropicLlmProvider, _resetApiFailureForTest, _setApiFailureForTest } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback-llm.js";
-import { _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
+import { type SdkModule, SubscriptionLlmProvider, _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
 
 const REQ: LlmRequest = { tier: "sonnet", model: "claude-sonnet-4-6", systemStatic: "персона", messages: [{ role: "user", content: "привет" }] };
@@ -382,7 +382,7 @@ describe("терминальный отказ основного канала �
     await p.complete(REQ);
     expect(p.channelStatus().primary).toBe("ok"); // до фикса: off / auth / «ключ не принят»
     await p.complete(REQ); // порог транзиентного предохранителя
-    clock += 400_000; // VPN поднялся за 5 минут — канал обязан попробоваться снова
+    clock += 30 * 60_000; // пауза гео-блока (30 мин, не латч на 6 ч) истекла — канал обязан попробоваться снова
     await p.complete(REQ);
     expect(primary.calls).toBe(3); // до фикса: 1 — канал выключен на 6 часов
   });
@@ -542,9 +542,10 @@ describe("W0 (2026-09-09): стрим основного канала пробр
 describe("403 гео-блока через настоящий провайдер API (C3)", () => {
   const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
 
-  function realPrimaryThrowing403(): AnthropicLlmProvider {
+  function realPrimaryThrowing403(calls = { n: 0 }): AnthropicLlmProvider {
     const p = new AnthropicLlmProvider({ apiKey: "sk-test", maxRetries: 0 });
     const fail = async (): Promise<never> => {
+      calls.n += 1;
       throw Object.assign(new Error(REGION_403), { status: 403 });
     };
     (p as unknown as { clientPromise: Promise<unknown> }).clientPromise = Promise.resolve({ messages: { create: fail, stream: fail } });
@@ -566,11 +567,54 @@ describe("403 гео-блока через настоящий провайдер
     expect(r.text).not.toMatch(/ключ/i);
   });
 
-  it("резерв настроен, но тоже упал без известной причины (как в бою на входе в Windows) → всё равно про VPN", async () => {
-    const p = new FallbackLlmProvider(realPrimaryThrowing403(), fake({ live: true, throws: new Error("подписка: сеть недоступна") }));
-    const r = await p.complete(REQ);
-    expect(r.stubbed).toBe(true);
-    expect(r.text).toMatch(/VPN/); // до фикса: «Ключ доступа к модели не принят…»
+  /**
+   * Адверс-ревью р1: «как в бою» — НАСТОЯЩИЙ провайдер подписки (подменён только SDK). CLI без терминала шлёт 403
+   * гео-блока строкой «Failed to authenticate. API Error: 403 Request not allowed» (claude.exe 0.3.251), провайдер
+   * сам классифицирует её ДО броска, и withKnownReason берёт ЕГО причину. Фейк, бросающий без записи причины,
+   * этот путь прятал: до фикса владелец слышал «разлогинился… claude setup-token» вместо VPN.
+   */
+  it("резерв (настоящий провайдер подписки) тоже получил 403 гео-блока в обёртке CLI → про VPN, не setup-token", async () => {
+    const CLI_403 = "Failed to authenticate. API Error: 403 Request not allowed";
+    const sdk: SdkModule = {
+      query: () =>
+        (async function* () {
+          yield { type: "assistant", message: { content: [{ type: "text", text: CLI_403 }] } };
+          yield { type: "result", subtype: "success", is_error: true, api_error_status: 403, result: CLI_403 };
+        })(),
+      tool: (name: string) => ({ name }),
+      createSdkMcpServer: (opts) => ({ type: "sdk", name: opts.name, tools: opts.tools }),
+    };
+    const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test"; // live без сохранённого логина
+    try {
+      const p = new FallbackLlmProvider(realPrimaryThrowing403(), new SubscriptionLlmProvider({ loadSdk: async () => sdk }));
+      const r = await p.complete(REQ);
+      expect(r.stubbed).toBe(true);
+      expect(r.text).toMatch(/VPN/);
+      expect(r.text).not.toMatch(/setup-token|разлогин/u); // до фикса: «доступ по подписке разлогинился…»
+    } finally {
+      if (savedToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+    }
+  });
+
+  // Адверс-ревью р1 (LOW): пока VPN не поднят, гео-блок за 5 минут не лечится — общая пауза предохранителя
+  // возвращала по 2 заведомо мёртвых вызова в каждое 5-минутное окно. Для region пауза длиннее (30 мин).
+  it("гео-блок подряд → основной канал пропускается 30 минут, а не общие 5", async () => {
+    const calls = { n: 0 };
+    let clock = 0;
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(calls), secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ);
+    expect(calls.n).toBe(2);
+    clock += 400_000; // общая 5-минутная пауза уже истекла бы
+    expect((await p.complete(REQ)).text).toBe("по подписке");
+    expect(calls.n).toBe(2); // до фикса: 3 — снова обречённый вызов API
+    expect(p.channelStatus().primary).toBe("cooldown"); // транзиентно, не латч «ключ»
+    clock += 30 * 60_000;
+    await p.complete(REQ);
+    expect(calls.n).toBe(3); // полуоткрытая проба: вдруг VPN уже поднят
   });
 
   it("резерв жив → ход по подписке, а API-канал в паспорте НЕ выключен как «ключ»", async () => {

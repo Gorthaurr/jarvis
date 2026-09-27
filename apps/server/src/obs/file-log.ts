@@ -107,7 +107,7 @@ export class FileLogSink {
   };
 
   /** Записать накопленный буфер (и отложенное после сбоя) на диск, ротация по дню. Fail-safe. */
-  flush(): void {
+  flush(final = false): void {
     if (this.buf.length === 0 && this.out.idle) return;
     const lines = this.buf;
     this.buf = [];
@@ -120,7 +120,7 @@ export class FileLogSink {
         /* не критично */
       }
     }
-    this.out.write(join(this.dir, `server-${day}.log`), join(this.dir, `server-${day}.${process.pid}.log`), lines);
+    this.out.write(join(this.dir, `server-${day}.log`), join(this.dir, `server-${day}.${process.pid}.log`), lines, { final });
   }
 
   /** Запустить периодический флаш. Идемпотентно. */
@@ -136,7 +136,10 @@ export class FileLogSink {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.flush();
+    // Флаш последний (р1): сбой основного → сразу запасной, не ждём N подряд. Второй проход дописывает
+    // предупреждение, которое выпустила сама финальная запись (через логгер оно легло в буфер).
+    this.flush(true);
+    this.flush(true);
   }
 }
 

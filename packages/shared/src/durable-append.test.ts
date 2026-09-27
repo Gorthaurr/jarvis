@@ -85,4 +85,41 @@ describe("DurableAppender", () => {
     expect(lines(fallback)).toEqual(["C", "D", "E"]);
     expect(log.warn).toHaveBeenCalledTimes(3);
   });
+
+  // р1: dispose/фатальный выход — последний флаш, следующего не будет. Ждать «N сбоев подряд» нельзя.
+  it("финальная запись: основной не пишется → сразу в запасной, даже на первом сбое", () => {
+    mkdirSync(primary);
+    const a = new DurableAppender(log, { fallbackAfter: 3, now });
+    a.write(primary, fallback, ["отложенная"]); // сбой 1 — обычный режим держит в памяти
+    expect(existsSync(fallback)).toBe(false);
+    a.write(primary, fallback, ["FATAL"], { final: true }); // сбой 2 < 3, но это последний шанс
+    expect(lines(fallback)).toEqual(["отложенная", "FATAL"]);
+    expect(a.idle).toBe(true);
+  });
+
+  // р1: при долгом сбое самые старые строки (с кодом ошибки) выкидываются из очереди — код обязан дожить до сводки.
+  it("код ошибки основного и запасного — в напоминании и в сводке восстановления", () => {
+    mkdirSync(primary);
+    mkdirSync(fallback);
+    const a = new DurableAppender(log, { fallbackAfter: 1, maxPending: 1, warnEveryMs: 10, now });
+    a.write(primary, fallback, ["1", "2", "3"]);
+    const code = (log.warn.mock.calls[0]![1] as { code: string }).code;
+    expect(code).toBeTruthy();
+    t = 100;
+    a.write(primary, fallback, ["4"]);
+    expect(log.warn.mock.calls.at(-1)![1]).toMatchObject({ code, fallbackCode: code, lost: 3 });
+    rmSync(primary, { recursive: true });
+    a.write(primary, fallback, []);
+    expect(log.info.mock.calls[0]![1]).toMatchObject({ code, fallbackCode: code, lost: 3 });
+  });
+
+  // р1: каталог логов удалили на ходу («почистить логи», code_run) — раньше ENOENT до перезапуска процесса.
+  it("каталога нет (ENOENT) → пересоздаём и повторяем один раз, это не сбой", () => {
+    const nested = join(dir, "logs");
+    const a = new DurableAppender(log, { fallbackAfter: 1, now });
+    a.write(join(nested, "p.log"), join(nested, "f.log"), ["после удаления каталога"]);
+    expect(lines(join(nested, "p.log"))).toEqual(["после удаления каталога"]);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(a.idle).toBe(true);
+  });
 });

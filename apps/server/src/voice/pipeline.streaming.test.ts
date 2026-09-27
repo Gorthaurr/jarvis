@@ -430,3 +430,116 @@ describe("A3: потеря названа вслух в первой фразе 
     h.endStream();
   });
 });
+
+/** Тот же стенд, что у B4, но эндпоинт по speech_end без interim (кашель/ТВ в раздумье → пустой лиз). */
+function alwaysEndpointTurn(): NonNullable<VoicePipelineDeps["turnDetector"]> {
+  return {
+    onSpeechStart() {},
+    onInterim() {},
+    onSpeechEnd: () => "endpoint",
+    tick: () => "wait",
+    reset() {},
+    onProviderEndpoint: () => "wait",
+    minSilenceMs: 200,
+    maxSilenceMs: 800,
+  } as unknown as NonNullable<VoicePipelineDeps["turnDetector"]>;
+}
+
+/**
+ * Ревью р1 B4 (LOW): снапшот mouth-to-ear был ОДНИМ слотом. Шум в раздумье открывал лиз 2, его finalizeStt
+ * перезаписывал слот — ack ответа хода 1 (честно теговый своим seq) отбрасывался МОЛЧА, и главный KPI латентности
+ * терял каждый ход с речью в раздумье (перекос к тихим ходам). Теперь снапшоты по seq, промах — в лог.
+ */
+describe("ревью р1: mouth-to-ear хода переживает шумовой лиз в раздумье", () => {
+  let prevEarcon: string | undefined;
+  beforeEach(() => {
+    prevEarcon = process.env.JARVIS_THINK_EARCON_MS;
+    process.env.JARVIS_THINK_EARCON_MS = "0";
+  });
+  afterEach(() => {
+    if (prevEarcon === undefined) delete process.env.JARVIS_THINK_EARCON_MS;
+    else process.env.JARVIS_THINK_EARCON_MS = prevEarcon;
+  });
+
+  it("кашель в раздумье (пустой лиз 2 финализирован) → m2e хода 1 всё равно записан", async () => {
+    const clock = { t: 10_000 };
+    const m2e = vi.fn();
+    const h = make({ now: () => clock.t, onMouthToEar: m2e, turnDetector: alwaysEndpointTurn() });
+    h.pipe.onWake();
+    clock.t = 11_000;
+    h.stt.last!.emit({ text: "какая погода", final: true }); // turn_end хода 1
+    await flush();
+    const sink1 = h.getSink();
+    clock.t = 11_500;
+    h.pipe.onVadEvent("speech_start"); // кашель — лиз 2
+    clock.t = 11_800;
+    h.pipe.onVadEvent("speech_end"); // эндпоинт без interim → close_stt → снапшот лиза 2
+    await flush();
+    h.stt.last!.emit({ text: "", final: true }); // пустой финал шума
+    await flush();
+    clock.t = 13_000;
+    sink1.sentence("Пасмурно, плюс восемь.");
+    h.tts.streams[0]!.push();
+    h.pipe.onAudioPlayed(h.chunks[0]!.gen!, 13_100);
+    expect(m2e).toHaveBeenCalledWith(2_100, 1, "answer"); // 13 100 − 11 000
+    h.endStream();
+  });
+
+  it("ack без снапшота хода — отброс виден в логе, не молча", async () => {
+    const lines: string[] = [];
+    const m2e = vi.fn();
+    const h = make({ log: captureLog(lines), onMouthToEar: m2e });
+    await startTurn(h, "который час");
+    h.getSink().done("Десять утра.");
+    h.tts.streams[0]!.push();
+    h.pipe.onAudioPlayed(999, Date.now()); // тег хода, которого не было
+    expect(m2e).not.toHaveBeenCalled();
+    expect(lines.some((l) => l.includes("mouth-to-ear") && l.includes("999"))).toBe(true);
+    h.endStream();
+  });
+});
+
+/**
+ * Ревью р1 A3 (LOW): предупреждение о непроговорённом списывалось на СИНТЕЗЕ (не по звуку) и пофразный путь
+ * приставлял его к КАЖДОЙ фразе — протухший посреди ответа итог вклинивал «Сэр, один итог…» между фразами.
+ */
+describe("ревью р1: предупреждение о потере — первой ЗВУЧАЩЕЙ фразе стрим-ответа", () => {
+  /** Ход думает → итог в очереди протух (счётчик потерь +1). */
+  async function turnWithLoss(clock: { t: number }) {
+    const h = make({ now: () => clock.t, followupMs: 60_000 });
+    await startTurn(h, "найди отчёт");
+    h.pipe.speakQueued("Итог, который протух.");
+    clock.t += 3 * 60_000;
+    h.pipe.drainPending();
+    return h;
+  }
+
+  it("новая потеря посреди ответа не вклинивается между фразами", async () => {
+    const clock = { t: 50_000 };
+    const h = await turnWithLoss(clock);
+    const sink = h.getSink();
+    sink.sentence("Первая фраза.");
+    expect(h.tts.streams[0]!.text).toMatch(/не успел проговорить/);
+    h.tts.streams[0]!.push(); // предупреждение прозвучало
+    h.pipe.speakQueued("Ещё итог."); // канал занят речью → в очередь
+    clock.t += 3 * 60_000; // протух (и минутный троттлинг предупреждения прошёл)
+    h.pipe.drainPending();
+    sink.sentence("Вторая фраза.");
+    h.tts.streams[0]!.finishStream(); // → синтез второй фразы
+    expect(h.tts.streams[1]!.text).toBe("Вторая фраза."); // не «Сэр, один итог…» посреди ответа
+    h.endStream();
+  });
+
+  it("первая фраза не дала звука (сбой TTS) — предупреждение уходит со второй, а не теряется", async () => {
+    const clock = { t: 50_000 };
+    const h = await turnWithLoss(clock);
+    const sink = h.getSink();
+    sink.sentence("Первая фраза.");
+    sink.sentence("Вторая фраза.");
+    expect(h.tts.streams[0]!.text).toMatch(/не успел проговорить/);
+    h.tts.streams[0]!.finishStream(); // синтез кончился без единого чанка
+    expect(h.tts.streams[1]!.text).toMatch(/не успел проговорить/);
+    expect(h.tts.streams[1]!.text).toContain("Вторая фраза.");
+    h.endStream();
+  });
+});

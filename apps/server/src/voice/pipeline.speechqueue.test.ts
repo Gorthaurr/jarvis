@@ -434,3 +434,70 @@ describe("A3: спасённый ответ на вопрос владельца
     expect(direct).toMatch(/не успел проговорить/);
   });
 });
+
+/**
+ * Ревью р1 A3 (LOW): счётчик непроговорённого обнулялся на СИНТЕЗЕ. Прямой ответ хода — носитель предупреждения,
+ * и именно его чаще всего перебивают: барж-ин до первого чанка (или сбой TTS без звука) терял предупреждение
+ * навсегда. Теперь списание — по первому реально отправленному чанку, иначе предупреждение возвращается.
+ */
+describe("ревью р1: предупреждение о потере списывается по факту звука", () => {
+  function makeTurns() {
+    const clock = { t: 1_000_000 };
+    const turns: ((r: { voice: string }) => void)[] = [];
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const pipe = new VoicePipeline({
+      stt, tts,
+      onUserTurn: () => new Promise((res) => { turns.push(res); }),
+      sendSpeakChunk: () => {}, sendClientState: () => {}, followupMs: 60_000,
+      now: () => clock.t,
+    });
+    return { stt, tts, pipe, turns, clock };
+  }
+
+  /** Ход 1 думает → итог протух (потеря +1) → ответ хода 1 уходит в синтез с предупреждением. */
+  async function answerWithNotice() {
+    const r = makeTurns();
+    r.pipe.onWake();
+    r.stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    r.pipe.speakQueued("Итог, который протух.");
+    r.clock.t += 3 * 60_000;
+    r.pipe.drainPending();
+    r.turns[0]!({ voice: "Сейчас три часа." });
+    await flush();
+    expect(r.tts.texts.at(-1)).toMatch(/не успел проговорить/);
+    return r;
+  }
+
+  /** Следующий ход владельца — его прямой ответ. */
+  async function nextAnswer(r: ReturnType<typeof makeTurns>): Promise<string | undefined> {
+    r.clock.t += 1_000;
+    r.pipe.onWake();
+    r.stt.last!.emit({ text: "а какое число", final: true });
+    await flush();
+    r.turns.at(-1)!({ voice: "Двадцать седьмое." });
+    await flush();
+    return r.tts.texts.find((t) => t.includes("Двадцать седьмое."));
+  }
+
+  it("перебили до первого чанка → предупреждение звучит в следующем ответе", async () => {
+    const r = await answerWithNotice();
+    r.pipe.onVadEvent("barge_in"); // ни байта клиенту не ушло
+    r.pipe.onVadEvent("speech_end");
+    expect(await nextAnswer(r)).toMatch(/не успел проговорить/);
+  });
+
+  it("синтез кончился без звука (сбой TTS) → предупреждение не потеряно", async () => {
+    const r = await answerWithNotice();
+    r.tts.last!.finish(); // done без единого чанка
+    expect(await nextAnswer(r)).toMatch(/не успел проговорить/);
+  });
+
+  it("прозвучало → списано: следующий ответ без предупреждения", async () => {
+    const r = await answerWithNotice();
+    r.tts.last!.push();
+    r.tts.last!.finish();
+    expect(await nextAnswer(r)).toBe("Двадцать седьмое.");
+  });
+});

@@ -118,6 +118,8 @@ const MIN_ECHO_CHARS = 16;
 
 export function classifySubscriptionError(text: string): SubscriptionFailure {
   const t = String(text ?? "");
+  // C3 (адверс-ревью р1): гео-403 CLI приходит в обёртке «Failed to authenticate. API Error: …» — судим ДО auth.
+  if (isRegionBlock(t, undefined)) return { kind: "other", human: "подписка: сервис модели не пускает запрос из этой сети — проверьте VPN", at: Date.now() };
   if (/authenticate|oauth|session expired|not logged in|unauthorized/i.test(t)) {
     return { kind: "auth", human: "подписка не авторизована (сессия истекла) — нужно выполнить `claude setup-token` и обновить CLAUDE_CODE_OAUTH_TOKEN", at: Date.now() };
   }
@@ -129,7 +131,6 @@ export function classifySubscriptionError(text: string): SubscriptionFailure {
   if (/rate.?limit|429|too many requests/i.test(t)) {
     return { kind: "rate_limit", human: "подписка временно ограничивает частоту запросов", at: Date.now() };
   }
-  if (isRegionBlock(t, undefined)) return { kind: "other", human: "подписка: сервис модели не пускает запрос из этой сети — проверьте VPN", at: Date.now() }; // C3
   return { kind: "other", human: `резервный канал не ответил: ${t.slice(0, 160)}`, at: Date.now() };
 }
 

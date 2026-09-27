@@ -11,8 +11,21 @@ export interface ApiFailure {
   at: number;
 }
 
-/** Признаки того, что отказ — про КЛЮЧ/права (401 invalid x-api-key, 403 permission_error «API key does not…»). */
-const KEY_MARKERS = /x-api-key|api.?key|authenticat|unauthorized|permission/i;
+/** Признаки того, что отказ — про КЛЮЧ/права (401 invalid x-api-key, 403 permission_error «API key does not…», OAuth). */
+const KEY_MARKERS = /x-api-key|api.?key|authenticat|unauthorized|permission|oauth/i;
+
+/**
+ * Обёртка CLI подписки (адверс-ревью р1): без терминала claude.exe отдаёт ЛЮБОЙ 401/403 строкой
+ * «Failed to authenticate. API Error: <status> <message>» — слово authenticate тут шаблон, а не признак ключа.
+ * Снимаем только её (ТОЧКА и следом «API Error»); «Failed to authenticate: OAuth…» (двоеточие) — настоящая авторизация.
+ */
+const CLI_AUTH_WRAPPER = /Failed to authenticate\.\s*(?=API Error)/giu;
+
+/** Статус из текста CLI («API Error: 401 …»), когда числового поля нет: 401 в обёртке — всегда не гео. */
+function statusFromText(t: string): number | undefined {
+  const m = /API Error:\s*(\d{3})\b/u.exec(t);
+  return m ? Number(m[1]) : undefined;
+}
 
 /**
  * 🔴 C3 (аудит прод-логов 27.09): 403 `forbidden` «Request not allowed» приходил на КАЖДОМ входе в Windows —
@@ -22,8 +35,10 @@ const KEY_MARKERS = /x-api-key|api.?key|authenticat|unauthorized|permission/i;
  * Правило узкое: нужен маркер forbidden/«Request not allowed» и НИ ОДНОГО признака ключа.
  */
 export function isRegionBlock(t: string, status: number | undefined): boolean {
-  if (status !== undefined && status !== 403) return false;
-  return /\bforbidden\b|request not allowed/i.test(t) && !KEY_MARKERS.test(t);
+  const code = status ?? statusFromText(t);
+  if (code !== undefined && code !== 403) return false;
+  const bare = t.replace(CLI_AUTH_WRAPPER, "");
+  return /\bforbidden\b|request not allowed/i.test(bare) && !KEY_MARKERS.test(bare);
 }
 
 /** Классификация текста ошибки API (чистая функция — зеркало classifySubscriptionError). */

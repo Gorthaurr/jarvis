@@ -41,4 +41,13 @@ describe("classifyApiError — 403 гео-блока не выдаётся за 
   it("кончившийся баланс по-прежнему credits", () => {
     expect(classifyApiError(CREDITS, 400).kind).toBe("credits");
   });
+
+  // Адверс-ревью р1 (C3): CLI без терминала оборачивает ЛЮБОЙ 401/403 в «Failed to authenticate. API Error: …» —
+  // слово authenticate в обёртке не признак ключа. Зеркало правила подписки: та же строка → region.
+  it("обёртка CLI «Failed to authenticate. API Error: 403 …» → region; двоеточие и OAuth остаются auth", () => {
+    expect(classifyApiError("Failed to authenticate. API Error: 403 Request not allowed", 403).kind).toBe("region");
+    expect(classifyApiError(`Failed to authenticate. API Error: ${REGION_403}`, 403).kind).toBe("region");
+    expect(classifyApiError("Failed to authenticate: forbidden", 403).kind).toBe("auth");
+    expect(classifyApiError("Failed to authenticate. API Error: 403 Forbidden: OAuth token revoked", 403).kind).toBe("auth");
+  });
 });

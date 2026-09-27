@@ -5,14 +5,16 @@
  *  - сбой → порция не теряется, а откладывается (потолок maxPending; сверх него старые выкидываем и СЧИТАЕМ);
  *  - первый сбой — одно предупреждение с кодом ошибки; дальше напоминание не чаще warnEveryMs, со счётчиками;
  *  - fallbackAfter сбоев подряд → пишем в запасной файл (`<день>.<pid>.log`), предупредив о переходе один раз;
- *  - каждый флаш сначала пробует основной: ожил → отложенное ложится туда по порядку + сводка инцидента.
+ *  - каждый флаш сначала пробует основной: ожил → отложенное ложится туда по порядку + сводка инцидента;
+ *  - финальная запись (`{ final }`: dispose/фатальный выход, р1) — следующего флаша не будет, поэтому сбой основного
+ *    сразу ведёт в запасной, без ожидания N подряд; коды ошибок держим до сводки (старые строки с ними вытесняются).
  * Отложенное живёт ЗДЕСЬ, а не в буфере sink: иначе его страж «≥ 2000 строк → флаш» дёргал бы сбойную запись на
  * каждую новую строку. Предупреждения идут в логгер (консоль + этот же sink): буфер sink к этому моменту пуст —
  * вложенного флаша нет, а сама строка ляжет в файл следующим флашем.
  * ОДИН модуль для клиента и сервера (DRY): subpath `@jarvis/shared/durable-append`, НЕ из index — браузерные бандлы
- * (renderer, расширение) shared тоже тянут, а здесь node:fs.
+ * (renderer, расширение) shared тоже тянут, а здесь (через `durable-append-fs.ts`) node:fs.
  */
-import { appendFileSync } from "node:fs";
+import { tryAppend } from "./durable-append-fs.js";
 import type { Logger } from "./index.js";
 
 export interface DurableAppendOpts {
@@ -25,16 +27,6 @@ export interface DurableAppendOpts {
   now?: () => number;
 }
 
-/** Ошибка записи или null, если строки легли. */
-function tryAppend(file: string, data: string): NodeJS.ErrnoException | null {
-  try {
-    appendFileSync(file, data);
-    return null;
-  } catch (e) {
-    return e instanceof Error ? (e as NodeJS.ErrnoException) : new Error(String(e));
-  }
-}
-
 export class DurableAppender {
   private pending: string[] = [];
   private failures = 0; // сбоев основного подряд
@@ -42,6 +34,8 @@ export class DurableAppender {
   private viaFallback = 0; // строк ушло в запасной за инцидент
   private fallbackFile: string | null = null;
   private fallbackBroken = false;
+  private lastCode = ""; // код последней ошибки основного / запасного — до сводки восстановления
+  private fallbackCode = "";
   private lastWarnAt = Number.NEGATIVE_INFINITY;
   private readonly fallbackAfter: number;
   private readonly maxPending: number;
@@ -63,8 +57,8 @@ export class DurableAppender {
     return this.pending.length === 0;
   }
 
-  /** Дописать отложенное + lines в основной файл; при сбое — отложить или (после N подряд) в запасной. */
-  write(primary: string, fallback: string, lines: string[]): void {
+  /** Дописать отложенное + lines в основной файл; при сбое — отложить или (после N подряд либо final) в запасной. */
+  write(primary: string, fallback: string, lines: string[], opts: { final?: boolean } = {}): void {
     const batch = this.pending.length > 0 ? this.pending.concat(lines) : lines;
     if (batch.length === 0) return;
     const data = `${batch.join("\n")}\n`;
@@ -75,9 +69,9 @@ export class DurableAppender {
       return;
     }
     this.failures++;
-    const code = err.code ?? "unknown";
-    if (this.failures === 1) this.warn("durable-лог: запись в файл не удалась — строки держу в памяти", { code, file: primary, error: err.message });
-    if (this.failures >= this.fallbackAfter && this.toFallback(fallback, data, batch.length, code)) return;
+    const code = (this.lastCode = err.code ?? "unknown");
+    if (this.failures === 1) this.warn(`durable-лог: запись в файл не удалась — ${opts.final ? "финальная, иду в запасной" : "строки держу в памяти"}`, { code, file: primary, error: err.message });
+    if ((opts.final || this.failures >= this.fallbackAfter) && this.toFallback(fallback, data, batch.length, code)) return;
     this.keep(batch);
     this.remind(code);
   }
@@ -86,7 +80,8 @@ export class DurableAppender {
   private toFallback(fallback: string, data: string, count: number, code: string): boolean {
     const err = tryAppend(fallback, data);
     if (err) {
-      if (!this.fallbackBroken) this.warn("durable-лог: запасной файл тоже не пишется", { code: err.code ?? "unknown", file: fallback, primaryCode: code });
+      this.fallbackCode = err.code ?? "unknown";
+      if (!this.fallbackBroken) this.warn("durable-лог: запасной файл тоже не пишется", { code: this.fallbackCode, file: fallback, primaryCode: code });
       this.fallbackBroken = true;
       return false;
     }
@@ -116,6 +111,7 @@ export class DurableAppender {
       lost: this.lost,
       viaFallback: this.viaFallback,
       ...(this.fallbackFile ? { fallback: this.fallbackFile } : {}),
+      ...(this.fallbackCode ? { fallbackCode: this.fallbackCode } : {}),
     });
   }
 
@@ -123,6 +119,8 @@ export class DurableAppender {
   private recovered(primary: string): void {
     this.log.info("durable-лог: основной файл снова пишется", {
       file: primary,
+      code: this.lastCode,
+      ...(this.fallbackCode ? { fallbackCode: this.fallbackCode } : {}),
       failures: this.failures,
       lost: this.lost,
       viaFallback: this.viaFallback,
@@ -133,6 +131,7 @@ export class DurableAppender {
     this.viaFallback = 0;
     this.fallbackFile = null;
     this.fallbackBroken = false;
+    this.lastCode = this.fallbackCode = "";
     this.lastWarnAt = Number.NEGATIVE_INFINITY;
   }
 

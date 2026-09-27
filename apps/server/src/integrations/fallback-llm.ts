@@ -35,6 +35,7 @@
 import { type Logger, createLogger } from "@jarvis/shared";
 import { type ApiFailureKind, lastApiFailure, llmFailureLine } from "./anthropic.js";
 import type { ILlmProvider, LlmChannelStatus, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
+import { transientCooldownMs } from "./primary-cooldown.js";
 import { lastSubscriptionFailure } from "./subscription-llm.js";
 
 const log: Logger = createLogger("llm:fallback");
@@ -70,17 +71,10 @@ function primaryEnabledByEnv(): boolean {
  * Сколько подряд отказов основного канала считаем «он мёртв надолго» и на сколько перестаём его
  * дёргать. Мотив — СКОРОСТЬ: каждый ход тратил секунды на обречённый HTTP-запрос с ретраем ПЕРЕД
  * тем, как уйти в резерв. Предохранитель полуоткрытый: по истечении паузы основной пробуется снова.
- * Это путь для ТРАНЗИЕНТНЫХ сбоев; терминальные (баланс/ключ) идут своим путём — см. шапку.
+ * Это путь для ТРАНЗИЕНТНЫХ сбоев; терминальные (баланс/ключ) идут своим путём — см. шапку. Длина паузы
+ * (общая 5 мин, гео-блок — 30) — primary-cooldown.ts.
  */
 const TRIP_AFTER_FAILURES = 2;
-function breakerCooldownMs(): number {
-  // Пустая строка → дефолт (та же грабля, что у terminalRecheckMs: Number("") === 0 обнулял бы
-  // паузу и возвращал обречённые вызовы каждым ходом).
-  const raw = (process.env.JARVIS_PRIMARY_COOLDOWN_MS ?? "").trim();
-  if (!raw) return 300_000;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 300_000;
-}
 
 /** Не лечатся повтором (пополнить баланс / поправить ключ). `region` (403 без VPN, C3) — транзиентный, не здесь. */
 const TERMINAL_KINDS: ReadonlySet<ApiFailureKind> = new Set<ApiFailureKind>(["credits", "auth"]);
@@ -188,11 +182,14 @@ export class FallbackLlmProvider implements ILlmProvider {
       return;
     }
     this.consecutiveFailures += 1;
-    if (this.consecutiveFailures >= TRIP_AFTER_FAILURES && this.secondary.live && breakerCooldownMs() > 0) {
-      this.skipPrimaryUntil = this.now() + breakerCooldownMs();
+    const kind = failure && failure.at >= wallStart ? failure.kind : undefined; // только причина ЭТОГО вызова
+    const cooldownMs = transientCooldownMs(kind); // гео-блок (без VPN) — дольше общей паузы
+    if (this.consecutiveFailures >= TRIP_AFTER_FAILURES && this.secondary.live && cooldownMs > 0) {
+      this.skipPrimaryUntil = this.now() + cooldownMs;
       log.warn("основной канал отказал подряд — временно иду сразу в резерв (экономлю секунды на ход)", {
         failures: this.consecutiveFailures,
-        cooldownMs: breakerCooldownMs(),
+        cooldownMs,
+        причина: kind ?? "неизвестна",
       });
     }
   }

@@ -434,6 +434,30 @@ describe("classifySubscriptionError — разные причины лечатс
     expect(classifySubscriptionError(text).kind).toBe(kind);
   });
 
+  // Адверс-ревью р1 (C3): РЕАЛЬНАЯ строка CLI (headless, claude.exe 0.3.251) на 403 без VPN — с обёрткой
+  // «Failed to authenticate.» (с ТОЧКОЙ). До фикса /authenticate/ ловил её раньше региона → «claude setup-token».
+  it.each([
+    "Failed to authenticate. API Error: 403 Request not allowed",
+    'Failed to authenticate. API Error: 403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}',
+    "Claude Code returned an error result: Failed to authenticate. API Error: 403 Request not allowed",
+  ])("гео-403 в обёртке CLI «%s» → совет про VPN, не авторизация", (text) => {
+    const f = classifySubscriptionError(text);
+    expect(f.kind).not.toBe("auth");
+    expect(f.human).toMatch(/VPN/u);
+    expect(f.human).not.toMatch(/setup-token/u);
+  });
+
+  it.each([
+    "Failed to authenticate: OAuth session expired and could not be refreshed",
+    "Failed to authenticate. API Error: 401 OAuth token has expired",
+    "Failed to authenticate. API Error: 403 permission_error OAuth token does not meet scope requirement",
+    "Failed to authenticate. API Error: 403 OAuth access token has been revoked.",
+    "Failed to authenticate. API Error: 403 Forbidden: OAuth token revoked",
+    "Failed to authenticate. API Error: 401 Forbidden", // 401 в обёртке — не гео, даже со словом forbidden
+  ])("настоящая авторизация «%s» остаётся auth (гео-правило не шире нужного)", (text) => {
+    expect(classifySubscriptionError(text).kind).toBe("auth");
+  });
+
   it("неизвестная ошибка не выдаётся за понятную — текст сохраняется", () => {
     expect(classifySubscriptionError("ECONNRESET на хосте api").human).toMatch(/ECONNRESET/);
   });
