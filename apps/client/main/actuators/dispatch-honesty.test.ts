@@ -80,6 +80,14 @@ vi.mock("./screen.js", () => ({
   getLastCaptureMapping: () => null,
   probeScreen: async () => ({ hash: "0" }),
 }));
+// W2 П5: OCR снимает натив через screen-grab (не captureScreen) — тот же управляемый захват st.capture (зависание — тоже).
+vi.mock("./screen-grab.js", () => ({
+  grabImage: async () => {
+    await st.capture();
+    const img = { toPNG: () => Buffer.from("png"), getSize: () => ({ width: 100, height: 100 }), resize: () => img, crop: () => img };
+    return { img, w: 100, h: 100, display: { id: 1, bounds: { x: 0, y: 0, width: 100, height: 100 } }, origin: { x: 0, y: 0 }, sx: 1, sy: 1, nativeSx: 1 };
+  },
+}));
 // §3.9 зрение на файл: лист мокается — проверяем ПРОВОДКУ dispatch (успех отдаёт данные как есть, провал → ошибка).
 vi.mock("./file-view.js", () => ({ viewFile: (p: string, o: unknown) => st.view(p, o) }));
 vi.mock("./selection.js", () => ({

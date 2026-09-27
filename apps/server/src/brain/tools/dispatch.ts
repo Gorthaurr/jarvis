@@ -405,7 +405,9 @@ export async function dispatchTool(
   const canon = canonicalToolCall(rawName, rawInput);
   const name = canon.name;
   if (isActSteps(name, canon.input)) return actSteps(ctx, canon.input, dispatchTool);
-  const input = withTaskFrame(name, canon.input, ctx);
+  const framed = withTaskFrame(name, canon.input, ctx); // W2 П5: координаты без кадра задачи — отказ ДО гейтов
+  if (framed.denied) return framed.denied;
+  const input = framed.input;
   const cred = credentialGate(name, input, ctx);
   if (cred.block) return err(cred.block);
   const out = await dispatchToolCore(name, input, ctx);

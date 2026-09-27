@@ -116,7 +116,7 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
             button: p.button === "right" || p.button === "middle" ? p.button : undefined,
             dy: typeof p.dy === "number" ? p.dy : undefined,
             dx: typeof p.dx === "number" ? p.dx : undefined,
-            space: p.space === "screen" ? "screen" : undefined,
+            space: p.space === "screen" ? "screen" : undefined, frame: typeof p.frame === "string" ? p.frame : undefined, // W2 П5: кадр — сервер
           });
           return;
         }

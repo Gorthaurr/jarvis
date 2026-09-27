@@ -250,6 +250,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
       {
         pid: { type: "integer", description: "PID процесса окна (из look{what:'windows'}). Без него — активное окно." },
         maxItems: { type: "integer", minimum: 1, maximum: 200, description: "Кап элементов (деф 60)." },
+        frame: { type: "string", description: "Кадр, в системе которого отдать bbox (деф — кадр задачи; нет кадра — без bbox)." },
       },
       [],
     ),
@@ -754,6 +755,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         rect: SCREEN_RECT_SCHEMA,
         monitor: { type: "string", description: "'active' (дефолт) | 'primary' | 'jarvis' | индекс строкой." },
         lang: { type: "string", description: "Язык OCR BCP-47 ('ru'/'en'). Без него — язык профиля Windows." },
+        frame: { type: "string", description: "Кадр, в системе которого отдать строки (деф — кадр задачи)." },
       },
       [],
     ),

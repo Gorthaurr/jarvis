@@ -146,7 +146,7 @@ function desktopSession(): Session {
   );
   return { sessionId: "s1", userId: "u1", sendAction, send: vi.fn(), requestConfirm: vi.fn() } as unknown as Session;
 }
-const click = (id: string, x: number): MockTurn => call(id, "input_click", { target: { by: "coords", x, y: 300 }, method: "physical" });
+const click = (id: string, x: number): MockTurn => call(id, "input_click", { target: { by: "coords", x, y: 300, frame: "k1af1" }, method: "physical" });
 
 describe("р2 loop-regress-2: скрин после РАЗНЫХ рук в UIA-слепом окне — не «тот же вид»", () => {
   it("13 разных кликов по меню Доты, скрин после каждого → без нуджа «топтание», до финала", async () => {

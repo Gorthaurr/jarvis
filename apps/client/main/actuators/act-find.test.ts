@@ -23,6 +23,7 @@ vi.mock("./apps.js", async () => (await import("../test-support/act-mocks.js")).
 import { btn, resetActState } from "../test-support/act-mocks.js";
 import { act } from "./act.js";
 import { ActFindError, findTarget, scoreItem } from "./act-find.js";
+import { registerFrame } from "./frames.js";
 
 const OPTS = { restoreCursor: true };
 beforeEach(() => resetActState(st));
@@ -106,14 +107,24 @@ describe("act — ступень OCR и точка", () => {
     expect(st.click).not.toHaveBeenCalled();
   });
 
-  it("цель-точка x/y: элемент под точкой → invoke по его handle; снапшот не читается", async () => {
-    await act({ kind: "gui.act", target: { x: 10, y: 20 } }, OPTS);
+  it("цель-точка x/y в кадре: ground.at в DIP кадра → invoke по handle; снапшот не читается; note — что под точкой", async () => {
+    // Кадр 960×540 от монитора 1920×1080 в (1920,0): 0,5 px на DIP → точка (10,20) кадра = DIP (1940, 40).
+    const f = registerFrame({ kind: "f", displayId: 2, boundsDIP: { x: 1920, y: 0, width: 1920, height: 1080 }, origin: { x: 1920, y: 0 }, sx: 0.5, sy: 0.5, w: 960, h: 540 });
+    let at: { x: number; y: number } | null = null;
+    st.groundAt = async (x, y) => {
+      at = { x, y };
+      return { handle: "77", bbox: { x: 0, y: 0, w: 80, h: 30 }, name: "Играть", role: "ControlType.Button" };
+    };
+    const r = await act({ kind: "gui.act", target: { x: 10, y: 20, frame: f.id } }, OPTS);
+    expect(at).toEqual({ x: 1940, y: 40 });
     expect(st.snapshotCalls).toBe(0);
     expect(st.invoke).toHaveBeenCalledWith({ by: "handle", handle: "77" }, "invoke", undefined);
+    expect(r.found?.note).toBe("под точкой Button «Играть»");
   });
 
-  it("W2: точка в неизвестном кадре → честная ошибка до поиска и действия", async () => {
-    await expect(act({ kind: "gui.act", target: { x: 10, y: 20, frame: "k1f9" } }, OPTS)).rejects.toThrow(/кадр «k1f9» неизвестен/u);
+  it("W2: точка без кадра (и без space) / в кадре прошлой загрузки → честная ошибка до поиска и действия", async () => {
+    await expect(act({ kind: "gui.act", target: { x: 10, y: 20 } }, OPTS)).rejects.toThrow(/координаты без кадра/u);
+    await expect(act({ kind: "gui.act", target: { x: 10, y: 20, frame: "k1f9" } }, OPTS)).rejects.toThrow(/кадр «k1f9».*устарел, пересними/su);
     expect(st.invoke).not.toHaveBeenCalled();
     expect(st.click).not.toHaveBeenCalled();
   });
