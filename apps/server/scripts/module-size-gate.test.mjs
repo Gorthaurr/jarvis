@@ -2,8 +2,45 @@
  * W2 (пакет 0, P0-f): правила гейта размеров модулей (закон CLAUDE.md «модули < 150 строк, раздутые не растут»).
  * Реверт-проверка: ослабь любое правило judge() — строка таблицы упадёт.
  */
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmdirSync, symlinkSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ALLOW_GROWTH, LIMIT, isGatedModule, judge } from "./module-size-gate.mjs";
+
+const GATE = fileURLToPath(new URL("./module-size-gate.mjs", import.meta.url));
+
+/** Запуск без BASE: живой гейт обязан ответить usage и кодом 2 (молчащий гард — 0 и пустота). */
+function expectUsageExit(script) {
+  const r = spawnSync(process.execPath, [script], { cwd: dirname(GATE), encoding: "utf8", windowsHide: true, timeout: 20_000 });
+  expect(r.error).toBeUndefined();
+  expect(r.stderr).toMatch(/usage: module-size-gate\.mjs <BASE>/u);
+  expect(r.stdout).toBe("");
+  expect(r.status).toBe(2);
+}
+
+describe("запуск как скрипт", () => {
+  // 27.09: гард «я — точка входа» сравнивал `file://${argv[1]}` с import.meta.url; на Windows argv[1] —
+  // `C:\…`, а url — `file:///C:/…` → main() не звался, гейт молча отдавал 0 на любом BASE.
+  it("гейт реально запускается как скрипт (Windows: argv[1] vs import.meta.url) — без BASE → usage и код 2", () => {
+    expectUsageExit(GATE);
+  });
+
+  // import.meta.url точки входа Node строит из realpath, argv[1] — нет: через ссылку на папку гард без realpath молчит.
+  it("через junction/симлинк на папку скриптов — тоже usage и код 2", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "gate-link-"));
+    const link = join(tmp, "scripts");
+    symlinkSync(dirname(GATE), link, "junction");
+    try {
+      expectUsageExit(join(link, basename(GATE)));
+    } finally {
+      unlinkSync(link); // снимает только ссылку (не идёт внутрь), без рекурсии
+      rmdirSync(tmp);
+    }
+  });
+});
 
 const none = new Set();
 
