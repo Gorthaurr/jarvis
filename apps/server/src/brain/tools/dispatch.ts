@@ -22,6 +22,7 @@ import type { ToolResultContent } from "../../integrations/llm.js";
 import { ACTUATOR_TOOL_BY_KIND, COLD_TOOL_NAMES, TOOLS_BY_NAME } from "@jarvis/tools";
 import type { EpisodicMemory } from "../../memory/episodic.js";
 import { forgetUserMemory, writeUserMemory } from "../../memory/user-memory.js";
+import { UNADDRESSED_MEMORY } from "../agent/unaddressed.js";
 import { knowledgeConsult, memorySearch, webFetch, webSearch } from "./handlers/info.js";
 import type { IWebProvider } from "../../integrations/web.js";
 import type { ContradictionDeps } from "../../memory/contradiction-hook.js";
@@ -123,6 +124,7 @@ export interface ToolContext {
   origin?: "user" | "proactive";
   /** Ход — машинный реэнтри (watch-action), не реплика владельца: интерактивные просьбы к нему запрещены. */
   machineTurn?: boolean;
+  unaddressedTurn?: boolean; // A1: реплика без «Джарвис» (viaWake=false) — долговременную память не пишем/не забываем
   /**
    * Подтверждение необратимого (§14). kind задаёт вид модалки: send|order|irreversible.
    *
@@ -945,6 +947,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   const text = String(input.content ?? input.text ?? "").trim();
   if (!text) return err("memory_write: пустой content");
   if (ctx.devSession) return ok("Dev-сессия: в долговременную память владельца не записываю (запись пропущена).");
+  if (ctx.unaddressedTurn) return err(UNADDRESSED_MEMORY);
   // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
   const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, {
@@ -957,6 +960,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
 
 async function memoryForget(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   if (ctx.devSession) return ok("Dev-сессия: память владельца не трогаю (забывание пропущено).");
+  if (ctx.unaddressedTurn) return err(UNADDRESSED_MEMORY);
   // Аудит контекста 2026-07-20: честное забывание. Схема объявляет `query`; принимаем content/text
   // для совместимости. Помечает stale близкие эпизоды (обратимо) + чистит совпадающий факт профиля.
   const q = String(input.query ?? input.content ?? input.text ?? "").trim();
