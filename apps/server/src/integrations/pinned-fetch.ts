@@ -12,7 +12,7 @@ import https from "node:https";
 import type { LookupFunction } from "node:net";
 import { type Duplex, Readable, pipeline } from "node:stream";
 import zlib from "node:zlib";
-import { type HostLookup, checkHostPublic } from "@jarvis/shared";
+import { type HostLookup, type LocalInterfaces, checkHostPublic } from "@jarvis/shared";
 
 /** Один HTTP-запрос БЕЗ следования редиректам (цепочку ходит web.fetch сам, с гардом на каждом hop). */
 export type WebTransport = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
@@ -20,8 +20,11 @@ export type WebTransport = (url: string, init: { headers: Record<string, string>
 /** code ошибки сокета, когда имя указывает во внутреннюю сеть. */
 export const PRIVATE_ADDRESS = "EJARVIS_PRIVATE_ADDRESS";
 
-/** `lookup` для net/tls: суд над ответом DNS и выдача ТОЛЬКО проверенных адресов (их сокет и откроет). */
-export function pinnedLookup(lookup?: HostLookup): LookupFunction {
+/**
+ * `lookup` для net/tls: суд над ответом DNS и выдача ТОЛЬКО проверенных адресов (их сокет и откроет). IP-литерал
+ * Node в lookup НЕ передаёт — его судит `isFetchUrlAllowed` (web.ts) тем же общим правилом. `interfaces` — DI стенда.
+ */
+export function pinnedLookup(lookup?: HostLookup, interfaces?: LocalInterfaces): LookupFunction {
   return (hostname, options, cb) => {
     let done = false; // ровно один ответ сокету, даже если колбэк бросит
     const callback = ((...args: Parameters<typeof cb>) => {
@@ -29,7 +32,7 @@ export function pinnedLookup(lookup?: HostLookup): LookupFunction {
       done = true;
       cb(...args);
     }) as typeof cb;
-    void checkHostPublic(hostname, { lookup }).then((v) => {
+    void checkHostPublic(hostname, { lookup, interfaces }).then((v) => {
       if (!v.ok) {
         const private_ = v.reason === "private";
         const msg = private_ ? `имя «${hostname}» указывает во внутреннюю сеть (${v.address}) — не подключаюсь` : `DNS: «${hostname}» не разрешилось (${v.detail})`;
@@ -97,9 +100,9 @@ export function toResponse(res: http.IncomingMessage): Response {
   return new Response(Readable.toWeb(body) as unknown as ReadableStream<Uint8Array>, { status, statusText: res.statusMessage ?? "", headers });
 }
 
-/** Транспорт web.fetch по умолчанию: GET с пиннингом проверенного адреса. `lookup` — DI стенда (нет → системный DNS). */
-export function pinnedTransport(lookup?: HostLookup): WebTransport {
-  const pinned = pinnedLookup(lookup);
+/** Транспорт web.fetch по умолчанию: GET с пиннингом проверенного адреса. `lookup`/`interfaces` — DI стенда (нет → система). */
+export function pinnedTransport(lookup?: HostLookup, interfaces?: LocalInterfaces): WebTransport {
+  const pinned = pinnedLookup(lookup, interfaces);
   return (url, init) =>
     new Promise<Response>((resolve, reject) => {
       const u = new URL(url);

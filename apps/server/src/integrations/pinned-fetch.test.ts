@@ -3,12 +3,14 @@
  * отдаёт как 127.0.0.1, обязано НЕ дойти до него ни одним запросом. Факт — по журналу сервера, не по ответу.
  *
  * Реверт-проверки (из копии): pinnedLookup отдаёт адреса без суда → «роутер» получает запрос → красный;
- * WebProvider по умолчанию снова на глобальном fetch → живой localtest.me доходит до «роутера» → красный.
+ * WebProvider по умолчанию снова на глобальном fetch → живой localtest.me доходит до «роутера» → красный; общее правило
+ * без своих сетей ПК (`local-nets.ts`) или pinnedLookup без `interfaces` → «свой интерфейс» красный (живой — на ПК с Radmin).
  */
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createServer, get, type Server } from "node:http";
+import { networkInterfaces } from "node:os";
 import { brotliCompressSync, gzipSync } from "node:zlib";
-import type { HostLookup } from "@jarvis/shared";
+import { type HostLookup, isPrivateIp } from "@jarvis/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PRIVATE_ADDRESS, pinnedLookup, pinnedTransport, toResponse } from "./pinned-fetch.js";
 import { WebProvider } from "./web.js";
@@ -90,6 +92,16 @@ describe("B-14 (DNS): транспорт web.fetch пиннит проверен
     expect(hits).toEqual([]);
   });
 
+  it("имя → адрес соседа по сети своего интерфейса (Radmin VPN) → PRIVATE_ADDRESS, подключения нет", async () => {
+    hits.length = 0;
+    // В роли 26.106.17.249/8 — TEST-NET-2: его нет у настоящих интерфейсов, суд обязан взять список из `interfaces`.
+    const interfaces = () => ({ "Radmin VPN": [{ address: "198.51.100.7", cidr: "198.51.100.7/24" }] });
+    const lookup = table({ "radmin.example": ["198.51.100.200"] });
+    await expect(pinnedTransport(lookup, interfaces)(`http://radmin.example:${port}/`, { headers: {}, signal: signal() })).rejects.toMatchObject({ code: PRIVATE_ADDRESS });
+    expect(lookup.calls).toBe(1);
+    expect(hits).toEqual([]);
+  });
+
   it("WebProvider.fetch поверх транспорта: имя, указывающее внутрь → честный null, запросов нет", async () => {
     hits.length = 0;
     const web = new WebProvider(undefined, pinnedTransport(table({ "pinned.example": ["127.0.0.1"] })));
@@ -151,5 +163,32 @@ describe.skipIf(!liveLoopbackName)("B-14 (DNS) живьём: web.fetch по ум
     hits.length = 0;
     expect(await new WebProvider(undefined).fetch(`http://localtest.me:${port}/secret`)).toBeNull();
     expect(hits).toEqual([]);
+  });
+});
+
+// Живой факт адверс-ревью 27.09: «роутер» на 0.0.0.0 (как PostgreSQL 5432), НАСТОЯЩИЙ адрес интерфейса этого ПК вне
+// RFC1918 (на ПК владельца — Radmin VPN 26.106.17.249), системный список интерфейсов. Имя → такой адрес идёт через
+// lookup сокета; литерал Node в lookup НЕ передаёт — его судит isFetchUrlAllowed. Нет такого адреса — пропуск.
+const ownOutsideRanges = Object.values(networkInterfaces())
+  .flatMap((l) => l ?? [])
+  .filter((a) => a.family === "IPv4" && !isPrivateIp(a.address, () => ({})))
+  .map((a) => a.address);
+
+describe.skipIf(!ownOutsideRanges.length)("B-14 живьём: свой адрес ПК вне RFC1918, «роутер» на 0.0.0.0", () => {
+  it("имя → свой адрес и литерал своего адреса в url → null, «роутер» запросов не получил", async () => {
+    const got: string[] = [];
+    const router = createServer((req, res) => void (got.push(req.url ?? "/"), res.end("ROUTER-SECRET")));
+    await new Promise<void>((r) => router.listen(0, "0.0.0.0", () => r()));
+    const a = router.address();
+    const p = typeof a === "object" && a ? a.port : 0;
+    const own = ownOutsideRanges[0]!;
+    try {
+      const web = new WebProvider(undefined, pinnedTransport(table({ "radmin-live.example": [own] })));
+      expect(await web.fetch(`http://radmin-live.example:${p}/secret`)).toBeNull();
+      expect(await new WebProvider(undefined).fetch(`http://${own}:${p}/secret`)).toBeNull();
+      expect(got).toEqual([]);
+    } finally {
+      await new Promise((r) => router.close(() => r(undefined)));
+    }
   });
 });

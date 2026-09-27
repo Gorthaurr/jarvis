@@ -44,6 +44,19 @@ describe("B-14 (DNS): суд над хостом по ответу резолв�
     expect(await checkHostPublic("router.local", { lookup })).toMatchObject({ ok: false, reason: "private" });
     expect(lookup.calls).toEqual([]);
   });
+
+  it("имя → адрес своего интерфейса (Radmin VPN) или соседа по его сети → private; литерал такого адреса — без резолва", async () => {
+    // В роли 26.106.17.249/8 — TEST-NET-2: его нет у настоящих интерфейсов, суд обязан взять список из `interfaces`.
+    const interfaces = () => ({ "Radmin VPN": [{ address: "198.51.100.7", cidr: "198.51.100.7/24" }] });
+    const lookup = table({ "radmin.example": ["198.51.100.7"], "peer.example": ["203.0.113.10", "198.51.100.200"], "pub.example": ["8.8.8.8"] });
+    expect(await checkHostPublic("radmin.example", { lookup, interfaces })).toEqual({ ok: false, reason: "private", address: "198.51.100.7" });
+    expect(await checkHostPublic("peer.example", { lookup, interfaces })).toEqual({ ok: false, reason: "private", address: "198.51.100.200" });
+    expect(await checkHostPublic("pub.example", { lookup, interfaces })).toEqual({ ok: true, addresses: ["8.8.8.8"] });
+    expect(await checkHostPublic("198.51.100.9", { lookup, interfaces })).toEqual({ ok: false, reason: "private", address: "198.51.100.9" });
+    expect(await checkHostPublic("[::ffff:198.51.100.9]", { lookup, interfaces })).toMatchObject({ ok: false, reason: "private" });
+    expect(await checkHostPublic("198.51.100.9", { lookup })).toEqual({ ok: true, addresses: ["198.51.100.9"] }); // без VPN — публичный
+    expect(lookup.calls).toEqual(["radmin.example", "peer.example", "pub.example"]);
+  });
 });
 
 describe("limitLookup: частые резолвы перехвата навигации не занимают весь пул getaddrinfo", () => {

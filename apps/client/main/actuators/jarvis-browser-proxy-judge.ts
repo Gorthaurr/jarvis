@@ -12,14 +12,14 @@
  *  - одно имя в полёте — один резолв; публичный вердикт помнится `cacheMs` — пиннинг цел: подключение идёт к адресам
  *    ВЕРДИКТА, так что DNS, сменивший ответ на 127.0.0.1, до истечения кеша просто не спрашивается.
  */
-import { type HostLookup, type HostVerdict, Semaphore, checkHostPublic, systemLookup } from "@jarvis/shared";
+import { type HostLookup, type HostVerdict, type LocalInterfaces, Semaphore, checkHostPublic, systemLookup } from "@jarvis/shared";
 
 /** Одноярусное имя (без точки и не IPv6) — интранет: LLMNR/NetBIOS/суффикс поиска ведут в LAN, резолв не нужен. */
 export const isIntranetName = (host: string): boolean => Boolean(host) && !host.includes(".") && !host.includes(":");
 
 /** Суд над хостом для невидимого браузера: интранет-имя — отказ без резолва, иначе `checkHostPublic`. */
-export function checkBrowserHost(host: string, lookup?: HostLookup, timeoutMs?: number): Promise<HostVerdict> {
-  return isIntranetName(host) ? Promise.resolve({ ok: false, reason: "private", address: host }) : checkHostPublic(host, { lookup, timeoutMs });
+export function checkBrowserHost(host: string, lookup?: HostLookup, timeoutMs?: number, interfaces?: LocalInterfaces): Promise<HostVerdict> {
+  return isIntranetName(host) ? Promise.resolve({ ok: false, reason: "private", address: host }) : checkHostPublic(host, { lookup, timeoutMs, interfaces });
 }
 
 export interface HostJudgeOpts {
@@ -29,6 +29,8 @@ export interface HostJudgeOpts {
   cacheMs?: number;
   /** Таймаут вердикта (по умолчанию — `checkHostPublic`, 3 с). */
   timeoutMs?: number;
+  /** Свои интерфейсы ПК (DI стенда); нет → системный список (`local-nets.ts`). */
+  interfaces?: LocalInterfaces;
 }
 
 const SLOTS = 1;
@@ -70,7 +72,7 @@ export class HostJudge {
     };
     try {
       if (!alive.some((a) => a())) return { ok: false, reason: "unresolved", detail: "запрос снят: клиент ушёл до резолва" };
-      const verdict = await checkBrowserHost(host, lookup, this.opts.timeoutMs);
+      const verdict = await checkBrowserHost(host, lookup, this.opts.timeoutMs, this.opts.interfaces);
       if (verdict.ok) this.remember(host, verdict);
       return verdict;
     } finally {

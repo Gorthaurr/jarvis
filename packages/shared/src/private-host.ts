@@ -5,10 +5,14 @@
  *
  * Приватно: loopback (127/8, ::1), «этот хост» (0/8, ::), RFC1918 (10/8, 172.16/12, 192.168/16), link-local
  * (169.254/16 — вкл. облачные метаданные, fe80::/10), CGNAT (100.64/10), IPv6 ULA (fc00::/7), IPv4-mapped/
- * -compatible IPv6 с приватным IPv4, имена `localhost`, `*.localhost`, `*.local` (mDNS), `*.internal`.
+ * -compatible IPv6 с приватным IPv4, имена `localhost`, `*.localhost`, `*.local` (mDNS), `*.internal`, и адреса
+ * САМОГО ПК с их on-link сетями (Radmin VPN 26/8, PPPoE, глобальный IPv6 — `local-nets.ts`; `interfaces` — DI стенда).
  * Здесь суд по ИМЕНИ из URL (синхронно, без сети). Публичное имя, указывающее на приватный IP (`localtest.me`,
  * `127.0.0.1.nip.io`), ловит второй слой — суд по ОТВЕТУ DNS (`host-resolve.ts` checkHostPublic + `isPrivateIp`).
  */
+
+import { type LocalInterfaces, isLocalNetAddress } from "./local-nets.js";
+export type { LocalInterfaces }; // DI стенда для потребителей правила (прокси, pinned-fetch)
 
 /** Схемы, у которых WHATWG находит хост и БЕЗ «//»: `http:evil.example`, `http:\evil.example`, `https:/x` → хост x. */
 const SPECIAL_SCHEME = /^(?:https?|wss?|ftp):/iu;
@@ -40,10 +44,10 @@ function privateIpv4(a: number, b: number): boolean {
 }
 
 /** IPv4 в точечной записи (WHATWG URL уже нормализовал десятичные/hex/octal формы) → приватный? null — не IPv4. */
-function ipv4Private(host: string): boolean | null {
+function ipv4Private(host: string, interfaces?: LocalInterfaces): boolean | null {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(host);
   if (!m) return null;
-  return privateIpv4(Number(m[1]), Number(m[2]));
+  return privateIpv4(Number(m[1]), Number(m[2])) || isLocalNetAddress(host, interfaces);
 }
 
 /** IPv6 (без скобок, любая запись) → 8 чисел; хвост a.b.c.d разворачивается. null — не IPv6. */
@@ -67,12 +71,14 @@ function hextets(host: string): number[] | null {
 /**
  * IPv6 (без скобок): loopback/unspecified, ULA fc00::/7, link-local fe80::/10, site-local fec0::/10, мультикаст, и
  * ВСЕ формы со встроенным IPv4 — mapped/compatible, SIIT ::ffff:0:0/96, NAT64 64:ff9b::/96 (+ локальный /48), 6to4
- * 2002::/16 — по встроенному адресу; Teredo 2001::/32 — целиком (веб-сервер на нём не живёт). Непарсящийся — приватный.
+ * 2002::/16 — по встроенному адресу (ЦЕЛИКОМ: он же может быть адресом своего интерфейса); Teredo 2001::/32 — целиком
+ * (веб-сервер на нём не живёт); свой адрес/сеть интерфейса. Непарсящийся — приватный.
  */
-function ipv6Private(host: string): boolean {
+function ipv6Private(host: string, interfaces?: LocalInterfaces): boolean {
   const x = hextets(host);
   if (!x) return true;
-  const v4 = (i: number) => privateIpv4(x[i]! >> 8, x[i]! & 0xff); // первые два октета IPv4 в хекстете i
+  const quad = (i: number) => [x[i]! >> 8, x[i]! & 0xff, x[i + 1]! >> 8, x[i + 1]! & 0xff].join("."); // IPv4 в хекстетах i, i+1
+  const v4 = (i: number) => privateIpv4(x[i]! >> 8, x[i]! & 0xff) || isLocalNetAddress(quad(i), interfaces);
   const zeros = (n: number) => x.slice(0, n).every((v) => v === 0);
   if (zeros(7) && x[7]! <= 1) return true; // :: и ::1
   if ((x[0]! & 0xfe00) === 0xfc00 || (x[0]! & 0xffc0) === 0xfe80 || (x[0]! & 0xffc0) === 0xfec0 || x[0]! >= 0xff00) return true;
@@ -80,16 +86,17 @@ function ipv6Private(host: string): boolean {
   if (zeros(4) && x[4] === 0xffff && x[5] === 0) return v4(6); // SIIT
   if (x[0] === 0x64 && x[1] === 0xff9b) return x[2] === 1 || v4(6); // NAT64
   if (x[0] === 0x2002) return v4(1); // 6to4
-  return x[0] === 0x2001 && x[1] === 0; // Teredo
+  if (x[0] === 0x2001 && x[1] === 0) return true; // Teredo
+  return isLocalNetAddress(x.map((h) => h.toString(16)).join(":"), interfaces);
 }
 
 /** Приватный/локальный хост (SSRF-класс). Пустой/битый хост (about:blank, data:) — НЕ приватный: сети там нет. */
-export function isPrivateHost(urlOrHost: string): boolean {
+export function isPrivateHost(urlOrHost: string, interfaces?: LocalInterfaces): boolean {
   const host = urlHostname(urlOrHost);
   if (!host) return false;
   if (host === "localhost" || /\.(?:localhost|local|internal)$/u.test(host)) return true;
-  if (host.includes(":")) return ipv6Private(host);
-  return ipv4Private(host) === true;
+  if (host.includes(":")) return ipv6Private(host, interfaces);
+  return ipv4Private(host, interfaces) === true;
 }
 
 /**
@@ -97,18 +104,18 @@ export function isPrivateHost(urlOrHost: string): boolean {
  * его не разберёт (`https://::1` — не URL → "" → «не приватный»), поэтому IPv6 оборачиваем в [] сами. Непарсящийся
  * адрес — приватный: резолвер вернул мусор, подключаться к нему не будем (fail-closed).
  */
-export function isPrivateIp(address: string): boolean {
+export function isPrivateIp(address: string, interfaces?: LocalInterfaces): boolean {
   const a = String(address ?? "").trim().replace(/%.*$/u, "").replace(/^\[|\]$/gu, "");
   if (!a.includes(":")) {
     const oct = a.split(".");
     if (oct.length !== 4 || oct.some((o) => !/^(0|[1-9]\d{0,2})$/u.test(o) || Number(o) > 255)) return true; // «999.1.1.1», «01.02.03.04»
-    return ipv4Private(a) === true;
+    return ipv4Private(a, interfaces) === true;
   }
   const host = urlHostname(`http://[${a}]`);
-  return host ? ipv6Private(host) : true;
+  return host ? ipv6Private(host, interfaces) : true;
 }
 
 /** http(s)-адрес на приватном хосте (для перехвата навигации и ответов вкладок; прочие схемы судит свой гард). */
-export function isPrivateHttpUrl(url: string): boolean {
-  return /^https?:/iu.test(String(url ?? "").trim()) && isPrivateHost(url); // и `http:host` без «//»
+export function isPrivateHttpUrl(url: string, interfaces?: LocalInterfaces): boolean {
+  return /^https?:/iu.test(String(url ?? "").trim()) && isPrivateHost(url, interfaces); // и `http:host` без «//»
 }
