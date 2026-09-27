@@ -2,7 +2,7 @@
  * B-14 (свои адреса ПК): СИСТЕМНЫЙ список интерфейсов (без DI) — кеш 1 с (`os.networkInterfaces()` ≈ 2 мс синхронно
  * на Windows, суд — на каждое соединение), но не навсегда: VPN, подключённый на ходу, попадает в суд за ≤ 1 с.
  * Реверт-проверка (из копии): кеш без срока → красный «VPN подключился»; возраст кеша без учёта шага часов назад →
- * красный «часы назад».
+ * красный «часы назад»; сбой ОС не обновляет метку кеша → красный «ОС не отдала список».
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -51,8 +51,14 @@ describe("B-14: системный список интерфейсов — на 
     expect(isPrivateIp("26.1.2.3")).toBe(true);
     os.fail = true;
     vi.advanceTimersByTime(1500);
+    const before = os.calls;
     expect(isPrivateIp("26.1.2.3")).toBe(true);
     expect(isPrivateIp("8.8.8.8")).toBe(false);
+    expect(isPrivateIp("26.1.2.4")).toBe(true);
+    expect(os.calls - before).toBe(1); // сбой ОС не снимает кеш: не 2 мс и исключение на КАЖДЫЙ суд (контроль р2)
+    vi.advanceTimersByTime(1000);
+    isPrivateIp("26.1.2.3");
+    expect(os.calls - before).toBe(2); // и повтор — не раньше, чем через 1 с
     os.fail = false;
   });
 });
