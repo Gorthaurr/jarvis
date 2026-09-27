@@ -44,6 +44,10 @@ afterAll(() => {
 beforeEach(() => {
   fake = useFakeSidecar();
   fake.snapshot = { window: "Заказ — Магазин", pid: 500, items: [PASTE_ITEM, SEND], truncated: false };
+  // Интеграция W2 (стык П1×П2): окно — в реальной форме window.list; программа ОБЫЧНАЯ (не мессенджер/банк), так что
+  // §14 её клики не судит и отказ здесь — только §0. Без окна процесс неизвестен → рубеж П1 честно отклонял бы
+  // «Отправить» как кандидат в коммит («не смог определить программу»), и тест проверял бы не §0.
+  fake.windows = [{ hwnd: 50, pid: 500, process: "shop", title: "Заказ — Магазин", foreground: true, x: 0, y: 0, w: 1920, h: 1080 }];
   fake.focusedText = "ControlType.Edit: Комментарий [ПУСТО]";
   resetElectronMock({ clipboardText: CARD });
   resetHeldKeys();

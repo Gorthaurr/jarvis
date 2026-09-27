@@ -114,9 +114,11 @@ describe.skipIf(!hasPython)("jarvis SDK × §0 (настоящий python + мо
     fake.focusedText = "ControlType.Edit: Логин [ПУСТО]";
     const ok = await py(["import jarvis", "jarvis.find('Логин').click()", "jarvis.write('ivan')", "print('typed')"]);
     expect(ok.stdout).toMatch(/typed/u);
+    // Интеграция W2 (стык П1×П2): find моста — лестница act (bridge-find), handle едет в форме протокола (строка,
+    // Target.handle); сайдкар читает число из строки (Ipc.cs). Прежнее число — артефакт python-поиска до П1.
     expect(fake.mutations().map((c) => [c.op, c.args.text ?? c.args.handle])).toEqual([
-      ["invoke", 7],
-      ["invoke", 6],
+      ["invoke", "7"],
+      ["invoke", "6"],
       ["type", "ivan"],
     ]);
   }, 40_000);
