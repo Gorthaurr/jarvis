@@ -89,6 +89,15 @@ describe("ClientFileLogSink — сбой записи не теряет стро
     expect(msgsIn(primary)).toEqual(["A", "B", "C"]);
   });
 
+  it("dispose с пустым буфером, но отложенным после сбоя → отложенное всё равно уходит (в запасной)", () => {
+    mkdirSync(primary);
+    const s = new ClientFileLogSink({ dir });
+    s.sink(entry("A"));
+    s.flush(); // сбой 1: A отложена, буфер sink пуст
+    s.dispose();
+    expect(msgsIn(fallback)).toEqual(["A"]);
+  });
+
   it("отложенное не возвращается в буфер sink: страж «≥ 2000 строк → флаш» не долбит сбойную запись на каждую строку", () => {
     mkdirSync(primary);
     mkdirSync(fallback); // не пишется ни основной, ни запасной
@@ -144,6 +153,25 @@ describe("ClientFileLogSink в логгере (addLogSink) — предупре�
     app.error("FATAL crash line");
     s.dispose();
     expect(msgsIn(fallback)).toEqual(["FATAL crash line", expect.stringMatching(/^durable-лог: запись/), expect.stringMatching(/запасной/)]);
+  });
+
+  // р2: основной занят КРАТКО (EBUSY от антивируса) — ожил, пока финальная запись уходила в запасной. Второй проход
+  // пишет предупреждения в основной и сам выпускает сводку «снова пишется»; раньше третьего прохода не было — итог
+  // инцидента со ссылкой на запасной файл терялся.
+  it("основной ожил посреди финальной записи → сводка восстановления со ссылкой на запасной тоже в основном", () => {
+    const unblock = addLogSink((e) => {
+      if (e.msg.startsWith("durable-лог: запись")) rmSync(primary, { recursive: true, force: true });
+    });
+    try {
+      app.error("FATAL crash line");
+      s.dispose();
+    } finally {
+      unblock();
+    }
+    expect(msgsIn(fallback)).toEqual(["FATAL crash line"]);
+    const recs = readFileSync(primary, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { msg: string; meta?: unknown });
+    expect(recs.map((r) => r.msg)).toEqual([expect.stringMatching(/^durable-лог: запись/), expect.stringMatching(/запасной/), expect.stringMatching(/снова пишется/)]);
+    expect(recs[2]!.meta).toMatchObject({ fallback, viaFallback: 1, failures: 1 });
   });
 
   it("каталог логов удалили на ходу → пересоздан, строка легла в основной без предупреждений", () => {

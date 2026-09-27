@@ -370,7 +370,7 @@ describe("терминальный отказ основного канала �
   /**
    * 🔴 C3 (аудит прод-логов 27.09): 403 «Request not allowed» на входе в Windows — это VPN, который ещё не
    * поднялся, а не ключ. Прежде он латчил канал на 6 часов как «ключ не принят»; теперь — транзиентный
-   * предохранитель (5 минут) и канал в паспорте не «выключен».
+   * предохранитель (для гео-блока пауза не короче 30 минут, primary-cooldown.ts) и канал в паспорте не «выключен».
    */
   const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
 
@@ -542,14 +542,39 @@ describe("W0 (2026-09-09): стрим основного канала пробр
 describe("403 гео-блока через настоящий провайдер API (C3)", () => {
   const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
 
-  function realPrimaryThrowing403(calls = { n: 0 }): AnthropicLlmProvider {
+  /** Настоящий провайдер API, чей HTTP-клиент бросает так, как бросает SDK (`status` + `${status} ${body}`). */
+  function realPrimaryFailing(calls: { n: number }, text: string, status: number): AnthropicLlmProvider {
     const p = new AnthropicLlmProvider({ apiKey: "sk-test", maxRetries: 0 });
     const fail = async (): Promise<never> => {
       calls.n += 1;
-      throw Object.assign(new Error(REGION_403), { status: 403 });
+      throw Object.assign(new Error(text), { status });
     };
     (p as unknown as { clientPromise: Promise<unknown> }).clientPromise = Promise.resolve({ messages: { create: fail, stream: fail } });
     return p;
+  }
+  const realPrimaryThrowing403 = (calls = { n: 0 }): AnthropicLlmProvider => realPrimaryFailing(calls, REGION_403, 403);
+
+  /**
+   * Резерв «как в бою» при гео-блоке: пока VPN не поднят, CLI подписки ТОЖЕ получает 403 (настоящий провайдер
+   * записывает причину до броска — так же и здесь); `down=false` — VPN поднялся, подписка отвечает.
+   */
+  function flakySubscription(): ILlmProvider & { down: boolean; calls: number } {
+    const CLI_403 = "Failed to authenticate. API Error: 403 Request not allowed";
+    const s = {
+      live: true,
+      down: true,
+      calls: 0,
+      async complete(): Promise<LlmResponse> {
+        s.calls += 1;
+        if (!s.down) return resp({ text: "по подписке" });
+        _setSubscriptionFailureForTest(CLI_403);
+        throw new Error(`подписка: ${CLI_403}`);
+      },
+      async completeStream(): Promise<LlmResponse> {
+        return s.complete();
+      },
+    };
+    return s;
   }
 
   const resetReasons = (): void => {
@@ -615,6 +640,74 @@ describe("403 гео-блока через настоящий провайдер
     clock += 30 * 60_000;
     await p.complete(REQ);
     expect(calls.n).toBe(3); // полуоткрытая проба: вдруг VPN уже поднят
+  });
+  // ↑ Резерв здесь отвечает ВСЕГДА — и пауза держится: успех подписки, которая не падала вместе с API, НЕ доказывает,
+  // что гео-блок снят (маршрут CLI может идти иначе). Снимать по такому успеху = 2 мёртвых вызова API каждые 3 хода.
+
+  /**
+   * Адверс-ревью р2 (LOW): вход в Windows без VPN — гео-403 у ОБОИХ каналов, пауза основного встала на 30 мин. VPN
+   * поднялся через секунды, подписка ответила — сеть доказанно починилась, а быстрый канал ещё полчаса пропускался и
+   * паспорт твердил «основной канал временно не отвечает». Успех подписки ПОСЛЕ её же провала снимает паузу досрочно.
+   */
+  it("гео-блок у обоих каналов, потом подписка ответила → пауза основного снята досрочно", async () => {
+    const calls = { n: 0 };
+    let clock = 0;
+    const secondary = flakySubscription();
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(calls), secondary, {}, () => clock);
+    await p.complete(REQ);
+    expect((await p.complete(REQ)).stubbed).toBe(true); // пауза встала; подписка тоже 403 — VPN не поднят
+    expect(p.channelStatus().primary).toBe("cooldown");
+    secondary.down = false; // VPN поднялся
+    clock += 5_000;
+    expect((await p.complete(REQ)).text).toBe("по подписке");
+    expect(calls.n).toBe(2); // этот ход ещё без API — пауза действовала на его старте
+    expect(p.channelStatus().primary).toBe("ok"); // до фикса: «cooldown» ещё ~30 минут
+    await p.complete(REQ);
+    expect(calls.n).toBe(3); // до фикса: 2 — быстрый канал пропускался при живой сети
+    expect(p.channelStatus().primary).toBe("ok"); // счётчик тоже сброшен: одна новая неудача — ещё не пауза
+  });
+
+  it("снятие — только при ДЕЙСТВУЮЩЕЙ паузе: после её истечения успех подписки счётчик отказов API не обнуляет", async () => {
+    const calls = { n: 0 };
+    let clock = 0;
+    const secondary = flakySubscription();
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(calls), secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ); // пауза гео-блока; подписка тоже падает все 30 минут
+    clock += 30 * 60_000;
+    secondary.down = false;
+    await p.complete(REQ); // полуоткрытая проба: API снова 403 (1-я неудача), подписка ответила — паузы нет, снимать нечего
+    await p.complete(REQ); // 2-я неудача подряд → пауза встаёт снова
+    expect(calls.n).toBe(4);
+    expect(p.channelStatus().primary).toBe("cooldown"); // без гарда паузы: счётчик обнулён, «ok» и новые мёртвые вызовы
+  });
+
+  it("пауза НЕ гео-блока (429 / причина неизвестна) успехом подписки после её провала не снимается", async () => {
+    const setups = [
+      () => {
+        const calls = { n: 0 };
+        return { primary: realPrimaryFailing(calls, "429 rate limit exceeded", 429), calls: () => calls.n };
+      },
+      () => {
+        const f = fake({ live: true, result: STUB }); // стаб без записанной причины — kind неизвестен
+        return { primary: f, calls: () => f.calls };
+      },
+    ];
+    for (const setup of setups) {
+      resetReasons();
+      const { primary, calls } = setup();
+      let clock = 0;
+      const secondary = flakySubscription();
+      const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+      await p.complete(REQ);
+      await p.complete(REQ);
+      secondary.down = false;
+      clock += 5_000;
+      await p.complete(REQ);
+      await p.complete(REQ);
+      expect(calls()).toBe(2); // лимит/сбой самого API успех подписки не лечит — обычная пауза держится
+      expect(p.channelStatus().primary).toBe("cooldown");
+    }
   });
 
   it("резерв жив → ход по подписке, а API-канал в паспорте НЕ выключен как «ключ»", async () => {

@@ -66,6 +66,8 @@ export interface SpeakerGateDeps {
 export interface AgentReplyLike {
   voice: string;
   display?: { title?: string; markdown: string };
+  /** W3 V-1: voice — служебный ack промоушена («Секунду, сэр»), не ответ (как AgentReply.ack; salvage его не озвучит). */
+  ack?: boolean;
 }
 
 /**
@@ -691,6 +693,9 @@ export class VoicePipeline {
       // жертвы → отказываем НОВОЙ (у итога задачи есть текстовая копия в чате, у напоминания — нет).
       const victim = this.pendingSpeech.findIndex((p) => !p.urgent && !p.retriable);
       if (victim < 0) {
+        // Сюда доходит только НЕповторяемая (retriable вернулась выше): источник её не повторит — это потеря,
+        // владелец должен услышать «не успел проговорить» (финальное ревью р2: отказ был молчаливым).
+        this.drops.lost();
         this.log.warn("очередь озвучки полна и занята непереигрываемым — новая реплика не принята", {
           chars: text.length,
         });
@@ -1192,7 +1197,7 @@ export class VoicePipeline {
       // Ход инвалидирован (перебили/стоп). FAIL-SAFE как в стриминговом пути: работа СДЕЛАНА — текст
       // отдаём в чат, голос (если это не намеренное глушение) в очередь. Здесь речь ещё не начиналась —
       // startTts вызывается ниже, поэтому spokeAlready=false.
-      this.salvageCancelledReply(reply.voice, myGen, mySeq, { spokeAlready: false, addressed: meta.viaWake });
+      this.salvageCancelledReply(reply.voice, myGen, mySeq, { spokeAlready: false, addressed: meta.viaWake, ack: reply.ack });
       // Канал мог освободиться: пробуем пролить отложенный фоновый итог (иначе застрял бы в очереди).
       this.maybeDrainSpeech();
       return;
@@ -1693,8 +1698,11 @@ export class VoicePipeline {
       this.log.warn("реплика хода отменена — текст сохранён, озвучка НЕ ставится в очередь", { chars: text.length, reason: plan.reason, turn: mySeq });
       return;
     }
-    this.log.warn("реплика хода отменена перебиванием — текст сохранён, голос в очередь", { chars: text.length, myGen, gen: this.gen, turn: mySeq, origin: plan.origin });
-    this.speakQueued(text, false, { origin: plan.origin });
+    const accepted = this.speakQueued(text, false, { origin: plan.origin });
+    const meta = { chars: text.length, myGen, gen: this.gen, turn: mySeq, origin: plan.origin };
+    // Очередь могла отказать (полна непереигрываемым) — лог не врёт, потерю speakQueued уже учёл (drops).
+    if (accepted) this.log.warn("реплика хода отменена перебиванием — текст сохранён, голос в очередь", meta);
+    else this.log.warn("реплика хода отменена перебиванием — текст сохранён, голос НЕ принят очередью (потеря учтена)", meta);
   }
 
   // ── таймеры ────────────────────────────────────────────────

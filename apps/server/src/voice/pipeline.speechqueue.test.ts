@@ -269,6 +269,32 @@ describe("очередь озвучки: срок годности и кап (а
     // Итог задачи не имеет права выкинуть ни одну из них: у него есть текстовая копия, у них — нет.
     expect(pipe.speakQueued("Готово, сэр.")).toBe(false);
   });
+
+  // Финальное ревью р2 (аудит 27.09): отказ НЕповторяемой реплике — тоже потеря (источник её не повторит).
+  // Раньше счётчик непроговорённого не рос → владелец в игре не слышал ни итога, ни «не успел проговорить».
+  it("отказанный НЕповторяемый итог учтён как потеря — следующая речь несёт предупреждение", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush(); // канал занят раздумьем → очередь держит
+    for (let i = 1; i <= 4; i += 1) pipe.speakQueued(`Напоминание ${i}.`, true, { retriable: true });
+    expect(pipe.speakQueued("Готово, сэр.")).toBe(false); // жертвы нет — отказ
+    pipe.mute(); // канал свободен → дренаж
+    await flush();
+    expect(tts.texts[0]).toMatch(/не успел проговорить/);
+  });
+
+  it("отказ ПОВТОРЯЕМОЙ реплике потерей не считается (источник повторит сам)", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    for (let i = 1; i <= 4; i += 1) pipe.speakQueued(`Напоминание ${i}.`, true, { retriable: true });
+    expect(pipe.speakQueued("Напоминание 5.", true, { retriable: true })).toBe(false);
+    pipe.mute();
+    await flush();
+    expect(tts.texts.join(" ")).not.toMatch(/не успел проговорить/);
+  });
 });
 
 // Ревью фиксов речи 2026-07-24: fail-safe (сохранение отменённой реплики) не должен воскрешать то,

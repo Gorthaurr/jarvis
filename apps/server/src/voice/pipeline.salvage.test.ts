@@ -222,6 +222,49 @@ describe("salvage уважает адресацию хода: принятое �
   });
 });
 
+/**
+ * Финальное ревью р2 (аудит 27.09): очередь озвучки полна непереигрываемым (срочное/retriable) — salvage получает
+ * отказ, а лог рапортовал «голос в очередь», и потеря не считалась: владелец не слышал ни ответа, ни «не успел».
+ */
+describe("salvage при полной очереди: отказ — честно и с учётом потери", () => {
+  it("лог говорит «НЕ принят», а следующая речь несёт предупреждение о непроговорённом", async () => {
+    const warns: string[] = [];
+    const log = { debug() {}, info() {}, error() {}, warn: (m: string) => void warns.push(m), child() { return log; } };
+    const h = make({ log });
+    h.pipe.onWake();
+    await h.say("найди отчёт за сентябрь"); // ход 1 думает — очередь держит
+    for (let i = 1; i <= 4; i += 1) h.pipe.speakQueued(`Напоминание ${i}.`, true, { retriable: true });
+    h.pipe.onVadEvent("speech_start");
+    await h.say("и открой почту"); // ход 2 отменяет ход 1
+    h.sinks[0]!.done("Отчёт за сентябрь в папке «Документы», сэр."); // salvage → очередь полна, жертвы нет
+    expect(h.chat).toContain("Отчёт за сентябрь в папке «Документы», сэр."); // текст не пропал
+    expect(warns.some((m) => m.includes("НЕ принят"))).toBe(true);
+    expect(warns.some((m) => m.includes("голос в очередь"))).toBe(false);
+    h.sinks[1]!.done("Открыл почту, сэр."); // прямой ответ хода 2 — носитель предупреждения
+    expect(h.tts.texts.at(-1)).toMatch(/не успел проговорить/);
+  });
+});
+
+describe("классический путь (JARVIS_VOICE_STREAMING=0): ack промоушена не спасается как ответ", () => {
+  it("занят: спасённый «Берусь» отменённого адресованного хода не звучит, текст — в чат", async () => {
+    const answers: ((r: { voice: string; ack?: boolean }) => void)[] = [];
+    const h = make({ onUserTurnStream: undefined, onUserTurn: () => new Promise((res) => void answers.push(res)) });
+    h.pipe.onWake();
+    await h.say("найди отчёт за сентябрь"); // ход 1 (адресован: wake-гейта нет)
+    h.pipe.onVadEvent("speech_start");
+    await h.say("и открой почту"); // ход 2 отменяет ход 1
+    answers[0]!({ voice: "Берусь, сэр.", ack: true }); // tier0-промоушен хода 1 (brain/agent/index.ts)
+    answers[1]!({ voice: "Открыл почту, сэр." });
+    await flush();
+    h.tts.streams.at(-1)!.push();
+    h.tts.streams.at(-1)!.finishStream();
+    h.clock.t += 2_000;
+    h.pipe.setClientPlayback(false); // динамик свободен — очередь дренируется
+    expect(h.tts.texts).toEqual(["Открыл почту, сэр."]); // «Берусь» устарел: итог задачи придёт сам
+    expect(h.chat).toContain("Берусь, сэр."); // текст не пропал
+  });
+});
+
 describe("salvage адресованного хода: ответ владельцу (A3), но не «promoted» в first_answer", () => {
   it("занят: спасённый ответ звучит после ответа хода 2, first_answer хода 1 путём promoted НЕ пишется", async () => {
     const h = make();
