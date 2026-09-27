@@ -41,7 +41,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl`, `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
   под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU.
-- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS→кадры→STT);
+- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос);
   dev-сессия, действия клиента — фейк. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
 - Тесты: `apps/server` `npx vitest run` (~3510), `apps/client` (~1000), `packages/*`, `node --test infra/client-keeper.test.mjs`,
   стенд расширения `node --test "apps/extension/test/*.test.mjs"` (~230, настоящий Chromium; `CHROME_PATH`). Typecheck:
@@ -74,7 +74,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - `brain/router/` — tier0 ($0: медиа, громкость, запуск, консьерж), вопрос vs действие, тир (рассуждение/биржа → fable).
 - `brain/tools/` — `dispatch.ts` (тонкий маршрутизатор) + `handlers/*` (browser, messaging, info, skills, code, act,
   self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`.
-- `brain/persona/persona.md` — системный промпт (v90, бампать version при правке), `modes.ts`, `emotion.ts`.
+- `brain/persona/persona.md` — системный промпт (v91, бампать version при правке), `modes.ts`, `emotion.ts`.
 - `brain/tasks/` — реестр задач §20 (durable `data/tasks.json`), scope (правка vs новая), control, narrate.
 - `brain/` ещё: `app-channels.ts` (каналы программ + частота W4.2), `capabilities.ts` (паспорт возможностей),
   `profile.ts`, `consent.ts`, `response-cache.ts`, `knowledge/`, `trading/`, `mcp/`.
@@ -87,7 +87,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   briefing, consolidation (сон-цикл), incidents, quiet-hours, self-review. `autonomy/` — killswitch, часовой предохранитель.
 - `self/` — самоулучшение (свой код, слабости из телеметрии, `self_patch` через ветку+verify).
 - `product/` — продуктовый каркас (аккаунты/тарифы/оплата) за `JARVIS_PRODUCT_MODE` (деф 0).
-- `obs/` — file-log, metrics (COGS, round, mouth_to_ear), pricing.
+- `obs/` — file-log, metrics (COGS, round, mouth_to_ear, first_answer), pricing.
 
 ## Клиент (`apps/client/main`)
 - `index.ts` (bootstrap, трей, single-instance, IPC), `transport/` (WS, resume), `owner-quit.ts` (маркер «Выйти»).

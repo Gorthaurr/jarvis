@@ -3854,3 +3854,30 @@ noteFrame, preflightText, ранний Enter act, метка кадра capture)
 `IsPassword` в GroundResult/SnapshotItem и `describe`, `window.foreground` у окна без заголовка, `LLKHF_INJECTED` в
 модалке «Подтвердить», G-13 глубина снапшота, G-15 `\n`→VK_RETURN, G-16 UIPI, G-17 направление ScrollPattern,
 `ocr.limits`. Живьём не проверено — чек-лист W2 в NEXT_SESSION.md (только MAG 271QP).
+
+## 2026-09-27 — волна W3 «петля, арсенал, скорость» (облачная сессия)
+По `docs/REVIEW_2026-09-26.md` §3.3–3.5; три пакета без пересечения файлов (план сверен с кодом на bf478f4). L-4/L-5/V-2/V-3/V-6 —
+решения владельца, не трогались.
+- **A — code_run честный (L-2, G-14, S-9, L-8, L-7).** SDK-скрипт = рука: `code-input.ts` распознаёт python + `jarvis`
+  (import/from/`__import__`/import_module, алиасы, `;`), самописный инструмент — по шаблону. `blind-call.ts`
+  (`isBlindMutateCall`) заменил проверку по имени в четырёх местах: долг сверки, `armUncertainDebt`, `noteRealAction`,
+  стейл-гард. Сбой SDK-скрипта после отправки → `uncertain` «сверь». Аренда ввода: `toolNeedsInput(name, input, resolve)`
+  — SDK и самописный SDK под арендой; `code_run{background}` с jarvis — честный отказ «ничего не запущено». Вывод
+  скрипта (stdout/stderr, хвосты `job_status`, текст ошибки) — в `<untrusted_content source="code_run">` через флаг
+  `untrustedOutput` в `runCodeGuarded` и самописном пути (проба `app_channel_learn` читает сырой JSON). `web_inspect` —
+  VERIFY; подсказка стейл-гарда — по лестнице восприятия.
+- **B — скорость и контекст (V-4/B-F7, L-6, L-13, L-8).** Разговорный ход после инструментов стримит финал
+  (`loop/stream-final.ts`), только если нет мутаций, долгов сверки/отправки, отказа ввода и вуали; сдача («не могу»)
+  не озвучивается, анти-капитуляция не переспрашивает начатую речь. Свёртка/вырезка снимков доходит до живой
+  SDK-сессии: `LlmRequest.historyRewritten` — «masked» открывает новую сессию со свёрнутым транскриптом, «pruned» —
+  при > 8 картинках (`integrations/subscription-continuity.ts`); петлевой тест со SDK-заглушкой, чей usage растёт с
+  историей: без фикса задача кончалась `contextWrap`. `createSdkMcpServer({alwaysLoad:true})`. Нудж после `web_act`
+  ведёт в `web_read`/`web_inspect`, а не в Chrome владельца (`loop/verify-hint.ts`).
+- **C — арсенал и голос (L-10, L-7, L-8, V-1, V-5).** Горячие схемы 75 110 → 63 592 символов (`HOT_CHARS_CEILING` =
+  65 000 — страж), каталог холодных — целыми фразами до 160 символов (`catalog.ts`, явные строки для 7 инструментов),
+  хвосты переименований убраны (страж L-7). Фасад `web_read{view:"elements", query}` → `web_inspect` (горячих 60).
+  Метрика `first_answer` (конец речи → первый чанк содержательного ответа, путь sync/promoted) и `firstSound` у
+  `mouth_to_ear` (answer/ack/filler): «Берусь» больше не выдаётся за ответ; итог промотированной задачи несёт
+  `answerOf` своего хода. Прогрев ack-фраз промоушена и «Секунду, сэр.» в TTS-кеше на старте сессии. Персона v91.
+Гейт (d4f5620): сервер 3562 (+2 win32), клиент 994 (+9 Windows), tools 34, shared 190, protocol 20, typecheck, гейт
+размеров, `mutate-loop all` 17/17, стенд 31/31. Живьём (подписка, голос, Windows) не проверено — NEXT_SESSION.
