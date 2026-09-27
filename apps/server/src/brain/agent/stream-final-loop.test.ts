@@ -1,10 +1,11 @@
 /**
- * W3 (V-4 = B-F7): финал РАЗГОВОРНОГО хода после инструментов звучит по мере генерации, а не целиком из терминала.
+ * W3 (V-4 = B-F7): финал РАЗГОВОРНОГО хода после инструментов звучит по мере генерации, а не целиком из терминала
+ * (на шаге > 0 — со второй фразы: однофразная преамбула перед очередным инструментом в голос не идёт).
  * ПЕТЛЁЙ (handleUserText + настоящий dispatchTool): «какая погода?» → web_search → ответ. Провайдер модели —
  * ручной: шаг 1 отдаёт дельты и ДЕРЖИТ промис, пока тест не отпустит, — так видно, звучит ли фраза до конца вызова.
  * Реверт-проверки (из копии): стрим только на `step === 0` (stream-final.ts) — падает первый кейс; без предиката
  * finalStreamSafe — второй; без глушения капитуляции в первой отдаче — третий; `step === 0` вместо streamedThisRound
- * в докрутке max_tokens — четвёртый.
+ * в докрутке max_tokens — четвёртый; без `!streamedThisRound` в анти-капитуляции — пятый; eager и на шаге > 0 — шестой.
  */
 import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand } from "@jarvis/protocol";
@@ -23,7 +24,10 @@ const USAGE = { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreat
 const resp = (text: string, toolUses: ToolUse[] = [], stopReason?: StopReason): LlmResponse => ({
   text, toolUses, stopReason: stopReason ?? (toolUses.length > 0 ? "tool_use" : "end_turn"), usage: USAGE, stubbed: true,
 });
-const toolTurn = (id: string, name: string, input: Record<string, unknown>): Turn => async () => resp("", [{ id, name, input }]);
+const toolTurn = (id: string, name: string, input: Record<string, unknown>, preamble = ""): Turn => async (onDelta) => {
+  if (preamble) onDelta({ text: preamble });
+  return resp(preamble, [{ id, name, input }]);
+};
 /** Текстовый ход дельтами; `hold` — после скольких дельт ждать отпускания (промис хода висит). */
 const textTurn = (parts: string[], opts: { hold?: { after: number; gate: Promise<void> }; stopReason?: StopReason } = {}): Turn => async (onDelta) => {
   for (let i = 0; i < parts.length; i += 1) {
@@ -105,6 +109,17 @@ describe("W3 V-4: финал разговорного хода после инс
     expect(h.done[0]).toBe(reply.voice);
   });
 
+  it("однофразная преамбула перед очередным инструментом на шаге > 0 не звучит — звучит финал", async () => {
+    const h = harness(() => [
+      toolTurn("s1", "web_search", { query: "погода москва" }),
+      toolTurn("s2", "web_search", { query: "ветер москва" }, "Уточню ещё ветер."),
+      textTurn(PHRASES),
+    ]);
+    await handleUserText(h.session, QUESTION, h.deps, h.sink);
+    expect(h.sentences.join(" ")).not.toMatch(/Уточню/u);
+    expect(h.sentences).toHaveLength(3);
+  });
+
   it("ход с делом (act, долг сверки): из шага 1 до verify-нуджа в голос не уходит НИЧЕГО, итог звучит один раз", async () => {
     const claim = "Готово, сэр — обновил прогноз.";
     const h = harness(() => [toolTurn("a1", "act", { target: "Обновить" }), textTurn([claim]), textTurn([claim]), textTurn([claim])]);
@@ -130,12 +145,12 @@ describe("W3 V-4: финал разговорного хода после инс
   it("ответ по делу с оговоркой «не могу» в хвосте — уже звучит, анти-капитуляция не переспрашивает (второго голоса нет)", async () => {
     const h = harness(() => [
       toolTurn("s1", "web_search", { query: "погода москва" }),
-      textTurn(["В Москве плюс пять градусов. ", "Точнее по району, к сожалению, не могу сказать."]),
+      textTurn(["В Москве плюс пять градусов. ", "Ветер слабый. ", "Точнее по району, к сожалению, не могу сказать."]),
       textTurn(["Готово, повторяю: плюс пять."]),
     ]);
     await handleUserText(h.session, QUESTION, h.deps, h.sink);
     expect(h.llm.requests).toHaveLength(2);
-    expect(h.sentences).toHaveLength(2);
+    expect(h.sentences).toHaveLength(3);
     expect(h.sentences.join(" ")).not.toMatch(/повторяю/u);
   });
 

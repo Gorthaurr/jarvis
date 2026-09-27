@@ -36,7 +36,7 @@ export async function callModel(ctx: LoopCtx, step: number, prep: CallPrep) {
   st.progress.streamedThisRound = false;
   st.progress.streamedFinal = false;
   const llmCallStartedMs = Date.now(); // время ИМЕННО обращения к модели — для замера быстроты канала
-  const resp: LlmResponse = shouldStreamStep(ctx, step) ? await streamModelCall(ctx, llmReq) : await deps.llm.complete(llmReq);
+  const resp: LlmResponse = shouldStreamStep(ctx, step) ? await streamModelCall(ctx, step, llmReq) : await deps.llm.complete(llmReq);
   warmth.touch(session.sessionId);
   deps.spend.recordStep(taskId);
   return { resp, llmCallStartedMs };

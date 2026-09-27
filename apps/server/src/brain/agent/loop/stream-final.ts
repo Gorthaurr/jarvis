@@ -28,19 +28,20 @@ export function shouldStreamStep(ctx: LoopCtx, step: number): boolean {
 }
 
 /**
- * Вызов модели со стримом в sink. §10: на разговорном ходе фраза уходит сразу (mouth-to-ear = первый токен + одна
- * фраза); на action-пути — только когда накопилось ≥ 2 фраз (преамбулу «Сейчас гляну…» перед tool_use не голосим).
+ * Вызов модели со стримом в sink. §10: на шаге 0 разговорного хода фраза уходит сразу (mouth-to-ear = первый токен +
+ * одна фраза); на action-пути и на шагах > 0 — только когда накопилось ≥ 2 фраз: однофразную преамбулу перед
+ * очередным инструментом («Уточню ещё…») не голосим — одна обратная связь уже прозвучала на шаге 0.
  *   - ПЕРВАЯ отдача раунда сверяется с капитуляцией: «Не могу…» не звучит, раунд замолкает целиком — анти-капитуляция
  *     переспросит модель, и в голос уйдёт уже повтор (иначе владелец слышал бы отказ и следом ответ);
  *   - текстовый ход без tool_use: остаток дофлашиваем, streamedFinal = что-то реально ушло (терминал не дублирует);
  *   - tool-ход: удержанное (преамбулу) отбрасываем, финал произнесёт следующий раунд или терминал.
  */
-export async function streamModelCall(ctx: LoopCtx, llmReq: LlmRequest): Promise<LlmResponse> {
+export async function streamModelCall(ctx: LoopCtx, step: number, llmReq: LlmRequest): Promise<LlmResponse> {
   const { deps, opts, st } = ctx;
   const sink = ctx.sink as ReplySink;
   const chunker = new SentenceChunker();
   const held: string[] = [];
-  let eager = opts?.conversational === true;
+  let eager = opts?.conversational === true && step === 0;
   let muted = false;
   const release = (pieces: string[]): void => {
     if (muted || pieces.length === 0) return;
