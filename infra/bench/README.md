@@ -16,7 +16,7 @@ pnpm install --frozen-lockfile
 node infra/bench/bench.mjs setup      # apt: xvfb openbox xdotool wmctrl imagemagick tesseract(+rus) ffmpeg; проверки
 node infra/bench/bench.mjs up         # Xvfb :99 → openbox → фикстуры → сервер → Chromium → ждём коннект расширения
 node infra/bench/bench.mjs status     # JSON: процессы, /healthz, ext.connected, service worker, CDP, окна; ready:true
-node --test --test-concurrency=1 "infra/bench/scenarios/*.test.mjs"   # сценарии (≈70 с)
+node --test --test-concurrency=1 "infra/bench/scenarios/*.test.mjs"   # сценарии (≈70 с; параллельно тоже безопасно)
 node infra/bench/bench.mjs down       # гасит ТОЛЬКО свои процессы (pid-файлы), профиль Chromium стирается
 ```
 
@@ -32,10 +32,10 @@ node infra/bench/bench.mjs down       # гасит ТОЛЬКО свои про�
 |---|---|
 | `setup` | apt-зависимости (root) и проверки: бинарники, Chromium, node_modules, esbuild, tesseract rus |
 | `up` / `down` / `status` | подъём/гашение/состояние стека. Порт или дисплей занят чужим — отказ, чужое не трогаем |
-| `tool <name> <json\|@file> [--confirm yes\|no\|expire\|undelivered\|yes,no] [--json] [--full]` | инструмент через НАСТОЯЩИЙ `dispatchTool` bench-сессии; сводка + §14-вопросы; картинки → `out/` |
+| `tool <name> <json\|@file> [--confirm yes\|no\|expire\|undelivered\|yes,no] [--json] [--full]` | инструмент через НАСТОЯЩИЙ `dispatchTool` bench-сессии; сводка + §14-вопросы; картинки → `out/`; отказ транспорта/ввода (409, неразрешённый `$ref`) — код выхода 1 |
 | `say "реплика" --script f.json [--confirm …] [--var k=v] [--json]` | реплика через петлю `handleUserText` со сценарным мозгом; раунды, нуджи, задача |
 | `shot [file.png] [--scale 50%] [--ocr]` | скриншот экрана Xvfb (`import -window root`); `--ocr` — tesseract rus+eng |
-| `log [n] [--out]` | хвост JSONL-лога сервера (форматированный) или `logs/server.out.log` |
+| `log [n] [--out]` | хвост свежего JSONL-лога сервера (форматированный) или `logs/server.out.log` |
 | `sites-log [--run id] [--site s] [--facts] [--json]` | журнал фикстур (факты и трассы) |
 | `reset` | журнал фикстур, вкладки (одна `about:blank` через CDP), bench-сессия (ref-снимки, цель вкладки, одобрения) |
 
@@ -62,7 +62,7 @@ node infra/bench/bench.mjs down       # гасит ТОЛЬКО свои про�
 | `online.sberbank.ru` | банк: «Оплатить» (POST-форма), «Перевести» (fetch) | bank | `payment`, `transfer` |
 | `lms.vuz-bench.ru` | Moodle: view → startattempt → attempt → summary (кнопка + модалка) → review | edu по пути | `attempt_started`, `answer_saved`, `quiz_finished` |
 | `shop.example.com` | магазин: «Добавить в корзину», «Оформить заказ» | безопасный | `cart_add {qty}`, `order_placed` |
-| `id.example.com` | вход: пароль, OTP (`one-time-code`) | §0 | `login_submit` (без секретов) |
+| `id.example.com` | вход: пароль, OTP (`one-time-code`) | §0 | `login_submit` (без секретов); трасса `field_changed {field, filled}` — наблюдатель полей (снимок inspect маскирует секреты, судить по нему «пароль не введён» нельзя) |
 | `news.example.com` | лента с таймером, «Показать ещё»; `/slow?ms=N` | безопасный | `feed_more`; трассы `slow_served`/`slow_aborted` |
 | `video.example.com` | `<video>` (клип ffmpeg), autoplay НЕ отключён | безопасный | `media_play/pause/seeked/ended` |
 
@@ -94,8 +94,9 @@ node infra/bench/bench.mjs down       # гасит ТОЛЬКО свои про�
 
 ## Сценарии и `lib.mjs`
 
-`scenarios/*.test.mjs` поднимают стенд при необходимости (`ensureUp`, остаётся жить), берут межпроцессный замок
-(`lock`), сбрасывают состояние (`begin`), работают каждый со своим `run`. API: `tool`, `say`, `open(url)` (свежие вкладки
+`scenarios/*.test.mjs` берут межпроцессный замок (`lock`) ПЕРВЫМ, поднимают стенд при необходимости (`ensureUp`,
+остаётся жить), сбрасывают состояние (`begin`), работают каждый со своим `run`. Сам `up` — под своим замком
+(`lock-up`): два подъёма наперегонки не перезапишут pid-файлы друг друга. API: `tool`, `say`, `open(url)` (свежие вкладки
 + ожидание коммита навигации), `facts/waitFacts/traces`, `cdp.{list,pages,close,newTab}`, `shot`, `reset`.
 «Ничего не произошло» проверяется ожиданием 1,5 с.
 

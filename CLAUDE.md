@@ -40,15 +40,14 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Сервер руками: `apps/server` → `npx tsx src/index.ts` (порт **8787**; НЕ `tsx watch`). Логи: `apps/server/data/logs/
   server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl`, `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
-  под супервизором — `apps/client/client.{out,err}.log`.
+  под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU — артефакт среды.
 - Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS→кадры→STT);
   dev-сессия, действия клиента — фейк. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
 - Тесты: `npx vitest run` в `apps/server`, `apps/client`, `packages/*`; `node --test` — `infra/client-keeper.test.mjs`,
   `"apps/extension/test/*.test.mjs"`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутации петли:
   `node apps/server/scripts/mutate-loop.cjs`. Длины функций: `node apps/server/scripts/fn-lengths.mjs`.
-- **Стенд (облако)**: `node infra/bench/bench.mjs up|status|tool|say|shot|log|down` — сервер + Chromium с расширением
-  на Xvfb + HTTPS-фикстуры на настоящих хостах §14, `/dev/bench/*`; `infra/bench/README.md`.
-- Сценарии: `node --test --test-concurrency=1 "infra/bench/scenarios/*.test.mjs"` — факт по журналу фикстур.
+- **Стенд (облако, `infra/bench/README.md`)**: `node infra/bench/bench.mjs up|status|tool|say|shot|log|down` — сервер,
+  Chromium+расширение на Xvfb, HTTPS-фикстуры на хостах §14; сценарии `node --test "infra/bench/scenarios/*.test.mjs"`.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
   Фолбэк PGlite. Docker не используется.
 - Модели (ASCII-путь!): `~/.jarvis/models` — слух (`fetch-hearing-models.mjs`), e5 в `hf/` (качается сам с `HF_ENDPOINT`).

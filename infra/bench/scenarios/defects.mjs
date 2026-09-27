@@ -18,11 +18,11 @@ export const DEFECTS = {
   // а extension/modules/tab-find.js ищет по хосту только ЗАКОММИЧЕННЫЙ tab.url (pendingUrl — нет). Сразу после
   // browser_open (страница ещё грузится) browser_inspect{url} → «вкладка … не открыта».
   OPEN_RACE: "W1-D3: browser_inspect{url} сразу после browser_open (навигация не закоммичена) → «вкладка не открыта»",
-  // apps/extension/modules/capture.js: chrome.tabs.captureVisibleTab ограничен квотой Chrome (2 вызова/с); второй
-  // снимок подряд (полный кадр → зум, два image-чтения в одном раунде) падает capture_failed вместо выжидания.
-  CAPTURE_QUOTA: "W1-D5: два browser_read{view:image} подряд → capture_failed (квота captureVisibleTab), без повтора",
+  // apps/extension/modules/capture.js: chrome.tabs.captureVisibleTab ограничен квотой Chrome (2 вызова/с); третий
+  // снимок за секунду (полный кадр → зум → зум, image-чтения одного раунда) падает capture_failed вместо выжидания.
+  CAPTURE_QUOTA: "W1-D5: третий browser_read{view:image} за секунду → capture_failed (квота captureVisibleTab 2/с), без выжидания",
   // Корень тот же, что у W1-D2 (подпись ref = name+selector+role+type): у кнопки навигации теста
-  // `input[type=submit][name=next]` в «подписи» оказывается слово submit ИЗ СЕЛЕКТОРА → «Следующая страница» и
+  // `input[type=submit][name=next]` в «подписи» оказывается слово submit ИЗ СЕЛЕКТОРА И ТИПА → «Следующая страница» и
   // «Закончить попытку...» судятся как сдача — владельцу задают вопрос на каждой странице теста.
   LMS_NAV_ASKS: "W1-D6: навигация по страницам теста Moodle («Следующая страница») спрашивает владельца",
   // web-commit-guard takeApproval/rememberApproval: одобрение запомнено под подписью-с-селектором кнопки страницы

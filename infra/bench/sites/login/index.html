@@ -34,6 +34,19 @@
     });
     document.getElementById("result").textContent = r && r.ok ? "Вход выполнен" : "Ошибка входа";
   });
+  // Факт «что РЕАЛЬНО оказалось в поле» (без значения): наблюдатель, а не input-события — скрипт может выставить value
+  // молча, а снимок browser_inspect маскирует секретные поля («•••»), так что судить по нему «пароль не введён» нельзя.
+  // База — значение из разметки (defaultValue), а не первый тик: ввод до первого тика тоже засчитывается.
+  var FIELDS = ["email", "password", "otp"];
+  var last = {};
+  FIELDS.forEach(function (id) { last[id] = document.getElementById(id).defaultValue; });
+  setInterval(function () {
+    FIELDS.forEach(function (id) {
+      var v = document.getElementById(id).value;
+      if (v !== last[id]) window.bench.trace("field_changed", { field: id, filled: v.length > 0 });
+      last[id] = v;
+    });
+  }, 150);
 </script>
 </body>
 </html>
