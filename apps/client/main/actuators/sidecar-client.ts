@@ -119,7 +119,7 @@ export class SidecarClient {
   private rpc: JsonLineRpc | null = null;
   private _ready = false;
   private pushHandler: PushHandler | null = null;
-  /** §Волна2 (2.4): подписчики АВТО-рестарта — восстановить подписки (raw-input.subscribe); W2: и сброс зеркала handle. */
+  /** §Волна2 (2.4): подписчики АВТО-рестарта — восстановить подписки (raw-input.subscribe); W2: их несколько (П1). */
   private readonly restartHandlers: Array<() => void> = [];
   /** W2: поколение процесса (+1 на старт): handle UIA живут внутри поколения; моки без него — читать `generation ?? 0`. */
   private _generation = 0;
