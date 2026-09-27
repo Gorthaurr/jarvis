@@ -17,7 +17,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { screen } from "electron";
-import { AsyncMutex, type Candidate, createLogger, nameSearchVariants, pickRecipient } from "@jarvis/shared";
+import { AsyncMutex, type Candidate, type HostLookup, createLogger, nameSearchVariants, pickRecipient } from "@jarvis/shared";
 import { chromeCandidates, safeBrowserUrl } from "./browser-cdp.js";
 import { CdpConn } from "./cdp-conn.js";
 import { webAct } from "./jarvis-browser-act.js";
@@ -125,8 +125,9 @@ export interface ImportCookie {
   expirationDate?: number;
 }
 
-/** DI для стенда (настоящий Chromium в тесте): путь, доп. флаги, профиль, стартовая страница, пауза после запуска. */
-export interface JarvisBrowserOpts { chromePath?: string; extraArgs?: string[]; profileDir?: string; startUrl?: string; settleMs?: number }
+/** DI для стенда (настоящий Chromium в тесте): путь, доп. флаги, профиль, стартовая страница, пауза после запуска,
+ *  резолвер для суда гарда навигации по DNS (B-14; нет → системный). */
+export interface JarvisBrowserOpts { chromePath?: string; extraArgs?: string[]; profileDir?: string; startUrl?: string; settleMs?: number; resolveHost?: HostLookup }
 
 /**
  * Браузер Джарвиса: ТЁПЛЫЙ невидимый Chrome со своим профилем, общий слой для веб-действий.
@@ -204,7 +205,7 @@ export class JarvisBrowser {
     // B-14: гард навигации — ДО первого действия; не поднялся → браузер не отдаём (ensureBrowser перезапустит).
     const guardConn = new CdpConn();
     await guardConn.connect(await this.discoverBrowserWs(this.port));
-    this.guard = new NavGuard(guardConn);
+    this.guard = new NavGuard(guardConn, this.opts.resolveHost);
     await this.guard.start();
     const cdp = new CdpConn();
     await cdp.connect(wsUrl);
@@ -345,8 +346,9 @@ export class JarvisBrowser {
       const cdp = await this.ensureBrowser();
       const mark = this.guard?.mark() ?? 0;
       const out = await webAct(cdp, this.mainFrameId, intent, params);
-      const blocked = this.guard?.since(mark) ?? []; // B-14: действие увело во внутреннюю сеть — переход сорван, говорим
-      return blocked.length ? { ...out, blockedNav: blockedNavText(blocked) } : out;
+      // B-14: действие увело во внутреннюю сеть — переход сорван, говорим; мёртвое имя стороннего iframe — не провал действия.
+      const blocked = (this.guard?.since(mark) ?? []).filter((b) => b.reason === "private" || b.frameId === this.mainFrameId);
+      return blocked.length ? { ...out, blockedNav: blockedNavText(blocked), blockedNavReason: blocked.some((b) => b.reason === "private") ? "private" : "unresolved" } : out;
     });
   }
 

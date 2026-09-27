@@ -4,16 +4,36 @@
  * «публичный» сайт под именем `shop.jb.example` (host-resolver → 127.0.0.1) и «внутренняя сеть» на 127.0.0.1.
  * Факты тестов — по ЖУРНАЛУ запросов фикстур (дошёл ли запрос до «роутера», сколько раз POST ушёл на сервер).
  *
+ * B-14 (DNS): Chrome ведёт ЛЮБОЕ `*.jb.example` на 127.0.0.1 (host-resolver), а гард навигации судит по таблице
+ * `fixtureLookup` — что ответил бы DNS: shop — публичный TEST-NET адрес, evil — 127.0.0.1 (localtest.me-класс),
+ * mixed — публичный + 127.0.0.1, slow — 127.0.0.1 с задержкой, прочие `*.jb.example` — не разрешаются.
+ *
  * Подключение: vi.mock("electron", ...) в тест-файле (offscreenPos читает screen).
  */
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type HostLookup, systemLookup } from "@jarvis/shared";
 import { chromeCandidates } from "../actuators/browser-cdp.js";
 import { JarvisBrowser } from "../actuators/jarvis-browser.js";
 
 export const PUBLIC_HOST = "shop.jb.example";
+
+const FIXTURE_DNS: Record<string, string[]> = {
+  [PUBLIC_HOST]: ["203.0.113.10"],
+  "evil.jb.example": ["127.0.0.1"],
+  "mixed.jb.example": ["203.0.113.10", "127.0.0.1"],
+};
+
+/** «DNS» стенда для гарда навигации: имена фикстур — по таблице, остальное — настоящий DNS (живые тесты). */
+export const fixtureLookup: HostLookup = async (host) => {
+  if (host === "slow.jb.example") return new Promise((r) => setTimeout(() => r(["127.0.0.1"]), 1500));
+  const v = FIXTURE_DNS[host];
+  if (v) return v;
+  if (host.endsWith(".jb.example")) throw Object.assign(new Error(`нет ${host}`), { code: "ENOTFOUND" });
+  return systemLookup(host);
+};
 
 /** Chrome/Chromium для стенда: CHROME_PATH, облачный Chromium, иначе установленный Chrome владельца. */
 export function findChrome(): string | null {
@@ -61,7 +81,7 @@ export async function fixture(routes: Record<string, Route | string>): Promise<F
   return { port, hits, close: () => new Promise((r) => srv.close(() => r())) };
 }
 
-/** Настоящий JarvisBrowser на Chromium стенда (временный профиль; host-resolver: shop.jb.example → 127.0.0.1). */
+/** Настоящий JarvisBrowser на Chromium стенда (временный профиль; host-resolver: *.jb.example → 127.0.0.1; DNS гарда — fixtureLookup). */
 export function launchJarvisBrowser(chrome: string): { jb: JarvisBrowser; dispose(): Promise<void> } {
   const profile = mkdtempSync(join(tmpdir(), "jarvis-jb-"));
   const rootOnly = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
@@ -70,7 +90,8 @@ export function launchJarvisBrowser(chrome: string): { jb: JarvisBrowser; dispos
     profileDir: profile,
     startUrl: "about:blank",
     settleMs: 200,
-    extraArgs: [...rootOnly, "--headless=new", "--disable-gpu", "--no-proxy-server", `--host-resolver-rules=MAP ${PUBLIC_HOST} 127.0.0.1`],
+    resolveHost: fixtureLookup,
+    extraArgs: [...rootOnly, "--headless=new", "--disable-gpu", "--no-proxy-server", "--host-resolver-rules=MAP *.jb.example 127.0.0.1"],
   });
   return {
     jb,

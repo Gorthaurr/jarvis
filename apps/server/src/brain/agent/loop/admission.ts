@@ -4,6 +4,7 @@ import type { LoopCtx } from "./context.js";
 import type { RecalledSkill } from "../../../memory/skills.js";
 import type { ActionKind, SkillStep } from "@jarvis/protocol";
 import { kindNeedsInput } from "../../tools/input-kinds.js";
+import { stepsNavRefusal } from "../../tools/nav-dns.js";
 import { MACRO_NOTE_MARKER } from "../checkpoint.js";
 import { prefillNeedsLlmSteps } from "../skill-prefill.js";
 import { autoReplayBlocked } from "../replay-gate.js";
@@ -99,6 +100,8 @@ export async function runReplay(ctx: LoopCtx, recalled: RecalledSkill, replaySte
     // (needsLlm input.key с пустым combo → «enter»; browser.open с пустым url → «file:///…»).
     // Перепроверяем ЗАПОЛНЕННЫЕ шаги тем же гардом — иначе оба гарда (#5/#7) обходимы префиллом.
     if (replayUnsafe(prefilled)) throw new Error("после префилла шаги небезопасны для слепого реплея (URI/отправка)");
+    const nav = await stepsNavRefusal("реплей", prefilled);
+    if (nav) throw new Error(`слепой реплей запрещён — ${String(nav.content).slice(0, 200)}`);
     replaySteps = prefilled;
     if (!(await ensureInput())) throw new Error("ввод занят другой задачей (таймаут аренды)");
     if (task.cancel.cancelled) throw new Error("cancelled");
