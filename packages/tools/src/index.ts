@@ -200,7 +200,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "app_focus",
     description:
-      "Переключить фокус на уже запущенное приложение/окно (ActionCommand app.focus, §6). Без захвата ввода у пользователя сверх необходимого. ВНИМАНИЕ: window{op:'focus'} НЕ закрывает приложение — чтобы закрыть, используй app_close.",
+      "Переключить фокус на уже запущенное приложение/окно (горячий путь — window{op:'focus'}). Без захвата ввода сверх необходимого. Фокус НЕ закрывает приложение — закрыть: app_close.",
     input_schema: obj(
       {
         app: { type: "string", description: "Имя или идентификатор приложения для фокуса." },
@@ -227,7 +227,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "ui_ground",
     description:
-      "Найти элемент UI по роли/имени в a11y-дереве и получить его handle/bbox (ActionCommand ui.ground, §6). Результат (handle) возвращается в ActionResult.data и переиспользуется в act/act через Target by:\"handle\". Это предпочтительный способ адресации перед действием — без координат и CSS-селекторов. Ищет сперва в АКТИВНОМ окне, затем по всему рабочему столу. Не знаешь точное имя — nameMode:\"substring\" (матч по вхождению) или сперва look{what:'elements'} (все элементы окна списком).",
+      "Найти элемент UI по роли/имени в a11y-дереве и получить его handle/bbox (ActionCommand ui.ground, §6). handle из ответа — точный адрес для act{target:{handle}} или ui_invoke{target:{by:\"handle\", handle}}, без координат и CSS-селекторов. Ищет сперва в АКТИВНОМ окне, затем по всему рабочему столу. Не знаешь точное имя — nameMode:\"substring\" (матч по вхождению) или сперва look{what:'elements'} (все элементы окна списком).",
     input_schema: obj(
       {
         query: obj(
@@ -246,7 +246,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "ui_snapshot",
     description:
-      "ДЕШЁВЫЕ ГЛАЗА для нативных окон (§Волна2): список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name, automationId, value, bbox} одним вызовом (~сотни токенов текста вместо 2K-токенного скриншота; bbox — в кадре задачи, есть после screen_capture). Предпочитай его screen_capture для обычных приложений (проводник, настройки, плееры, IDE): осмотрел список → действуй точно по handle (act / act by:\"handle\"). ⚠️ ПОЛЯ ВВОДА: value:\"\" = поле реально ПУСТОЕ — его name и видимый серый текст это placeholder-ПОДСКАЗКА, не введённый текст; введённое всегда лежит в value. Пусто/мало элементов = окно UIA-слепое (игра/canvas) → тогда screen_capture. По умолчанию активное окно; pid — конкретный процесс (из look{what:'windows'}).",
+      "ДЕШЁВЫЕ ГЛАЗА для нативных окон (§Волна2): список ИНТЕРАКТИВНЫХ элементов окна {handle, role, name, automationId, value, bbox} одним вызовом (~сотни токенов текста вместо 2K-токенного скриншота; bbox — в кадре задачи, есть после screen_capture). Предпочитай его screen_capture для обычных приложений (проводник, настройки, плееры, IDE): осмотрел список → действуй точно по handle (act{target:{handle}}). ⚠️ ПОЛЯ ВВОДА: value:\"\" = поле реально ПУСТОЕ — его name и видимый серый текст это placeholder-ПОДСКАЗКА, не введённый текст; введённое всегда лежит в value. Пусто/мало элементов = окно UIA-слепое (игра/canvas) → тогда screen_capture. По умолчанию активное окно; pid — конкретный процесс (из look{what:'windows'}).",
     input_schema: obj(
       {
         pid: { type: "integer", description: "PID процесса окна (из look{what:'windows'}). Без него — активное окно." },
@@ -354,7 +354,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "ui_invoke",
     description:
-      "ОСНОВНОЙ путь действия (§6): выполнить UIA-паттерн над элементом по handle/роли без захвата курсора и без фокуса. Предпочитай act синтетическому вводу (act/input_type). pattern=setValue требует value; пароль, код подтверждения и карточные реквизиты через setValue НЕ вводим (§0) — гард отклонит, когда поле опознаётся по имени элемента (target by=role + name); по голому handle поле не видно, поэтому секрет не подставляй сам — попроси владельца. §14: invoke «Отправить»/«Оплатить» в мессенджере/банке/1С — вопрос владельцу (рубеж клиента судит найденный элемент и его программу).",
+      "Прямой UIA-паттерн над элементом по handle/роли без курсора и фокуса. Обычно это делает act сам (его invoke/set/toggle/select/expand); ui_invoke — когда нужен именно паттерн по handle из look{what:'elements'}. Синтетический ввод (input_type) — фолбэк. pattern=setValue требует value; пароль, код подтверждения и карточные реквизиты через setValue НЕ вводим (§0) — гард отклонит, когда поле опознаётся по имени элемента (target by=role + name); по голому handle поле не видно, поэтому секрет не подставляй сам — попроси владельца. §14: invoke «Отправить»/«Оплатить» в мессенджере/банке/1С — вопрос владельцу (рубеж клиента судит найденный элемент и его программу).",
     input_schema: obj(
       {
         target: TARGET_SCHEMA,
@@ -375,7 +375,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "input_type",
     description:
-      "Ввести текст синтетическим вводом в активный элемент (ActionCommand input.type, §6). FALLBACK: применяй только когда act с pattern=setValue невозможен. ЗАПРЕЩЕНО вводить УЧЁТНЫЕ И ПЛАТЁЖНЫЕ данные: пароли, коды подтверждения (СМС/2FA/одноразовые), номера карт, CVV и сроки действия (§0 принцип 5, §14) — их вводит владелец сам. Рубеж клиента отклонит печать в поле пароля/кода (по элементу в фокусе) и номер карты, но секрет не подставляй вовсе. Перевод строки = Enter: в мессенджере/банке/1С — вопрос владельцу ДО первой буквы.",
+      "Ввести текст синтетическим вводом в активный элемент (ActionCommand input.type, §6). FALLBACK: применяй, только когда act{do:'type'} / act{do:'set'} невозможны. ЗАПРЕЩЕНО вводить УЧЁТНЫЕ И ПЛАТЁЖНЫЕ данные: пароли, коды подтверждения (СМС/2FA/одноразовые), номера карт, CVV и сроки действия (§0 принцип 5, §14) — их вводит владелец сам. Рубеж клиента отклонит печать в поле пароля/кода (по элементу в фокусе) и номер карты, но секрет не подставляй вовсе. Перевод строки = Enter: в мессенджере/банке/1С — вопрос владельцу ДО первой буквы.",
     input_schema: obj(
       {
         text: { type: "string", description: "Текст для ввода." },
@@ -688,11 +688,11 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "code_run",
     description:
-      "Выполнить код для РЕАЛЬНОГО управления Windows (ActionCommand code.run): python | node | powershell (FullLanguage — Add-Type/COM/.NET доступны). Тебе ОТКРЫТЫ реестр, службы, сеть, COM, запуск процессов, системные пути — разбирайся и делай САМ (это твой основной инструмент «рук», не запасной). Подтверждение нужно ТОЛЬКО на необратимое: удаление файлов / форматирование диска. ЗАПРЕЩЕНО (рельсы §4): выключать/перезагружать ПК отсюда (только через system_power) и завершать процессы самого Джарвиса (electron/node/sidecar). Карты/платёжные данные — нельзя (§0). ВРЕМЯ: окно по умолчанию ~30 с; для тестов/сборок задай timeoutMs (до 180000 — но это съедает потолок задачи); всё дольше (прогон всех тестов, деплой, транскрипция, рендер) — background:true: ответ придёт СРАЗУ с jobId, а исход — job_status{jobId} (running/exitCode/хвост вывода) или wait_for{kind:\"file\"} по файлу результата; «запустил» ≠ «сделал». КАТАЛОГ: cwd — обязателен для git/npm/pnpm/vitest/docker в репозитории (без него команда идёт во временной папке и падает «not a git repository»). " +
-      "jarvis SDK (ТОЛЬКО lang=python) — третья ступень рук после act и act{steps}: процедура с логикой/циклами/ожиданиями — ОДНИМ скриптом `import jarvis`, те же актуаторы без раундов LLM между шагами. Мост под рубежом §0/§14 БЕЗ одобрения: коммит (Enter/«Отправить» в мессенджере/банке/1С; браузер — только browser_act) и ввод пароля/кода/карты → JarvisError; отправку сделай отдельным act — владелец подтвердит. ТАЙМАУТЫ В СЕКУНДАХ. API: " +
-      "jarvis.launch(app) | jarvis.focus(query) | jarvis.close(app) | jarvis.key('r'|'ctrl+s'|'enter', mode=None, scancode=False) [игры→scancode=True; mode='down'/'up' — удержание] | jarvis.write(text) [печать в фокус] | jarvis.click(x,y,button=None,count=None,frame=None) [x,y — экранные DIP из ocr()/find(); точка с картинки screen_capture — frame='<id кадра>'] | jarvis.find('текст') → Element [сначала UIA-снапшот→надёжный invoke без курсора, потом OCR; el.click()/el.write(text); проверяй `if el:`] | jarvis.wait_window(title, timeout=5) | jarvis.wait_text(text, timeout=5) | jarvis.wait_for(condition_dict, timeout=5) | jarvis.sleep(sec) | jarvis.snapshot()/ocr()/read_context()/windows(). " +
-      "Любой вызов кидает jarvis.JarvisError при провале → скрипт падает → ты видишь ЧЕСТНУЮ ошибку (не ложный успех), НЕ обёртывай в try без нужды. Отказ вуали режима выделения (владелец обводит область) завершает скрипт SystemExit(77) — НЕ пиши голый except:/except BaseException (перехваченный отказ = «выполнено» про невыполненное; я это замечу и помечу исход неизвестным). print(...) итог — вернётся в stdout. " +
-      "ПРИМЕР («открой блокнот и напиши тест»): `import jarvis\\njarvis.launch('notepad')\\njarvis.wait_window('Блокнот', timeout=5)\\njarvis.write('тест')\\nprint('готово')`.",
+      "Выполнить код для РЕАЛЬНОГО управления Windows: python | node | powershell (FullLanguage — Add-Type/COM/.NET). Открыты реестр, службы, сеть, COM, процессы, системные пути — для СИСТЕМЫ это основной путь: разбирайся и делай сам. Подтверждение — ТОЛЬКО на необратимое (удаление файлов, форматирование). ЗАПРЕЩЕНО: выключать/перезагружать ПК (только system_power), завершать процессы Джарвиса (electron/node/sidecar), карты/платёжные данные (§0). ВРЕМЯ: деф ~30 с; timeoutMs до 180000 (съедает потолок задачи); дольше (все тесты, деплой, рендер) — background:true: сразу jobId, исход — job_status{jobId} или wait_for{kind:\"file\"}; «запустил» ≠ «сделал». cwd обязателен для git/npm/pnpm/vitest/docker в репозитории. " +
+      "GUI скриптом — jarvis SDK (только python, `import jarvis`) — ТРЕТЬЯ ступень после act и act{steps}: для логики/циклов/ожиданий, которых серия act не выразит. Такой скрипт — это руки: идёт под арендой ввода, только синхронно (background с jarvis — отказ), и его «готово» — не сверка: после скрипта СВЕРЬ исход (look/screen_capture). Мост под рубежом §0/§14 без одобрения: коммит (Enter/«Отправить» в мессенджере/банке/1С; браузер — только browser_act) и пароль/код/карта → JarvisError; отправку — отдельным act (владелец подтвердит). ТАЙМАУТЫ В СЕКУНДАХ. API (всё — jarvis.*): " +
+      "launch(app) | focus(query) | close(app) | key('ctrl+s'|'enter', mode=None, scancode=False) [игры: scancode=True; mode='down'/'up' — удержание] | write(text) [печать в фокус] | click(x,y,button=None,count=None,frame=None) [x,y — DIP из ocr()/find(); точка со снимка — frame='<id кадра>'] | find('текст') → Element [UIA-снапшот → invoke без курсора, потом OCR; el.click()/el.write(text); проверяй `if el:`] | wait_window(title, timeout=5) | wait_text(text, timeout=5) | wait_for(condition_dict, timeout=5) | sleep(sec) | snapshot()/ocr()/read_context()/windows(). " +
+      "Провал вызова → jarvis.JarvisError → скрипт падает → ЧЕСТНАЯ ошибка; не глуши её try без нужды. Отказ вуали (владелец обводит область) — SystemExit(77): НЕ пиши голый except:/except BaseException (перехваченный отказ = «выполнено» про невыполненное; исход помечу неизвестным). Итог — print(...). " +
+      "ПРИМЕР: `import jarvis\\njarvis.launch('notepad')\\njarvis.wait_window('Блокнот', timeout=5)\\njarvis.write('тест')\\nprint('готово')`.",
     input_schema: obj(
       {
         lang: {
@@ -703,7 +703,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         code: { type: "string", description: "Исходный код. Полный доступ к системе; подтверждение лишь на необратимое." },
         cwd: { type: "string", description: "Рабочий каталог (репозиторий/проект). Без него — временная папка." },
         timeoutMs: { type: "integer", minimum: 1000, maximum: 180000, description: "Окно этого запуска, мс (деф ~30000). Длинное ожидание съедает потолок задачи — для долгого бери background." },
-        background: { type: "boolean", description: "true — фоновое задание: вернуть jobId сразу, исход спрашивать job_status." },
+        background: { type: "boolean", description: "true — фоновое задание: вернуть jobId сразу, исход спрашивать job_status. Не для скрипта с import jarvis (руки — только синхронно)." },
       },
       ["lang", "code"],
     ),
@@ -1565,13 +1565,19 @@ const JARVIS_BROWSER_TOOLS: ToolSchema[] = [
   {
     name: "web_read",
     description:
-      "Прочитать читаемый текст ТЕКУЩЕЙ страницы в браузере Джарвиса (после web_open/web_act). Возвращает title/url/text + loginWall. loginWall=true означает СТЕНУ ЛОГИНА (сайт требует войти): не выдумывай содержимое и не читай дальше — вызови web_login(url) и попроси пользователя войти, затем продолжай через web_open/web_read.",
-    input_schema: obj({}, []),
+      "ГЛАЗА невидимого браузера Джарвиса (после web_open/web_act). Деф (view:\"text\") — читаемый текст ТЕКУЩЕЙ страницы: title/url/text + loginWall; loginWall=true — СТЕНА ЛОГИНА: не выдумывай содержимое — web_login(url), владелец войдёт сам, потом web_open/web_read. view:\"elements\" (query — фильтр по тексту/лейблу) — интерактивные элементы с УСТОЙЧИВЫМИ селекторами и состоянием: чем кликать web_act{intent:'click', params:{selector}} и как СВЕРИТЬ его исход.",
+    input_schema: obj(
+      {
+        view: { type: "string", enum: ["text", "elements"], description: "text (деф) — текст страницы; elements — интерактивные элементы с селекторами." },
+        query: { type: "string", description: "elements: фрагмент текста/лейбла для фильтра." },
+      },
+      [],
+    ),
   },
   {
     name: "web_inspect",
     description:
-      "ГЛАЗА на любой сайт в браузере Джарвиса: вернуть список интерактивных элементов (кнопки/ссылки/поля/role/aria/text) с УСТОЙЧИВЫМИ селекторами и состоянием. Зови, когда не знаешь что кликнуть, web_act «не сработал» / элемент не найден, или нужен точный selector. Цикл: web_inspect (можно query — фрагмент текста/лейбла для фильтра) → выбери элемент → web_act{intent:'click',selector:'…'} (точно, не угадывая) → проверь web_inspect/web_read. Это заменяет per-site хардкод: на ЛЮБОМ сайте смотри элементы и действуй по их селекторам.",
+      "ГЛАЗА на любой сайт в браузере Джарвиса: вернуть список интерактивных элементов (кнопки/ссылки/поля/role/aria/text) с УСТОЙЧИВЫМИ селекторами и состоянием. Зови, когда не знаешь что кликнуть, web_act «не сработал» / элемент не найден, или нужен точный selector. Горячий путь к нему — web_read{view:'elements', query}. Цикл: элементы (query — фильтр по тексту/лейблу) → выбери → web_act{intent:'click', params:{selector:'…'}} (точно, не угадывая) → сверь элементами/текстом. Это заменяет per-site хардкод: на ЛЮБОМ сайте смотри элементы и действуй по их селекторам.",
     input_schema: obj(
       {
         query: { type: "string", description: "Фрагмент текста/лейбла для фильтра элементов (необязательно)." },
@@ -1583,13 +1589,13 @@ const JARVIS_BROWSER_TOOLS: ToolSchema[] = [
   {
     name: "web_act",
     description:
-      "Действие на текущей странице браузера Джарвиса: click (по тексту или CSS-селектору), type (ввести текст в фокус/селектор), scroll (прокрутить), key (нажать Enter/Tab/Escape). Композируется с web_open/web_read для автономной работы на сайте. Пароли, коды подтверждения и карточные реквизиты через type НЕ вводим (§0): ввод в поле, опознанное по params.selector/лейблу, гард отклоняет; вход в сервис — через web_login, владелец входит сам.",
+      "Действие на текущей странице браузера Джарвиса: click (по тексту или CSS-селектору), type (ввести текст в фокус/селектор), scroll (прокрутить), key (нажать Enter/Tab/Escape). Исход НЕ подтверждён самим действием — сверь: web_read (текст) или web_read{view:'elements'} (состояние элементов). Пароли, коды подтверждения и карточные реквизиты через type НЕ вводим (§0): ввод в поле, опознанное по params.selector/лейблу, гард отклоняет; вход в сервис — через web_login, владелец входит сам.",
     input_schema: obj(
       {
         intent: { type: "string", enum: ["click", "type", "scroll", "key", "upload"], description: "Тип действия. upload — положить ФАЙЛ С ДИСКА в <input type=file> текущей страницы (CDP setFileInputFiles, размер не ограничен) — так «выложи видео/фото» в залогиненном браузере Джарвиса." },
         params: {
           type: "object",
-          description: "Параметры: для click — {text} или {selector}; для type — {text, selector?}; для scroll — {dy}; для key — {key:'Enter'|'Tab'|'Escape'}; для upload — {path, selector?} (селектор input[type=file], деф первый на странице; после upload сверь превью/имя файла через web_read/web_inspect, «Опубликовать» — отдельный клик с подтверждением).",
+          description: "Параметры: для click — {text} или {selector}; для type — {text, selector?}; для scroll — {dy}; для key — {key:'Enter'|'Tab'|'Escape'}; для upload — {path, selector?} (селектор input[type=file], деф первый на странице; после upload сверь превью/имя файла через web_read{view:'elements'}, «Опубликовать» — отдельный клик с подтверждением).",
         },
       },
       ["intent"],
@@ -2167,7 +2173,7 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   // форм — главный рычаг), а browser_close ушёл в COLD: закрытие вкладок — browser_tabs{op:"close"} (канонизация в
   // facades.ts), прежнее имя исполняется по имени — старые навыки работают. Горячих по-прежнему 60.
   "browser_close",
-  "web_inspect", // отладка в невидимом браузере Джарвиса — редко
+  "web_inspect", // W3 (L-8): горячий путь к нему — web_read{view:"elements"} (facades.ts); схема-двойник холодная
   "telegram_send_voice", // голосовые сообщения в TG — редко против текста (telegram_send горячий)
   // system_power/system_lock — ГОРЯЧИЕ (причина №5): «выключи компьютер», «заблокируй» — ежедневные голосовые
   // команды дома; необратимое — под подтверждением, схемы крошечные.
@@ -2180,11 +2186,8 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "self_patch",
 ]);
 
-/** Однострочник инструмента для каталога «по запросу» (имя + первая фраза описания). */
-export function toolCatalogLine(t: Pick<ToolSchema, "name" | "description">): string {
-  const desc = (String(t.description || "").split(/(?:\. |\n|—)/)[0] ?? "").trim().slice(0, 100);
-  return `- ${t.name}: ${desc}`;
-}
+// W3 (L-10): строка каталога холодных — целые фразы без висячих скобок + явные подсказки (catalog.ts).
+export { CATALOG_HINTS, CATALOG_LINE_MAX, catalogSummary, toolCatalogLine } from "./catalog.js";
 
 /** Имена всех актуаторных инструментов (эмитят ActionCommand). Полезно для гейтинга на клиенте. */
 export const ACTUATOR_TOOL_NAMES: readonly string[] = Object.values(ACTUATOR_TOOL_BY_KIND);
@@ -2207,6 +2210,15 @@ export * from "./facades.js";
  * переноса другого в COLD — падение сборки, а не молчаливый рост кешируемого префикса (§15).
  */
 export const HOT_TOOL_CEILING = 60;
+
+/**
+ * W3 (L-10): потолок ВЕСА горячего набора — Σ JSON схем {name, description, input_schema}, что уходят в tools[] КАЖДОГО
+ * хода (на подписке схема едет в описании MCP-инструмента). На ревью 26.09 — 75 110 символов при 60 схемах.
+ */
+export const HOT_CHARS_CEILING = 65_000;
+export function hotToolChars(): number {
+  return hotToolNames().reduce((n, name) => n + JSON.stringify(TOOLS_BY_NAME[name]).length, 0);
+}
 
 /** W2 (решение №9): поля верхнего уровня схемы — allowlist сборки ActionCommand (сервер, command-fields.ts). */
 export function toolInputFields(name: string): ReadonlySet<string> {
