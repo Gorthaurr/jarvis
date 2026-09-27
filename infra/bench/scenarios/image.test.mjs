@@ -31,7 +31,9 @@ test("browser_read{view:image}: снимок вкладки приходит и 
   const img = image(r);
   assert.ok(img.bytes > 5_000, `снимок подозрительно мал: ${img.bytes} байт`);
   const [file] = saveImages(r.result, "image-full");
-  const text = execFileSync("tesseract", [file, "-", "-l", "rus+eng"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  // OMP_THREAD_LIMIT=1: под нагрузкой (сервер+Chromium на 4 CPU) OpenMP tesseract крутится вхолостую — 0,25 с → 38 с.
+  const env = { ...process.env, OMP_THREAD_LIMIT: "1" };
+  const text = execFileSync("tesseract", [file, "-", "-l", "rus+eng"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env });
   assert.match(text, /Маргарит|корзин/i, `на снимке не страница лавки (OCR: ${text.slice(0, 200)})`);
 });
 

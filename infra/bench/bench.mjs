@@ -63,7 +63,8 @@ const commands = {
   async shot() {
     const file = lib.shot(pos[1]);
     // OCR — по полному разрешению (на уменьшенном кадре tesseract путает кириллицу), масштаб — потом.
-    const text = opts.ocr ? execFileSync("tesseract", [file, "-", "-l", "rus+eng"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }) : "";
+    const env = { ...process.env, OMP_THREAD_LIMIT: "1" }; // OpenMP tesseract под нагрузкой крутится вхолостую
+    const text = opts.ocr ? execFileSync("tesseract", [file, "-", "-l", "rus+eng"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env }) : "";
     if (opts.scale) execFileSync("convert", [file, "-resize", opts.scale, file]);
     print(file);
     if (text) print(text);
