@@ -3499,7 +3499,7 @@ Electron-клиента; живой смоук в игре — за владел
   отказе ДО первой дельты; `anthropic.ts` текст стаба дельтой не отдаёт.
 - **Задача видна в очереди за семафором** (`queuedPreTask` → `opts.preTask`, state queued; отменённая не
   стартует); цель петли — явный `text` (последнее user-сообщение промпта); `pushTurn` пустое игнорирует.
-- **§14 на клиенте** (`actuators/commit-guard.ts`, данные в `@jarvis/shared/commit-risk`): Enter/Ctrl+Enter в
+- **§14 на клиенте** (`actuators/commit-guard.ts` — W2 27.09: удалён, заменён рубежом `inject.ts`; данные в `@jarvis/shared/commit-risk`): Enter/Ctrl+Enter в
   рискованном процессе (мессенджер/банк/1С) с SDK-моста (`guardedDispatch` в `index.ts`) и из реплея
   навыка (`client-actuator`) — честный отказ «используй input_key». Передний план неизвестен → пропуск.
 - **Пиннинг `/ext`** (`ws-routes.ts` `pinnedExtId` ← `JARVIS_EXT_ID`): только своё расширение; не задан →

@@ -13,7 +13,7 @@
  * Реверт-проверка: убери ранний Enter в act.ts — (3) падает; preflightText в type-chunks — (2); injectedFailure — (4);
  * noteFrame/frame в dispatch — (1).
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Сервер читает каталог данных на загрузке модулей — изолированный tmp, как vitest.setup сервера.
 await vi.hoisted(async () => {
@@ -43,6 +43,12 @@ let side: FakeSidecar;
 const ops = (): string[] => side.mutations().map((c) => (c.op === "key" ? `key:${String(c.args.combo)}` : c.op === "type" ? `type:${String(c.args.text)}` : c.op));
 const text = (r: { content: unknown }): string => (typeof r.content === "string" ? r.content : JSON.stringify(r.content));
 const MESSAGE = el(12, "Сообщение", "edit", { x: 20, y: 900, w: 460, h: 32 });
+
+const prevObserve = process.env.JARVIS_FUSED_OBSERVE;
+afterAll(() => {
+  if (prevObserve === undefined) delete process.env.JARVIS_FUSED_OBSERVE;
+  else process.env.JARVIS_FUSED_OBSERVE = prevObserve;
+});
 
 beforeEach(() => {
   process.env.JARVIS_FUSED_OBSERVE = "0"; // наблюдение после действия — не предмет сценариев (иначе лишние захваты)

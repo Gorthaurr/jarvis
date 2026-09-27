@@ -87,7 +87,8 @@ describe("дыры мутационной таблицы петли — закр
   it("cap-by-loop-iters: канал падает и возвращается 50 раз — кап итераций исчерпан → честное «слишком много шагов»", async () => {
     const user = "u-holes-cap";
     const tasks = new TaskManager();
-    const click = (n: number) => ({ toolUses: [{ id: `c${n}`, name: "input_click", input: { target: { by: "coords", x: 10 + n, y: 20 } } }] });
+    // W2 П5: координаты модели — в кадре (frame); без него сервер отказал бы ДО канала, и кап меряла бы не эта дыра.
+    const click = (n: number) => ({ toolUses: [{ id: `c${n}`, name: "input_click", input: { target: { by: "coords", x: 10 + n, y: 20, frame: "f1" } } }] });
     const llm = new MockLlmProvider(Array.from({ length: 60 }, (_, n) => click(n)));
     const s = session(user, () => ({ ok: false, error: { code: "channel_down", message: "канал недоступен" } }), () => true);
     const reply = await handleUserText(s, "ткни по кнопке", deps(user, llm, tasks));
