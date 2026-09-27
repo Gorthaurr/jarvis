@@ -8,7 +8,8 @@
  *  - verified:"failed" — действие УШЛО, признак не наступил → НЕ observed и `uncertain` (журнал чекпойнта: «исход
  *    неизвестен — сверь перед повтором», а не «ОШИБКА = не сделано», после которой «доделай» кликает второй раз);
  *  - verified:"unchecked" — признак не задан / сенсор не ответил → судим по дельте наблюдения, как у input_click.
- * Частичное исполнение (клик в поле ушёл, печать упала) приезжает ошибкой с `stepActionInjected` → тоже `uncertain`.
+ * Частичное исполнение (клик в поле ушёл, печать упала или её отклонил рубеж) приезжает ошибкой с `stepActionInjected`
+ * → тоже `uncertain` (injected-outcome.ts — общий с generic-путём dispatch).
  * Ошибки поиска/фокуса/вуали/канала — прежними путями dispatch (null отсюда).
  */
 import type { ActionResult } from "@jarvis/protocol";
@@ -23,6 +24,7 @@ import {
   stripVeilFields,
   wrapUntrusted,
 } from "../dispatch-util.js";
+import { injectedFailure } from "../injected-outcome.js";
 
 interface ActData {
   found?: { via?: string; name?: string; role?: string; handle?: string; note?: string };
@@ -59,10 +61,8 @@ export function actResult(result: ActionResult): ToolResult | null {
       out.uncertain = true;
       return out;
     }
-    if (result.error?.code !== "runtime" || result.stepActionInjected !== true) return null;
-    const out = err(`act: ${result.error.message} ИСХОД НЕИЗВЕСТЕН — не повторяй вслепую, сверь состояние.`);
-    out.uncertain = true;
-    return out;
+    // Часть ушла (клик в поле, кусок печати), дальше сбой или отказ рубежа без вопроса — исход неизвестен (п.5 W2).
+    return injectedFailure("act", result);
   }
   const raw = (result.data && typeof result.data === "object" ? result.data : {}) as ActData & Record<string, unknown>;
   const { observation, ...rest } = raw;

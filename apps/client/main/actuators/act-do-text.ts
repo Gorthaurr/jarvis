@@ -51,14 +51,17 @@ async function typeOrPaste(text: string): Promise<string> {
 /**
  * Шаг ПОСЛЕ первого действия: провал → исход неизвестен (injected), вуаль — как есть. Протокольный исход (рубеж
  * инжекции: `denied` + needsApproval) сохраняется — сервер видит, ЧТО не пропущено, и что часть уже ушла (без повтора).
+ * `first` — это и есть первое действие (печать без цели): протокольный отказ сам знает, ушла ли часть (typeText
+ * ставит injected только после ушедшего куска) — «ничего не ушло» не превращается в «набрал, но не отправил».
  */
-async function after<T>(what: string, run: () => Promise<T>): Promise<T> {
+async function after<T>(what: string, run: () => Promise<T>, first = false): Promise<T> {
   try {
     return await run();
   } catch (e) {
     if (e instanceof DrawingOverlayError) throw e;
     const text = `${what}: ${msg(e)} — исход неизвестен, не повторяй вслепую`;
     const a = actionErrorOf(e);
+    if (first && a && a.code !== "runtime") throw e;
     if (a && a.code !== "runtime") throw new ActionError(text, { code: a.code, data: a.data, injected: true });
     throw new ActPartialError(text);
   }
@@ -111,7 +114,7 @@ export async function doType(f: FoundTarget, cmd: ActCommand, p: ActParams): Pro
  */
 export async function doTypeFocused(cmd: ActCommand, p: ActParams): Promise<ActDone> {
   const text = p.text ?? "";
-  const note = await after("печать в поле с фокусом не удалась (часть текста могла уйти)", () => typeOrPaste(text));
+  const note = await after("печать в поле с фокусом не удалась (часть текста могла уйти)", () => typeOrPaste(text), true);
   if (cmd.enter === true) await after("напечатал в поле с фокусом, Enter не нажат", () => pressKey("Enter"));
   return { did: `напечатал ${text.length} симв. в поле с фокусом${cmd.enter === true ? " и нажал Enter" : ""}${note}`, physical: true };
 }

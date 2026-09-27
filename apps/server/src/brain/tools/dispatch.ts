@@ -46,6 +46,7 @@ import { credentialGate, credentialGateNotes } from "./credential-gate.js";
 import { guiGate } from "./gui-gate.js";
 import { commandFromInput } from "./command-fields.js";
 import { sendActionApproved } from "./send-approved.js";
+import { injectedFailure } from "./injected-outcome.js";
 import { noteFrame, withTaskFrame } from "./frame-memory.js";
 import { actSteps, isActSteps } from "./handlers/act-steps.js";
 import { lookAtScreen } from "./handlers/screen.js";
@@ -866,10 +867,8 @@ async function dispatchToolCore(
     applyVeil(out, result.data);
     return out;
   }
-  {
-    const od = overlayDeniedResult(result);
-    if (od) return od;
-  }
+  const od = overlayDeniedResult(result) ?? injectedFailure(`Действие ${kind}`, result); // часть ушла → исход неизвестен
+  if (od) return od;
   const code = result.error?.code ?? "runtime";
   const msg = result.error?.message ?? "";
   // Б4 (г/д): канал мёртв (resume-grace) → не «действие не удалось», а «канал недоступен» + флаг для петли.
