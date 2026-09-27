@@ -43,6 +43,16 @@ function findAnchor(lines, anchor) {
   return hits;
 }
 const names = process.argv[2] === "all" || !process.argv[2] ? Object.keys(MUTS) : [process.argv[2]];
+// W2 (П4): прерывание (timeout/Ctrl+C) посреди мутации не оставляет мутированный файл: сигнал обрабатывается, когда
+// вернётся spawnSync (прогон тестов), — файл восстанавливается из копии в памяти, и только потом выход.
+let pending = null;
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(sig, () => {
+    if (pending) fs.writeFileSync(pending.file, pending.raw);
+    console.error(`прервано (${sig}) — ${pending ? `${pending.file} восстановлен` : "мутаций в работе не было"}`);
+    process.exit(130);
+  });
+}
 const table = [];
 for (const name of names) {
   const [a, b] = MUTS[name];
@@ -58,6 +68,7 @@ for (const name of names) {
   if (found.error) { table.push({ name, error: found.error }); continue; }
   const { file, lines, at } = found;
   const raw = fs.readFileSync(file, "utf8");
+  pending = { file, raw };
   // замена: первая строка якоря → строка(и) мутации с тем же отступом; остальные строки якоря удаляются
   const indent = /^\s*/.exec(lines[at])[0];
   const mutated = [...lines];
@@ -75,6 +86,7 @@ for (const name of names) {
     table.push({ name, file: path.basename(file), failed });
   } finally {
     fs.writeFileSync(file, raw);
+    pending = null;
   }
 }
 const out = process.argv[3] ?? path.join(require("os").tmpdir(), "mutation-table.json");
