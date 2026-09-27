@@ -18,7 +18,12 @@ export interface Turn {
 
 /** A1: реплики для сон-цикла — без принятых окном без «Джарвис» (чужая речь не становится «фактом о владельце»). */
 export function consolidationTurns(turns: readonly Turn[]): Array<{ role: Turn["role"]; text: string }> {
-  return turns.filter((t) => !t.unaddressed).map((t) => ({ role: t.role, text: t.text }));
+  let skipping = false; // ответ Джарвиса на чужую речь — тоже вон (эхом «Понял, голосовые пропускаю» факт вернулся бы)
+  const kept = turns.filter((t) => {
+    if (t.role === "user") skipping = t.unaddressed === true;
+    return !skipping;
+  });
+  return kept.map((t) => ({ role: t.role, text: t.text }));
 }
 
 /** Сущность для анафоры (§10): объект, на который можно сослаться местоимением. */

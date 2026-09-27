@@ -79,7 +79,6 @@ export async function handleUserText(
   // (фраза была одной хезитацией) — оставляем оригинал, не теряем ход.
   const clean = cleanDisfluency(text.trim()) || text.trim();
   deps.memory.pushTurn("user", clean, meta?.viaWake === false);
-  if (meta?.origin !== "watch-action") deps.unaddressedUtterance = meta?.viaWake === false; // A1: судит ПОСЛЕДНЯЯ реплика владельца
 
   // ПАМЯТЬ — ОСОЗНАННАЯ, не свалка транскриптов. Раньше СЮДА писалась КАЖДАЯ реплика как «event»
   // (включая STT-мусор, команды, обрывки) → потом всплывала в приветствии/контексте как «странные

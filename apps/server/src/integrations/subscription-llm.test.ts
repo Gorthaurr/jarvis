@@ -355,6 +355,24 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
 
   // Адверс-ревью р1: у реального SDKResultError текст причины — в errors[], поля result нет. Раньше причина
   // терялась («резервный канал не ответил: error_during_execution»), и владельцу нельзя было назвать её.
+  // Ревью р2: второй путь CLI кладёт первым служебную строку «[ede_diagnostic] …» — причина за ней.
+  it("errors[] с [ede_diagnostic] первым → причина всё равно распознана (auth)", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["[ede_diagnostic] result_type=user last_content_type=text stop_reason=end_turn", "OAuth token has expired"] }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+    expect(lastSubscriptionFailure()?.kind).toBe("auth");
+  });
+
+  // Ревью р2: пустой текст ошибки не должен превращать провал в пустой «успех» (потребитель судит errorText на истинность).
+  it.each([
+    [{ type: "result", subtype: "error_during_execution", is_error: true, errors: [""] }],
+    [{ type: "result", subtype: "success", is_error: true, result: "" }],
+  ])("пустой текст ошибки %# → всё равно провал, а не пустой успех", async (res) => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([res]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+  });
+
   it("error_during_execution реальной формы (errors[]) → причина распознана (auth), а не «не ответил»", async () => {
     _resetSubscriptionFailureForTest();
     const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["OAuth session expired"] }]);

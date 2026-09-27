@@ -5,14 +5,19 @@
  * платный STT, потолок MAX_RECONNECTS не срабатывал никогда.
  *
  * Правила (швы в deepgram.ts): бюджет реконнектов обнуляет только ПРОГРЕСС — свежее аудио хода на живой сокет,
- * а не open; 1011 во время хода без свежего аудио после open = ход завис: не переподключаемся, стрим закрыт
- * (пайплайн переоткроет на следующей речи).
+ * а не open; 1011 во время хода = ход завис, если Deepgram закрыл ПО ПРОСТОЮ («did not receive audio» — так все 1639
+ * закрытий 1011 в проде 26.09) или звука после open не было вовсе: не переподключаемся, стрим закрыт (пайплайн
+ * переоткроет на следующей речи). Реплей буфера — звук хода (адверс-ревью р1), но таймаут по простою реплеем не
+ * лечится: иначе шторм держал бы только бюджет (~6 кругов, ~100 с повторно оплаченного STT на зависание, ревью р2).
  */
 
 export const STALLED_TURN_LOG =
   "deepgram: ход без аудио — 1011 по простою, не переподключаюсь (стрим закрыт, откроется на следующей речи)";
 
 /** Закрытие сокета — признак зависшего хода (реконнект лишь реплеил бы старый буфер по кругу)? */
-export function isStalledTurnClose(code: number | undefined, activeTurn: number, audioSinceOpen: boolean): boolean {
-  return code === 1011 && activeTurn >= 0 && !audioSinceOpen;
+export function isStalledTurnClose(code: number | undefined, reason: unknown, activeTurn: number, audioSinceOpen: boolean): boolean {
+  return code === 1011 && activeTurn >= 0 && (IDLE_TIMEOUT_RE.test(String(reason ?? "")) || !audioSinceOpen);
 }
+
+/** Причина закрытия Deepgram «по простою» (NET-0001): звука нет дольше ~10 с. */
+const IDLE_TIMEOUT_RE = /did not receive audio|NET-0001/iu;

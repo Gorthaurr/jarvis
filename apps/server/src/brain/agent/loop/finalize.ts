@@ -25,7 +25,7 @@ export async function maybeSelfLearn(ctx: LoopCtx, o: LoopOutcome): Promise<void
   // сохраняла навык из траектории, которая НЕ привела к результату — recall потом подсовывал бы её.
   // `taskOk` — единственный полный список; новый флаг больше не забудется.
   // T-F1: смоук агента не учит навыки владельца.
-  if (!deps.devSession && !deps.unaddressedUtterance && taskOk && st.progress.finalText && st.honesty.anyToolSucceeded && learnWorthy && !recalled && !st.progress.skillSavedInLoop && deps.skills) {
+  if (!deps.devSession && !toolCtx.unaddressedTurn && taskOk && st.progress.finalText && st.honesty.anyToolSucceeded && learnWorthy && !recalled && !st.progress.skillSavedInLoop && deps.skills) {
     const learnedId = await selfLearnSkill({
       deps,
       sys,
@@ -96,7 +96,7 @@ export function recordTaskMetrics(ctx: LoopCtx, o: LoopOutcome): void {
   // T-F3 (ревью 2026-09-24): исход кредитуем только УВЕРЕННО вспомненному навыку. Шумный recall e5 (sim 0.82–0.88 на
   // чужие задачи) раньше начислял исход не тому навыку — плохой навык не подавлялся, хороший штрафовался.
   // Контроль-1 №5: и навыку, чей авто-реплей реально исполнялся (порог реплея 0,84 ниже порога «уверенного» 0,9).
-  if (!deps.devSession && !deps.unaddressedUtterance && (confidentRecall(recalled) || st.progress.macroReplayed) && recalled && !recalled.fromShared && deps.skills?.recordOutcome && !st.exit.cancelled && !st.exit.limited && !st.exit.timedOut && !st.exit.llmStubbed && !st.exit.queueTimedOut && !st.exit.channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
+  if (!deps.devSession && !ctx.toolCtx.unaddressedTurn && (confidentRecall(recalled) || st.progress.macroReplayed) && recalled && !recalled.fromShared && deps.skills?.recordOutcome && !st.exit.cancelled && !st.exit.limited && !st.exit.timedOut && !st.exit.llmStubbed && !st.exit.queueTimedOut && !st.exit.channelLost && !capExhausted && !inputDeniedFailure && !overlayDeniedFailure) {
     void deps.skills.recordOutcome(deps.userId, recalled.id, taskOk).catch((e) =>
       log.debug("recordOutcome навыка пропущен", e instanceof Error ? e.message : String(e)),
     );
@@ -111,7 +111,7 @@ export function recordTaskMetrics(ctx: LoopCtx, o: LoopOutcome): void {
   // любой recall — и жесты «напиши реферат» (клики в чат, набор текста) оседали слепым реплеем в чужих навыках.
   const macroTargetId =
     st.progress.savedSkillId ?? (recalled && !recalled.fromShared && confidentRecall(recalled) ? recalled.id : undefined);
-  if (!deps.devSession && !deps.unaddressedUtterance && taskOk && macroTargetId && deps.skills?.attachReplay && st.progress.gestureTrace.length > 0) {
+  if (!deps.devSession && !ctx.toolCtx.unaddressedTurn && taskOk && macroTargetId && deps.skills?.attachReplay && st.progress.gestureTrace.length > 0) {
     const lines = compileReplayLines(st.progress.gestureTrace);
     if (lines.length > 0) {
       const skillsRef = deps.skills;

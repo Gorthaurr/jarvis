@@ -794,7 +794,7 @@ class PersistentDeepgramConnection {
         log.info("deepgram WS закрыт (персист)", { code: ev?.code, reason: String(ev?.reason ?? "").slice(0, 80), msgs: this.msgCount });
         this.open = false;
         this.clearKeepAlive();
-        if (isStalledTurnClose(ev?.code, this.activeTurn, this.audioSinceOpen)) return void (log.warn(STALLED_TURN_LOG), this.socketDied());
+        if (isStalledTurnClose(ev?.code, ev?.reason, this.activeTurn, this.audioSinceOpen)) return void (log.warn(STALLED_TURN_LOG), this.socketDied());
         if (!this.disposed && this.shouldReconnect(ev?.code)) {
           this.scheduleReconnect(); // committed/buffer СОХРАНЕНЫ → финал хода не теряем
           return;

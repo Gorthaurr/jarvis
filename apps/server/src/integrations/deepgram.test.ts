@@ -287,14 +287,14 @@ describe("Deepgram ПЕРСИСТЕНТНЫЙ WS (§10, JARVIS_DEEPGRAM_PERSISTE
     return st;
   };
 
-  it("R1: шторм 1011 со старым буфером и БЕЗ живого звука ограничен бюджетом (≤ 6 сокетов), стрим закрыт", async () => {
+  it("R1: прод-форма шторма — 1011 «did not receive audio» при буфере от начала хода → стоп на ПЕРВОМ сокете (ревью р2)", async () => {
     const t = new DeepgramSttProvider("k").open({ sampleRate: 16_000 });
     const st = watch(t);
     MockWS.instances[0]!.fire("open");
     t.pushAudio(new ArrayBuffer(640)); // в начале хода звук был → в буфере
     MockWS.instances[0]!.fire("close", { code: 1011, reason: "did not receive audio data" });
     await cycle(1011, 20, false, t);
-    expect(MockWS.instances.length).toBeLessThanOrEqual(6); // на старом коде — 21
+    expect(MockWS.instances.length).toBe(1); // на коде до фикса — 21, после ревью р1 — 6 (держал только бюджет)
     expect(st.closed).toBe(true);
   });
 

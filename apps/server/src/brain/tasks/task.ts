@@ -27,6 +27,7 @@ export interface CancelFlag {
  */
 export interface SteerChannel {
   pending: string[];
+  lastUnaddressed?: boolean; // A1: последняя поправка на ходу — без «Джарвис» (судит адресацию ЭТОЙ задачи)
 }
 
 /** Долгая задача (§20): цель, состояние, прогресс, итог. */

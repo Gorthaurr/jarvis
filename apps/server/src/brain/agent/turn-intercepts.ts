@@ -18,7 +18,7 @@ import { emotionName, matchEmotionCommand } from "../persona/emotion.js";
 import { looksLikeCommandUtterance } from "./replay-gate.js";
 import { hasCommitmentMarker, reflectCommitmentFromUtterance } from "./commitment-reflect.js";
 import { verbalize } from "../verbalize/index.js";
-import { refuseUnaddressed, skipUnaddressed } from "./unaddressed.js";
+import { skipUnaddressed } from "./unaddressed.js";
 import { isDuplicateGoal, looksLikeDoneEcho, looksLikeStatusQuery } from "../tasks/scope.js";
 
 /** «Зови меня X / меня зовут X / обращайся ко мне X» → имя (детерминированно, без LLM). */
@@ -145,7 +145,7 @@ export function interceptName(t: TurnCtx): AgentReply | null {
   // Память (§8/§11): пользователь представился → запоминаем имя НАВСЕГДА (профиль на диске),
   // подставляем в персону текущей сессии. Больше не спрашиваем при каждом запуске.
   const name = extractName(clean);
-  if (name && t.meta?.viaWake === false) return refuseUnaddressed(t, "имя");
+  if (name && skipUnaddressed(t.meta, "имя")) return null; // не сохраняем и не глотаем — реплику ведёт модель
   if (name) {
     void setDisplayName(deps.userId, name);
     if (deps.userContext) deps.userContext.displayName = name;
@@ -176,7 +176,7 @@ export function interceptMode(t: TurnCtx): AgentReply | null {
   // Смена режима-маски (§11): «будь дерзким» / «будь собой» — детерминированно, без LLM.
   // Персист в профиль; тон применится со следующего хода (и голос переключится в пайплайне).
   const modeId = matchModeCommand(clean);
-  if (modeId && modeId !== "butler" && t.meta?.viaWake === false) return refuseUnaddressed(t, "режим"); // сброс — можно
+  if (modeId && skipUnaddressed(t.meta, "режим")) return null; // матчер не якорный: «…как обычно» не глотаем
   if (modeId) {
     void setMode(deps.userId, modeId);
     const mode = getMode(modeId);
@@ -195,7 +195,7 @@ export function interceptEmotion(t: TurnCtx): AgentReply | null {
   // neutral (сброс) подтверждаем коротко; на не-нейтральной НЕ возвращаемся — пусть LLM прямо сейчас
   // произнесёт реплику в новой подаче (демонстрация по просьбе «скажи что-нибудь по-злому»).
   const emotionCmd = matchEmotionCommand(clean);
-  if (emotionCmd && emotionCmd !== "neutral" && t.meta?.viaWake === false) return refuseUnaddressed(t, "эмоция");
+  if (emotionCmd && skipUnaddressed(t.meta, "эмоция")) return null;
   if (emotionCmd) {
     void setEmotion(deps.userId, emotionCmd);
     if (emotionCmd === "neutral") {
@@ -252,7 +252,7 @@ export async function interceptActiveTask(t: TurnCtx): Promise<AgentReply | null
     // задачи — НЕ плодим вторую петлю и НЕ ждём её конца. Впрыскиваем в ИДУЩУЮ задачу (task.steer) —
     // петля подхватит перед ближайшим шагом — и сразу коротко подтверждаем. «new»-реплика (отдельное
     // дело) идёт прежним путём, самостоятельной параллельной задачей.
-    if (!freshContext && deps.tasks?.steer(activeTask.taskId, clean)) {
+    if (!freshContext && deps.tasks?.steer(activeTask.taskId, clean, t.meta?.viaWake)) {
       // Претензия/статус-запрос («ты не сделал», «я не вижу, что делаешь») — НЕ инструкция-правка: steer
       // впрыснут (петля перепроверит), но отвечаем ЧЕСТНЫМ СТАТУСОМ, а не «Принял, поправляю» — для
       // задачи-ожидания править нечего, и «поправляю» вводило в заблуждение. Инструкция-правка

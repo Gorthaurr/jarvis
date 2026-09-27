@@ -19,7 +19,9 @@ export function isApiErrorFrame(msg: Record<string, unknown>): boolean {
 export function resultOutcome(msg: Record<string, unknown>): { errorText?: string; resultText?: string } {
   const sub = typeof msg.subtype === "string" ? msg.subtype : "";
   const failed = (sub !== "" && sub !== "success") || msg.is_error === true || msg.api_error_status != null;
-  const firstError = Array.isArray(msg.errors) && msg.errors.length > 0 ? String(msg.errors[0]) : undefined;
-  if (failed) return { errorText: String(msg.result ?? firstError ?? (sub || "ошибка API")) };
-  return sub === "success" && typeof msg.result === "string" ? { resultText: msg.result } : {};
+  if (!failed) return sub === "success" && typeof msg.result === "string" ? { resultText: msg.result } : {};
+  // Первый НЕПУСТОЙ кандидат (пустая строка = ложный успех у потребителя), служебная диагностика CLI — последней.
+  const errors = Array.isArray(msg.errors) ? msg.errors.map((e) => String(e ?? "")) : [];
+  const reasons = [String(msg.result ?? ""), ...errors.filter((e) => !e.startsWith("[ede_diagnostic]")), ...errors];
+  return { errorText: reasons.find((e) => e.trim() !== "") ?? (sub || "ошибка API") };
 }
