@@ -2,99 +2,22 @@
  * Хендлеры ИСХОДЯЩИХ сообщений/заказов (§14) — вынесено из god-object dispatch.ts (§ревью).
  * telegram_send (невидимый CDP + расширение-фолбэк), telegram_send_voice, message_send (vk/telegram через
  * outbound-гард), order_place (red-line карты §0). Общие send-гарды (confirm-once + cadence + идемпотентность)
- * живут здесь, рядом с потребителями. Маршрутизация остаётся в dispatch (switch).
+ * — в send-guards.ts (реэкспорт ниже). Маршрутизация остаётся в dispatch (switch).
  */
 import { DEFAULT_ACTION_TIMEOUT_MS, type MessageChannel } from "@jarvis/protocol";
-import { AsyncMutex, TtlCache, nameSearchVariants } from "@jarvis/shared";
-import { approveSend, isSendApproved, listConsents, revokeSendMatching } from "../../consent.js";
-import { CadenceGuard } from "../../messaging/cadence.js";
+import { nameSearchVariants } from "@jarvis/shared";
+import { approveSend, listConsents, revokeSendMatching } from "../../consent.js";
 import { type DeliveryVerdict, probeDelivery } from "../../messaging/delivery-check.js";
 import { idempotencyKey, sendOutbound } from "../../messaging/outbound.js";
-import { ResendGuard, peerIdentityKeys, resendGuardWindowMs } from "../../messaging/resend-guard.js";
+import { peerIdentityKeys } from "../../messaging/resend-guard.js";
 import { CardDataError, DEFAULT_ORDER_POLICY, type OrderItem } from "../../orders/order-guard.js";
 import { placeOrder } from "../../orders/orders.js";
-import type { ConfirmOutcome, ToolContext, ToolResult } from "../dispatch.js";
-import { channelDownResult, confirmDeclineText, declined, gateDeclined, err, ok, overlayDeniedResult } from "../dispatch-util.js";
+import type { ToolContext, ToolResult } from "../dispatch.js";
+import { channelDownResult, confirmDeclineText, gateDeclined, err, ok, overlayDeniedResult } from "../dispatch-util.js";
+import { isExtNoReply } from "../ext-errors.js";
+import { agoOf, cadence, confirmSendOnce, placedOrderKeys, resendGuard, sendGateMessage, sendLock, sentKeys } from "./send-guards.js";
 
-/**
- * Подтверждение отправки адресату ОДИН РАЗ (§14, фидбэк пользователя). Если этого адресата уже одобряли
- * когда-либо (в т.ч. в прошлой сессии — согласие персистентно) — не переспрашиваем. Иначе спрашиваем;
- * чистое одобрение запоминаем НАВСЕГДА (ревизия текста согласие не фиксирует).
- */
-export async function confirmSendOnce(
-  ctx: ToolContext,
-  channel: string,
-  recipient: string,
-  summary: string,
-): Promise<ConfirmOutcome> {
-  if (isSendApproved(ctx.userId, channel, recipient)) {
-    return { approved: true, outcome: "approved" };
-  }
-  // Ф0: канала подтверждения нет вовсе → это НЕ отказ владельца, а невозможность его спросить.
-  if (!ctx.confirm) return { approved: false, outcome: "undelivered" };
-  const r = await ctx.confirm(summary, "send");
-  if (r.approved) await approveSend(ctx.userId, channel, recipient);
-  return r;
-}
-
-/**
- * Ф0 пульта: РАЗНЫЕ слова на разные исходы. Раньше любой неуспех звучал как «вы не подтвердили» —
- * то есть Джарвис утверждал, что владелец ПРИНЯЛ РЕШЕНИЕ, хотя тот мог вопроса вовсе не видеть
- * (мёртвый сокет, закрытая сессия) или не успеть ответить. Приписывать владельцу чужое решение —
- * та же ложь, что «Готово» без результата.
- */
-export function sendGateMessage(outcome: ConfirmOutcome["outcome"], what: string, to: string, repeat = false): string {
-  const act = repeat ? `повторную отправку ${what}` : `отправку ${what}`;
-  switch (outcome) {
-    case "undelivered":
-      return `Не отправил ${what} «${to}» — не смог спросить вашего подтверждения: связь с вашим экраном была недоступна.`;
-    case "expired":
-      return `Не отправил ${what} «${to}» — вы не ответили на подтверждение, и оно истекло. Скажите, если отправить.`;
-    default:
-      return `Не отправил ${what} — вы не подтвердили ${act} «${to}».`;
-  }
-}
-
-/** Cadence/идемпотентность переписки — на процесс (per-user внутри, §14). */
-export const cadence = new CadenceGuard();
-// Аудит-2 [8]: дедуп отправки — ОКНО, а не «навсегда». Прежний Set<string> без TTL/eviction: (а) блокировал
-// ЛЕГИТИМНЫЙ повтор той же фразы тому же адресату НАВСЕГДА («напиши маме 'еду домой'» назавтра не уходил);
-// (б) рос без ограничения на долгоживущем сервере. TtlCache даёт окно дедупа (анти-retry burst) + eviction.
-const SEND_DEDUP_MS = Math.max(30_000, Number(process.env.JARVIS_SEND_DEDUP_MS) || 10 * 60_000);
-export const sentKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
-/** Идемпотентность заказов — окно (§14; аудит-2 [8]). */
-const placedOrderKeys = new TtlCache<true>({ ttlMs: SEND_DEDUP_MS, maxEntries: 2000 });
-/**
- * Ресенд-гард (эпизод «двойная отправка Кате» 2026-07-24): короткое окно «этому человеку только что
- * уже уходило сообщение». Ловит то, что упускает точная идемпотентность: повтор с другой пунктуацией/
- * регистром/склонением имени. Адресат помнится под ВСЕМИ ключами идентичности (peerId + имя + стем).
- * ЛЕНИВО (ревью: .env грузится в index.ts ПОСЛЕ ESM-хойст-импортов — module-load читал бы дефолт,
- * игнорируя JARVIS_RESEND_GUARD_MS; та же грабля, что device у эмбеддера).
- */
-let _resendGuard: ResendGuard | undefined;
-export function resendGuard(): ResendGuard {
-  _resendGuard ??= new ResendGuard(resendGuardWindowMs());
-  return _resendGuard;
-}
-/** Только для тестов: пересоздать гард (подхватить env текущего теста). */
-export function _resetResendGuardForTest(): void {
-  _resendGuard = undefined;
-}
-
-/**
- * Сериализация исходящих ПЕР-ПОЛЬЗОВАТЕЛЬ (ревью: две параллельные задачи проходили check ресенд-гарда
- * ДО record друг друга → обе слали без единого confirm). Мьютекс делает «check → confirm → send →
- * record» атомарным относительно других отправок того же пользователя; отправки редки — очередь дёшева.
- */
-const sendLocks = new Map<string, AsyncMutex>();
-export function sendLock(userId: string): AsyncMutex {
-  let m = sendLocks.get(userId);
-  if (!m) {
-    m = new AsyncMutex();
-    sendLocks.set(userId, m);
-  }
-  return m;
-}
+export { _resetResendGuardForTest, cadence, confirmSendOnce, resendGuard, sendGateMessage, sendLock, sentKeys } from "./send-guards.js";
 
 /**
  * Сколько ждём ЧТЕНИЕ чата при сверке «ушло ли на самом деле» (delivery-check). Отдельный, короткий
@@ -119,11 +42,6 @@ async function probeTelegramDelivery(
     const data = r.data as { messages?: unknown } | undefined;
     return { ok: r.ok, messages: data?.messages };
   });
-}
-
-/** Человекочитаемое «N с назад» для сводки confirm/ответа модели (нет возраста — честное «недавно»). */
-function agoOf(ageMs: number | undefined): string {
-  return ageMs === undefined ? "недавно" : `${Math.max(1, Math.round(ageMs / 1000))} с назад`;
 }
 
 /** Проблема резолва адресата (не транспорт): не нашёл/неоднозначно/не залогинен. */
@@ -369,8 +287,11 @@ async function telegramSendVoiceLocked(ctx: ToolContext, input: Record<string, u
   const recent = resendGuard().check(ctx.userId, "telegram", guardKeys, text);
   if (recent) {
     if (!ctx.confirm) return err(`Повторная отправка «${to}» требует подтверждения (§14), а канал подтверждения недоступен.`);
+    const said = `«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»`;
     const c = await ctx.confirm(
-      `«${to}» только что (${agoOf(recent.ageMs)}) получал: «${recent.prev.bodyPreview}».\nОтправить ещё и ГОЛОСОВОЕ:\n«${text.slice(0, 160)}${text.length > 160 ? "…" : ""}»?`,
+      recent.prev.uncertain === true
+        ? `Прошлая отправка «${to}» оборвалась ${agoOf(recent.ageMs)}, и я не знаю, дошла ли. Отправить ГОЛОСОВОЕ ещё раз (может прийти дублем)?\n${said}`
+        : `«${to}» только что (${agoOf(recent.ageMs)}) получал: «${recent.prev.bodyPreview}».\nОтправить ещё и ГОЛОСОВОЕ:\n${said}?`,
       "send",
     );
     if (!c.approved) return gateDeclined(sendGateMessage(c.outcome, "голосовое", to, true), c.outcome);
@@ -386,8 +307,24 @@ async function telegramSendVoiceLocked(ctx: ToolContext, input: Record<string, u
     resendGuard().record(ctx.userId, "telegram", guardKeys, text);
     return { ...ok(`Отправил голосовое «${to}» голосом филиппа.`), sent: true };
   } catch (e) {
-    return err(`Не вышло отправить голосовое «${to}»: ${e instanceof Error ? e.message : String(e)}`);
+    const msg = e instanceof Error ? e.message : String(e);
+    // W2 S-7: расширение не ответило ПОСЛЕ отправки запроса — голосовое могло уйти: исход неизвестен, повтор — через владельца.
+    if (isExtNoReply(e)) {
+      cadence.record(ctx.userId, "telegram", to);
+      resendGuard().record(ctx.userId, "telegram", guardKeys, text, { uncertain: true });
+      return { ...err(uncertainSendText("голосовое", to, "telegram", msg)), uncertain: true };
+    }
+    return err(`Не вышло отправить голосовое «${to}»: ${msg}`);
   }
+}
+
+/** W2 S-7: честный текст «не знаю, ушло ли» (закон 1: третий исход отправки). */
+function uncertainSendText(what: string, to: string, channel: string, reason: string | undefined): string {
+  const check = channel === "telegram" ? `проверь telegram_read «${to}»` : "проверь переписку";
+  return (
+    `Не знаю, ушло ли ${what} «${to}»: отправка оборвалась (${reason ?? "ответа нет"}). Вслепую НЕ повторяю — это дало бы ` +
+    `человеку дубль: ${check}. Повтор того же текста спросит владельца.`
+  );
 }
 
 /** message.send под гардами §14: confirm (revise-петля) + cadence + idempotency (UC-2). */
@@ -416,14 +353,19 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
   const recent = resendGuard().check(ctx.userId, channel, guardKeys, body);
   let confirmedByResendGate = false;
   if (recent) {
-    if (recent.kind === "identical" && !resend) {
+    // W2 S-7: прошлая отправка оборвалась (исход неизвестен) — «уже отправлял» было бы непроверенным утверждением, а
+    // молчаливый повтор — возможным дублем человеку. Повтор того же текста решает владелец.
+    const unsure = recent.kind === "identical" && recent.prev.uncertain === true;
+    if (recent.kind === "identical" && !resend && !unsure) {
       return ok(
         `Уже отправлял «${to}» то же самое ${agoOf(recent.ageMs)} — повтор НЕ ушёл. ` +
           `Если пользователь ЯВНО просит отправить ещё раз — повтори вызов с resend:true (уйдёт после подтверждения).`,
       );
     }
     const preview = `${body.slice(0, 160)}${body.length > 160 ? "…" : ""}`;
-    const summary = recent.kind === "identical"
+    const summary = unsure
+      ? `Прошлая отправка «${to}» (${channel}) оборвалась ${agoOf(recent.ageMs)}, и я не знаю, дошла ли. Отправить ещё раз (может прийти дублем)?\n${preview}`
+      : recent.kind === "identical"
       ? `Повторная отправка «${to}» (${channel}) — то же сообщение уже уходило ${agoOf(recent.ageMs)}:\n${preview}`
       : `«${to}» только что (${agoOf(recent.ageMs)}) получил: «${recent.prev.bodyPreview}».\nОтправить вдогонку ещё и это?\n${preview}`;
     const c = await ctx.confirm(summary, "send");
@@ -463,13 +405,20 @@ async function messageSendLocked(ctx: ToolContext, input: Record<string, unknown
       send: async (ch, rcpt, b) => {
         const r = await ctx.session.sendAction({ kind: "message.send", channel: ch, to: rcpt, body: b }, DEFAULT_ACTION_TIMEOUT_MS);
         if (r.error?.code === "channel_down") channelDown = true;
-        return { ok: r.ok, error: r.error?.message };
+        // W2 S-7: таймаут/разрыв сессии — команда УШЛА, ответа нет: сообщение могло дойти (не «не отправлено»).
+        const lost = r.error?.code === "timeout" || r.error?.code === "disconnected";
+        return { ok: r.ok, error: r.error?.message, ...(lost ? { uncertain: true } : {}) };
       },
     },
   );
   if (res.status === "sent") {
     resendGuard().record(ctx.userId, channel, guardKeys, res.body);
     return { ...ok(`Отправлено ${to}.`), sent: true };
+  }
+  if (res.status === "uncertain") {
+    // Окно гарда взводим «неопределённой» записью: повтор того же текста пойдёт через владельца, не молча.
+    resendGuard().record(ctx.userId, channel, guardKeys, res.body, { uncertain: true });
+    return { ...err(uncertainSendText("сообщение", to, channel, res.reason)), uncertain: true };
   }
   // Точный дедуп сработал (окно sentKeys) — это НЕ ошибка исполнения: честно объясняем модели, как
   // выглядит ЯВНЫЙ повтор (симметрично telegram_send; err тут провоцировал бессмысленные ретраи).
