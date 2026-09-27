@@ -4,13 +4,16 @@
  * «публичный» сайт под именем `shop.jb.example` (host-resolver → 127.0.0.1) и «внутренняя сеть» на 127.0.0.1.
  * Факты тестов — по ЖУРНАЛУ запросов фикстур (дошёл ли запрос до «роутера», сколько раз POST ушёл на сервер).
  *
- * B-14 (DNS): Chrome ведёт ЛЮБОЕ `*.jb.example` на 127.0.0.1 (host-resolver), а гард навигации судит по таблице
- * `fixtureLookup` — что ответил бы DNS: shop — публичный TEST-NET адрес, evil — 127.0.0.1 (localtest.me-класс),
- * mixed — публичный + 127.0.0.1, slow — 127.0.0.1 с задержкой, прочие `*.jb.example` — не разрешаются.
+ * B-14 (DNS): «DNS» стенда — таблица `fixtureLookup`: shop — публичный TEST-NET адрес, evil — 127.0.0.1
+ * (localtest.me-класс), mixed — публичный + 127.0.0.1, slow — 127.0.0.1 с задержкой, rebind* — первый ответ публичный,
+ * дальше 127.0.0.1 (DNS rebinding, TTL 0), прочие `*.jb.example` — не разрешаются. По ней судят И гард навигации, И
+ * прокси пиннинга (через него Chrome ходит всегда); прокси звонит на проверенный адрес, TEST-NET подменяется на
+ * 127.0.0.1 (`fixtureMapAddress`). `--host-resolver-rules` оставлен НАРОЧНО: Chrome, обошедший прокси (сломанный
+ * пиннинг), сам уведёт `*.jb.example` на 127.0.0.1 — и «роутер» увидит запрос, тест покраснеет.
  *
  * Подключение: vi.mock("electron", ...) в тест-файле (offscreenPos читает screen).
  */
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,16 +22,26 @@ import { chromeCandidates } from "../actuators/browser-cdp.js";
 import { JarvisBrowser } from "../actuators/jarvis-browser.js";
 
 export const PUBLIC_HOST = "shop.jb.example";
+const TEST_NET = "203.0.113.10";
+/** Публичный ответ rebind*-имён: «сайт атакующего», которого на стенде нет (127.0.0.2 — никто не слушает). */
+const REBIND_PUBLIC = "203.0.113.66";
 
 const FIXTURE_DNS: Record<string, string[]> = {
-  [PUBLIC_HOST]: ["203.0.113.10"],
+  [PUBLIC_HOST]: [TEST_NET],
   "evil.jb.example": ["127.0.0.1"],
-  "mixed.jb.example": ["203.0.113.10", "127.0.0.1"],
+  "mixed.jb.example": [TEST_NET, "127.0.0.1"],
 };
+/** Сколько раз спрашивали rebind*-имя (первый ответ — публичный, дальше — 127.0.0.1). */
+export const rebindAsked = new Map<string, number>();
 
 /** «DNS» стенда для гарда навигации: имена фикстур — по таблице, остальное — настоящий DNS (живые тесты). */
 export const fixtureLookup: HostLookup = async (host) => {
   if (host === "slow.jb.example") return new Promise((r) => setTimeout(() => r(["127.0.0.1"]), 1500));
+  if (/^rebind[\w-]*\.jb\.example$/u.test(host)) {
+    const n = (rebindAsked.get(host) ?? 0) + 1;
+    rebindAsked.set(host, n);
+    return n === 1 ? [REBIND_PUBLIC] : ["127.0.0.1"];
+  }
   const v = FIXTURE_DNS[host];
   if (v) return v;
   if (host.endsWith(".jb.example")) throw Object.assign(new Error(`нет ${host}`), { code: "ENOTFOUND" });
@@ -81,9 +94,18 @@ export async function fixture(routes: Record<string, Route | string>): Promise<F
   return { port, hits, close: () => new Promise((r) => srv.close(() => r())) };
 }
 
-/** Настоящий JarvisBrowser на Chromium стенда (временный профиль; host-resolver: *.jb.example → 127.0.0.1; DNS гарда — fixtureLookup). */
-export function launchJarvisBrowser(chrome: string): { jb: JarvisBrowser; dispose(): Promise<void> } {
+/** Прокси пиннинга звонит на проверенный адрес: «публичный» TEST-NET фикстур живёт на 127.0.0.1. Суд — ДО подмены. */
+export const fixtureMapAddress = (ip: string): string => (ip === TEST_NET ? "127.0.0.1" : ip === REBIND_PUBLIC ? "127.0.0.2" : ip);
+
+/** Настоящий JarvisBrowser на Chromium стенда (временный профиль; DNS гарда и прокси — fixtureLookup; обход прокси → host-resolver). */
+export function launchJarvisBrowser(chrome: string, opts: { noPreconnect?: boolean } = {}): { jb: JarvisBrowser; dispose(): Promise<void> } {
   const profile = mkdtempSync(join(tmpdir(), "jarvis-jb-"));
+  if (opts.noPreconnect) {
+    // Предподключение Chrome (навигация, нажатие на ссылку) идёт МИМО Fetch-перехвата и раньше него: порядок «гард →
+    // прокси» плавает. Без него он детерминирован — rebinding-тест доказывает именно суд прокси при подключении.
+    mkdirSync(join(profile, "Default"), { recursive: true });
+    writeFileSync(join(profile, "Default", "Preferences"), JSON.stringify({ net: { network_prediction_options: 2 } }));
+  }
   const rootOnly = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
   const jb = new JarvisBrowser({
     chromePath: chrome,
@@ -91,7 +113,8 @@ export function launchJarvisBrowser(chrome: string): { jb: JarvisBrowser; dispos
     startUrl: "about:blank",
     settleMs: 200,
     resolveHost: fixtureLookup,
-    extraArgs: [...rootOnly, "--headless=new", "--disable-gpu", "--no-proxy-server", "--host-resolver-rules=MAP *.jb.example 127.0.0.1"],
+    mapAddress: fixtureMapAddress,
+    extraArgs: [...rootOnly, "--headless=new", "--disable-gpu", "--host-resolver-rules=MAP *.jb.example 127.0.0.1"],
   });
   return {
     jb,

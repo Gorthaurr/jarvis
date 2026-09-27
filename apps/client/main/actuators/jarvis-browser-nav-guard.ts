@@ -12,12 +12,14 @@
  *
  * B-14 (DNS, 27.09): судим не только ИМЯ, но и ОТВЕТ DNS (`checkHostPublic`): `localtest.me`/`127.0.0.1.nip.io`
  * (→ 127.0.0.1) проходили по имени, и браузер реально ходил на dev-HTTP сервера. Любой приватный адрес ответа → отказ;
- * имя не разрешилось/DNS молчит → тоже отказ (без проверки адреса не пускаем). Остаток — DNS rebinding: Chrome
- * резолвит сам ПОСЛЕ нас и может получить другой ответ; закрыть его может только пиннинг адреса (локальный
- * прокси) — почему отложен, см. docs/SECURITY.md «SSRF по DNS».
+ * имя не разрешилось/DNS молчит → тоже отказ (без проверки адреса не пускаем). DNS rebinding (Chrome резолвит сам
+ * ПОСЛЕ нас) закрывает пиннинг-прокси (jarvis-browser-proxy.ts): его блок на host:port недавно ОТПУЩЕННОГО здесь
+ * документа — `proxyBlocked` — ложится в тот же журнал с кадром перехода, и open()/read() говорят честно.
  */
-import { type HostLookup, checkHostPublic, createLogger, limitLookup, systemLookup, urlHostname } from "@jarvis/shared";
+import { type HostLookup, createLogger, limitLookup, systemLookup, urlHostname } from "@jarvis/shared";
 import type { CdpConn } from "./cdp-conn.js";
+import type { ProxyBlock } from "./jarvis-browser-proxy.js";
+import { checkBrowserHost } from "./jarvis-browser-proxy-judge.js";
 
 const log = createLogger("actuator:jarvis-browser:nav-guard");
 
@@ -30,9 +32,23 @@ export interface BlockedNav {
 }
 
 const DOCUMENT_PATTERN = [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }];
+/** Сколько помним отпущенный документ: подключение через прокси идёт за ним не позже таймаута SOCKS-подключения Chrome
+ *  (30 с — столько запрос может ждать слота суда прокси) + вердикта (3 с). */
+const RELEASED_TTL_MS = 35_000;
+
+/** Ключ «хост:порт» в записи прокси (хост — `urlHostname`, порт по схеме). */
+function hostPort(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${urlHostname(url)}:${u.port || (u.protocol === "https:" ? 443 : 80)}`;
+  } catch {
+    return "";
+  }
+}
 
 export class NavGuard {
   private readonly journal: BlockedNav[] = [];
+  private readonly released: Array<{ key: string; frameId?: string; at: number }> = [];
   private seq = 0;
 
   /** Резолв на КАЖДЫЙ Document-запрос: ≤2 getaddrinfo разом + кеш (пул libuv процесса не отдаём странице, адверс-ревью). */
@@ -67,15 +83,46 @@ export class NavGuard {
     if (!requestId) return;
     // about:blank/data:/chrome-error — сети нет, судить нечего; http(s) — по имени И по ответу DNS.
     const host = urlHostname(url);
-    const verdict = /^https?:\/\//iu.test(url) ? await checkHostPublic(host, { lookup: this.lookup }) : null;
+    const frameId = typeof p.frameId === "string" ? p.frameId : undefined;
+    const verdict = /^https?:\/\//iu.test(url) ? await checkBrowserHost(host, this.lookup) : null; // интранет-имя — без резолва
     if (!verdict || verdict.ok) {
+      if (verdict) this.release(url, frameId);
       await this.conn.send("Fetch.continueRequest", { requestId }).catch(() => undefined);
       return;
     }
-    this.journal.push({ seq: ++this.seq, host, frameId: typeof p.frameId === "string" ? p.frameId : undefined, reason: verdict.reason });
-    if (this.journal.length > 50) this.journal.shift();
+    this.record({ host, frameId, reason: verdict.reason });
     log.warn(verdict.reason === "private" ? "B-14: переход на внутренний адрес заблокирован" : "B-14: переход заблокирован — DNS не подтвердил адрес", { host, ...verdict });
     await this.conn.send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" }).catch(() => undefined);
+  }
+
+  private record(b: Omit<BlockedNav, "seq">): void {
+    this.journal.push({ seq: ++this.seq, ...b });
+    if (this.journal.length > 50) this.journal.shift();
+  }
+
+  private release(url: string, frameId?: string): void {
+    const now = Date.now();
+    while (this.released.length && (now - this.released[0]!.at > RELEASED_TTL_MS || this.released.length > 100)) this.released.shift();
+    this.released.push({ key: hostPort(url), frameId, at: now });
+  }
+
+  /**
+   * Блок пиннинг-прокси. Совпал с недавно отпущенным документом (тот же host:port) — считаем сорванным ПЕРЕХОДОМ: запись
+   * журнала с его кадром. Нет — подресурс или предподключение: только журнал прокси, act() не пугаем чужим блоком.
+   * Подресурс ТОГО ЖЕ host:port в окне тоже ляжет как переход — но блок на хост, только что прошедший суд, значит, что
+   * его DNS за это время стал внутренним/неразрешимым (публичный вердикт прокси помнит 30 с), и тревога по делу.
+   */
+  proxyBlocked(b: ProxyBlock): boolean {
+    const key = `${b.host}:${b.port}`;
+    const now = Date.now();
+    for (let i = this.released.length - 1; i >= 0; i--) {
+      const r = this.released[i]!;
+      if (r.key !== key || now - r.at > RELEASED_TTL_MS) continue;
+      this.record({ host: b.host, frameId: r.frameId, reason: b.reason });
+      log.warn("B-14: переход сорван пиннинг-прокси — адрес при подключении не тот, что при проверке (rebinding)", { ...b });
+      return true;
+    }
+    return false;
   }
 
   /** Метка «до действия»: блокировки ПОСЛЕ неё вернёт since(). */
