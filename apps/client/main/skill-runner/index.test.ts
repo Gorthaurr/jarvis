@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SkillStep } from "@jarvis/protocol";
 import { DrawingOverlayError } from "../selection/overlay-error.js";
+import { selectionStore } from "../selection/store.js";
 import { type CancelToken, type SkillActuator, runSkill, outcomeToActionResult } from "./index.js";
 
 const noSleep = async () => undefined;
@@ -356,6 +357,124 @@ describe("skill-runner × контроль-5 (действие ушло / про
     expect(r).toMatchObject({ ok: false, overlayDrawing: true, actionInjected: true });
     expect(r.message).toMatch(/вуал/u);
     expect(r.message).not.toMatch(/не подтвердил expect/u);
+  });
+
+  /**
+   * runner-3c…f: ДЕФОЛТНАЯ проводка окна вуали — без инъекции veiledSince раннер судит по НАСТОЯЩЕМУ selectionStore
+   * по часам Date.now() (так зовёт боевой skill.execute). Date.now заморожен и сдвигается только тестом ВНУТРИ опроса:
+   * граница `drawingEndedAfter` строгая, реальные часы флейкали бы (см. runner-3), а без сдвига в опросе «окно от
+   * начала опроса» не отличить от «окна от момента решения» (метка закрытия всегда ≤ Date.now()).
+   */
+  describe("дефолтная проводка окна вуали (selectionStore, Date.now)", () => {
+    let clock = 0;
+    let dateNow: MockInstance<() => number>;
+    beforeEach(() => {
+      clock = 1_000_000;
+      dateNow = vi.spyOn(Date, "now").mockImplementation(() => clock); // до runSkill: veilClock берёт ссылку при вызове
+    });
+    // У стора нет reset (drawEndedAt не обнуляется, повторное «выкл» без открытой вуали метку не двигает): открыть и
+    // закрыть в эпохе 0 → drawingEndedAfter(t) = false для любого t ≥ 0. Иначе вуаль 3f осталась бы на экране, и
+    // соседние тесты файла на дефолтном overlayBlockReason/veiledSince легли бы об оверлей; а метка 3e (> tPoll при тех
+    // же часах) подменила бы в 3f флаг drawing.
+    afterEach(() => {
+      dateNow.mockRestore();
+      selectionStore.setDrawing(true, 0);
+      selectionStore.setDrawing(false, 0);
+    });
+
+    /**
+     * Оверлей открылся и закрылся (Esc) во время OCR-опроса: закрытие — через 1 мс после tPoll (окно без запаса сверху),
+     * опрос шёл и после — решение позже закрытия.
+     */
+    function veilBlinksDuringPoll(confirmed: boolean): SkillActuator["checkExpect"] {
+      return vi.fn(async () => {
+        selectionStore.setDrawing(true);
+        clock += 1;
+        selectionStore.setDrawing(false);
+        clock += 9;
+        return confirmed;
+      });
+    }
+
+    function runTypeStep(checkExpect: SkillActuator["checkExpect"], executeStep: SkillActuator["executeStep"] = async () => undefined) {
+      const execute = vi.fn(executeStep);
+      const run = runSkill({
+        skillId: "s",
+        version: 1,
+        steps: [step("input.type", { params: { text: "Привет" }, expect: { kind: "visual", text: "Привет" }, timeoutMs: 1, retries: 1 })],
+        cancel: { cancelled: false },
+        actuator: mockActuator({ executeStep: execute, checkExpect }),
+        sleep: noSleep,
+        overlayBlockReason: () => null, // «сейчас открыт оверлей» не скажешь — решает только окно сверки
+      });
+      return { execute, run };
+    }
+
+    it("runner-3c: вуаль открылась и закрылась ПОСРЕДИ опроса → дефолт судит по метке закрытия от НАЧАЛА опроса: overlayDrawing без ретрая", async () => {
+      const { execute, run } = runTypeStep(veilBlinksDuringPoll(false)); // OCR читал оверлей — постусловия «нет»
+      const r = await run;
+      expect(r).toMatchObject({ ok: false, failedStepIndex: 0, overlayDrawing: true, actionInjected: true });
+      expect(r.message).toMatch(/уже закрылась/u);
+      expect(r.message).not.toMatch(/не подтвердил expect/u);
+      // Без drawingEndedAfter или с окном от момента решения (Date.now() после опроса) — ретрай, дубль напечатанного.
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    it("runner-3d: вуаль мелькнула, пока шёл шаг, и закрылась ровно к началу опроса → окно от Date.now() начала опроса, граница строгая: честный «не подтвердил expect» с ретраем", async () => {
+      const { execute, run } = runTypeStep(
+        vi.fn(async () => {
+          clock += 5;
+          return false;
+        }),
+        async () => {
+          // В бою так идёт бесшумный UIA-шаг (runner-3): печать под открытой вуалью отверг бы рубеж инжекции.
+          await Promise.resolve();
+          clock += 5;
+          selectionStore.setDrawing(true);
+          clock += 20;
+          selectionStore.setDrawing(false); // шаг кончился вместе с вуалью: метка закрытия = tPoll
+        },
+      );
+      const r = await run;
+      expect(r.ok).toBe(false);
+      // Окно не с нуля, не от старта шага/реплея и без запаса назад: вуаль, закрытая к опросу, — не «сверка под вуалью».
+      expect(r.overlayDrawing).toBeFalsy();
+      expect(r.message).toMatch(/не подтвердил expect/u);
+      expect(r.actionInjected).toBe(true);
+      expect(execute).toHaveBeenCalledTimes(2);
+    });
+
+    it("runner-3e: expect ПОДТВЕРДИЛСЯ, хотя вуаль мелькнула в окне сверки → успех (провалом вуаль делает только неподтверждённый шаг)", async () => {
+      const { execute, run } = runTypeStep(veilBlinksDuringPoll(true));
+      const r = await run;
+      expect(r).toEqual({ ok: true }); // пометка veiled — дело наблюдения skill.execute (по своему окну), не раннера
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    it("runner-3f: вуаль открылась посреди опроса и ещё на экране → дефолт видит её по флагу drawing; коммит-шаг (без ретраев) — overlayDrawing, не «не подтвердил»", async () => {
+      const execute = vi.fn(async () => undefined);
+      const r = await runSkill({
+        skillId: "s",
+        version: 1,
+        // retries: 0 явно: с ретраем вуаль поймал бы гейт попытки 1, и потеря флага drawing в veiledSince прошла бы молча.
+        steps: [step("input.key", { params: { combo: "Enter" }, expect: { kind: "visual", text: "Отправлено" }, timeoutMs: 1, retries: 0 })],
+        cancel: { cancelled: false },
+        actuator: mockActuator({
+          executeStep: execute,
+          checkExpect: vi.fn(async () => {
+            selectionStore.setDrawing(true); // метка открытия не участвует — решает флаг
+            clock += 5; // опрос идёт во времени: с timeoutMs > POLL_MS замороженные часы крутили бы опрос вечно
+            return false;
+          }),
+        }),
+        sleep: noSleep,
+        // overlayBlockReason — тоже дефолт: до опроса вуали нет (гейт пропускает), к решению — боевой текст стора.
+      });
+      expect(r).toMatchObject({ ok: false, failedStepIndex: 0, overlayDrawing: true, actionInjected: true });
+      expect(r.message).toMatch(/оверлей/u);
+      expect(r.message).not.toMatch(/не подтвердил expect/u);
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("SEL-C5-2: предусловие под вуалью — честная причина «оверлей», а не «экран изменился», без грундинга и без клика", async () => {
