@@ -36,7 +36,7 @@ export function webActParams(intent: string, input: Record<string, unknown>): Re
     const v = own[k] ?? input[k];
     if (v !== undefined) out[k] = v;
   }
-  if (intent === "key") return { combo: String(out.combo ?? out.key ?? "Enter"), ...(out.selector !== undefined ? { selector: out.selector } : {}) };
+  if (intent === "key") return { combo: String(out.combo ?? out.key ?? "").trim() || "Enter", ...(out.selector !== undefined ? { selector: out.selector } : {}) };
   return out;
 }
 
