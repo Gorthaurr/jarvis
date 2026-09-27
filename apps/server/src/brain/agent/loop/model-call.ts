@@ -1,15 +1,15 @@
-// W3 «Петля»: вызов модели (стрим на первом ходе), учёт usage/денег/телеметрии раунда, стаб.
-import { log, emitSentence } from "./util.js";
+// W3 «Петля»: вызов модели (стрим — stream-final.ts), учёт usage/денег/телеметрии раунда, стаб.
+import { log } from "./util.js";
 import type { LoopCtx } from "./context.js";
 import type { CallPrep } from "./thinking.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
-import { SentenceChunker } from "../../nlu/sentences.js";
+import { shouldStreamStep, streamModelCall } from "./stream-final.js";
 import { verbalize } from "../../verbalize/index.js";
 import { metrics } from "../../../obs/metrics.js";
 import { costUsd } from "../../../obs/pricing.js";
 
 export async function callModel(ctx: LoopCtx, step: number, prep: CallPrep) {
-  const { deps, session, tier, sink, opts, st, taskId, sys, convo } = ctx;
+  const { deps, session, st, taskId, sys, convo } = ctx;
   const { roundThinking, warmth, cachePrefix } = prep;
   const llmReq = {
     tier: st.tier.currentTier,
@@ -26,55 +26,17 @@ export async function callModel(ctx: LoopCtx, step: number, prep: CallPrep) {
     thinking: roundThinking,
     // W2: одна сессия модели на задачу (провайдер подписки держит диалог между раундами; release — в finally).
     sessionKey: taskId,
+    // W3 (L-6): петля переписала УЖЕ отправленную историю (свёртка/вырезка скринов) — провайдер с живой сессией
+    // сам решает, начать ли её заново со свёрнутым транскриптом (иначе свёртка не уменьшает реальный промпт).
+    ...(st.budget.maskedLastRound ? { historyRewritten: "masked" as const } : st.budget.prunedLastRound ? { historyRewritten: "pruned" as const } : {}),
   };
-  // §10 realtime: на ПЕРВОМ ходе с sink стримим текст пофразно (token-streaming) — НО ТОЛЬКО
-  // для многопредложенных конверсационных реплик (как в плане: «пофразный — для много-
-  // предложенных, 1 фраза — текущий путь»). Claude штатно выдаёт ТЕКСТОВУЮ ПРЕАМБУЛУ перед
-  // tool_use («Сейчас гляну…» → web_read); чтобы её НЕ озвучивать, держим первую фразу и
-  // отдаём поток лишь когда накопилось ≥2 фразы (точно конверсация — преамбула коротка).
-  //   - конверсация (нет tool_use): held дофлашиваем в конце, streamedFinal=true (терминал не дублирует);
-  //   - tool-ход: held (преамбулу) ОТБРАСЫВАЕМ — финал произнесём в терминале ровно один раз.
-  let resp: LlmResponse;
+  // §10 realtime + W3 (V-4): стрим — шаг 0 и финал разговорного хода без дел (stream-final.ts). SYNC-FIRST (фикс
+  // double-speak): при suppressStepStream посреди петли в sink не уходит НИЧЕГО — финал звучит один раз: в терминале
+  // (done) или через speakResult (промоушен). streamedThisRound — что-то из ЭТОГО вызова уже прозвучало.
+  st.progress.streamedThisRound = false;
+  st.progress.streamedFinal = false;
   const llmCallStartedMs = Date.now(); // время ИМЕННО обращения к модели — для замера быстроты канала
-  // SYNC-FIRST (фикс ревью, double-speak): при suppressStepStream пофразный step-0-стрим ОТКЛЮЧЁН —
-  // ничего не уходит в sink ПОСРЕДИ петли. Иначе для текстового action-ответа стрим ставил pushedAny в
-  // пайплайне ДО промоушена → «Берусь» глох, а итог через speakResult звучал ВТОРОЙ раз (двойная озвучка).
-  // Финал произносится ОДИН раз: в терминале (done) или через speakResult (промоушен). Первый-токен-стрим
-  // не теряем для РАЗГОВОРА (conversational идёт обычным путём, там suppressStepStream не ставится).
-  if (sink && step === 0 && !opts?.suppressStepStream) {
-    const chunker = new SentenceChunker();
-    const held: string[] = [];
-    // W2 (2026-09-09): на РАЗГОВОРНОМ ходе первую фразу отдаём сразу — mouth-to-ear = первый токен + одна
-    // фраза, а не вся генерация. Преамбула перед инструментом («Сейчас гляну…») тут и есть честная
-    // обратная связь; финал tool-хода произносит терминал. На action-пути гард ≥2 фраз остаётся.
-    let eager = opts?.conversational === true; // подтверждённый конверсационный режим → немедленная отдача
-    const onPiece = (raw: string): void => {
-      if (eager) {
-        emitSentence(sink, raw);
-        st.progress.spokeAny = true;
-        return;
-      }
-      held.push(raw);
-      if (held.length >= 2) {
-        for (const h of held) emitSentence(sink, h);
-        held.length = 0;
-        eager = true;
-        st.progress.spokeAny = true;
-      }
-    };
-    resp = await deps.llm.completeStream(llmReq, (d) => {
-      for (const raw of chunker.push(d.text)) onPiece(raw);
-    });
-    if (resp.toolUses.length === 0) {
-      for (const raw of chunker.flush()) onPiece(raw);
-      for (const h of held) emitSentence(sink, h); // конверсация в 1 фразу — отдаём её сейчас
-      if (held.length > 0) st.progress.spokeAny = true;
-      st.progress.streamedFinal = true;
-    }
-    // tool-ход: held + остаток чанкера отбрасываем (преамбулу не озвучиваем).
-  } else {
-    resp = await deps.llm.complete(llmReq);
-  }
+  const resp: LlmResponse = shouldStreamStep(ctx, step) ? await streamModelCall(ctx, step, llmReq) : await deps.llm.complete(llmReq);
   warmth.touch(session.sessionId);
   deps.spend.recordStep(taskId);
   return { resp, llmCallStartedMs };

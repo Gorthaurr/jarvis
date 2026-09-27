@@ -33,7 +33,10 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 import { lazyDataPath } from "../paths.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
-import { MCP_PREFIX, type SdkQuery, type SessionTurn, SubscriptionSession, type ToolOutcome, unwrapArgs } from "./subscription-session.js";
+import { MCP_PREFIX, type SdkQuery, type SessionTurn, SubscriptionSession, unwrapArgs } from "./subscription-session.js";
+import { continuationOutcomes, countOutcomeImages, rewriteResetReason, sessionFingerprint } from "./subscription-continuity.js";
+
+export { continuationOutcomes } from "./subscription-continuity.js";
 
 const log: Logger = createLogger("llm:subscription");
 
@@ -368,7 +371,7 @@ export interface SdkModule {
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY?: string;
   query: SdkQuery;
   tool: (name: string, description: string, schema: unknown, handler: (args: unknown) => Promise<unknown>) => unknown;
-  createSdkMcpServer: (opts: { name: string; tools: unknown[]; timeout?: number }) => unknown;
+  createSdkMcpServer: (opts: { name: string; tools: unknown[]; timeout?: number; alwaysLoad?: boolean }) => unknown;
 }
 
 /**
@@ -382,40 +385,14 @@ const TOOL_WAIT_MS = 10 * 60_000;
 const SESSION_MAX_TURNS = 500;
 const MAX_SESSIONS = 6;
 
-/** Продолжение сессии: результаты инструментов из хвоста запроса, если он ровно их и содержит. */
-export function continuationOutcomes(req: LlmRequest, pendingIds: Set<string>): ToolOutcome[] | undefined {
-  const last = req.messages[req.messages.length - 1];
-  if (!last || last.role !== "user" || typeof last.content === "string") return undefined;
-  const results = last.content.filter((b): b is Extract<typeof b, { type: "tool_result" }> => b.type === "tool_result");
-  const texts = last.content.filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text").map((b) => b.text).filter((t) => t.trim());
-  const other = last.content.some((b) => b.type !== "tool_result" && b.type !== "text");
-  if (other || results.length === 0 || results.length !== pendingIds.size) return undefined;
-  if (!results.every((r) => pendingIds.has(r.tool_use_id))) return undefined;
-  const outcomes: ToolOutcome[] = results.map((r) => ({ toolUseId: r.tool_use_id, content: r.content, isError: r.is_error }));
-  if (texts.length > 0) {
-    // Врезки петли (нудж, поправка на ходу, live-контекст) идут в этом же user-сообщении текстом.
-    // В сессии SDK отдельного канала для них нет — доносим хвостом последнего результата, размеченно:
-    // модель обязана отличать наш статус от вывода инструмента (та же логика, что в транскрипте).
-    const lastOut = outcomes[outcomes.length - 1] as ToolOutcome;
-    const note = `\n\n### ВЛАДЕЛЕЦ/СИСТЕМА (примечание к этому ходу)\n${texts.join("\n\n")}`;
-    lastOut.content = typeof lastOut.content === "string" ? lastOut.content + note : [...lastOut.content, { type: "text", text: note }];
-  }
-  return outcomes;
-}
-
-/** Условия, при которых сессию можно продолжать: та же модель/эффорт/набор инструментов/стабильный system. */
-function sessionFingerprint(req: LlmRequest): string {
-  // Навык и каталог в отпечатке: внутри сессии они зафиксированы на старте (в кеш-блок CLI не входят).
-  const stable = [req.systemStatic, req.systemSkill, req.systemTools].filter((s) => s && s.trim()).join("\n\n");
-  return [subscriptionModel(), subscriptionEffort(req.tier), (req.tools ?? []).map((t) => t.name).join(","), stable].join(" ");
-}
-
 export class SubscriptionLlmProvider implements ILlmProvider {
   private sdk: SdkModule | null = null;
   private readonly loadSdk: () => Promise<SdkModule>;
   private readonly now: () => number;
   /** Живые сессии по ключу задачи (W2). */
   private readonly sessions = new Map<string, SubscriptionSession>();
+  /** W3 (L-6): сколько картинок уже ушло в каждую сессию (порог сброса после вырезки скринов петлёй). */
+  private readonly images = new WeakMap<SubscriptionSession, number>();
 
   constructor(deps: SubscriptionLlmDeps = {}) {
     this.now = deps.now ?? (() => Date.now());
@@ -518,7 +495,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
   private async run(req: LlmRequest, onDelta?: (d: LlmDelta) => void): Promise<LlmResponse> {
     const sdk = this.sdk ?? (this.sdk = await this.loadSdk());
     const key = req.sessionKey;
-    const fingerprint = sessionFingerprint(req);
+    const fingerprint = sessionFingerprint(req, subscriptionModel(), subscriptionEffort(req.tier));
     const t0 = this.now();
 
     // W2: ПРОДОЛЖЕНИЕ живой сессии — хвост запроса ровно результаты ожидаемых инструментов.
@@ -526,7 +503,11 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       const live = this.sessions.get(key);
       if (live) {
         const outcomes = live.alive && live.fingerprint === fingerprint ? continuationOutcomes(req, live.pendingIds()) : undefined;
-        if (outcomes) {
+        // W3 (L-6): историю переписала петля (свёртка / вырезка скринов) — сессия CLI её не видит, продолжать нельзя.
+        const images = (this.images.get(live) ?? 0) + (outcomes ? countOutcomeImages(outcomes) : 0);
+        const reset = outcomes ? rewriteResetReason(req, images) : undefined;
+        if (outcomes && !reset) {
+          this.images.set(live, images);
           let turn: SessionTurn;
           try {
             turn = await live.continueWith(outcomes, onDelta);
@@ -537,7 +518,8 @@ export class SubscriptionLlmProvider implements ILlmProvider {
           if (turn.ended) this.drop(key, "ход завершён");
           return this.toResponse(req, turn, onDelta, "continued", t0);
         }
-        this.drop(key, !live.alive ? "прежняя сессия завершилась" : live.fingerprint !== fingerprint ? "изменились модель/эффорт/инструменты" : "история разошлась с сессией");
+        if (reset) log.info("резерв: новая сессия — история переписана петлёй", { key, reason: reset });
+        this.drop(key, reset ?? (!live.alive ? "прежняя сессия завершилась" : live.fingerprint !== fingerprint ? "изменились модель/эффорт/инструменты" : "история разошлась с сессией"));
       }
     }
 
@@ -594,7 +576,9 @@ export class SubscriptionLlmProvider implements ILlmProvider {
       tools: [],
       ...(tools.length > 0
         ? {
-            mcpServers: { [SERVER_NAME]: sdk.createSdkMcpServer({ name: SERVER_NAME, tools, timeout: TOOL_WAIT_MS }) },
+            // W3 (L-13): alwaysLoad — наши инструменты всегда в промпте, их не прячет поиск инструментов CLI (tool search
+            // откладывал бы MCP-схемы: модель видела бы лишь имена и тратила ход на поиск). SDK ставит его в _meta каждому.
+            mcpServers: { [SERVER_NAME]: sdk.createSdkMcpServer({ name: SERVER_NAME, tools, timeout: TOOL_WAIT_MS, alwaysLoad: true }) },
             allowedTools: [`${MCP_PREFIX}*`],
           }
         : {}),
@@ -610,6 +594,7 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     const images = collectImages(req);
     const prompt = images.length > 0 ? userMessageStream(transcript, images) : transcript;
 
+    this.images.set(session, images.length);
     if (key) {
       if (this.sessions.size >= MAX_SESSIONS) {
         const oldest = this.sessions.keys().next().value;

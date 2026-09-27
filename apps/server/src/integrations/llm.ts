@@ -95,6 +95,9 @@ export interface LlmRequest {
    * Без ключа — разовый вызов, как раньше.
    */
   sessionKey?: string;
+  /** W3 (L-6): петля переписала отправленную историю (свёртка у потолка / вырезка скринов) — сессия подписки начнёт
+   *  заново со свёрнутым транскриптом (subscription-continuity.ts); API-каналу флаг не нужен — он шлёт историю целиком. */
+  historyRewritten?: "masked" | "pruned";
 }
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stub";
