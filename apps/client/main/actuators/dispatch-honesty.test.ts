@@ -451,8 +451,8 @@ describe("§режим выделения — проводка dispatch() (ко�
     const cmds = [
       { kind: "input.key", combo: "Enter" },
       { kind: "input.type", text: "x" },
-      { kind: "input.mouse", op: "move", x: 1, y: 1 },
-      { kind: "input.click", target: { by: "coords", x: 1, y: 1 } },
+      { kind: "input.mouse", op: "move", x: 1, y: 1, space: "screen" },
+      { kind: "input.click", target: { by: "coords", x: 1, y: 1, space: "screen" } },
     ] as unknown as ActionCommand[];
     for (const cmd of cmds) {
       const r = await run(cmd);

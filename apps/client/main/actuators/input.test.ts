@@ -17,9 +17,9 @@ describe("input: §режим выделения — гейт стоит в ТО
 
   it("явно ФИЗИЧЕСКИЙ клик (coords / physical) и мышь отвергаются ДО сайдкара — этим путём идут реплей навыка и SDK-мост (контроль-3)", async () => {
     selectionStore.setDrawing(true);
-    await expect(click({ by: "coords", x: 10, y: 10 })).rejects.toThrow(/оверлей/u);
+    await expect(click({ by: "coords", x: 10, y: 10, space: "screen" })).rejects.toThrow(/оверлей/u);
     await expect(click({ by: "handle", handle: "7" }, "physical")).rejects.toThrow(/оверлей/u);
-    await expect(mouse({ op: "move", x: 1, y: 1 })).rejects.toThrow(/оверлей/u);
+    await expect(mouse({ op: "move", x: 1, y: 1, space: "screen" })).rejects.toThrow(/оверлей/u);
   });
 
   it("контроль-4: правый / двойной клик по handle под вуалью — тоже физический, гейт ДО сайдкара", async () => {
@@ -43,8 +43,8 @@ describe("input: §режим выделения — гейт стоит в ТО
   });
 
   it("без вуали те же вызовы доходят до сайдкара — гейт не глушит ввод вообще", async () => {
-    await expect(click({ by: "coords", x: 10, y: 10 })).rejects.toThrow(/сайдкар не запущен/);
-    await expect(mouse({ op: "move", x: 1, y: 1 })).rejects.toThrow(/сайдкар не запущен/);
+    await expect(click({ by: "coords", x: 10, y: 10, space: "screen" })).rejects.toThrow(/сайдкар не запущен/);
+    await expect(mouse({ op: "move", x: 1, y: 1, space: "screen" })).rejects.toThrow(/сайдкар не запущен/);
   });
 });
 
