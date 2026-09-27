@@ -8,6 +8,7 @@
  * падает кейс порога; убрать `alwaysLoad: true` из createSdkMcpServer — падает кейс L-13.
  */
 import { describe, expect, it } from "vitest";
+import type { ToolSchema } from "@jarvis/tools";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -21,7 +22,7 @@ const SHOT = { name: "screen_capture", description: "снимок", input_schema
 const STUB = "[наблюдение свёрнуто ради места в контексте: web_fetch, было ~30000 симв.]";
 const IMG: ToolResultContent = { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } };
 
-function base(tools = [WEB_FETCH]): LlmRequest {
+function base(tools: ToolSchema[] = [WEB_FETCH]): LlmRequest {
   return { tier: "sonnet", model: "m", systemStatic: "ПЕРСОНА", messages: [{ role: "user", content: "сведи три страницы" }], tools, sessionKey: "task-1" };
 }
 

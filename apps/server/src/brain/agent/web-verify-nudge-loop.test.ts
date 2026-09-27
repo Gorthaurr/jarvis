@@ -25,7 +25,7 @@ function session(opts: { failWebActOnce?: boolean } = {}) {
     if (cmd.kind === "gui.act") return { commandId: "c", ok: true, durationMs: 1, data: { found: { via: "snapshot", name: "Далее" }, did: "UIA invoke", verified: "unchecked", detail: "…" } };
     if (cmd.kind === "jbrowser.act" && failNext) {
       failNext = false;
-      return { commandId: "c", ok: false, durationMs: 1, error: "элемент не найден" };
+      return { commandId: "c", ok: false, durationMs: 1, error: { code: "not_found", message: "элемент не найден" } };
     }
     return { commandId: "c", ok: true, durationMs: 1, data: { text: "страница" } };
   });
