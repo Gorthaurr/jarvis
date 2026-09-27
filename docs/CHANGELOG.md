@@ -4073,6 +4073,12 @@ handlers/browser +4, skills +5, watch +4, admission +3, web +2, jarvis-browser +
 Гейт на Windows: клиент — новые `jarvis-browser-proxy` 7, `jarvis-browser-proxy-judge` 9, `jarvis-browser-nav-guard` 5,
 chromium `jarvis-browser-pin` 4 (вкл. живой `https://example.com` через прокси) + rebinding в `jarvis-browser-dns`;
 `jarvis-browser-ssrf`, e2e `web_act` зелёные через прокси; реверт-мутации 20/20 красные (+ старый разбор рукопожатия
-валит воркер); гейт размеров ок (врезка `jarvis-browser.ts` +5 к main вместе с +1 B-14). Живьём НЕ проверено:
-`telegramSend`/`telegramRead` (webK, wss) через прокси с профилем владельца — профиль держит живой клиент, нужен
-«сейчас можно».
+валит воркер); гейт размеров ок (врезка `jarvis-browser.ts` +4 к main). **Живой смоук (27.09, «сейчас можно»
+владельца):** супервизор остановлен, код ветки (JarvisBrowser + прокси) на профиле JarvisTG, настоящий Chrome (не
+headless) и сеть через TUN: `example.com` — ок; `web_open localtest.me` — честный отказ (прокси отклонил и
+предподключения); webK залогинен → `telegramSend` в «Избранное» `delivered:true`, `telegramRead` нашёл сообщение;
+сетевые соединения Chrome — ТОЛЬКО 127.0.0.1 (прокси, CDP), все внешние (DC Telegram 149.154.167.99:443, Google…) —
+у процесса прокси. Супервизор поднят, клиент подключился. Оговорка: Claude desktop — MSIX, проба из его песочницы
+видит `%LOCALAPPDATA%\JarvisTG` через виртуальную копию (снимок профиля 02.09, та же живая сессия Telegram); профиль
+вне контейнера живой клиент подхватит после обновления main и пересборки клиента — первое использование смотреть в логе
+(`actuator:jarvis-browser:proxy`).
