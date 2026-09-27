@@ -96,6 +96,24 @@ describe("act{steps}: исполнение по шагу через dispatchTool
     expect(text(r)).toMatch(/отменили/u);
   });
 
+  it("бюджет серии (~180 с) исчерпан между шагами → стоп, остальное не исполняется", async () => {
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    try {
+      const t = ctx((cmd) => {
+        skew = 181_000; // первый шаг «шёл» три минуты (долгий verify, медленное окно)
+        return okAct(cmd);
+      });
+      const r = await dispatchTool("act", { steps: [{ target: "A" }, { target: "B" }] }, t.c);
+      expect(t.acts()).toHaveLength(1);
+      expect(r).toMatchObject({ isError: true, partialSteps: 1 });
+      expect(text(r)).toMatch(/бюджет серии/u);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("вуаль на шаге 2 → overlayDenied процедуры с числом сделанных шагов", async () => {
     const t = ctx((cmd) => (cmd.target === "B" ? { ok: false, error: { code: "overlay_drawing", message: "Поверх экрана открыт оверлей" } } : okAct(cmd)));
     const r = await dispatchTool("act", { steps: [{ target: "A" }, { target: "B" }, { target: "C" }] }, t.c);

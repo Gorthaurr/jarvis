@@ -15,6 +15,12 @@ import type { FakeSidecar } from "../test-support/fake-sidecar.js";
 
 vi.mock("electron", async () => (await import("../test-support/electron-mock.js")).electronModule);
 vi.mock("./sidecar-client.js", async () => (await import("../test-support/fake-sidecar.js")).fakeSidecarModule());
+// Рубеж инжекции: судья коммитов по умолчанию молчит (P0); кейсы ниже включают отказ на нужную операцию.
+const judge = vi.hoisted(() => ({ deny: null as null | ((op: string, p: Record<string, unknown>) => boolean) }));
+vi.mock("./commit-judge.js", () => ({
+  commitJudge: async (c: { op: string; params: Record<string, unknown> }) =>
+    judge.deny?.(c.op, c.params) ? { message: "§14: нужен ответ владельца", data: { needsApproval: { signature: "key:enter", process: "telegram", category: "messenger", what: "Enter" } } } : null,
+}));
 
 import { useFakeSidecar } from "../test-support/fake-sidecar.js";
 import { resetElectronMock } from "../test-support/electron-mock.js";
@@ -48,6 +54,7 @@ beforeEach(() => {
   resetMirror();
   resetHeldKeys();
   selectionStore.setDrawing(false);
+  judge.deny = null;
 });
 
 describe("глаголы указателя", () => {
@@ -141,6 +148,24 @@ describe("clear / enter", () => {
     const ops = fake.mutations().map((c) => (c.op === "key" ? `key:${String(c.args.combo)}` : c.op));
     expect(ops).toEqual(["invoke", "type", "key:Enter"]);
     expect((r.data as { did?: string }).did).toMatch(/нажал Enter/u);
+  });
+
+  it("рубеж не пропустил Enter после печати → протокольный denied с needsApproval + stepActionInjected (текст уже набран)", async () => {
+    judge.deny = (op, p) => op === "key" && p.combo === "Enter";
+    const r = await act({ target: "Поиск", do: "type", text: "кот", enter: true });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("denied");
+    expect(r.data).toMatchObject({ needsApproval: { signature: "key:enter" } });
+    expect(r.stepActionInjected).toBe(true);
+    expect(fake.mutations().map((c) => c.op)).toEqual(["invoke", "type"]); // Enter в сайдкар не ушёл
+  });
+
+  it("рубеж не пропустил UIA-очистку → отказ как есть, в клавиши (Ctrl+A → Delete) НЕ обходим", async () => {
+    judge.deny = (op, p) => op === "invoke" && p.pattern === "setValue";
+    const r = await act({ target: "Поиск", do: "type", text: "кот", clear: true });
+    expect(r.ok).toBe(false);
+    expect(r.error?.code).toBe("denied");
+    expect(fake.mutations()).toEqual([]);
   });
 
   it("печать ушла, Enter упал → исход неизвестен (stepActionInjected), без повтора", async () => {

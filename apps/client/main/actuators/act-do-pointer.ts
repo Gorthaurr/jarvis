@@ -21,8 +21,8 @@ import { sidecar } from "./sidecar-client.js";
 
 export type PointerVerb = "triple" | "middle" | "hover" | "drag" | "scroll";
 
-/** Бюджет поиска цели `to` у drag (снапшот UIA ≤ 12 с + OCR). */
-const DRAG_FIND_MS = 25_000;
+/** Бюджет поиска цели `to` у drag: ступени, на которые времени нет, findTarget не начинает (общий бюджет act — 45 с). */
+const DRAG_FIND_MS = 15_000;
 
 const gen = (): number => (sidecar() as { generation?: number }).generation ?? 0;
 

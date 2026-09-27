@@ -14,6 +14,7 @@ import { DrawingOverlayError } from "../selection/overlay-error.js";
 import type { ActCommand } from "./act-args.js";
 import type { FoundTarget } from "./act-find.js";
 import { type ActDone, ActPartialError, type ActParams } from "./act-do.js";
+import { ActionError, actionErrorOf } from "./action-error.js";
 import { mirrorOf } from "./handle-mirror.js";
 import { injectRpc } from "./inject.js";
 import { click, pressKey, typeText } from "./input.js";
@@ -47,13 +48,19 @@ async function typeOrPaste(text: string): Promise<string> {
   return "";
 }
 
-/** Шаг ПОСЛЕ первого действия: провал → ActPartialError (исход неизвестен), вуаль — как есть. */
+/**
+ * Шаг ПОСЛЕ первого действия: провал → исход неизвестен (injected), вуаль — как есть. Протокольный исход (рубеж
+ * инжекции: `denied` + needsApproval) сохраняется — сервер видит, ЧТО не пропущено, и что часть уже ушла (без повтора).
+ */
 async function after<T>(what: string, run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (e) {
     if (e instanceof DrawingOverlayError) throw e;
-    throw new ActPartialError(`${what}: ${msg(e)} — исход неизвестен, не повторяй вслепую`);
+    const text = `${what}: ${msg(e)} — исход неизвестен, не повторяй вслепую`;
+    const a = actionErrorOf(e);
+    if (a && a.code !== "runtime") throw new ActionError(text, { code: a.code, data: a.data, injected: true });
+    throw new ActPartialError(text);
   }
 }
 
@@ -63,7 +70,8 @@ async function uiaClear(f: FoundTarget): Promise<boolean> {
     await injectRpc("invoke", { handle: f.handle, pattern: "setValue", value: "" }, 12_000);
     return true;
   } catch (e) {
-    if (e instanceof DrawingOverlayError) throw e;
+    // Вуаль и отказ рубежа инжекции — наверх как есть (ничего не ушло): их не «обходят» клавишами.
+    if (e instanceof DrawingOverlayError || actionErrorOf(e)?.code === "denied") throw e;
     // Таймаут — поле могло очиститься (исход неизвестен); прочие ошибки — паттерна нет / только чтение: ничего не ушло.
     if (/timeout|таймаут/iu.test(msg(e))) throw new ActPartialError(`очистка «${f.name}» через UIA ушла, ответа нет — исход неизвестен`);
     return false;
