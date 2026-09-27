@@ -83,6 +83,7 @@ import { isLoopbackHost, resolveBindHost } from "./bind.js";
 import { buildGreeting } from "../proactive/greeting.js";
 import { takeIncidentReport } from "../proactive/incidents.js";
 import { ExtensionBridge } from "./extension-bridge.js";
+import { trackExtPresence } from "./ext-absence-seam.js";
 import { registerWsRoutes } from "./ws-routes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
@@ -378,7 +379,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   void app.register(async (instance) => {
     registerWsRoutes(instance, {
       onClient: (socket) => onConnection(socket as unknown as RawWs, config, registry, providers, brain, log),
-      ext: extBridge,
+      ext: trackExtPresence(extBridge), // учёт «когда расширение было на связи» (ext-absence.ts)
       rawToText,
       log,
       pinnedExtId: process.env.JARVIS_EXT_ID, // W0: только своё расширение на /ext
