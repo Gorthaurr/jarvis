@@ -109,6 +109,9 @@ export class JsonLineRpc {
   }
 }
 
+/** W2 П1: контекст ЗАГРУЗКИ (статический импорт — до любой команды): рестарт и его подписчики — в нём, не в ALS команды. */
+const BOOT = new AsyncResource("SidecarBoot");
+
 /** §Волна2 (2.4): бэкофф авто-рестарта 1с → ×2 → потолок 30с; прожил HEALTHY_UPTIME — бэкофф сбрасывается. */
 const RESTART_BASE_MS = 1_000;
 const RESTART_MAX_MS = 30_000;
@@ -130,8 +133,6 @@ export class SidecarClient {
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private startedAt = 0;
   private stopped = false;
-  /** W2 П1: контекст первого start() (загрузка) — рестарты идут в нём, не в области упавшей команды (ALS). */
-  private boot: AsyncResource | null = null;
 
   get ready(): boolean {
     return this._ready;
@@ -148,12 +149,11 @@ export class SidecarClient {
   /** §Волна2 (2.4): после авто-рестарта восстановить подписки нового процесса. W2: подписчиков несколько; П1 — в
    *  контексте ПОДПИСКИ (загрузка), а не того, кто уронил сайдкар: область одобрения (ALS) не протекает в подписки. */
   onRestarted(cb: () => void): void {
-    this.restartHandlers.push(AsyncResource.bind(cb));
+    this.restartHandlers.push(BOOT.bind(cb));
   }
 
   /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false (+ авто-ретрай с бэкоффом). */
   start(exePath: string): void {
-    this.boot ??= new AsyncResource("SidecarBoot");
     this.exePath = exePath;
     this.stopped = false;
     if (this.restartTimer) {
@@ -210,7 +210,7 @@ export class SidecarClient {
       // Новый процесс не помнит подписок старого (raw-input.subscribe/LL-хуки) — восстанавливаем.
       if (this._ready) for (const cb of this.restartHandlers) cb();
     };
-    this.restartTimer = setTimeout(this.boot ? this.boot.bind(tick) : tick, delay);
+    this.restartTimer = setTimeout(BOOT.bind(tick), delay);
     this.restartTimer.unref?.();
   }
 

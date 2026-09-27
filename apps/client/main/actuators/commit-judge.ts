@@ -62,7 +62,7 @@ export const commitJudge: Judge = async (c): Promise<JudgeDenial | null> => {
     const category = cat?.category ?? "messenger"; // процесс неизвестен → строжайший allowlist
     const intents = kind === "element" ? await elementIntents(t, category, !!cat) : await keyIntents(c, t, cat ?? null);
     if (!intents) return { message: "§14: элемент по handle изменился с прошлого снапшота (или не нашёлся) — сними ui_snapshot заново; ничего не нажато." };
-    if (intents.length && !t.proc) return unknownProcessDenial(intents[0]!);
+    if (intents.length && !t.proc) return unknownProcessDenial(intents[0]!, t.unknownHandle);
     for (const intent of intents) judged.push({ intent, proc: t.proc!, category, human: cat!.human });
   }
   const m = matchGrants(c.scope, judged);

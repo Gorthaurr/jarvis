@@ -37,6 +37,8 @@ export interface CommitTarget {
   element?: () => Promise<ElementFacts | null>;
   /** Запись зеркала (handle) — для пересверки устаревшей. */
   entry?: MirrorEntry;
+  /** handle, которого зеркало не знает (старый снапшот, рестарт сайдкара): ни элемента, ни процесса. */
+  unknownHandle?: string;
 }
 
 const pt = (x: unknown, y: unknown): Point | null => (typeof x === "number" && typeof y === "number" ? { x, y } : null);
@@ -63,7 +65,7 @@ export async function commitTargets(c: InjectionCase, kind: CommitKind): Promise
   if (kind !== "element") return [{ proc: await foregroundOf(c.facts), op: c.op, params: p }];
   if ((c.op === "click" || c.op === "invoke") && p.handle !== undefined && p.handle !== null) {
     const e = mirrorLookup(p.handle);
-    if (!e) return [{ proc: null, op: c.op, params: p, element: async () => null }];
+    if (!e) return [{ proc: null, op: c.op, params: p, element: async () => null, unknownHandle: String(p.handle) }];
     return [{ proc: await handleOf(c.facts, e), op: c.op, params: p, entry: e, element: async () => ({ name: e.name, role: e.role }) }];
   }
   const from = pt(p.x, p.y) ?? (c.op === "mouse" ? c.facts.cursor() : null);

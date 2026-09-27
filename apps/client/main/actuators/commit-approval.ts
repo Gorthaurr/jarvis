@@ -77,6 +77,9 @@ export function approvalDenial(scope: ApprovalScope | undefined, j: Judged, pend
 }
 
 /** Процесс цели не определён, а действие — кандидат в коммит: честно, без вопроса (спросить не о чем). */
-export function unknownProcessDenial(i: CommitIntent): JudgeDenial {
+export function unknownProcessDenial(i: CommitIntent, unknownHandle?: string): JudgeDenial {
+  if (unknownHandle !== undefined) {
+    return { message: `§14: handle ${unknownHandle.slice(0, 12)} неизвестен (снапшот старый или сайдкар перезапущен) — не знаю, что и где нажмётся; сними ui_snapshot заново. Ничего не нажато.` };
+  }
   return { message: `§14: ${whatOf(i)} — не смог определить программу цели, а это может быть отправка; укажи app (в какой программе). Ничего не нажато.` };
 }
