@@ -1,6 +1,9 @@
 /**
  * B-14 (свои адреса ПК): адрес своего интерфейса и его on-link сеть — приватны в ОБЩЕМ правиле (им судят сервер,
  * гард навигации и прокси пиннинга). Список интерфейсов — DI (`interfaces`), кроме живого кейса на настоящем ПК.
+ * Сети фикстур (7/8 в роли Radmin 26/8, 2a02:6b8:1:2::/64, 95.30.40.50) НЕ пересекаются с интерфейсами этого ПК — иначе
+ * настоящий список подстраховал бы потерянный проброс `interfaces` (адверс-ревью р1: на ПК владельца с Radmin 26.x
+ * мутация «IPv4-ветка isPrivateHost без interfaces» оставалась зелёной). Первый кейс это и сторожит.
  *
  * Реверт-проверки (из копии): private-host без `isLocalNetAddress` → красные Radmin/IPv6/встроенный IPv4/«VPN
  * подключился» и живой кейс (на ПК владельца — 26.106.17.249); встроенный IPv4 по двум октетам → красный
@@ -11,10 +14,10 @@ import { describe, expect, it } from "vitest";
 import type { LocalInterfaces } from "./local-nets.js";
 import { isPrivateHost, isPrivateHttpUrl, isPrivateIp } from "./private-host.js";
 
-/** ПК владельца 27.09 (`os.networkInterfaces()`), плюс PPPoE и глобальный IPv6 провайдера. */
+/** Форма ПК владельца 27.09 (`os.networkInterfaces()`: Radmin — /8), плюс PPPoE и глобальный IPv6 провайдера. */
 const OWNER_PC: LocalInterfaces = () => ({
   "Radmin VPN": [
-    { address: "26.106.17.249", cidr: "26.106.17.249/8" },
+    { address: "7.106.17.249", cidr: "7.106.17.249/8" },
     { address: "fdfd::1a6a:11f9", cidr: "fdfd::1a6a:11f9/64" },
   ],
   Ethernet: [
@@ -25,14 +28,19 @@ const OWNER_PC: LocalInterfaces = () => ({
 });
 
 describe("B-14: свои адреса ПК и их on-link сети — приватны", () => {
-  it("Radmin VPN 26.106.17.249/8: свой адрес и соседи по сети — приватно; вне /8 и обычный интернет — публично", () => {
-    for (const ip of ["26.106.17.249", "26.1.2.3", "26.255.255.254", "95.30.40.50"]) expect(isPrivateIp(ip, OWNER_PC), ip).toBe(true);
-    for (const ip of ["27.0.0.1", "25.255.255.255", "8.8.8.8", "95.30.40.51"]) expect(isPrivateIp(ip, OWNER_PC), ip).toBe(false);
+  it("сторож фикстур: их сети НЕ принадлежат интерфейсам этого ПК (иначе DI-кейсы ничего не доказывают)", () => {
+    for (const ip of ["7.1.2.3", "2a02:6b8:1:2::abcd", "95.30.40.50"]) expect(isPrivateIp(ip), `${ip} — сеть этого ПК, смени фикстуру`).toBe(false);
+  });
+
+  it("VPN-адаптер /8 (как Radmin 26.106.17.249/8): свой адрес и соседи по сети — приватно; вне /8 и интернет — публично", () => {
+    for (const ip of ["7.106.17.249", "7.1.2.3", "7.255.255.254", "95.30.40.50"]) expect(isPrivateIp(ip, OWNER_PC), ip).toBe(true);
+    for (const ip of ["8.0.0.1", "6.255.255.255", "8.8.8.8", "95.30.40.51"]) expect(isPrivateIp(ip, OWNER_PC), ip).toBe(false);
   });
 
   it("литерал в URL (web.fetch, browser-cdp, ответы вкладок) — тем же правилом", () => {
-    expect(isPrivateHost("http://26.106.17.249:5432/", OWNER_PC)).toBe(true);
-    expect(isPrivateHttpUrl("http://26.1.2.3:4599/", OWNER_PC)).toBe(true);
+    expect(isPrivateHost("http://7.106.17.249:5432/", OWNER_PC)).toBe(true);
+    expect(isPrivateHost("http://0x7.1.2.3:5432/", OWNER_PC)).toBe(true); // WHATWG нормализует в 7.1.2.3
+    expect(isPrivateHttpUrl("http://7.1.2.3:4599/", OWNER_PC)).toBe(true);
     expect(isPrivateHost("http://[2a02:6b8:1:2::abcd]/", OWNER_PC)).toBe(true);
     expect(isPrivateHost("https://8.8.8.8/", OWNER_PC)).toBe(false);
     expect(isPrivateHost("https://example.com/", OWNER_PC)).toBe(false);
@@ -44,10 +52,10 @@ describe("B-14: свои адреса ПК и их on-link сети — прив
   });
 
   it("встроенный IPv4 (mapped/compatible/SIIT/NAT64/6to4) судится ЦЕЛИКОМ по своим сетям, не по двум октетам", () => {
-    for (const ip of ["::ffff:26.1.2.3", "::ffff:1a01:203", "::26.1.2.3", "::ffff:0:1a01:203", "64:ff9b::1a01:203", "2002:1a01:203::1", "2002:5f1e:2832::7"]) {
+    for (const ip of ["::ffff:7.1.2.3", "::ffff:701:203", "::7.1.2.3", "::ffff:0:701:203", "64:ff9b::701:203", "2002:701:203::1", "2002:5f1e:2832::7"]) {
       expect(isPrivateIp(ip, OWNER_PC), ip).toBe(true);
     }
-    for (const ip of ["::ffff:27.0.0.1", "64:ff9b::808:808", "2002:5f1e:2833::1"]) expect(isPrivateIp(ip, OWNER_PC), ip).toBe(false);
+    for (const ip of ["::ffff:8.0.0.1", "64:ff9b::808:808", "2002:5f1e:2833::1"]) expect(isPrivateIp(ip, OWNER_PC), ip).toBe(false);
   });
 
   it("кривой адаптер: маска 0.0.0.0 (/0), /4, IPv6 /16, cidr null — приватен только сам адрес, интернет не «внутренний»", () => {
@@ -60,23 +68,24 @@ describe("B-14: свои адреса ПК и их on-link сети — прив
   });
 
   it("TUN с fake-IP (mihomo/Clash: адаптер 198.18.0.1/16 — тот же пул, что у ВСЕХ имён): сеть не приватна, только сам адрес", () => {
-    const mihomo: LocalInterfaces = () => ({ Mihomo: [{ address: "198.18.0.1", cidr: "198.18.0.1/16" }], Ethernet: [{ address: "26.106.17.249", cidr: "26.106.17.249/8" }] });
+    const mihomo: LocalInterfaces = () => ({ Mihomo: [{ address: "198.18.0.1", cidr: "198.18.0.1/16" }], Ethernet: [{ address: "7.106.17.249", cidr: "7.106.17.249/8" }] });
     expect(isPrivateIp("198.18.0.1", mihomo)).toBe(true);
     for (const ip of ["198.18.0.5", "198.18.3.7", "198.19.0.1"]) expect(isPrivateIp(ip, mihomo), ip).toBe(false);
-    expect(isPrivateIp("26.1.2.3", mihomo)).toBe(true); // остальные интерфейсы — как обычно
+    expect(isPrivateIp("7.1.2.3", mihomo)).toBe(true); // остальные интерфейсы — как обычно
   });
 
   it("список — на момент суда: VPN подключился посреди работы → адрес приватен; отключился → снова публичный", () => {
     let vpn = false;
     const live: LocalInterfaces = () => ({
       Ethernet: [{ address: "192.168.1.100", cidr: "192.168.1.100/24" }],
-      ...(vpn ? { "Radmin VPN": [{ address: "26.106.17.249", cidr: "26.106.17.249/8" }] } : {}),
+      ...(vpn ? { "Radmin VPN": [{ address: "7.106.17.249", cidr: "7.106.17.249/8" }] } : {}),
     });
-    expect(isPrivateIp("26.1.2.3", live)).toBe(false);
+    expect(isPrivateIp("7.1.2.3", live)).toBe(false);
     vpn = true;
-    expect(isPrivateIp("26.1.2.3", live)).toBe(true);
+    expect(isPrivateIp("7.1.2.3", live)).toBe(true);
+    expect(isPrivateHost("http://7.1.2.3/", live)).toBe(true);
     vpn = false;
-    expect(isPrivateIp("26.1.2.3", live)).toBe(false);
+    expect(isPrivateIp("7.1.2.3", live)).toBe(false);
   });
 
   it("провайдер интерфейсов бросил — суд не падает, правило диапазонов в силе", () => {

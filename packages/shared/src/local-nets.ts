@@ -47,11 +47,12 @@ let system: { at: number; list: BlockList } | undefined;
 
 /**
  * Системный список не прочитался (ошибка ОС) — остаётся прежний: вердикт не хуже, чем был до этого слоя
- * (правило диапазонов в силе), и не «всё приватно» (отказ всего веба).
+ * (правило диапазонов в силе), и не «всё приватно» (отказ всего веба). Часы шагнули назад (W32Time, ручная правка) —
+ * пересобираем: иначе `now - at < 0` держал бы старый список всю величину шага (адверс-ревью р1).
  */
 function systemNets(): BlockList {
   const now = Date.now();
-  if (system && now - system.at < SYSTEM_TTL_MS) return system.list;
+  if (system && now >= system.at && now - system.at < SYSTEM_TTL_MS) return system.list;
   let list = system?.list ?? new BlockList();
   try {
     list = build(networkInterfaces());

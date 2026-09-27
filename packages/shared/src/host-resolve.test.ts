@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type HostLookup, checkHostPublic, limitLookup } from "./host-resolve.js";
+
+// Правило ДИАПАЗОНОВ — без интерфейсов этого ПК: иначе вердикт «публично» зависел бы от машины (адаптер fake-IP
+// 198.18.0.1, VPS с большим on-link префиксом). Свои сети — local-nets*.test.ts (адверс-ревью р1).
+vi.mock("node:os", async (orig) => ({ ...(await orig<typeof import("node:os")>()), networkInterfaces: () => ({}) }));
 
 /** Таблица имён вместо DNS; счётчик — чтобы видеть, ходили ли в резолвер вообще. */
 function table(map: Record<string, string[] | Error | "hang">): HostLookup & { calls: string[] } {

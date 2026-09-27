@@ -10,9 +10,12 @@
  *  - резолвов разом — не больше `slots` (1; гард — свой `limitLookup` B-14); слот держится, пока не ответил сам
  *    резолвер, а не до таймаута вердикта; запрос, чей клиент уже ушёл (`alive` → false), снимается без резолва;
  *  - одно имя в полёте — один резолв; публичный вердикт помнится `cacheMs` — пиннинг цел: подключение идёт к адресам
- *    ВЕРДИКТА, так что DNS, сменивший ответ на 127.0.0.1, до истечения кеша просто не спрашивается.
+ *    ВЕРДИКТА, так что DNS, сменивший ответ на 127.0.0.1, до истечения кеша просто не спрашивается. Сами адреса из кеша
+ *    пересуживаются правилом (≈ 1,5 мкс): свой адрес ПК, появившийся с VPN после суда, приватен сразу, а не через 40 с;
+ *  - IP-литерал — без кеша и без слота: резолва нет, ждать зависший getaddrinfo ему незачем (адверс-ревью р1).
  */
-import { type HostLookup, type HostVerdict, type LocalInterfaces, Semaphore, checkHostPublic, systemLookup } from "@jarvis/shared";
+import { isIP } from "node:net";
+import { type HostLookup, type HostVerdict, type LocalInterfaces, Semaphore, checkHostPublic, isPrivateIp, systemLookup } from "@jarvis/shared";
 
 /** Одноярусное имя (без точки и не IPv6) — интранет: LLMNR/NetBIOS/суффикс поиска ведут в LAN, резолв не нужен. */
 export const isIntranetName = (host: string): boolean => Boolean(host) && !host.includes(".") && !host.includes(":");
@@ -49,9 +52,9 @@ export class HostJudge {
 
   /** host — канонический (`urlHostname`); alive — жив ли ещё ждущий (закрытый клиент резолв не держит). */
   judge(host: string, alive: () => boolean = () => true): Promise<HostVerdict> {
-    if (isIntranetName(host)) return checkBrowserHost(host);
+    if (isIntranetName(host) || isIP(host)) return checkBrowserHost(host, undefined, undefined, this.opts.interfaces);
     const hit = this.cache.get(host);
-    if (hit && hit.until > Date.now()) return Promise.resolve(hit.verdict);
+    if (hit && hit.until > Date.now()) return Promise.resolve(this.recheck(host, hit.verdict));
     let entry = this.inflight.get(host);
     if (!entry) {
       const waiting: Array<() => boolean> = [];
@@ -78,6 +81,14 @@ export class HostJudge {
     } finally {
       void raw.then(() => this.slots.release(), () => this.slots.release());
     }
+  }
+
+  /** Адреса публичного вердикта из кеша — через ТЕКУЩЕЕ правило (интерфейсы ПК меняются: VPN подключился после суда). */
+  private recheck(host: string, verdict: HostVerdict): HostVerdict {
+    const bad = verdict.ok ? verdict.addresses.find((a) => isPrivateIp(a, this.opts.interfaces)) : undefined;
+    if (!bad) return verdict;
+    this.cache.delete(host);
+    return { ok: false, reason: "private", address: bad };
   }
 
   private remember(host: string, verdict: HostVerdict): void {
