@@ -18,6 +18,7 @@ import { extractSlots } from "./skill-slots.js";
 import type { IEmbeddingProvider } from "../integrations/openai-embeddings.js";
 import { findDuplicateSemantic, findDuplicateSkill, matchLearnedSkill, recallSemantic } from "./skill-recall.js";
 import { attachReplaySection } from "./skill-macro.js";
+import { anchorsLine, parseAnchors } from "./skill-anchors.js";
 import { type SkillScanFinding, scanSkillContent, scanSkillText } from "./skill-scan.js";
 
 // Recall/дедуп вынесены в skill-recall.ts (§ревью); ре-экспорт — обратная совместимость импортёров/тестов.
@@ -692,6 +693,7 @@ export interface RecalledSkill {
   /** §P0 (ревью): СЫРОЙ косинус того же кандидата (без лексического/платформенного бустов) — гейт
    *  авто-реплея проверяет и его: бусты до +0.3 протаскивали rawCos~0.7 через порог 0.92. */
   recallSimRaw?: number;
+  anchors?: string[]; // якоря (frontmatter `anchors`): подсказка и при косинусе ниже порога — skill-anchors.ts
 }
 
 /** Итог попытки поднять навык в общую библиотеку (skill_promote, §мультитенант). */
@@ -758,6 +760,7 @@ function readLearned(rec: SkillRecord): RecalledSkill | null {
     procedure: splitFrontmatter(rec.contentMd).body.trim(),
     version: rec.version,
     failCount: rec.failCount, // P2.3: надёжность — recall подавит хронически падающий навык
+    ...(parseAnchors(fm.anchors).length ? { anchors: parseAnchors(fm.anchors) } : {}),
     ...(rec.userId === SHARED_USER_ID ? { fromShared: true } : {}),
     // §8 МАКРОС: derived-шаги (проза не парсится; ≠[] только если в навыке есть машинная секция реплея).
     ...(rec.steps.length > 0 ? { steps: rec.steps, needsReview: hasGuardSteps(rec.steps) } : {}),
@@ -771,6 +774,7 @@ export function serializeLearnedSkill(input: {
   version: number;
   when: string;
   procedure: string;
+  anchors?: readonly string[];
 }): string {
   // Фронтматтер построчный → name/description должны быть одной строкой.
   const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
@@ -780,6 +784,7 @@ export function serializeLearnedSkill(input: {
     `version: ${input.version}`,
     `source: learned`,
     `description: ${oneLine(input.when)}`,
+    ...anchorsLine(input.anchors),
   ].join("\n");
   return `---\n${fm}\n---\n\n${input.procedure.trim()}\n`;
 }

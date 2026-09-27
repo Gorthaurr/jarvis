@@ -18,6 +18,7 @@ import { type Tier, foldText } from "@jarvis/shared";
 import type { MediaOp, VolumeOp } from "@jarvis/protocol";
 import { looksLikeCommandUtterance } from "../agent/replay-gate.js";
 import { type ReactionKind, classifyReaction } from "./reaction.js";
+import { taskInfinitive } from "./task-verbs.js";
 
 /** Результат классификации: тир + (для tier0) распознанный локальный интент. */
 export interface RouteDecision {
@@ -737,7 +738,7 @@ function looksLikeAction(text: string): boolean {
  * гейт подсказки навыка в loop/retrieval.ts). Объединение, а не один список: каждый в отдельности неполон.
  */
 export function hasCommandVerb(text: string): boolean {
-  return IMPERATIVE_RE.test(text) || looksLikeAction(text) || looksLikeCommandUtterance(text);
+  return IMPERATIVE_RE.test(text) || looksLikeAction(text) || taskInfinitive(text) || looksLikeCommandUtterance(text);
 }
 
 // Частица «ли» — почти всегда вопрос («законно ЛИ парсить», «можно ЛИ», «успею ЛИ»). Ловим где угодно.
@@ -813,6 +814,8 @@ const IMPERATIVE_RE = word(
     "выруби(?:те)?|вруби(?:те)?|предупреди(?:те)?|запиши(?:те)?|проверь(?:те)?|позвони(?:те)?|подбери(?:те)?|" +
     "отключи(?:сь|те)?|подключи(?:сь|те)?|заверши(?:те)?|начни(?:те)?|отмени(?:те)?|повтори(?:те)?|" +
     "загрузи(?:те)?|скинь(?:те)?|отклони(?:те)?|прими(?:те)?|заверши(?:те)?|" +
+    // 27.09 (живой лог): учебные задания — «Пройди все мини-тесты во всех курсах» гейт навыка не считал приказом.
+    "пройди(?:те)?|сдай(?:те)?|реши(?:те)?|выполни(?:те)?|" +
     // Разбор эпизода «Дота» 2026-09-02: императивов ДВИЖЕНИЯ тут не было вовсе — «войди в пробу
     // героя» не опознавалось как приказ. Инфинитивы (войти/зайти) границей RB отсекаются.
     "войди(?:те)?|зайди(?:те)?|выйди(?:те)?|перейди(?:те)?|иди(?:те)?|вернись|верните?сь|" +

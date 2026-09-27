@@ -1,5 +1,6 @@
 // W3 «Петля»: retrieval фактов + recall навыка + каталог навыков (параллельно, под таймаутами).
 import { log, suppressSkillHint, withTimeout } from "./util.js";
+import { anchorHit } from "../../../memory/skill-anchors.js";
 import type { AgentDeps, ReplySink } from "../types.js";
 import { memoryMinScore } from "../../../memory/episodic.js";
 import { type RecalledSkill, formatSkillCatalog } from "../../../memory/skills.js";
@@ -22,7 +23,8 @@ export function skillHintBlockReason(s: RecalledSkill, text: string, conversatio
   if (!hasCommandVerb(text)) return "в реплике нет командного глагола";
   const raw = s.recallSimRaw ?? s.recallSim;
   if (raw === undefined) return "лексический recall без семантической уверенности";
-  if (raw < SKILL_HINT_MIN_RAW_COS) return `сырой косинус ${raw.toFixed(3)} < ${SKILL_HINT_MIN_RAW_COS}`;
+  // Якорь навыка в реплике снимает порог косинуса (e5-small не различает формы одной фразы — memory/skill-anchors.ts).
+  if (raw < SKILL_HINT_MIN_RAW_COS && !anchorHit(s.anchors, text)) return `сырой косинус ${raw.toFixed(3)} < ${SKILL_HINT_MIN_RAW_COS}, якорей навыка нет`;
   return null;
 }
 

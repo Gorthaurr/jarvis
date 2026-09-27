@@ -2,6 +2,8 @@
  * chrome.scripting.executeScript РЕЗОЛВИЛСЯ без результата (W1-D1, стенд): документ, где шла page-функция, выгрузился
  * посреди неё — клик по кнопке POST-формы увёл страницу, а Chrome промис умершего документа не ждёт и исключения не
  * бросает. Раньше это было «Не вышло» с координатным хатчем при ПРОШЕДШЕЙ оплате (модель кликнула бы снова — дубль).
+ * Тот же уход, но документ ЗАМОРОЖЕН в back/forward-кэше (27.09, Moodle «Вход»): executeScript не отвечал минутами (мост —
+ * isError через 20 с), поэтому robustClickMain сам отвечает по pagehide маркером {pageLeft:true} — сюда же (runInPage).
  * Закон 1 (ушло / не ушло / неизвестно) — исход по месту и по интенту:
  *  • подготовка (before: штамп ref) или целевой фрейм — как смерть контекста (frame-gone.js): «не выполнял» / frame_gone;
  *  • МЕНЯЮЩЕЕ действие в top, вкладка ушла (адрес сменился / грузится) → {ok, navigated, uncertain}: переход есть,
@@ -30,4 +32,17 @@ export async function pageLeftOutcome(tabId, frameId, before, intent, urlBefore)
     return { ok: true, navigated: t.pendingUrl || t.url || true, uncertain: true, note: "страница перешла во время действия — исход не подтверждён" };
   }
   return { ok: false, code: "page_gone", error: "страница сменила документ во время «" + intent + "» и результата не вернула — исход неизвестен, действие могло сработать" };
+}
+
+/**
+ * Медленный POST (ревью р1, 27.09): клик в top отправил форму, а ответ сервера идёт дольше ожидания robustClickMain —
+ * документ ещё на месте, контент не менялся ({changed:false}), но вкладка УЖЕ грузится. «Не отреагировала» здесь — ложь:
+ * модель кликнула бы снова (двойная отправка). Грузится / есть pendingUrl → переход вероятен, исход не подтверждён.
+ */
+export async function slowNavOutcome(tabId, frameId, rc, intent) {
+  if (intent === "hover" || !rc || rc.ok !== true || rc.changed !== false || rc.navigated || (frameId !== undefined && frameId !== 0) || rc.frame !== undefined) return rc;
+  let t = null;
+  try { t = await chrome.tabs.get(tabId); } catch { return rc; }
+  if (!t || (t.status !== "loading" && !t.pendingUrl)) return rc;
+  return { ok: true, navigated: t.pendingUrl || t.url || true, uncertain: true, note: "клик запустил загрузку страницы (ответ сайта ещё идёт) — исход не подтверждён" };
 }
