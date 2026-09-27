@@ -37,6 +37,7 @@ import { PhraseSpeaker } from "./speak-session.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
 import type { ISpeakerVerifier, VoiceProfile } from "./speaker/verifier.js";
+import { type AnswerPath, FirstAnswerTracker, type FirstSound } from "./first-answer.js";
 
 /** Нормализация команды для анти-дубля: регистр/ё/пунктуация/пробелы — чтобы «Напиши Кате.» и
  * «напиши кате» считались одной командой (повтор/эхо не исполняем дважды). \b не знает кириллицу,
@@ -80,9 +81,9 @@ export interface ReplySink {
   sentence(text: string): void;
   /** Карточка подробностей (§21). */
   display(card: { title?: string; markdown: string }): void;
-  /** Реплика сгенерирована целиком (full — весь голос для транскрипта/памяти). origin "proactive" — служебный
-   *  ack промоушена: окно разговора не открывает (ревью 2026-09-24, T-F6/B-F1; контракт — brain/agent/types.ts). */
-  done(full: string, opts?: { origin?: "user-turn" | "proactive" }): void;
+  /** Реплика сгенерирована целиком. origin "proactive" — окна разговора не открывает (T-F6/B-F1); ack — служебная
+   *  фраза промоушена, не ответ (W3 V-1: first_answer ждёт итог). Контракт — brain/agent/types.ts. */
+  done(full: string, opts?: { origin?: "user-turn" | "proactive"; ack?: boolean }): void;
 }
 
 /** Задержка перед филлером (§10): если реальная реплика подоспела раньше — филлер не нужен. */
@@ -101,13 +102,9 @@ const QUEUE_TTL_MS = envInt("JARVIS_SPEECH_QUEUE_TTL_MS", 120_000);
 /** Кап очереди озвучки: «пачка» из десятка реплик подряд — сама по себе плохой UX (та же жалоба). */
 const QUEUE_MAX = envInt("JARVIS_SPEECH_QUEUE_MAX", 4);
 
-/** Инкремент 0: ВЕРХНИЙ SANITY-потолок mouth-to-ear (env JARVIS_M2E_MAX_MS, деф 10 мин). Это НЕ клип
- *  легитимного хвоста: главная защита от мис-атрибуции проактива/фона — СТРУКТУРНАЯ (их речь не тегается
- *  turn-seq, ack не доходит). Потолок ловит лишь АБСУРД (clock-skew/грубая мис-корреляция → «минуты»),
- *  оставляя весь реальный диапазон (даже медленный многораундовый разговорный ход: turn_end → первая
- *  фраза после tool-петли, до ~loopMaxMs). Ревью инкремента 0: прежние 30с молча РЕЗАЛИ легитимный P95-
- *  хвост (agent-петля не ограничена stall-watchdog'ом по времени-до-первой-фразы) → baseline занижался.
- *  Отброс теперь ЛОГИРУЕТСЯ (наблюдаемость), а не молчит. */
+/** Инкремент 0: SANITY-потолок mouth-to-ear (env JARVIS_M2E_MAX_MS, деф 10 мин) — ловит лишь АБСУРД (clock-skew),
+ *  не легитимный медленный ход (прежние 30 с резали P95-хвост). Мис-атрибуцию проактива/фона закрывает структура:
+ *  их речь не тегается turn-seq. Отброс логируется. */
 const M2E_MAX_PLAUSIBLE_MS = envInt("JARVIS_M2E_MAX_MS", 600_000);
 
 /** Акустический фронт #1/#2 «строгий wake в шуме»: если за окно NOISY_WINDOW_MS пришло ≥ NOISY_MIN_IGNORED
@@ -147,6 +144,8 @@ export interface UserTurnMeta {
   /** true — явное «Джарвис» (или подтверждённый second-chance); false — катящееся окно разговора
    *  без обращения (главный вход чужой речи, форензика 2026-07-14: мат в Discord → авто-реплей). */
   viaWake: boolean;
+  /** W3 V-1: ход пайплайна — итог промоушена вернётся с ним (speakResult answerOf) и замкнёт first_answer. */
+  turnSeq?: number;
 }
 
 export interface VoicePipelineDeps {
@@ -163,9 +162,10 @@ export interface VoicePipelineDeps {
   onUserTurnStream?: (text: string, sink: ReplySink, meta?: UserTurnMeta) => Promise<void>;
   /** Отправка аудио-чанка TTS клиенту (speak.chunk, §5). */
   sendSpeakChunk: (c: TtsChunk) => void;
-  /** Realtime инкремент 0: замер mouth-to-ear (конец речи → первый звук РЕАЛЬНО сыгран у клиента), мс.
-   *  Зовётся из onAudioPlayed при получении ack. undefined → только лог (метрики не пишем). */
-  onMouthToEar?: (ms: number, turnSeq: number) => void;
+  /** Realtime инкремент 0: mouth-to-ear (конец речи → первый звук сыгран у клиента), мс; firstSound — чем был этот звук. */
+  onMouthToEar?: (ms: number, turnSeq: number, firstSound?: FirstSound) => void;
+  /** W3 V-1: turn_end → ОТПРАВКА первого чанка СОДЕРЖАТЕЛЬНОГО ответа (не ack/филлер), мс; path — sync/promoted. */
+  onFirstAnswer?: (ms: number, turnSeq: number, path: AnswerPath) => void;
   /** Уведомление клиента о состоянии (орб idle/listening/thinking/speaking). */
   sendClientState: (s: VoiceState) => void;
   /** Транскрипт для UI/логов (§5). */
@@ -281,6 +281,8 @@ export class VoicePipeline {
    *  а ack клиента прилетает через раунд-трип позже → для короткой однофразной mp3-реплики метрика терялась).
    *  Снапшот переживает сброс: onAudioPlayed матчит ack с ним и считает mouth-to-ear = ackTs − turnEndTs. */
   private m2eSnap: { seq: number; turnEndTs: number } | undefined;
+  /** W3 V-1: какой звук хода ушёл первым и когда ушёл первый содержательный ответ (first-answer.ts). */
+  private readonly firstAnswer = new FirstAnswerTracker(() => this.now(), (ms, seq, path) => this.deps.onFirstAnswer?.(ms, seq, path));
   /** Говорит ли сейчас пользователь (между speech_start и финалом) — не перебиваем его фоном. */
   private userSpeaking = false;
   /** Идёт ли ход агента прямо сейчас (гард «один ход за раз», ревью фиксов речи 2026-07-24). */
@@ -300,6 +302,7 @@ export class VoicePipeline {
     /** W0: итог задачи владельца («user-turn») открывает окно разговора; прочее — проактив. */
     origin?: SpeechOrigin;
     onOutcome?: (spoken: boolean) => void;
+    answerOf?: number; // W3 V-1: итог задачи, промотированной из этого хода
   }[] = [];
   /** Wake word (§3): активен ли разговор + когда было ПОСЛЕДНЕЕ взаимодействие (любая сторона). */
   private readonly requireWake: boolean;
@@ -646,12 +649,8 @@ export class VoicePipeline {
   }
 
   /**
-   * Озвучить РЕЗУЛЬТАТ фоновой задачи (§20 async): кладём в очередь и произносим, когда
-   * канал свободен (не во время раздумья/речи Джарвиса и не поверх говорящего пользователя).
-   * Так разговор не блокируется задачей, а её итог всё равно проговаривается по готовности.
-   */
-  /**
-   * Поставить проактивную реплику в очередь озвучки.
+   * Поставить в очередь озвучки итог фоновой задачи (§20 async) или проактивную реплику: звучит, когда канал
+   * свободен (не поверх раздумья/речи Джарвиса и говорящего владельца). answerOf — ход, чей итог (W3 V-1).
    *
    * 🔴 ВОЗВРАЩАЕТ, ПРИНЯТА ЛИ РЕПЛИКА (контроль-7 волны D — корневой фикс целого класса потерь).
    * Очередь ОДНА на все проактивные источники (напоминания, наблюдения, ambient), ёмкость QUEUE_MAX.
@@ -669,7 +668,7 @@ export class VoicePipeline {
   speakQueued(
     text: string,
     urgent = false,
-    opts?: { retriable?: boolean; onOutcome?: (spoken: boolean) => void; origin?: SpeechOrigin },
+    opts?: { retriable?: boolean; onOutcome?: (spoken: boolean) => void; origin?: SpeechOrigin; answerOf?: number },
   ): boolean {
     if (!text.trim()) return false;
     if (this.pendingSpeech.length >= QUEUE_MAX) {
@@ -705,6 +704,7 @@ export class VoicePipeline {
       retriable: opts?.retriable === true,
       origin: opts?.origin ?? "proactive",
       ...(opts?.onOutcome ? { onOutcome: opts.onOutcome } : {}),
+      ...(opts?.answerOf !== undefined ? { answerOf: opts.answerOf } : {}),
     });
     this.maybeDrainSpeech();
     return true;
@@ -721,7 +721,9 @@ export class VoicePipeline {
   /** Инкремент 0: снять снапшот текущего хода (seq + turn_end) для отложенного mouth-to-ear ack. */
   private captureM2eSnapshot(): void {
     const te = this.latency.report().marks.turn_end;
-    if (te !== undefined) this.m2eSnap = { seq: this.turnSeq, turnEndTs: te };
+    if (te === undefined) return;
+    this.m2eSnap = { seq: this.turnSeq, turnEndTs: te };
+    this.firstAnswer.begin(this.turnSeq, te);
   }
 
   /**
@@ -752,7 +754,7 @@ export class VoicePipeline {
     if (turnId === this.turnSeq) this.latency.markAt("audio_played", ts); // ход ещё жив → в live-трекер тоже
     const ms = Math.round(m2eMs);
     this.log.info(`latency mouth-to-ear: →ухо ${ms}мс (ход ${snap.seq})`);
-    this.deps.onMouthToEar?.(ms, snap.seq);
+    this.deps.onMouthToEar?.(ms, snap.seq, this.firstAnswer.firstSound(snap.seq));
   }
 
   /**
@@ -844,7 +846,7 @@ export class VoicePipeline {
     // (не тегаем turn-seq), иначе её ack замкнулся бы на висящий снапшот хода = ложные «минуты» (fix
     // мис-атрибуции). Собственный ответ хода тегается только в runAgent/runAgentStreaming/playFiller.
     // Колбэк исхода отдаём ВНУТРЬ синтеза: «взяли из очереди» ещё не «прозвучало» (контроль-11).
-    if (next) this.startTts(`${this.dropNotice()}${next.text}`, this.gen, true, undefined, next.onOutcome, next.origin ?? "proactive");
+    if (next) this.startTts(`${this.dropNotice()}${next.text}`, this.gen, true, undefined, next.onOutcome, next.origin ?? "proactive", next.answerOf);
   }
 
   /**
@@ -1203,7 +1205,7 @@ export class VoicePipeline {
     // §22 чат: реплика пользователя в историю (голосовой ход — что распознали).
     this.deps.sendChat?.({ role: "user", text });
     // §P0: как реплика прошла wake-гейт — мозг гейтит слепой авто-реплей (жесты только по явному «Джарвис»).
-    const meta: UserTurnMeta = { viaWake: this.lastAcceptViaWake };
+    const meta: UserTurnMeta = { viaWake: this.lastAcceptViaWake, turnSeq: this.turnSeq };
     // §P1 (форензика 2026-07-14: 36% ходов молчат ~10с до первой реакции): молчание раздумья
     // дольше порога → короткий earcon-тик «услышал, думаю» (см. armThinkEarcon).
     this.armThinkEarcon(myGen);
@@ -1258,9 +1260,11 @@ export class VoicePipeline {
     this.lastSpeechOrigin = "user-turn";
     this.awake = true;
     this.lastActiveAt = this.now();
+    let ackText: string | undefined; // W3 V-1: служебный ack (done с ack) — его чанки идут как "ack", не ответ
+    let phraseKind: FirstSound = "answer";
     const speaker = new PhraseSpeaker({
-      synthesize: (t) => this.deps.tts.synthesize(t, this.voiceOpts()),
-      sendChunk: (c) => this.emitSpeakChunk({ ...c, gen: this.turnSeq }), // инкремент 0: тег хода для mouth-to-ear
+      synthesize: (t) => ((phraseKind = t === ackText ? "ack" : "answer"), this.deps.tts.synthesize(t, this.voiceOpts())),
+      sendChunk: (c) => this.emitSpeakChunk({ ...c, gen: this.turnSeq }, phraseKind), // инкремент 0: тег хода для mouth-to-ear
       onSpeaking: () => {
         this.latency.mark("tts_first_chunk");
         this.latency.mark("audio"); // первый звук ОТПРАВЛЕН клиенту (mouth-to-ear замкнёт audio.played)
@@ -1328,6 +1332,7 @@ export class VoicePipeline {
           // Ничего не стримилось (детерминированный путь / 1-фразовая реплика) — произносим целиком.
           if (!pushedAny) {
             pushedAny = true;
+            if (opts?.ack) ackText = full.trim();
             speaker.push(full.trim());
           }
         }
@@ -1435,8 +1440,9 @@ export class VoicePipeline {
   /** Когда последний раз отправляли звук клиенту — водяной знак свежести для «отставших» сигналов. */
   private lastChunkSentAt = 0;
 
-  /** Отправить звуковой чанк клиенту, пометив динамик занятым (единая точка выхода аудио). */
-  private emitSpeakChunk(chunk: TtsChunk): void {
+  /** Отправить звуковой чанк клиенту, пометив динамик занятым (единая точка выхода аудио); kind — для V-1. */
+  private emitSpeakChunk(chunk: TtsChunk, kind?: FirstSound): void {
+    if (kind) this.firstAnswer.sound(chunk.gen, kind);
     this.markSpeakerBusy();
     this.lastChunkSentAt = this.now();
     this.deps.sendSpeakChunk(chunk);
@@ -1478,19 +1484,11 @@ export class VoicePipeline {
   private thinkEarconTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
-   * §P1 EARCON РАЗДУМЬЯ (форензика 2026-07-14): earcon Волны 1.1 звучал ТОЛЬКО на приёмке фоновой
-   * задачи — sync-first ход молчал до первой фразы (36% ходов ~10с тишины, медиана m2e 3.4–3.9с при
-   * цели 800мс; владелец повторял команды в тишину). Теперь: через JARVIS_THINK_EARCON_MS после
-   * начала раздумья, если ни звука, ни ответа ещё нет — ОДИН короткий тон «услышал, думаю».
-   * Состояние машины не трогаем (это не речь); голосовой филлер («Секунду, сэр»), если он включён,
-   * замещает тик (не дублируем). env читается на КАЖДОМ вызове (тестируемость).
-   *
-   * ВОЛНА B «мгновенный голос» (2026-07-29, порог 1800 → 700): ЖИВОЙ ЗАМЕР показал, что первый текст
-   * ответа приходит через 1.8–4.4с (это TTFT LLM; TTS добавляет лишь ~180мс — измерено A/B v1 vs v3).
-   * На пороге 1800мс тик успевал прозвучать впритык к самому ответу или уже после «мысленного»
-   * дедлайна владельца — то есть маскировал не ту часть тишины. 700мс: быстрые ходы (tier0-открытия,
-   * кеш-хиты) остаются ЧИСТЫМИ (успевают ответить раньше), а любой поход к модели даёт слышимое
-   * «услышал» ещё до того, как молчание начинает читаться как «не понял/не работает».
+   * §P1 EARCON РАЗДУМЬЯ (форензика 2026-07-14: 36% sync-first ходов ~10 с молчали до первой фразы): через
+   * JARVIS_THINK_EARCON_MS после начала раздумья, если ни звука, ни ответа нет — ОДИН тон «услышал, думаю».
+   * Машину не трогаем (это не речь); голосовой филлер, если включён, замещает тик. env читается на каждом вызове.
+   * Порог 700 мс (Волна B, было 1800): первый текст модели приходит через 1.8–4.4 с — быстрые ходы (tier0, кеш)
+   * остаются чистыми, а поход к модели даёт «услышал» до того, как молчание читается как «не понял».
    */
   private armThinkEarcon(myGen: number): void {
     const ms = envInt("JARVIS_THINK_EARCON_MS", 700);
@@ -1558,7 +1556,7 @@ export class VoicePipeline {
     this.latency.mark("tts_first_chunk");
     this.latency.mark("audio"); // первый звук (филлер) пошёл к клиенту
     this.dispatch({ type: "speak_start" }); // thinking → speaking
-    this.emitSpeakChunk({ audio, seq: 0, last: true, gen: this.turnSeq }); // инкремент 0: тег хода
+    this.emitSpeakChunk({ audio, seq: 0, last: true, gen: this.turnSeq }, "filler"); // инкремент 0: тег хода
     this.log.info("realtime: филлер проигран (маскировка пола латентности Opus)", this.latency.report());
   }
 
@@ -1575,8 +1573,8 @@ export class VoicePipeline {
    * речи микрофон корректно переоткрылся. drive=false (проактивность/онбординг §9/§11) —
    * «выстрелил и забыл»: НЕ трогаем цикл, слух остаётся как был.
    */
-  /** Опции синтеза: голос активного режима-маски (§11) поверх дефолтного voiceId. */
-  private voiceOpts(): TtsOpts {
+  /** Опции синтеза: голос активного режима-маски (§11) поверх дефолтного voiceId. Публично — прогрев кеша TTS (V-5). */
+  voiceOpts(): TtsOpts {
     const v = this.deps.getVoiceOpts?.();
     return {
       voiceId: v?.voiceId ?? this.deps.ttsVoiceId,
@@ -1600,6 +1598,7 @@ export class VoicePipeline {
     m2eSeq?: number,
     onOutcome?: (spoken: boolean) => void,
     origin: SpeechOrigin = "user-turn",
+    answerOf?: number,
   ): void {
     // ИСХОД — ПО ФАКТУ ЗВУКА (контроль-11): раньше onOutcome(true) звался ДО синтеза, и отказ TTS
     // (сеть/квота/429) навсегда помечал напоминание доставленным, хотя не прозвучало ни звука, а лог
@@ -1638,13 +1637,14 @@ export class VoicePipeline {
       if (first) {
         first = false;
         settle(true); // первый байт реально ушёл клиенту — вот теперь «прозвучало»
+        this.firstAnswer.promoted(answerOf); // W3 V-1: итог промотированной задачи этого хода пошёл
         this.latency.mark("tts_first_chunk");
         this.latency.mark("audio"); // первый звук ОТПРАВЛЕН клиенту (mouth-to-ear замкнёт audio.played)
         if (drive) this.dispatch({ type: "speak_start" });
         this.log.info(`latency: ${this.latency.report().summary}`);
       }
       // Инкремент 0: gen=m2eSeq (undefined → router опустит поле → клиент не тегирует эту озвучку).
-      this.emitSpeakChunk({ ...c, gen: m2eSeq });
+      this.emitSpeakChunk({ ...c, gen: m2eSeq }, "answer");
     });
     stream.onError((e) => {
       this.log.warn("ошибка TTS-стрима", e.message);

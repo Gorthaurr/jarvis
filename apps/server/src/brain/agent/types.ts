@@ -32,12 +32,11 @@ import { costUsd } from "../../obs/pricing.js";
 export interface AgentReply {
   voice: string;
   display?: { title?: string; markdown: string };
-  /**
-   * tier0 app.launch не нашёл цель (сценарии 2026-09-02, причина №1): «запусти тесты»/«включи стрим» с
-   * НЕизвестным именем умирали честным «не нашёл» без шанса для модели. Флаг — внутренний: handleUserText
-   * на инлайн-пути отдаёт реплику модели вместо терминала; фоновые/промотированные пути озвучивают voice как есть.
-   */
+  /** tier0 не закрыл реплику (не нашёл цель, причина №1 сценариев 2026-09-02): внутренний флаг — на инлайн-пути
+   *  handleUserText отдаёт реплику модели; фоновые/промотированные пути озвучивают voice как есть. */
   fallbackToLlm?: true;
+  /** W3 V-1: voice — служебный ack промоушена («Секунду, сэр»), не ответ: first_answer ждёт итог. */
+  ack?: true;
 }
 
 /**
@@ -62,7 +61,7 @@ export interface ReplySink {
    * (ack промоушена «Берусь, сэр»): окно разговора она НЕ открывает и не продлевает (ревью 2026-09-24, T-F6/B-F1 —
    * иначе на каждой фоновой задаче 8 с всё, что звучит в комнате, принималось за команду).
    */
-  done(full: string, opts?: { origin?: "user-turn" | "proactive" }): void;
+  done(full: string, opts?: { origin?: "user-turn" | "proactive"; ack?: boolean }): void;
 }
 
 /** Зависимости агента (инъекция для тестируемости и разделения слоёв). */
@@ -225,7 +224,7 @@ export interface AgentDeps {
    * задачи исполняются в фоне (не блокируя разговор), а итог проговаривается сюда.
    * Без него (тесты/dev.text) — синхронное поведение.
    */
-  speakResult?: (reply: AgentReply, opts?: { origin?: "user-turn" | "proactive" }) => void;
+  speakResult?: (reply: AgentReply, opts?: { origin?: "user-turn" | "proactive"; answerOf?: number }) => void;
   /**
    * Аренда физического ввода на сессию (§20): команды, трогающие мышь/клаву/фокус
    * (вкл. tier0 «открой X»), сериализуются через неё, а независимые задачи бегут
