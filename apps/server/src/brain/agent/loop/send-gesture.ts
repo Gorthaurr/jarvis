@@ -7,7 +7,8 @@ import { inspectWebBatch, webActGesture } from "./browser-gesture.js";
 import type { LoopState } from "./state.js";
 import type { ToolResult } from "../../tools/dispatch.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
-import { isBlindMutate } from "../error-voice.js";
+import { isBlindMutateCall } from "../blind-call.js";
+import type { ResolveCode } from "../../tools/code-input.js";
 
 type ToolUse = LlmResponse["toolUses"][number];
 
@@ -68,9 +69,10 @@ function executedPrefix(tu: ToolUse, k: number): ToolUse {
  * префиксу (набор → composedPending, набор+коммит → долг отправки): сервер сам велит «доделай шаг отдельным
  * browser_act», и следующий клик — коммит набранного. Вуальный отказ сюда не идёт: у него свой учёт
  * (overlayActionInjected → терминал «исход не подтверждён»).
+ * W3 (L-2): слепая рука — по ВЫЗОВУ (blind-call.ts): SDK-скрипт, упавший посреди кликов, хендлер помечает uncertain.
  */
-export function armUncertainDebt(st: LoopState, tu: ToolUse, r: ToolResult, eff: "verify" | "mutate" | "neutral"): void {
-  if (!r.isError || r.overlayDenied === true || eff !== "mutate" || !isBlindMutate(tu.name)) return;
+export function armUncertainDebt(st: LoopState, tu: ToolUse, r: ToolResult, eff: "verify" | "mutate" | "neutral", resolveCode?: ResolveCode): void {
+  if (!r.isError || r.overlayDenied === true || eff !== "mutate" || !isBlindMutateCall(tu.name, tu.input, resolveCode)) return;
   const k = r.partialSteps;
   if (r.uncertain === true) armSendDebt(st, sendGestureOf(tu, st.honesty.composedPending), true);
   else if (typeof k === "number" && k > 0) armSendDebt(st, sendGestureOf(executedPrefix(tu, k), st.honesty.composedPending), true);

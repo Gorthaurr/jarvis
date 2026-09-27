@@ -5,11 +5,12 @@
  * задачи не дерутся за общий ввод — мышь/клавиатуру/фокус окна. Команды, которые
  * синтезируют ввод, крадут фокус/открывают окно или гонят страницу через CDP,
  * обязаны идти под арендой ввода (AsyncMutex на сессию); всё остальное
- * (web/память/файлы/чтение a11y/код в песочнице/Office-COM/медиа-клавиши)
+ * (web/память/файлы/чтение a11y/код без SDK jarvis/Office-COM/медиа-клавиши)
  * безопасно параллелить — оно не трогает курсор.
  */
 import type { ActionKind } from "@jarvis/protocol";
 import { ACTUATOR_KIND_BY_TOOL } from "@jarvis/tools";
+import { callDrivesInput, type ResolveCode } from "./code-input.js";
 
 /**
  * Виды команд, требующие эксклюзивной аренды ввода (§20): прямой синтез ввода,
@@ -42,13 +43,16 @@ export function kindNeedsInput(kind: ActionKind): boolean {
 
 /**
  * Приведёт ли вызов инструмента модели к команде, занимающей ввод. Серверные
- * инструменты (web_search, memory_*, tool_*) не эмитят ActionCommand → нет;
- * самописные инструменты резолвятся в code.run (песочница, без GUI) → тоже нет.
+ * инструменты (web_search, memory_*, tool_*) не эмитят ActionCommand → нет.
+ * W3 (G-14): code.run сам по себе ввод не трогает, но python-скрипт с `import jarvis` кликает и печатает через
+ * мост актуаторов — судим по ВХОДУ (code-input.ts); самописный инструмент — по своему коду (резолвер из deps).
+ * Без входа — по имени, как раньше.
  */
-export function toolNeedsInput(name: string): boolean {
+export function toolNeedsInput(name: string, input?: unknown, resolveCode?: ResolveCode): boolean {
   // §Волна2 (2.2): input_batch — серверный инструмент (не в карте актуаторов), но эмитит
   // skill.execute (серия GUI-шагов) → аренда ввода обязательна.
   if (name === "input_batch") return true;
   const kind = ACTUATOR_KIND_BY_TOOL[name];
-  return kind ? kindNeedsInput(kind) : false;
+  if (kind && kindNeedsInput(kind)) return true;
+  return input !== undefined && callDrivesInput(name, input, resolveCode);
 }

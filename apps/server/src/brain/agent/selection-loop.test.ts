@@ -366,6 +366,11 @@ function toolResultText(messages: LlmMessage[]): string {
 }
 
 const view = (id = "v1") => ({ id, name: "screen_selection", input: { op: "view" } });
+/**
+ * W3 (G-14): явный `import jarvis` ФОНОМ сервер отклоняет до запуска (code.ts). Фоновое задание, чей SDK серверу не
+ * виден (скрипт исполняет файл), клиент по-прежнему может остановить вуалью — job_status обязан доложить честно.
+ */
+const HIDDEN_SDK_JOB = "exec(open('steps.py').read())";
 
 describe("режим выделения в петле", () => {
   it("активное выделение попадает в системный хвост промпта — с возрастом и без untrusted-обёртки", async () => {
@@ -1034,7 +1039,7 @@ describe("режим выделения в петле — контроль-6", (
   it("контроль-7 sdk-2: фоновое задание, легшее об вуаль, — job_status структурно overlayDenied; запуск скрипта не считается сделанным делом", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Не могу продолжить, сэр: скрипт остановился на третьем клике — открыт оверлей; два клика ушли, дождусь." },
     ]);
@@ -1092,7 +1097,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Готово, сэр." },
       { text: "Готово, сэр." },
@@ -1109,7 +1114,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const status = (id: string) => ({ id, name: "job_status", input: { jobId: "job-1" } });
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [status("j1")] },
       { toolUses: [status("j2")] },
       { text: "Не могу продолжить, сэр: оверлей всё ещё открыт — дождусь." },
@@ -1124,7 +1129,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Понял, сэр." },
       { text: "Понял, сэр." },
@@ -1195,7 +1200,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 10, y: 20, frame: "k1af1" } } }] },
       { text: "Понял, сэр." },
@@ -1329,7 +1334,7 @@ describe("режим выделения в петле — контроль-9", (
   it("job-veil-done0-not-failure: задание легло об вуаль на первом действии (done=0) — ход не «done»", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Скрипт остановился: открыт режим выделения — повторю, когда закроете рамку." },
       { text: "Скрипт остановился: открыт режим выделения — повторю, когда закроете рамку." },
