@@ -37,6 +37,7 @@ import { loadCheckpointStore } from "../brain/agent/checkpoint-store.js";
 import { ActivityService } from "../brain/activities.js";
 import { flushResolutionStores, loadResolutionMemory } from "../memory/resolution-memory.js";
 import { flushWorkingStores } from "../memory/working-store.js";
+import { consolidationTurns } from "../memory/working.js";
 import { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { McpManager } from "../brain/mcp/manager.js";
 import { loadMcpConfig } from "../brain/mcp/config.js";
@@ -1036,7 +1037,7 @@ function maybeConsolidate(ctx: SessionContext, brain: BrainProviders, log: Logge
   const today = new Date().toDateString();
   // «Новый день» — разные календарные даты (сервер на ПК владельца, локальная дата консистентна с renderNow).
   if (last && new Date(last).toDateString() === today) return;
-  const turns = ctx.memory.recentTurns().map((t) => ({ role: t.role, text: t.text }));
+  const turns = consolidationTurns(ctx.memory.recentTurns()); // A1: без реплик, принятых окном без «Джарвис»
   // Ревью волны Б 2-й проход (#2): НЕ сжигать дневной слот на ПУСТОЙ памяти. Раньше пометка стояла ДО
   // проверки реплик → первый коннект дня после >12ч-простоя (working-store вычистил вчерашнее по TTL)
   // помечал день, а реальный дневной диалог не консолидировался. Реплик пользователя нет → выходим БЕЗ

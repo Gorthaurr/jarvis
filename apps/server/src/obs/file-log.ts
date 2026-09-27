@@ -5,13 +5,15 @@
  * с ротацией по дню и retention (старые дни удаляются). НЕ горячий путь: пишем БУФЕРОМ с флашем по
  * таймеру (дешевле, чем appendFileSync на каждую строку — deepgram спамит сотнями строк).
  *
- * Fail-safe: любой сбой ФС проглатывается (консоль — основной канал, файл — бонус). Формат — JSONL
+ * Fail-safe: сбой ФС не роняет процесс, но и не теряет строки молча (C4/B5 27.09 → `durable-append.ts`: отложить,
+ * предупредить с кодом, после N сбоев подряд — запасной `server-<день>.<pid>.log`). Формат — JSONL
  * (одна запись на строку), чтобы аудит грепал/парсил машинно, а не регэкспил человекочитаемый вывод.
  */
-import { appendFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { type LogSink, addLogSink, createLogger } from "@jarvis/shared";
 import { dataPath } from "../paths.js";
+import { DurableAppender } from "@jarvis/shared/durable-append";
 
 const log = createLogger("obs:file-log");
 
@@ -43,7 +45,7 @@ export function pruneOldLogs(dir: string, retentionDays: number, now: Date): voi
     return; // папки ещё нет — нечего чистить
   }
   for (const name of names) {
-    const m = /^server-(\d{4})-(\d{2})-(\d{2})\.log$/.exec(name);
+    const m = /^server-(\d{4})-(\d{2})-(\d{2})(?:\.\d+)?\.log$/.exec(name); // + запасные `.<pid>.log`
     if (!m) continue;
     const fileDay = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
     if (fileDay < cutoff) {
@@ -67,6 +69,7 @@ export class FileLogSink {
   private readonly dir: string;
   private readonly retentionDays: number;
   private readonly flushMs: number;
+  private readonly out = new DurableAppender(log);
 
   constructor(opts: { dir?: string; retentionDays?: number; flushMs?: number } = {}) {
     this.dir = opts.dir ?? logsDir();
@@ -103,9 +106,9 @@ export class FileLogSink {
     if (this.buf.length >= 2000) this.flush(); // защита от разрастания буфера на спам-пиках
   };
 
-  /** Записать накопленный буфер на диск (ротация по дню). Fail-safe. */
-  flush(): void {
-    if (this.buf.length === 0) return;
+  /** Записать накопленный буфер (и отложенное после сбоя) на диск, ротация по дню. Fail-safe. */
+  flush(final = false): void {
+    if (this.buf.length === 0 && this.out.idle) return;
     const lines = this.buf;
     this.buf = [];
     const day = dayStr(new Date());
@@ -117,11 +120,7 @@ export class FileLogSink {
         /* не критично */
       }
     }
-    try {
-      appendFileSync(join(this.dir, `server-${day}.log`), lines.join("\n") + "\n");
-    } catch {
-      /* сбой записи — роняем эту порцию, консоль уже отработала */
-    }
+    this.out.write(join(this.dir, `server-${day}.log`), join(this.dir, `server-${day}.${process.pid}.log`), lines, { final });
   }
 
   /** Запустить периодический флаш. Идемпотентно. */
@@ -137,7 +136,9 @@ export class FileLogSink {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.flush();
+    // Флаш последний (р1): сбой основного → сразу запасной, не ждём N подряд. Повтор, пока буфер не пуст (≤ 3 прохода,
+    // р2): финальная запись сама выпускает предупреждения, а их запись в оживший основной — сводку восстановления.
+    for (let pass = 0; pass < 3 && (pass === 0 || this.buf.length > 0); pass++) this.flush(true);
   }
 }
 

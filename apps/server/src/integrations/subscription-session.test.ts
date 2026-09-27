@@ -423,3 +423,73 @@ describe("W2: устойчивость моста к схеме tool() SDK", () 
     expect(shape.args.isOptional()).toBe(true);
   });
 });
+
+/**
+ * A5 (аудит прод-логов 27.09): на подписке outputTokens занижались в 10–100 раз — засчитывался снимок
+ * message_start (output ≈ 1) из ПЕРВОГО assistant-кадра, а итог вывода из message_delta терялся. Слепли метрики,
+ * часовой гард трат и самоанализ. Кадры ниже — в форме настоящего SDK (includePartialMessages): каждый блок
+ * ответа — отдельный assistant-кадр со снимком usage, итог — в stream_event message_delta.usage.
+ */
+describe("A5: usage вывода на подписке — итог ответа, а не снимок начала", () => {
+  /** SDK, отдающий заданные кадры и закрывающий поток (инструментов не зовёт). */
+  function framesSdk(frames: Array<Record<string, unknown>>): FakeSdk {
+    const sdk: FakeSdk = {
+      ...realisticSdk(),
+      query({ prompt, options }) {
+        sdk.queries.push({ prompt, options, abort: options.abortController as AbortController });
+        return (async function* () {
+          for (const f of frames) yield f;
+        })();
+      },
+    };
+    return sdk;
+  }
+  const START = { input_tokens: 2, cache_read_input_tokens: 100, output_tokens: 1 }; // снимок message_start
+  const TEXT_REQ: LlmRequest = { ...BASE, tools: [], sessionKey: undefined };
+
+  it("текстовый ход: output = message_delta.usage (250), а не снимок первого кадра (1)", async () => {
+    const sdk = framesSdk([
+      { type: "system", subtype: "init" },
+      { type: "assistant", message: { id: "m1", usage: START, content: [{ type: "thinking", thinking: "думаю" }] } },
+      { type: "assistant", message: { id: "m1", usage: START, content: [{ type: "text", text: "Длинный ответ из нескольких фраз." }] } },
+      { type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 250 } } },
+      { type: "stream_event", event: { type: "message_stop" } },
+      { type: "result", subtype: "success", usage: { input_tokens: 2, output_tokens: 250 } },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(TEXT_REQ);
+    expect(r.usage.outputTokens).toBe(250); // до фикса: 1
+    expect(r.usage.cacheReadTokens).toBe(100); // вход — по-прежнему per-call снимок этого вызова
+    expect(r.usage.inputTokens).toBe(2);
+  });
+
+  it("tool_use-ход: message_delta несёт и stop_reason, и итог вывода — итог учтён ДО отдачи хода", async () => {
+    const sdk = framesSdk([
+      { type: "assistant", message: { id: "m1", usage: START, content: [{ type: "tool_use", id: "t1", name: "mcp__jarvis__app_launch", input: { args: { app: "notepad" } } }] } },
+      { type: "stream_event", event: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 180 } } },
+      { type: "stream_event", event: { type: "message_stop" } },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete({ ...BASE, sessionKey: undefined });
+    expect(r.toolUses.map((u) => u.id)).toEqual(["t1"]);
+    expect(r.usage.outputTokens).toBe(180); // до фикса: 1
+  });
+
+  it("поздний assistant-кадр ТОГО ЖЕ ответа с бóльшим output — берём больший (без message_delta)", async () => {
+    const sdk = framesSdk([
+      { type: "assistant", message: { id: "m1", usage: START, content: [{ type: "thinking", thinking: "думаю" }] } },
+      { type: "assistant", message: { id: "m1", usage: { ...START, output_tokens: 57 }, content: [{ type: "text", text: "Ответ." }] } },
+      { type: "result", subtype: "success", usage: {} },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(TEXT_REQ);
+    expect(r.usage.outputTokens).toBe(57); // до фикса: 1
+  });
+
+  it("запоздалый (меньший) итог не уменьшает уже учтённый вывод", async () => {
+    const sdk = framesSdk([
+      { type: "assistant", message: { id: "m1", usage: { ...START, output_tokens: 40 }, content: [{ type: "text", text: "Ответ." }] } },
+      { type: "stream_event", event: { type: "message_delta", delta: {}, usage: { output_tokens: 12 } } },
+      { type: "result", subtype: "success", usage: {} },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(TEXT_REQ);
+    expect(r.usage.outputTokens).toBe(40);
+  });
+});

@@ -143,7 +143,8 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
   // «остальное — нет / исход не подтверждён» и failed в реестре были бы ложью; дальше судит её текст.
   if (st.honesty.overlayActionInjected && realVerify && r.veiled !== true) st.honesty.verifiedAfterVeil = true;
   // Контроль-6 (C5R-5): durable-дело нейтральным инструментом — не «ничего не сделано».
-  if (eff === "neutral" && DURABLE_NEUTRAL_TOOLS.has(tu.name)) st.honesty.anyDurableNeutralSucceeded = true;
+  if (eff === "neutral" && DURABLE_NEUTRAL_TOOLS.has(tu.name) && r.declined !== true) st.honesty.anyDurableNeutralSucceeded = true;
+  if (r.declined === true && eff !== "mutate") { st.honesty.gateStoppedRound = true; st.honesty.declinedCalls.add(tu.id); } // A1: отказ политикой — не капитуляция, в журнале «не выполнено»
   // §P1-отправка: жест КОММИТА после набора (Enter/кнопка/берст «поле → кнопка», W4 act, W1 browser_act/browser_batch) —
   // send-gesture.ts. Fused-наблюдение коммита — снимок «факт нажатия», НЕ исход → долг сверки исхода.
   const gesture = sendGestureOf(tu, st.honesty.composedPending);

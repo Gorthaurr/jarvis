@@ -78,7 +78,7 @@ export async function handleUserText(
   // оговорки понимались и в детерминированном tier0, и в LLM. Если чистка выела всё
   // (фраза была одной хезитацией) — оставляем оригинал, не теряем ход.
   const clean = cleanDisfluency(text.trim()) || text.trim();
-  deps.memory.pushTurn("user", clean);
+  deps.memory.pushTurn("user", clean, meta?.viaWake === false);
 
   // ПАМЯТЬ — ОСОЗНАННАЯ, не свалка транскриптов. Раньше СЮДА писалась КАЖДАЯ реплика как «event»
   // (включая STT-мусор, команды, обрывки) → потом всплывала в приветствии/контексте как «странные

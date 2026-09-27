@@ -12,6 +12,18 @@ export interface Turn {
   role: "user" | "assistant";
   text: string;
   ts: number;
+  /** A1: реплика принята окном без «Джарвис» (могла быть чужая речь) — сон-цикл из неё фактов не извлекает. */
+  unaddressed?: true;
+}
+
+/** A1: реплики для сон-цикла — без принятых окном без «Джарвис» (чужая речь не становится «фактом о владельце»). */
+export function consolidationTurns(turns: readonly Turn[]): Array<{ role: Turn["role"]; text: string }> {
+  let skipping = false; // ответ Джарвиса на чужую речь — тоже вон (эхом «Понял, голосовые пропускаю» факт вернулся бы)
+  const kept = turns.filter((t) => {
+    if (t.role === "user") skipping = t.unaddressed === true;
+    return !skipping;
+  });
+  return kept.map((t) => ({ role: t.role, text: t.text }));
 }
 
 /** Сущность для анафоры (§10): объект, на который можно сослаться местоимением. */
@@ -62,11 +74,11 @@ export class WorkingMemory {
   }
 
   /** Добавить реплику; старые вытесняются (кольцевой буфер). */
-  pushTurn(role: Turn["role"], text: string): void {
+  pushTurn(role: Turn["role"], text: string, unaddressed = false): void {
     // W0 (2026-09-09): пустая реплика (тихий финал отменённой задачи: terminal("")) в историю не идёт —
     // пустой assistant-content в середине диалога API не принимает, а смысла в ней нет.
     if (text.trim().length === 0) return;
-    this.turns.push({ role, text, ts: Date.now() });
+    this.turns.push({ role, text, ts: Date.now(), ...(unaddressed ? { unaddressed: true as const } : {}) });
     if (this.turns.length > this.maxTurns) {
       this.turns.splice(0, this.turns.length - this.maxTurns);
     }

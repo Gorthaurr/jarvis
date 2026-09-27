@@ -6,7 +6,7 @@ import type { LlmResponse } from "../../../integrations/llm.js";
 import { shouldStreamStep, streamModelCall } from "./stream-final.js";
 import { verbalize } from "../../verbalize/index.js";
 import { metrics } from "../../../obs/metrics.js";
-import { costUsd } from "../../../obs/pricing.js";
+import { chargedCostUsd, usageChannel } from "../../../obs/pricing.js";
 
 export async function callModel(ctx: LoopCtx, step: number, prep: CallPrep) {
   const { deps, session, st, taskId, sys, convo } = ctx;
@@ -48,14 +48,14 @@ export function accountRound(ctx: LoopCtx, step: number, resp: LlmResponse, llmC
   // помесячно. Считать его в долларовый расход API нельзя: фиктивные $0.8/ход съедали месячный
   // потолок SpendGuard и заблокировали бы работу. Токены учитываем (это реальный расход лимита
   // подписки и полезная телеметрия), деньги — нет.
-  const turnCostUsd = resp.channel === "subscription" ? 0 : costUsd(st.tier.model, resp.usage);
+  const turnCostUsd = chargedCostUsd(resp, st.tier.model);
   st.usage.taskChargedUsd += turnCostUsd; // фактически начисленные деньги задачи — для /cogs (см. metrics.record ниже)
   // Кто ответил НА САМОМ ДЕЛЕ: у резерва модель своя, у основного канала — модель тира.
   st.tier.modelUsedLast = resp.modelUsed ?? st.tier.model;
-  st.tier.lastChannelUsed = resp.channel === "subscription" ? "subscription" : "api";
+  st.tier.lastChannelUsed = usageChannel(resp);
   deps.spend.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, turnCostUsd);
   deps.usageSink?.({
-    taskId, round: st.progress.round, model: st.tier.modelUsedLast, usage: resp.usage, costUsd: turnCostUsd, kind: "turn", channel: resp.channel === "subscription" ? "subscription" : "api",
+    taskId, round: st.progress.round, model: st.tier.modelUsedLast, usage: resp.usage, costUsd: turnCostUsd, kind: "turn", channel: usageChannel(resp),
     stubbed: resp.stopReason === "stub", promptTokensEstimate: st.budget.lastPromptTokens,
   });
   st.usage.cacheReadTokens += resp.usage.cacheReadTokens;
@@ -103,7 +103,7 @@ export function accountRound(ctx: LoopCtx, step: number, resp: LlmResponse, llmC
       // Время ИМЕННО этого раунда и канал — по ним меряется «быстрота» (запрос владельца
       // 2026-09-02): на резерве раунд стоит секунды, на кешированном основном — доли секунды.
       latencyMs: Math.max(0, Date.now() - llmCallStartedMs),
-      channel: resp.channel === "subscription" ? "subscription" : "api",
+      channel: usageChannel(resp),
       toolNames: resp.toolUses.map((t) => t.name),
       ...(thrashCause ? { cacheThrashCause: thrashCause } : {}),
     });

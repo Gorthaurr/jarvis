@@ -39,11 +39,14 @@ class CtrlTtsStream implements TtsStream {
   onDone(cb: () => void) { this.doneCb = cb; }
   cancel() { this._cancelled = true; }
   get cancelled() { return this._cancelled; }
+  push() { this.chunkCb?.({ audio: new ArrayBuffer(1), seq: 0, last: true }); }
+  finish() { this.doneCb?.(); }
 }
 class CtrlTtsProvider implements ITtsProvider {
   readonly live = false;
   texts: string[] = [];
-  synthesize(text: string): TtsStream { this.texts.push(text); return new CtrlTtsStream(); }
+  last: CtrlTtsStream | null = null;
+  synthesize(text: string): TtsStream { this.texts.push(text); this.last = new CtrlTtsStream(); return this.last; }
 }
 
 function make(onUserTurn: () => Promise<{ voice: string }>) {
@@ -266,6 +269,32 @@ describe("очередь озвучки: срок годности и кап (а
     // Итог задачи не имеет права выкинуть ни одну из них: у него есть текстовая копия, у них — нет.
     expect(pipe.speakQueued("Готово, сэр.")).toBe(false);
   });
+
+  // Финальное ревью р2 (аудит 27.09): отказ НЕповторяемой реплике — тоже потеря (источник её не повторит).
+  // Раньше счётчик непроговорённого не рос → владелец в игре не слышал ни итога, ни «не успел проговорить».
+  it("отказанный НЕповторяемый итог учтён как потеря — следующая речь несёт предупреждение", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush(); // канал занят раздумьем → очередь держит
+    for (let i = 1; i <= 4; i += 1) pipe.speakQueued(`Напоминание ${i}.`, true, { retriable: true });
+    expect(pipe.speakQueued("Готово, сэр.")).toBe(false); // жертвы нет — отказ
+    pipe.mute(); // канал свободен → дренаж
+    await flush();
+    expect(tts.texts[0]).toMatch(/не успел проговорить/);
+  });
+
+  it("отказ ПОВТОРЯЕМОЙ реплике потерей не считается (источник повторит сам)", async () => {
+    const { stt, tts, pipe } = make(() => new Promise(() => {}));
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    for (let i = 1; i <= 4; i += 1) pipe.speakQueued(`Напоминание ${i}.`, true, { retriable: true });
+    expect(pipe.speakQueued("Напоминание 5.", true, { retriable: true })).toBe(false);
+    pipe.mute();
+    await flush();
+    expect(tts.texts.join(" ")).not.toMatch(/не успел проговорить/);
+  });
 });
 
 // Ревью фиксов речи 2026-07-24: fail-safe (сохранение отменённой реплики) не должен воскрешать то,
@@ -370,5 +399,131 @@ describe("потерянные итоги названы вслух, а не п�
     pipe.speakQueued("Обычный итог.");
     await flush();
     expect(tts.texts.join(" ")).not.toMatch(/не успел проговорить/);
+  });
+});
+
+/**
+ * 🔴 Аудит прод-логов 27.09 (A3, сессия 24.09 18:37): владелец в полноэкранной игре задал вопрос, следом
+ * сказал ещё фразу — она отменила ход (один ход за раз), а уже готовый ответ «спасся» в очередь как ПРОАКТИВ.
+ * Busy-гейт §9 выпускает из очереди только срочное → ответ на его же вопрос пролежал до TTL и выброшен молча;
+ * предупреждение о потере цеплялось только к очередной речи, которую в полном экране тоже не выпускают.
+ */
+describe("A3: спасённый ответ на вопрос владельца не глохнет под busy-гейтом", () => {
+  function makeTurns(busy: boolean) {
+    const clock = { t: 1_000_000 };
+    const turns: ((r: { voice: string }) => void)[] = [];
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const pipe = new VoicePipeline({
+      stt, tts,
+      onUserTurn: () => new Promise((res) => { turns.push(res); }),
+      sendSpeakChunk: () => {}, sendClientState: () => {}, followupMs: 50,
+      isUserBusy: () => busy,
+      now: () => clock.t,
+    });
+    return { stt, tts, pipe, turns, clock };
+  }
+
+  it("занят (полный экран): ход A отменён фразой B, ответ A готов позже → звучит после ответа B, а не протухает", async () => {
+    const { stt, tts, pipe, turns, clock } = makeTurns(true);
+    pipe.onWake();
+    stt.last!.emit({ text: "что у меня на экране", final: true }); // ход A
+    await flush();
+    expect(pipe.state).toBe("thinking");
+    pipe.onVadEvent("speech_start"); // владелец заговорил снова — новый лиз, ход A жив
+    stt.last!.emit({ text: "ладно, сделаем потом", final: true }); // ход B отменяет A
+    await flush();
+    turns[0]!({ voice: "На экране открыт редактор кода." }); // A договорил ПОСЛЕ отмены → salvage
+    await flush();
+    turns[1]!({ voice: "Хорошо, сэр." }); // B отвечает прямо
+    await flush();
+    expect(tts.texts).toEqual(["Хорошо, сэр."]); // спасённый не лезет поверх ответа B
+    tts.last!.push();
+    tts.last!.finish(); // синтез B кончился → speak_done
+    clock.t += 2_000; // клиент доиграл ответ B (сильно раньше TTL 120 с)
+    pipe.setClientPlayback(false);
+    expect(tts.texts).toContain("На экране открыт редактор кода.");
+  });
+
+  it("потеря названа вслух и в ПРЯМОМ ответе хода, а не только в очередной реплике", async () => {
+    const { stt, tts, pipe, turns, clock } = makeTurns(false);
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    pipe.speakQueued("Итог, который протух."); // канал занят раздумьем → в очередь
+    clock.t += 3 * 60_000; // пролежал дольше TTL
+    pipe.drainPending(); // протухший выброшен — счётчик потерь +1
+    turns[0]!({ voice: "Сейчас три часа." }); // следующая произносимая реплика — прямой ответ хода
+    await flush();
+    expect(tts.texts.join(" ")).not.toContain("который протух");
+    const direct = tts.texts.find((t) => t.includes("Сейчас три часа."));
+    expect(direct).toMatch(/не успел проговорить/);
+  });
+});
+
+/**
+ * Ревью р1 A3 (LOW): счётчик непроговорённого обнулялся на СИНТЕЗЕ. Прямой ответ хода — носитель предупреждения,
+ * и именно его чаще всего перебивают: барж-ин до первого чанка (или сбой TTS без звука) терял предупреждение
+ * навсегда. Теперь списание — по первому реально отправленному чанку, иначе предупреждение возвращается.
+ */
+describe("ревью р1: предупреждение о потере списывается по факту звука", () => {
+  function makeTurns() {
+    const clock = { t: 1_000_000 };
+    const turns: ((r: { voice: string }) => void)[] = [];
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const pipe = new VoicePipeline({
+      stt, tts,
+      onUserTurn: () => new Promise((res) => { turns.push(res); }),
+      sendSpeakChunk: () => {}, sendClientState: () => {}, followupMs: 60_000,
+      now: () => clock.t,
+    });
+    return { stt, tts, pipe, turns, clock };
+  }
+
+  /** Ход 1 думает → итог протух (потеря +1) → ответ хода 1 уходит в синтез с предупреждением. */
+  async function answerWithNotice() {
+    const r = makeTurns();
+    r.pipe.onWake();
+    r.stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    r.pipe.speakQueued("Итог, который протух.");
+    r.clock.t += 3 * 60_000;
+    r.pipe.drainPending();
+    r.turns[0]!({ voice: "Сейчас три часа." });
+    await flush();
+    expect(r.tts.texts.at(-1)).toMatch(/не успел проговорить/);
+    return r;
+  }
+
+  /** Следующий ход владельца — его прямой ответ. */
+  async function nextAnswer(r: ReturnType<typeof makeTurns>): Promise<string | undefined> {
+    r.clock.t += 1_000;
+    r.pipe.onWake();
+    r.stt.last!.emit({ text: "а какое число", final: true });
+    await flush();
+    r.turns.at(-1)!({ voice: "Двадцать седьмое." });
+    await flush();
+    return r.tts.texts.find((t) => t.includes("Двадцать седьмое."));
+  }
+
+  it("перебили до первого чанка → предупреждение звучит в следующем ответе", async () => {
+    const r = await answerWithNotice();
+    r.pipe.onVadEvent("barge_in"); // ни байта клиенту не ушло
+    r.pipe.onVadEvent("speech_end");
+    expect(await nextAnswer(r)).toMatch(/не успел проговорить/);
+  });
+
+  it("синтез кончился без звука (сбой TTS) → предупреждение не потеряно", async () => {
+    const r = await answerWithNotice();
+    r.tts.last!.finish(); // done без единого чанка
+    expect(await nextAnswer(r)).toMatch(/не успел проговорить/);
+  });
+
+  it("прозвучало → списано: следующий ответ без предупреждения", async () => {
+    const r = await answerWithNotice();
+    r.tts.last!.push();
+    r.tts.last!.finish();
+    expect(await nextAnswer(r)).toBe("Двадцать седьмое.");
   });
 });

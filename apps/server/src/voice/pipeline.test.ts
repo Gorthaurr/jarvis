@@ -274,6 +274,24 @@ describe("VoicePipeline (§10)", () => {
     expect(typeof chunks[chunks.length - 1]!.gen).toBe("number"); // ответ хода тегирован и на стрим-пути
   });
 
+  it("B4 (аудит 27.09): классический путь — ответ, готовый ПОСЛЕ открытия нового лиза, тегается СВОИМ ходом", async () => {
+    // Речь в раздумье открывает лиз 2 (turnSeq++), ход 1 жив. Раньше startTts тегал ответ живым this.turnSeq
+    // (= 2) — ack клиента не сходился со снапшотом хода 1, и mouth-to-ear этого хода терялся молча.
+    const m2e = vi.fn();
+    let answer!: (r: { voice: string }) => void;
+    const { pipe, stt, tts, chunks } = makePipeline(vi.fn(() => new Promise<{ voice: string }>((r) => (answer = r))), m2e);
+    pipe.onWake();
+    stt.last!.emit({ text: "какая погода", final: true });
+    await flush();
+    pipe.onVadEvent("speech_start"); // лиз 2 открыт, ход 1 ещё думает
+    answer({ voice: "Пасмурно, сэр." });
+    await flush();
+    tts.last!.push(0, true);
+    pipe.onAudioPlayed(chunks[chunks.length - 1]!.gen!, Date.now() + 500); // клиент эхом вернул тег чанка
+    expect(m2e).toHaveBeenCalledTimes(1);
+    expect(m2e.mock.calls[0]![1]).toBe(1); // замкнут ход 1, а не лиз 2
+  });
+
   it("barge-in во время speaking рубит TTS и не даёт speak_done сработать", async () => {
     const { pipe, stt, tts } = makePipeline();
     pipe.onWake();

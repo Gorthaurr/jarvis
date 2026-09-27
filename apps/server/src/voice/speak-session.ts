@@ -14,10 +14,13 @@
  */
 import type { Logger } from "@jarvis/shared";
 import type { TtsChunk, TtsStream } from "../integrations/voice-providers.js";
+import type { DropClaim } from "./drop-notice.js";
 
 export interface PhraseSpeakerDeps {
-  /** Синтез одной фразы (с voice-опциями режима §11 — настраивает вызывающий). */
-  synthesize: (text: string) => TtsStream;
+  /** Синтез одной фразы (с voice-опциями режима §11 — настраивает вызывающий); prefix — приставка к ней. */
+  synthesize: (text: string, prefix: string) => TtsStream;
+  /** Приставка о непроговорённом (drop-notice.ts) — берётся, пока сессия НЕ звучала: первой ЗВУЧАЩЕЙ фразе. */
+  claimPrefix?: () => DropClaim | undefined;
   /** Отправить аудио-чанк клиенту (speak.chunk, §5). */
   sendChunk: (c: TtsChunk) => void;
   /** Первый звук ПЕРВОЙ фразы пошёл клиенту → войти в speaking (один раз). */
@@ -36,6 +39,7 @@ export class PhraseSpeaker {
   private spoke = false; // speak_start уже эмитнут
   private doneEmitted = false;
   private cancelled = false;
+  private claim: DropClaim | undefined; // приставка текущей фразы (ревью р1: не между фразами, списание по звуку)
 
   constructor(private readonly deps: PhraseSpeakerDeps) {}
 
@@ -72,6 +76,7 @@ export class PhraseSpeaker {
     if (this.cancelled) return;
     this.cancelled = true;
     this.queue.length = 0;
+    this.claim?.settle(false); // оборвали до звука — предупреждение вернётся следующей речи
     if (this.current) {
       this.current.cancel();
       this.current = null;
@@ -85,13 +90,15 @@ export class PhraseSpeaker {
       if (this.finished) this.emitDone();
       return;
     }
-    const stream = this.deps.synthesize(text);
+    const claim = (this.claim = this.spoke ? undefined : this.deps.claimPrefix?.());
+    const stream = this.deps.synthesize(text, claim?.text ?? "");
     this.current = stream;
     let firstChunk = true;
     stream.onChunk((c) => {
       if (!this.deps.isLive() || this.cancelled) return;
       if (firstChunk) {
         firstChunk = false;
+        claim?.settle(true); // приставка ЭТОЙ фразы реально ушла клиенту — списать
         if (!this.spoke) {
           this.spoke = true;
           this.deps.onSpeaking();
@@ -101,6 +108,7 @@ export class PhraseSpeaker {
     });
     stream.onError((e) => this.deps.log?.warn("ошибка синтеза фразы", e.message));
     stream.onDone(() => {
+      claim?.settle(false); // фраза без звука (сбой TTS) — приставка вернётся и уйдёт со следующей
       if (this.cancelled) return;
       // current мог уже смениться при гонке — сбрасываем только «свой» стрим.
       if (this.current === stream) this.current = null;

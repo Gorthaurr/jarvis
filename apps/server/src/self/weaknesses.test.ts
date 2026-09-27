@@ -94,6 +94,37 @@ describe("collectWeaknesses — «не знаю» ≠ «всё хорошо»", 
     expect(r.weaknesses[0]?.kind).toBe("degradation:context_masked"); // самая частая — первой
     expect(r.weaknesses.some((w) => w.kind.startsWith("error:"))).toBe(true);
   });
+
+  // C4/B5 р1 (27.09): основной файл дня занят → WARN/ERROR тех часов лежат ТОЛЬКО в запасном server-<день>.<pid>.log.
+  it("запасной файл дня читается: его повторяющийся WARN — слабость; окно считает ДНИ, а не файлы", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jarvis-logs-"));
+    const line = (ts: string, level: string, msg: string) => JSON.stringify({ ts, level, msg });
+    // Старый день с ошибкой: при days=2 он вне окна — запасные файлы не должны вытеснить настоящие дни.
+    writeFileSync(join(dir, "server-2026-09-24.log"), Array.from({ length: 3 }, () => line("2026-09-24T10:00:00.000Z", "error", "старый день")).join("\n"));
+    writeFileSync(join(dir, "server-2026-09-25.log"), line("2026-09-25T10:00:00.000Z", "info", "обычный день"));
+    writeFileSync(join(dir, "server-2026-09-26.log"), line("2026-09-26T23:00:00.000Z", "info", "durable-лог: основной файл снова пишется"));
+    writeFileSync(
+      join(dir, "server-2026-09-26.4242.log"),
+      ["10", "08", "09"].map((h) => line(`2026-09-26T${h}:00:00.000Z`, "warn", `ActionCommand timeout ${h}000ms`)).join("\n"),
+    );
+    writeFileSync(join(dir, "server-2026-09-26.5555.log"), line("2026-09-26T07:00:00.000Z", "warn", "ActionCommand timeout 07000ms"));
+
+    const r = await collectWeaknesses(dir, { days: 2 });
+    expect(r.windowDays).toBe(2); // 25-е и 26-е; три файла 26-го — один день
+    const w = r.weaknesses.find((x) => x.kind.startsWith("warn:ActionCommand"));
+    expect(w?.count).toBe(4); // из двух запасных файлов одного дня
+    expect(r.weaknesses.some((x) => x.kind.includes("старый день"))).toBe(false);
+  });
+
+  it("записи дня из нескольких файлов сливаются по ts (образцы — в хронологическом порядке)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "jarvis-logs-"));
+    const line = (h: string) => JSON.stringify({ ts: `2026-09-26T${h}:00:00.000Z`, level: "warn", msg: "сбой N", meta: { h } });
+    writeFileSync(join(dir, "server-2026-09-26.log"), [line("12"), line("09")].join("\n"));
+    writeFileSync(join(dir, "server-2026-09-26.4242.log"), [line("10"), line("08")].join("\n"));
+    const r = await collectWeaknesses(dir, { days: 1 });
+    expect(r.windowDays).toBe(1);
+    expect(r.weaknesses[0]?.samples).toEqual(['{"h":"08"}', '{"h":"09"}', '{"h":"10"}']);
+  });
 });
 
 // 🔴 Разбор боевой телеметрии 2026-08-31: 31 «провал» из 86 — ходы, не дошедшие до модели (кончился

@@ -22,7 +22,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import type { ILlmProvider } from "../integrations/llm.js";
 import type { EpisodicMemory } from "../memory/episodic.js";
 import type { SpendGuard } from "../billing/index.js";
-import { costUsd } from "../obs/pricing.js";
+import { chargedCostUsd } from "../obs/pricing.js";
 import { writeUserMemory } from "../memory/user-memory.js";
 import { appendConsolidationRun } from "./consolidation-journal.js";
 
@@ -163,7 +163,7 @@ export async function consolidateMemory(
       maxTokens: 400,
     });
     deps.spend?.recordStep(consId);
-    deps.spend?.recordUsage(consId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(deps.model, resp.usage));
+    deps.spend?.recordUsage(consId, resp.usage.inputTokens + resp.usage.outputTokens, chargedCostUsd(resp, deps.model)); // C6: подписка = $0
     if (resp.stubbed || resp.stopReason === "stub") return 0;
     const m = /\[[\s\S]*\]/.exec(resp.text ?? "");
     if (!m) return 0;

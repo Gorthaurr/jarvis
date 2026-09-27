@@ -1,8 +1,8 @@
 // Волна G: резерв мозга на подписке — переключение каналов и ЧЕСТНОСТЬ исходов.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { _resetApiFailureForTest, _setApiFailureForTest } from "./anthropic.js";
+import { AnthropicLlmProvider, _resetApiFailureForTest, _setApiFailureForTest } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback-llm.js";
-import { _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
+import { type SdkModule, SubscriptionLlmProvider, _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
 
 const REQ: LlmRequest = { tier: "sonnet", model: "claude-sonnet-4-6", systemStatic: "персона", messages: [{ role: "user", content: "привет" }] };
@@ -368,6 +368,26 @@ describe("терминальный отказ основного канала �
   });
 
   /**
+   * 🔴 C3 (аудит прод-логов 27.09): 403 «Request not allowed» на входе в Windows — это VPN, который ещё не
+   * поднялся, а не ключ. Прежде он латчил канал на 6 часов как «ключ не принят»; теперь — транзиентный
+   * предохранитель (для гео-блока пауза не короче 30 минут, primary-cooldown.ts) и канал в паспорте не «выключен».
+   */
+  const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
+
+  it("403 гео-блока (VPN) канал НЕ выключает латчем — транзиентный путь с полуоткрытой пробой", async () => {
+    let clock = 0;
+    const primary = primaryWithFailure(REGION_403, 403);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    expect(p.channelStatus().primary).toBe("ok"); // до фикса: off / auth / «ключ не принят»
+    await p.complete(REQ); // порог транзиентного предохранителя
+    clock += 30 * 60_000; // пауза гео-блока (30 мин, не латч на 6 ч) истекла — канал обязан попробоваться снова
+    await p.complete(REQ);
+    expect(primary.calls).toBe(3); // до фикса: 1 — канал выключен на 6 часов
+  });
+
+  /**
    * 🔴 Адверс-ревью правки (2026-09-02): «выключенный» канал всё равно получал HTTP-запрос — стаб
    * добывался вызовом `primary.complete(req)`. Пока резерв отвечал, это было не видно; стоило ему
    * упасть — и на КАЖДОМ ходе уходил обречённый запрос в API, ровно то, что латч должен был убрать.
@@ -511,5 +531,191 @@ describe("W0 (2026-09-09): стрим основного канала пробр
     const r = await p.completeStream(REQ, (d) => seen.push(d.text));
     expect(r.text).toBe("по подписке");
     expect(seen).toEqual(["по подписке"]);
+  });
+});
+
+/**
+ * C3 ПРОВОДКОЙ: настоящий AnthropicLlmProvider (подменён только HTTP-клиент SDK) бросает 403 гео-блока так,
+ * как бросает SDK (`status` + `${status} ${body}`), дальше — настоящая классификация, настоящий стаб и
+ * настоящая фолбэк-цепочка. Владелец при двух лёгших каналах слышит про VPN, а не «ключ не принят».
+ */
+describe("403 гео-блока через настоящий провайдер API (C3)", () => {
+  const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
+
+  /** Настоящий провайдер API, чей HTTP-клиент бросает так, как бросает SDK (`status` + `${status} ${body}`). */
+  function realPrimaryFailing(calls: { n: number }, text: string, status: number): AnthropicLlmProvider {
+    const p = new AnthropicLlmProvider({ apiKey: "sk-test", maxRetries: 0 });
+    const fail = async (): Promise<never> => {
+      calls.n += 1;
+      throw Object.assign(new Error(text), { status });
+    };
+    (p as unknown as { clientPromise: Promise<unknown> }).clientPromise = Promise.resolve({ messages: { create: fail, stream: fail } });
+    return p;
+  }
+  const realPrimaryThrowing403 = (calls = { n: 0 }): AnthropicLlmProvider => realPrimaryFailing(calls, REGION_403, 403);
+
+  /**
+   * Резерв «как в бою» при гео-блоке: пока VPN не поднят, CLI подписки ТОЖЕ получает 403 (настоящий провайдер
+   * записывает причину до броска — так же и здесь); `down=false` — VPN поднялся, подписка отвечает.
+   */
+  function flakySubscription(): ILlmProvider & { down: boolean; calls: number } {
+    const CLI_403 = "Failed to authenticate. API Error: 403 Request not allowed";
+    const s = {
+      live: true,
+      down: true,
+      calls: 0,
+      async complete(): Promise<LlmResponse> {
+        s.calls += 1;
+        if (!s.down) return resp({ text: "по подписке" });
+        _setSubscriptionFailureForTest(CLI_403);
+        throw new Error(`подписка: ${CLI_403}`);
+      },
+      async completeStream(): Promise<LlmResponse> {
+        return s.complete();
+      },
+    };
+    return s;
+  }
+
+  const resetReasons = (): void => {
+    _resetApiFailureForTest();
+    _resetSubscriptionFailureForTest(); // причина резерва из соседних кейсов не должна подменить нашу (TTL 30 мин)
+  };
+  beforeEach(resetReasons);
+  afterEach(resetReasons);
+
+  it("оба канала недоступны → честный стаб с советом про VPN, не про ключ", async () => {
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(), fake({ live: false }));
+    const r = await p.complete(REQ);
+    expect(r.stubbed).toBe(true);
+    expect(r.text).toMatch(/VPN/); // до фикса: «Ключ доступа к модели не принят…»
+    expect(r.text).not.toMatch(/ключ/i);
+  });
+
+  /**
+   * Адверс-ревью р1: «как в бою» — НАСТОЯЩИЙ провайдер подписки (подменён только SDK). CLI без терминала шлёт 403
+   * гео-блока строкой «Failed to authenticate. API Error: 403 Request not allowed» (claude.exe 0.3.251), провайдер
+   * сам классифицирует её ДО броска, и withKnownReason берёт ЕГО причину. Фейк, бросающий без записи причины,
+   * этот путь прятал: до фикса владелец слышал «разлогинился… claude setup-token» вместо VPN.
+   */
+  it("резерв (настоящий провайдер подписки) тоже получил 403 гео-блока в обёртке CLI → про VPN, не setup-token", async () => {
+    const CLI_403 = "Failed to authenticate. API Error: 403 Request not allowed";
+    const sdk: SdkModule = {
+      query: () =>
+        (async function* () {
+          yield { type: "assistant", message: { content: [{ type: "text", text: CLI_403 }] } };
+          yield { type: "result", subtype: "success", is_error: true, api_error_status: 403, result: CLI_403 };
+        })(),
+      tool: (name: string) => ({ name }),
+      createSdkMcpServer: (opts) => ({ type: "sdk", name: opts.name, tools: opts.tools }),
+    };
+    const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = "sk-ant-oat-test"; // live без сохранённого логина
+    try {
+      const p = new FallbackLlmProvider(realPrimaryThrowing403(), new SubscriptionLlmProvider({ loadSdk: async () => sdk }));
+      const r = await p.complete(REQ);
+      expect(r.stubbed).toBe(true);
+      expect(r.text).toMatch(/VPN/);
+      expect(r.text).not.toMatch(/setup-token|разлогин/u); // до фикса: «доступ по подписке разлогинился…»
+    } finally {
+      if (savedToken === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken;
+    }
+  });
+
+  // Адверс-ревью р1 (LOW): пока VPN не поднят, гео-блок за 5 минут не лечится — общая пауза предохранителя
+  // возвращала по 2 заведомо мёртвых вызова в каждое 5-минутное окно. Для region пауза длиннее (30 мин).
+  it("гео-блок подряд → основной канал пропускается 30 минут, а не общие 5", async () => {
+    const calls = { n: 0 };
+    let clock = 0;
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(calls), secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ);
+    expect(calls.n).toBe(2);
+    clock += 400_000; // общая 5-минутная пауза уже истекла бы
+    expect((await p.complete(REQ)).text).toBe("по подписке");
+    expect(calls.n).toBe(2); // до фикса: 3 — снова обречённый вызов API
+    expect(p.channelStatus().primary).toBe("cooldown"); // транзиентно, не латч «ключ»
+    clock += 30 * 60_000;
+    await p.complete(REQ);
+    expect(calls.n).toBe(3); // полуоткрытая проба: вдруг VPN уже поднят
+  });
+  // ↑ Резерв здесь отвечает ВСЕГДА — и пауза держится: успех подписки, которая не падала вместе с API, НЕ доказывает,
+  // что гео-блок снят (маршрут CLI может идти иначе). Снимать по такому успеху = 2 мёртвых вызова API каждые 3 хода.
+
+  /**
+   * Адверс-ревью р2 (LOW): вход в Windows без VPN — гео-403 у ОБОИХ каналов, пауза основного встала на 30 мин. VPN
+   * поднялся через секунды, подписка ответила — сеть доказанно починилась, а быстрый канал ещё полчаса пропускался и
+   * паспорт твердил «основной канал временно не отвечает». Успех подписки ПОСЛЕ её же провала снимает паузу досрочно.
+   */
+  it("гео-блок у обоих каналов, потом подписка ответила → пауза основного снята досрочно", async () => {
+    const calls = { n: 0 };
+    let clock = 0;
+    const secondary = flakySubscription();
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(calls), secondary, {}, () => clock);
+    await p.complete(REQ);
+    expect((await p.complete(REQ)).stubbed).toBe(true); // пауза встала; подписка тоже 403 — VPN не поднят
+    expect(p.channelStatus().primary).toBe("cooldown");
+    secondary.down = false; // VPN поднялся
+    clock += 5_000;
+    expect((await p.complete(REQ)).text).toBe("по подписке");
+    expect(calls.n).toBe(2); // этот ход ещё без API — пауза действовала на его старте
+    expect(p.channelStatus().primary).toBe("ok"); // до фикса: «cooldown» ещё ~30 минут
+    await p.complete(REQ);
+    expect(calls.n).toBe(3); // до фикса: 2 — быстрый канал пропускался при живой сети
+    expect(p.channelStatus().primary).toBe("ok"); // счётчик тоже сброшен: одна новая неудача — ещё не пауза
+  });
+
+  it("снятие — только при ДЕЙСТВУЮЩЕЙ паузе: после её истечения успех подписки счётчик отказов API не обнуляет", async () => {
+    const calls = { n: 0 };
+    let clock = 0;
+    const secondary = flakySubscription();
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(calls), secondary, {}, () => clock);
+    await p.complete(REQ);
+    await p.complete(REQ); // пауза гео-блока; подписка тоже падает все 30 минут
+    clock += 30 * 60_000;
+    secondary.down = false;
+    await p.complete(REQ); // полуоткрытая проба: API снова 403 (1-я неудача), подписка ответила — паузы нет, снимать нечего
+    await p.complete(REQ); // 2-я неудача подряд → пауза встаёт снова
+    expect(calls.n).toBe(4);
+    expect(p.channelStatus().primary).toBe("cooldown"); // без гарда паузы: счётчик обнулён, «ok» и новые мёртвые вызовы
+  });
+
+  it("пауза НЕ гео-блока (429 / причина неизвестна) успехом подписки после её провала не снимается", async () => {
+    const setups = [
+      () => {
+        const calls = { n: 0 };
+        return { primary: realPrimaryFailing(calls, "429 rate limit exceeded", 429), calls: () => calls.n };
+      },
+      () => {
+        const f = fake({ live: true, result: STUB }); // стаб без записанной причины — kind неизвестен
+        return { primary: f, calls: () => f.calls };
+      },
+    ];
+    for (const setup of setups) {
+      resetReasons();
+      const { primary, calls } = setup();
+      let clock = 0;
+      const secondary = flakySubscription();
+      const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+      await p.complete(REQ);
+      await p.complete(REQ);
+      secondary.down = false;
+      clock += 5_000;
+      await p.complete(REQ);
+      await p.complete(REQ);
+      expect(calls()).toBe(2); // лимит/сбой самого API успех подписки не лечит — обычная пауза держится
+      expect(p.channelStatus().primary).toBe("cooldown");
+    }
+  });
+
+  it("резерв жив → ход по подписке, а API-канал в паспорте НЕ выключен как «ключ»", async () => {
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(), fake({ live: true, result: resp({ text: "по подписке" }) }));
+    const r = await p.complete(REQ);
+    expect(r.text).toBe("по подписке");
+    const st = p.channelStatus();
+    expect(st.primary).not.toBe("off"); // до фикса: off / kind auth — латч на 6 часов
+    expect(st.kind).not.toBe("auth");
   });
 });

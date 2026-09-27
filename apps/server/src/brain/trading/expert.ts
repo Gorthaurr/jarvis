@@ -11,7 +11,7 @@
 import { type Logger, type Tier, createLogger } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
 import type { ILlmProvider, LlmRequest, ToolUse } from "../../integrations/llm.js";
-import { costUsd } from "../../obs/pricing.js";
+import { chargedCostUsd } from "../../obs/pricing.js";
 import type { KnowledgeBase } from "../knowledge/index.js";
 import type { Direction, Market } from "./index.js";
 
@@ -97,11 +97,12 @@ export class TradeExpert {
   /** Накопленные траты эксперта в USD (для бюджет-капа/наблюдаемости). */
   private spent = 0;
   private budgetWarned = false;
+  private subscriptionNoted = false;
 
   constructor(
     private readonly llm: ILlmProvider,
     private readonly knowledge: Pick<KnowledgeBase, "consult">,
-    /** budgetUsd — жёсткий потолок трат LLM (USD); исчерпан → эксперт молчит (пас), цикл идёт без расхода. */
+    /** budgetUsd — потолок ДОЛЛАРОВ API по ключу; исчерпан → пас. Ход по подписке = $0: потолок его не тормозит. */
     private readonly opts: { model: string; tier: Tier; maxTokens?: number; budgetUsd?: number },
   ) {}
 
@@ -188,7 +189,11 @@ export class TradeExpert {
     };
     try {
       const resp = await this.llm.complete(req);
-      this.spent += costUsd(this.opts.model, resp.usage); // учёт ФАКТИЧЕСКИХ трат для бюджет-капа
+      this.spent += chargedCostUsd(resp, this.opts.model); // ФАКТИЧЕСКИЕ траты для бюджет-капа; подписка = $0 (C6)
+      if (resp.channel === "subscription" && this.opts.budgetUsd != null && !this.subscriptionNoted) {
+        this.subscriptionNoted = true; // честно, один раз: потолок в долларах задан, а ограничивать ему нечего
+        log.warn("эксперт: ходы идут по подписке ($0) — потолок JARVIS_AUTO_PREDICT_EXPERT_BUDGET_USD их НЕ ограничивает, тормоз — только часовой предохранитель автономных вызовов", { budgetUsd: this.opts.budgetUsd });
+      }
       if (resp.stubbed) return null; // нет реального бэкенда — не плодим мусорные прогнозы
       return this.parse(ctx, resp.toolUses);
     } catch (e) {

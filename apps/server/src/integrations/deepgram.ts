@@ -7,6 +7,7 @@
  * MockSttStream (стаб). RU-качество — bake-off на M1 (§18), провайдер заменяем (§1).
  */
 import { type Logger, createLogger } from "@jarvis/shared";
+import { STALLED_TURN_LOG, isStalledTurnClose } from "./deepgram-stall.js";
 import {
   type ISttProvider,
   MockSttStream,
@@ -572,6 +573,7 @@ class PersistentDeepgramConnection {
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private idleSleepTimer: ReturnType<typeof setTimeout> | null = null;
   private lastAudioAt = 0;
+  private audioSinceOpen = false; // свежее аудио хода после open = прогресс (deepgram-stall.ts)
   private openResolve: (() => void) | null = null;
   private readonly agc = new StreamAgc();
   private readonly fmtSampleRate: number;
@@ -634,6 +636,7 @@ class PersistentDeepgramConnection {
   pushAudioForTurn(turn: number, pcm: ArrayBuffer): void {
     if (turn !== this.activeTurn) return; // аудио чужого/завершённого хода — игнор
     this.lastAudioAt = Date.now();
+    if (this.open) [this.audioSinceOpen, this.reconnectAttempts] = [true, 0];
     const boosted = this.agc.boost(pcm);
     this.sentSec += boosted.byteLength / (this.fmtSampleRate * 2); // s16le mono: 2 байта/семпл
     const dv = new DataView(boosted);
@@ -753,7 +756,7 @@ class PersistentDeepgramConnection {
           return;
         }
         this.open = true;
-        this.reconnectAttempts = 0;
+        this.audioSinceOpen = false; // бюджет реконнектов обнуляет только прогресс, не open (deepgram-stall.ts)
         log.info("deepgram WS открыт — STT в облаке (персистентный, расход баланса идёт отсюда)");
         if (this.activeTurn >= 0) {
           // первичный старт ИЛИ reconnect mid-turn: пересобрать committed С НУЛЯ + реплей буфера
@@ -770,6 +773,7 @@ class PersistentDeepgramConnection {
             this.sentSec += f.byteLength / (this.fmtSampleRate * 2);
           }
           if (this.turnState === "sealing") this.turnEndSec = this.sentSec; // весь буфер = этот ход
+          if (this.turnAudioBuffer.length > 0) this.audioSinceOpen = true; // реплей = звук хода на ЭТОМ сокете (бюджет — только живое)
         } else {
           // H14 (ревью 2026-07-02): reconnect В ПРОСТОЕ (сеть моргнула МЕЖДУ ходами, напр. 1006).
           // Таймлайн нового сокета у Deepgram тоже начинается с 0, а sentSec хранил секунды СТАРОГО
@@ -790,6 +794,7 @@ class PersistentDeepgramConnection {
         log.info("deepgram WS закрыт (персист)", { code: ev?.code, reason: String(ev?.reason ?? "").slice(0, 80), msgs: this.msgCount });
         this.open = false;
         this.clearKeepAlive();
+        if (isStalledTurnClose(ev?.code, ev?.reason, this.activeTurn, this.audioSinceOpen)) return void (log.warn(STALLED_TURN_LOG), this.socketDied());
         if (!this.disposed && this.shouldReconnect(ev?.code)) {
           this.scheduleReconnect(); // committed/buffer СОХРАНЕНЫ → финал хода не теряем
           return;

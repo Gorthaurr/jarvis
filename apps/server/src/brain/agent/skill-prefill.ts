@@ -11,7 +11,7 @@
  */
 import type { SkillStep } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
-import type { ILlmProvider } from "../../integrations/llm.js";
+import type { ILlmProvider, LlmResponse } from "../../integrations/llm.js";
 
 const log: Logger = createLogger("skill-prefill");
 
@@ -27,8 +27,8 @@ export interface PrefillDeps {
   llm: ILlmProvider;
   /** Дешёвый исполнительский тир (§Волна3 3.2): заполнение значений — механика, не рассуждение. */
   model: string;
-  /** Ревью Волны 3 (#8): учесть расход префилл-вызова (SpendGuard + COGS-метрики). Опц. */
-  onUsage?: (usage: PrefillUsage) => void;
+  /** Ревью Волны 3 (#8): учесть расход префилл-вызова (SpendGuard + COGS-метрики). Опц. `channel` — подписка = $0 (C6). */
+  onUsage?: (usage: PrefillUsage, channel?: LlmResponse["channel"]) => void;
 }
 
 /**
@@ -87,7 +87,7 @@ export async function prefillNeedsLlmSteps(
       tools: [],
       maxTokens: 600,
     });
-    deps.onUsage?.(resp.usage); // ревью Волны 3 (#8): расход вызова — в SpendGuard/метрики
+    deps.onUsage?.(resp.usage, resp.channel); // ревью Волны 3 (#8): расход вызова — в SpendGuard/метрики
     if (resp.stubbed || resp.stopReason === "stub") return null;
     const m = /\{[\s\S]*\}/.exec(resp.text ?? "");
     if (!m) return null;

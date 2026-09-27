@@ -18,7 +18,7 @@ import { autonomyThrottle } from "../../autonomy/throttle.js";
 import type { ILlmProvider } from "../../integrations/llm.js";
 import type { EpisodicMemory } from "../../memory/episodic.js";
 import { writeUserMemory } from "../../memory/user-memory.js";
-import { costUsd } from "../../obs/pricing.js";
+import { chargedCostUsd } from "../../obs/pricing.js";
 import type { SpendGuard } from "../../billing/index.js";
 
 const log: Logger = createLogger("memory-reflect");
@@ -109,7 +109,7 @@ export async function reflectFactFromUtterance(args: MemoryReflectArgs): Promise
       tools: [memWriteSchema],
     });
     args.spend?.recordStep(reflectId);
-    args.spend?.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(args.model, resp.usage));
+    args.spend?.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, chargedCostUsd(resp, args.model)); // C6: подписка = $0
     const tu = resp.toolUses.find((t) => t.name === "memory_write");
     if (!tu) return; // фактов нет — штатный (частый) исход
     const input = tu.input as { content?: unknown; text?: unknown; kind?: unknown };

@@ -27,6 +27,7 @@
  *  • Эффорт по тиру (medium/high/max) — единственный рычаг скорости, не меняющий модель (Opus 5).
  */
 import { existsSync, mkdirSync } from "node:fs";
+import { isRegionBlock } from "./api-error-classify.js";
 import { join } from "node:path";
 import { z } from "zod";
 import { type Logger, createLogger } from "@jarvis/shared";
@@ -117,6 +118,8 @@ const MIN_ECHO_CHARS = 16;
 
 export function classifySubscriptionError(text: string): SubscriptionFailure {
   const t = String(text ?? "");
+  // C3 (адверс-ревью р1): гео-403 CLI приходит в обёртке «Failed to authenticate. API Error: …» — судим ДО auth.
+  if (isRegionBlock(t, undefined)) return { kind: "other", human: "подписка: сервис модели не пускает запрос из этой сети — проверьте VPN", at: Date.now() };
   if (/authenticate|oauth|session expired|not logged in|unauthorized/i.test(t)) {
     return { kind: "auth", human: "подписка не авторизована (сессия истекла) — нужно выполнить `claude setup-token` и обновить CLAUDE_CODE_OAUTH_TOKEN", at: Date.now() };
   }

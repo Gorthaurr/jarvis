@@ -17,7 +17,7 @@
  *     пока владелец не вмешается → канал ВЫКЛЮЧАЕТСЯ (`off`) с ОДНИМ честным WARN. Больше ни одного
  *     запроса: перепроверка редкая (JARVIS_PRIMARY_RECHECK_MS, деф 6 ч; 0 = никогда) плюс одна проба
  *     после перезапуска — этого хватает, чтобы пополненный баланс подхватился сам, без ручной возни.
- *   • ТРАНЗИЕНТНЫЙ (сеть, 429, перегруз) — прежний полуоткрытый предохранитель на 5 минут.
+ *   • ТРАНЗИЕНТНЫЙ (сеть, 429, перегруз) — прежний полуоткрытый предохранитель на 5 минут (гео-блок — 30).
  * Класс берём из `lastApiFailure()` (anthropic.ts уже классифицирует ошибку) и ТОЛЬКО если причина
  * записана ПОСЛЕ начала нашего вызова: протухшая причина прошлого сбоя не имеет права выключать канал.
  *
@@ -35,6 +35,7 @@
 import { type Logger, createLogger } from "@jarvis/shared";
 import { type ApiFailureKind, lastApiFailure, llmFailureLine } from "./anthropic.js";
 import type { ILlmProvider, LlmChannelStatus, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
+import { RegionPauseHeal, transientCooldownMs } from "./primary-cooldown.js";
 import { lastSubscriptionFailure } from "./subscription-llm.js";
 
 const log: Logger = createLogger("llm:fallback");
@@ -70,19 +71,12 @@ function primaryEnabledByEnv(): boolean {
  * Сколько подряд отказов основного канала считаем «он мёртв надолго» и на сколько перестаём его
  * дёргать. Мотив — СКОРОСТЬ: каждый ход тратил секунды на обречённый HTTP-запрос с ретраем ПЕРЕД
  * тем, как уйти в резерв. Предохранитель полуоткрытый: по истечении паузы основной пробуется снова.
- * Это путь для ТРАНЗИЕНТНЫХ сбоев; терминальные (баланс/ключ) идут своим путём — см. шапку.
+ * Это путь для ТРАНЗИЕНТНЫХ сбоев; терминальные (баланс/ключ) идут своим путём — см. шапку. Длина паузы
+ * (общая 5 мин, гео-блок — 30 с досрочным снятием по ожившей подписке) — primary-cooldown.ts.
  */
 const TRIP_AFTER_FAILURES = 2;
-function breakerCooldownMs(): number {
-  // Пустая строка → дефолт (та же грабля, что у terminalRecheckMs: Number("") === 0 обнулял бы
-  // паузу и возвращал обречённые вызовы каждым ходом).
-  const raw = (process.env.JARVIS_PRIMARY_COOLDOWN_MS ?? "").trim();
-  if (!raw) return 300_000;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : 300_000;
-}
 
-/** Отказы, которые повтором НЕ лечатся: нужно действие владельца (пополнить баланс / поправить ключ). */
+/** Не лечатся повтором (пополнить баланс / поправить ключ). `region` (403 без VPN, C3) — транзиентный, не здесь. */
 const TERMINAL_KINDS: ReadonlySet<ApiFailureKind> = new Set<ApiFailureKind>(["credits", "auth"]);
 
 /**
@@ -109,6 +103,7 @@ export class FallbackLlmProvider implements ILlmProvider {
   lastChannel: LlmChannel = "primary";
   private consecutiveFailures = 0;
   private skipPrimaryUntil = 0;
+  private readonly regionHeal = new RegionPauseHeal(); // досрочное снятие паузы гео-блока, когда подписка доказала: сеть ожила
   /** Терминальный латч: канал выключен до `until` (0 = до перезапуска/успешной перепроверки). */
   private primaryOff?: { kind: ApiFailureKind; human: string; since: number; until: number };
   /** Сводка «сколько ходов подряд идём по резерву» — чтобы не писать WARN на каждый раунд. */
@@ -188,11 +183,15 @@ export class FallbackLlmProvider implements ILlmProvider {
       return;
     }
     this.consecutiveFailures += 1;
-    if (this.consecutiveFailures >= TRIP_AFTER_FAILURES && this.secondary.live && breakerCooldownMs() > 0) {
-      this.skipPrimaryUntil = this.now() + breakerCooldownMs();
+    const kind = failure && failure.at >= wallStart ? failure.kind : undefined; // только причина ЭТОГО вызова
+    const cooldownMs = transientCooldownMs(kind); // гео-блок (без VPN) — дольше общей паузы
+    if (this.consecutiveFailures >= TRIP_AFTER_FAILURES && this.secondary.live && cooldownMs > 0) {
+      this.skipPrimaryUntil = this.now() + cooldownMs;
+      this.regionHeal.paused(kind);
       log.warn("основной канал отказал подряд — временно иду сразу в резерв (экономлю секунды на ход)", {
         failures: this.consecutiveFailures,
-        cooldownMs: breakerCooldownMs(),
+        cooldownMs,
+        причина: kind ?? "неизвестна",
       });
     }
   }
@@ -312,12 +311,17 @@ export class FallbackLlmProvider implements ILlmProvider {
       // долларовую стоимость (подписка оплачена помесячно — см. LlmResponse.channel).
       const resp: LlmResponse = { ...raw, channel: "subscription" };
       this.lastChannel = "subscription";
+      if (this.skipPrimaryUntil > 0 && this.regionHeal.subscriptionOk()) {
+        this.skipPrimaryUntil = 0;
+        this.consecutiveFailures = 0;
+      }
       log.info("ход выполнен по подписке", { tier: req.tier, toolUses: resp.toolUses.length, outputTokens: resp.usage.outputTokens });
       return resp;
     } catch (e) {
       // Резерв тоже не смог (протухший токен, лимит подписки, сбой CLI) — отдаём стаб основного:
       // петля обязана увидеть провал хода, а не «пустой успех».
       log.error("резервный канал (подписка) не сработал — стаб", { error: e instanceof Error ? e.message : String(e) });
+      this.regionHeal.subscriptionFailed();
       return withKnownReason(await fallbackStub());
     }
   }

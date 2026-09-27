@@ -92,6 +92,21 @@ export function costUsd(model: string, u: TokenUsage, opts?: { cacheTtl?: "5m" |
   );
 }
 
+/**
+ * Сколько ДЕНЕГ начислить за вызов LLM (SpendGuard, COGS) — ЕДИНОЕ правило для петли и всех побочных вызовов.
+ * Ход по ПОДПИСКЕ оплачен помесячно: $0 (токены — это лимит подписки, не доллары API). 🔴 C6 (аудит 27.09):
+ * правило жило только в accountRound, а рефлексы/самообучение/сон-цикл/префилл списывали цену API за вызов,
+ * ушедший по подписке, — фантомные доллары копились в месячном потолке SpendGuard.
+ */
+export function chargedCostUsd(resp: { usage: TokenUsage; channel?: string }, model: string): number {
+  return resp.channel === "subscription" ? 0 : costUsd(model, resp.usage);
+}
+
+/** Канал вызова для метрик/ledger (`UsageSinkEvent.channel`): подписка или API. */
+export function usageChannel(resp: { channel?: string }): "api" | "subscription" {
+  return resp.channel === "subscription" ? "subscription" : "api";
+}
+
 /** Стоимость в МИКРО-долларах (целое) — единица ledger продукта: без потери на округлении до цента. */
 export function costMicroUsd(model: string, u: TokenUsage, opts?: { cacheTtl?: "5m" | "1h" }): number {
   return Math.round(costUsd(model, u, opts) * 1_000_000);

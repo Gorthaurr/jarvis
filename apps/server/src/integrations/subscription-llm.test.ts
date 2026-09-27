@@ -340,7 +340,8 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   it("error_max_turns с пойманным вызовом инструмента — НЕ ошибка", async () => {
     const sdk = fakeSdk([
       { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "mcp__jarvis__app_launch", input: { args: { app: "x" } } }] } },
-      { type: "result", subtype: "error_max_turns", result: "Reached maximum number of turns (1)" },
+      // Реальная форма SDK (адверс-ревью р1): is_error:true, errors[], поля result нет.
+      { type: "result", subtype: "error_max_turns", is_error: true, errors: ["Reached maximum number of turns (1)"] },
     ]);
     const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
     expect(r.stopReason).toBe("tool_use");
@@ -350,6 +351,33 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   it("настоящая ошибка БЕЗ результата — по-прежнему исключение (стаб, а не пустой успех)", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "OAuth session expired" }]);
     await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+  });
+
+  // Адверс-ревью р1: у реального SDKResultError текст причины — в errors[], поля result нет. Раньше причина
+  // терялась («резервный канал не ответил: error_during_execution»), и владельцу нельзя было назвать её.
+  // Ревью р2: второй путь CLI кладёт первым служебную строку «[ede_diagnostic] …» — причина за ней.
+  it("errors[] с [ede_diagnostic] первым → причина всё равно распознана (auth)", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["[ede_diagnostic] result_type=user last_content_type=text stop_reason=end_turn", "OAuth token has expired"] }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+    expect(lastSubscriptionFailure()?.kind).toBe("auth");
+  });
+
+  // Ревью р2: пустой текст ошибки не должен превращать провал в пустой «успех» (потребитель судит errorText на истинность).
+  it.each([
+    [{ type: "result", subtype: "error_during_execution", is_error: true, errors: [""] }],
+    [{ type: "result", subtype: "success", is_error: true, result: "" }],
+  ])("пустой текст ошибки %# → всё равно провал, а не пустой успех", async (res) => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([res]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+  });
+
+  it("error_during_execution реальной формы (errors[]) → причина распознана (auth), а не «не ответил»", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["OAuth session expired"] }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+    expect(lastSubscriptionFailure()?.kind).toBe("auth");
   });
 
   it("слишком длинное имя инструмента не отдаётся в резерв (лимит 64 с префиксом)", async () => {
@@ -404,6 +432,30 @@ describe("classifySubscriptionError — разные причины лечатс
     ["socket hang up", "other"],
   ])("«%s» → %s", (text, kind) => {
     expect(classifySubscriptionError(text).kind).toBe(kind);
+  });
+
+  // Адверс-ревью р1 (C3): РЕАЛЬНАЯ строка CLI (headless, claude.exe 0.3.251) на 403 без VPN — с обёрткой
+  // «Failed to authenticate.» (с ТОЧКОЙ). До фикса /authenticate/ ловил её раньше региона → «claude setup-token».
+  it.each([
+    "Failed to authenticate. API Error: 403 Request not allowed",
+    'Failed to authenticate. API Error: 403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}',
+    "Claude Code returned an error result: Failed to authenticate. API Error: 403 Request not allowed",
+  ])("гео-403 в обёртке CLI «%s» → совет про VPN, не авторизация", (text) => {
+    const f = classifySubscriptionError(text);
+    expect(f.kind).not.toBe("auth");
+    expect(f.human).toMatch(/VPN/u);
+    expect(f.human).not.toMatch(/setup-token/u);
+  });
+
+  it.each([
+    "Failed to authenticate: OAuth session expired and could not be refreshed",
+    "Failed to authenticate. API Error: 401 OAuth token has expired",
+    "Failed to authenticate. API Error: 403 permission_error OAuth token does not meet scope requirement",
+    "Failed to authenticate. API Error: 403 OAuth access token has been revoked.",
+    "Failed to authenticate. API Error: 403 Forbidden: OAuth token revoked",
+    "Failed to authenticate. API Error: 401 Forbidden", // 401 в обёртке — не гео, даже со словом forbidden
+  ])("настоящая авторизация «%s» остаётся auth (гео-правило не шире нужного)", (text) => {
+    expect(classifySubscriptionError(text).kind).toBe("auth");
   });
 
   it("неизвестная ошибка не выдаётся за понятную — текст сохраняется", () => {
@@ -504,6 +556,36 @@ describe("эхо ошибки канала не выдаём за ответ м�
     await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/лимит подписки/);
   });
 
+  // Живой случай 25–27.09 (прод-лог, C2): на входе в Windows API отвечал 403, SDK прислал текст ошибки
+  // ассистентом и result с subtype:"success", но is_error:true — ход считался выполненным (outputTokens:0).
+  // Реверт: верни в subscription-session.ts судить провал только по subtype — тест упадёт.
+  it("result subtype:success, но is_error:true (ошибка API) → ход ПРОВАЛЕН, сырой текст ошибки не ответ", async () => {
+    _resetSubscriptionFailureForTest();
+    const API_ERR = 'API Error: 403 {"error":{"type":"forbidden","message":"Request not allowed"}}';
+    const sdk = fakeSdk([
+      { type: "assistant", message: { content: [{ type: "text", text: API_ERR }] } },
+      { type: "result", subtype: "success", is_error: true, api_error_status: 403, result: API_ERR },
+    ]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка:/);
+    expect(lastSubscriptionFailure()).toBeDefined();
+  });
+
+  // Адверс-ревью р1 (C2): обрыв ПОСЛЕ готового ответа — CLI шлёт ответ, затем кадр-ошибку `error:"server_error"` и
+  // result{success, is_error:true}. Текст кадра-ошибки в ответ не идёт → настоящий ответ не выбрасывается как «эхо».
+  // Реверт: верни extractText без isApiErrorFrame в subscription-session.ts — тест упадёт.
+  it("ответ модели + хвостовой кадр «Connection lost» (is_error:true) → ответ сохранён, не ложный провал", async () => {
+    _resetSubscriptionFailureForTest();
+    const LOST = "API Error: Connection lost mid-response. The response above may be incomplete.";
+    const sdk = fakeSdk([
+      { type: "assistant", message: { content: [{ type: "text", text: "Открываю блокнот, сэр." }] } },
+      { type: "assistant", error: "server_error", message: { content: [{ type: "text", text: LOST }] } },
+      { type: "result", subtype: "success", is_error: true, result: LOST },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(r.text).toBe("Открываю блокнот, сэр.");
+    expect(r.text).not.toMatch(/API Error/u);
+  });
+
   it("НАСТОЯЩИЙ частичный ответ обрывом не выбрасывается (работу модели не теряем)", async () => {
     _resetSubscriptionFailureForTest();
     const sdk = throwingSdk(
@@ -513,6 +595,13 @@ describe("эхо ошибки канала не выдаём за ответ м�
     const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
     expect(r.text).toBe("Открываю блокнот, сэр");
     expect(r.stubbed).toBe(false);
+  });
+
+  // C3 (аудит 27.09): 403 «Request not allowed» на входе в Windows — сеть/VPN, а не «резерв не ответил» сырой строкой.
+  it("classifySubscriptionError: 403 forbidden «Request not allowed» → совет про VPN, без сырого текста", () => {
+    const f = classifySubscriptionError('API Error: 403 {"error":{"type":"forbidden","message":"Request not allowed"}}');
+    expect(f.human).toMatch(/VPN/u);
+    expect(f.human).not.toMatch(/API Error/u);
   });
 
   it("isErrorEcho: подстрока ошибки — эхо; осмысленный ответ — нет", () => {

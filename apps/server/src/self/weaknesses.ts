@@ -12,6 +12,7 @@
  */
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { parseJsonl, readDayLogs } from "./day-logs.js";
 
 /** Одна слабость: что повторяется, сколько раз, с примерами. */
 export interface Weakness {
@@ -25,7 +26,7 @@ export interface Weakness {
 }
 
 export interface WeaknessReport {
-  /** Окно наблюдения в днях (сколько дневных логов удалось прочитать). */
+  /** Окно наблюдения в днях (сколько дней логов прочитано; запасные файлы дня — тот же день). */
   windowDays: number;
   /**
    * Всего задач в окне; `failed` — провалы РАБОТЫ, `llmUnavailable` — ходы, не дошедшие до модели
@@ -55,20 +56,6 @@ async function tailLines(path: string, maxLines: number): Promise<string[]> {
   if (!buf) return [];
   const lines = buf.split(/\r?\n/).filter(Boolean);
   return lines.slice(-maxLines);
-}
-
-/** Разобрать JSONL, молча пропуская битые строки (лог — не контракт, обрыв записи возможен). */
-function parseJsonl(lines: readonly string[]): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = [];
-  for (const l of lines) {
-    try {
-      const o = JSON.parse(l);
-      if (o && typeof o === "object") out.push(o as Record<string, unknown>);
-    } catch {
-      /* битая строка — пропускаем */
-    }
-  }
-  return out;
 }
 
 /**
@@ -205,22 +192,18 @@ export async function collectWeaknesses(logsDir: string, opts: { days?: number; 
     const ts = Date.parse(String(e.ts ?? ""));
     return Number.isFinite(ts) ? ts >= since : true; // строка без времени (легаси) — не выбрасываем
   });
-  const dayFiles = names.filter((n) => /^server-\d{4}-\d{2}-\d{2}\.log$/.test(n)).sort().slice(-days);
-  const logEntries: Record<string, unknown>[] = [];
-  for (const f of dayFiles) {
-    const raw = await readFile(join(logsDir, f), "utf8").catch(() => "");
-    logEntries.push(...parseJsonl(raw.slice(-MAX_LOG_BYTES).split(/\r?\n/).filter(Boolean)));
-  }
+  // День = основной файл + запасные `server-<день>.<pid>.log` (р1 C4/B5): окно в ДНЯХ, записи дня слиты по ts.
+  const { days: windowDays, entries: logEntries } = await readDayLogs(logsDir, names, days, MAX_LOG_BYTES);
 
   if (metricEvents.length === 0 && logEntries.length === 0) {
-    return { windowDays: dayFiles.length, tasks: { total: 0, failed: 0, llmUnavailable: 0 }, weaknesses: [], unavailable: "телеметрия пуста — судить о слабостях не по чему" };
+    return { windowDays, tasks: { total: 0, failed: 0, llmUnavailable: 0 }, weaknesses: [], unavailable: "телеметрия пуста — судить о слабостях не по чему" };
   }
 
   const speed = speedByChannel(metricEvents);
   const fromMetrics = weaknessesFromMetrics(metricEvents);
   const fromLogs = weaknessesFromLogs(logEntries);
   const weaknesses = [...fromMetrics.weaknesses, ...fromLogs].sort((a, b) => b.count - a.count).slice(0, limit);
-  return { windowDays: dayFiles.length, tasks: fromMetrics.tasks, weaknesses, ...(speed.length ? { speed } : {}) };
+  return { windowDays, tasks: fromMetrics.tasks, weaknesses, ...(speed.length ? { speed } : {}) };
 }
 
 /**

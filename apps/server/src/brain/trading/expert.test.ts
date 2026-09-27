@@ -1,4 +1,6 @@
+import { type LogSink, addLogSink } from "@jarvis/shared";
 import { describe, expect, it } from "vitest";
+import { FallbackLlmProvider } from "../../integrations/fallback-llm.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse, ToolUse } from "../../integrations/llm.js";
 import { type ExpertContext, TradeExpert } from "./expert.js";
 
@@ -99,6 +101,41 @@ describe("TradeExpert (§трейдинг слой 2: LLM в петле прог
     const reqs = llm.requests.length;
     expect(await e.decide(ctx())).toBeNull(); // 2-й — бюджет исчерпан
     expect(llm.requests.length).toBe(reqs); // LLM не вызван второй раз
+  });
+
+  // C6 (адверс-ревью р1): эксперт в бою стоит на FallbackLlmProvider (server.ts). Ход по подписке оплачен
+  // помесячно — фантомные доллары по цене API не должны съедать бюджет и глушить эксперта раньше срока.
+  it("ход по ПОДПИСКЕ (настоящая фолбэк-цепочка) бюджет эксперта не тратит", async () => {
+    const sub = new FakeLlm(decision({ act: true, direction: "up", stopPrice: 97, targetPrice: 110, confidence: 0.7 }));
+    const noKey: ILlmProvider = { live: false, complete: () => Promise.reject(new Error("нет ключа")), completeStream: () => Promise.reject(new Error("нет ключа")) };
+    const e = new TradeExpert(new FallbackLlmProvider(noKey, sub), knowledge, { model: "claude-opus-4-8", tier: "fable", budgetUsd: 0.00001 });
+    expect(await e.decide(ctx())).not.toBeNull();
+    expect(e.spentUsd()).toBe(0); // до фикса: costUsd по цене Opus → бюджет «исчерпан»
+    expect(e.budgetExhausted()).toBe(false);
+    expect(await e.decide(ctx())).not.toBeNull();
+    expect(sub.requests.length).toBe(2); // эксперт не замолчал
+  });
+
+  /**
+   * Адверс-ревью р2 (LOW): при «только подписка» spent навсегда 0 — долларовый потолок ничего не ограничивает, а лог
+   * старта обещал «budgetUsd: X». Честно: на первом ходе по подписке ОДИН раз говорим, что потолок её не тормозит.
+   */
+  it("ход по подписке при заданном потолке → ОДИН честный лог «потолок не ограничивает», по API — ни одного", async () => {
+    const entries: Parameters<LogSink>[0][] = [];
+    const off = addLogSink((e) => entries.push(e));
+    try {
+      const uses = decision({ act: true, direction: "up", stopPrice: 97, targetPrice: 110, confidence: 0.7 });
+      const noKey: ILlmProvider = { live: false, complete: () => Promise.reject(new Error("нет ключа")), completeStream: () => Promise.reject(new Error("нет ключа")) };
+      const viaSub = new TradeExpert(new FallbackLlmProvider(noKey, new FakeLlm(uses)), knowledge, { model: "claude-opus-4-8", tier: "fable", budgetUsd: 5 });
+      await viaSub.decide(ctx());
+      await viaSub.decide(ctx());
+      const viaApi = new TradeExpert(new FakeLlm(uses), knowledge, { model: "claude-opus-4-8", tier: "fable", budgetUsd: 5 });
+      await viaApi.decide(ctx());
+      const notes = entries.filter((e) => e.scope === "trade-expert" && /подписк/u.test(e.msg) && /не ограничивает/iu.test(e.msg));
+      expect(notes).toHaveLength(1); // до фикса: 0 — владелец верил в потолок, которого нет
+    } finally {
+      off();
+    }
   });
 
   it("в запрос уходят факты, выдержка базы знаний и tool решения", async () => {

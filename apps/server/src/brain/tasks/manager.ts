@@ -100,12 +100,13 @@ export class TaskManager {
    * перед очередным шагом и впрыснет в диалог LLM (см. agent-loop). Возвращает true, если задача жива
    * (можно рулить); false — терминальная/не найдена (тогда вызывающий трактует реплику как новую).
    */
-  steer(taskId: string, text: string): boolean {
+  steer(taskId: string, text: string, viaWake?: boolean): boolean {
     const task = this.tasks.get(taskId);
     if (!task || !isActiveState(task.state)) return false;
     const trimmed = text.trim();
     if (!trimmed) return false;
     task.steer.pending.push(trimmed);
+    task.steer.lastUnaddressed = viaWake === false; // A1: адресация задачи — по её последней поправке
     return true;
   }
 
