@@ -3881,3 +3881,35 @@ noteFrame, preflightText, ранний Enter act, метка кадра capture)
   `answerOf` своего хода. Прогрев ack-фраз промоушена и «Секунду, сэр.» в TTS-кеше на старте сессии. Персона v91.
 Гейт (d4f5620): сервер 3562 (+2 win32), клиент 994 (+9 Windows), tools 34, shared 190, protocol 20, typecheck, гейт
 размеров, `mutate-loop all` 17/17, стенд 31/31. Живьём (подписка, голос, Windows) не проверено — NEXT_SESSION.
+
+## 2026-09-27 — волна W4 «невидимый браузер, периметр, разрез background.js» (облачная сессия)
+- **S-12 (канал `/ext`).** Пустой Origin на `/ext` — отказ всегда (Chrome его шлёт); пиннинг по умолчанию — ID из `key`
+  манифеста (`gateway/ext-id.ts`, тест выводит его из `manifest.json`), `JARVIS_EXT_ID` — только переопределение, режима
+  «любое расширение» нет. Живое расширение больше не вытесняется: новичку при подключённом старом — WS-ping старому
+  (1,5 с); pong → новичок отклонён (close 4409), нет pong → вытеснение как раньше (`gateway/ext-liveness.ts`).
+  `/ws` не менялся (граница доверия loopback). Живой смоук в облаке: настоящий MV3 SW отвечает на ping, самозванец с
+  поддельным Origin получил 4409, без Origin — отказ, интенты обслуживает настоящее расширение.
+- **B-14 (SSRF на навигации).** Одно правило приватного хоста `shared/private-host.ts` (loopback, RFC1918, link-local,
+  CGNAT, 0/8, `.local`/`.localhost`/`.internal`, IPv6 ULA/link-local/mapped) — у `web.fetch`, `browserUrlBlocked` и
+  клиента (раньше сервер и расширение считали по-разному). Невидимый браузер режет запрос документа во внутреннюю сеть
+  ДО выхода в сеть (Fetch на соединении уровня браузера: редирект, клик, iframe, `_blank`), `open/read` — честная
+  ошибка, а не текст страницы ошибки (`jarvis-browser-nav-guard.ts`, `cdp-conn.ts`). Chrome владельца — только сервер:
+  вкладку увели на внутренний адрес → `browser_read/inspect/image` отказывают, `browser_act` — «сделал, но вкладка ушла
+  внутрь», без адреса и содержимого (`handlers/browser-ssrf.ts`); сам запрос в Chrome владельца сервер не предотвратит.
+- **B-2 + гард страницы у `web_act` (п.6 брифа).** Невидимый браузер исполняет через CDP ТЕ ЖЕ page-функции, что
+  расширение (`jarvis-browser-act.ts`): type/key — `elementActIsolated` в изолированном мире (строгая цель: селектор не
+  найден → не печатает в фокус; §0 по полю; гард Enter), click — `robustClickMain` (слово целиком: «да» не попадает в
+  «Удалить»; гард подписи). Сервер (`handlers/web-act.ts`): поля от модели — allowlist по интенту, служебные
+  `guard*/approved*` вырезаются; текущий адрес дочитывается; на опасном хосте/LMS — вопрос до действия; гард страницы —
+  на любом хосте; commit_confirm → один вопрос и один повтор, второй — «кнопка сменилась». Инлайн-гейт `dispatch.ts` и
+  `webActGateParams` удалены; судим ту клавишу, что жмём (`combo ?? key ?? Enter`).
+- **п.7 — разрез `background.js`, первый шаг.** Page-функции переехали в `apps/extension/page/` (`ref.js`,
+  `element-act.js`, `robust-click.js`, `inspect.js`, `read.js`, `probe.js`, с `.d.ts`) байт в байт: `toString()` всех 40
+  функций равен базе в стенде, SW-vm и бандле esbuild; `background.js` 3085 → 1859 строк. Закон `page/*.js`: только
+  самодостаточные `export function`; сторож `page-modules.test.mjs` проверяет это компилятором TypeScript по
+  `toString()` (ловит и то, что пропускают сценарии стенда — клик по тексту). Дальше — сборка page-скриптов из мелких
+  модулей (IIFE + `executeScript{files}`): `element-act.js`/`robust-click.js`/`inspect.js` пока длиннее 150 строк.
+  Зум `web_*` — не начат (следующий шаг).
+Гейт (w3 d602b7a): сервер 3577 (+2 win32), клиент 1006 (+9 Windows), стенд расширения 252/252, shared 194, tools 34,
+protocol 20, typecheck, `mutate-loop all` 17/17, облачный стенд 31/31. Гейт размеров: врезки `browser-cdp.ts` +2 и
+`handlers/browser.ts` +4 — через `--allow` (≤ +5 по плану). Живьём в Chrome владельца не проверено — NEXT_SESSION.
