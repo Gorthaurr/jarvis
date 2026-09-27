@@ -154,14 +154,15 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
   return "mutate"; // browser_open/act, web_open/act, input_*, app_*, fs_write/edit, office_*, system_*, code_run…
 }
 
-/** W1 «браузерные руки»: интенты browser_act, которые страницу НЕ меняют — навести курсор, прокрутить к элементу. */
+/** W1/W2: жесты, которые ничего НЕ меняют — навести курсор, прокрутить: browser_act{hover|scroll_to}, act{hover|scroll}. */
 const NEUTRAL_BROWSER_INTENTS = new Set(["hover", "scroll_to"]);
+const NEUTRAL_ACT_VERBS = new Set(["hover", "scroll"]);
 
 /**
  * Эффект КОНКРЕТНОГО вызова: у части инструментов под одним именем операции разной природы. Единая точка для петли
  * и журнала — разойдись они, журнал звал бы «сделанным» то, что петля считала взглядом (и наоборот).
  *  - screen_selection: `view` — свежий кадр области (сверка), start/clear — нейтральны;
- *  - browser_act{hover|scroll_to} — нейтральны: ни дела, ни verify-долга (наведение/прокрутка ничего не отправляют).
+ *  - browser_act{hover|scroll_to}, act{hover|scroll} (не серия) — нейтральны: ни дела, ни verify-долга; act{steps} — mutate.
  * Вызов — КАНОНИЧЕСКИЙ (петля и журнал канонизируют до этого): browser_tabs{op:"close"} приходит как browser_close
  * (facades.ts) и по имени — mutate. Без входа (потребители по одному имени) — эффект по имени, как раньше.
  */
@@ -169,6 +170,7 @@ export function toolCallEffect(name: string, input?: unknown): "verify" | "mutat
   const i = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   if (name === "screen_selection") return String(i.op ?? "view") === "view" ? "verify" : "neutral";
   if (name === "browser_act" && NEUTRAL_BROWSER_INTENTS.has(String(i.intent ?? ""))) return "neutral";
+  if (name === "act" && i.steps === undefined && NEUTRAL_ACT_VERBS.has(String(i.do ?? ""))) return "neutral";
   return toolEffect(name);
 }
 
@@ -208,9 +210,7 @@ const BLIND_MUTATE_TOOLS = new Set([
 ]);
 
 /** Слепое ли это меняющее действие — то, чей успех надо подтвердить наблюдением, не доверяя «ok». */
-export function isBlindMutate(name: string): boolean {
-  return BLIND_MUTATE_TOOLS.has(name);
-}
+export const isBlindMutate = (name: string): boolean => BLIND_MUTATE_TOOLS.has(name);
 
 // Заявление о НАБЛЮДАЕМОМ содержимом/результате (его надо было сверить глазами перед «готово»). НЕ
 // триггерит простое «открыл/запустил/готово» (там успех действия = цель). Триггерит «результаты/первый/
@@ -257,7 +257,6 @@ export const DURABLE_NEUTRAL_TOOLS = new Set([
   "set_reminder", "cancel_reminder", "watch_create", "watch_cancel",
   "consent_revoke", "obligation_add", "obligation_remove",
 ]);
-
 
 /** Грубая классификация по тексту ошибки (для будущих специализированных фраз/телеметрии). */
 export function classifyFailure(detail?: string): FailureClass {

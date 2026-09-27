@@ -1,6 +1,6 @@
 /**
  * W2 (пакет 0): порядок хуков dispatchTool — контракт для пакетов П1–П5.
- *  - маршрут act{steps} стоит ДО гейтов: сама серия не спрашивает владельца (каждый шаг спросит сам в П4) и не уходит клиенту;
+ *  - маршрут act{steps} стоит ДО гейтов: сама серия не спрашивает владельца (каждый шаг спрашивает сам, П4) и не уходит клиенту;
  *  - кап зрения задачи едет в screen.capture (maxEdge/maxPixels), без капа — прежняя команда;
  *  - taskVisionCap: подписка ∪ тиры API по состоянию каналов.
  */
@@ -29,13 +29,13 @@ function ctx(over: Partial<ToolContext> = {}): { c: ToolContext; sent: ActionCom
 }
 
 describe("dispatchTool — порядок хуков", () => {
-  it("act{steps} уходит в маршрут серии ДО §14-гейта: вопроса нет, команда не отправлена, честный отказ (П4 исполнит)", async () => {
+  it("act{steps} уходит в маршрут серии ДО §14-гейта: сама серия не спрашивает — спрашивает ТОЛЬКО Enter-шаг (П4), серия клиенту не уходит", async () => {
     const { c, sent, confirm } = ctx();
     const r = await dispatchTool("act", { app: "Telegram", steps: [{ target: "Сообщение", do: "type", text: "привет" }, { do: "key", combo: "Enter" }] }, c);
-    expect(confirm).not.toHaveBeenCalled();
-    expect(sent).toHaveLength(0);
-    expect(r.isError).toBe(true);
-    expect(String(r.content)).toMatch(/ничего не сделано/u);
+    expect(confirm).toHaveBeenCalledTimes(1); // один вопрос — на Enter; двойного (серия + шаг) нет
+    expect(sent.map((x) => (x as { do?: string }).do)).toEqual(["type", "key"]);
+    expect(sent.some((x) => "steps" in x)).toBe(false);
+    expect(r.isError).toBe(false);
   });
 
   it("тот же Enter одним act — гейт спрашивает (маршрут серии не перехватывает обычный act)", async () => {

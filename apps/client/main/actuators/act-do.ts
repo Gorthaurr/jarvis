@@ -5,16 +5,17 @@
  * срабатывает, либо бросает ДО действия (паттерн не поддержан / элемент пропал) — тогда законен физический клик по тому
  * же handle. Если действие ушло (invoke вернул ok, печать началась), второй попытки нет ни здесь, ни по провалу verify.
  * Бесшумный путь (UIA) — по умолчанию; физический SendInput — фолбэк, physical:true, правый/двойной клик и точка без
- * UIA-элемента. type = клик в поле (лестница input.click) + печать; set = UIA setValue (мгновенно, без клавиатуры).
+ * UIA-элемента. type = клик в поле + печать (W2: clear/enter — act-do-text.ts); set = UIA setValue (без клавиатуры);
+ * W2: triple/middle/hover/scroll/drag — act-do-pointer.ts.
  */
 import { createLogger } from "@jarvis/shared";
 import type { ActCommand } from "./act-args.js";
 import { doPointer } from "./act-do-pointer.js";
+import { doType, doTypeFocused } from "./act-do-text.js";
 import { DrawingOverlayError } from "../selection/overlay-error.js";
 import type { FoundTarget } from "./act-find.js";
 import { invoke } from "./ground.js";
-import { click, pressKey, typeText } from "./input.js";
-import { PASTE_FROM_CHARS, pasteNote, pasteText } from "./paste-text.js";
+import { click, pressKey } from "./input.js";
 
 const log = createLogger("actuator:act-do");
 
@@ -52,7 +53,7 @@ const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e))
  * ТОЧКОЙ (координаты/OCR), кликается В ЭТУ ТОЧКУ — клик по handle = центр элемента, а под точкой мог оказаться
  * крупный родитель. По handle — только цель из снапшота (у неё точки нет, центр элемента и есть цель).
  */
-async function physicalClick(f: FoundTarget, p: ActParams, opts: { button?: "left" | "right" | "middle"; count?: number }): Promise<ActDone> {
+export async function physicalClick(f: FoundTarget, p: ActParams, opts: { button?: "left" | "right" | "middle"; count?: number }): Promise<ActDone> {
   const target = f.point
     ? ({ by: "coords", x: f.point.x, y: f.point.y, space: "screen" } as const)
     : f.handle
@@ -60,7 +61,8 @@ async function physicalClick(f: FoundTarget, p: ActParams, opts: { button?: "lef
       : null;
   if (!target) throw new Error(`«${f.name}»: ни handle, ни точки — кликнуть физически нечем`);
   const r = await click(target, "physical", p.restoreCursor, opts);
-  const how = opts.button === "right" ? "правый клик" : (opts.count ?? 1) > 1 ? "двойной клик" : "физический клик";
+  const n = opts.count ?? 1;
+  const how = opts.button === "right" ? "правый клик" : opts.button === "middle" ? "средний клик" : n >= 3 ? "тройной клик" : n > 1 ? "двойной клик" : "физический клик";
   return { did: `${how} по «${f.name}»`, screenX: r?.screenX, screenY: r?.screenY, physical: true };
 }
 
@@ -87,41 +89,6 @@ async function doClick(f: FoundTarget, p: ActParams): Promise<ActDone> {
   return physicalClick(f, p, {});
 }
 
-/** type: сфокусировать поле кликом (лестница input.click), затем печать. Клик ушёл, печать упала → ActPartialError. */
-async function doType(f: FoundTarget, p: ActParams): Promise<ActDone> {
-  const text = p.text ?? "";
-  const target = f.handle ? ({ by: "handle", handle: f.handle } as const) : f.point ? ({ by: "coords", x: f.point.x, y: f.point.y, space: "screen" } as const) : null;
-  if (!target) throw new Error(`«${f.name}»: некуда кликнуть перед печатью (нет handle/точки)`);
-  const r = await click(target, p.physical ? "physical" : "silent", p.restoreCursor);
-  let note = "";
-  try {
-    // Ревью 2026-09-24 (H-T1): длинный текст — вставкой, иначе печать выходит за бюджет act и повторяется моделью.
-    if (text.length >= PASTE_FROM_CHARS) note = pasteNote(await pasteText(text));
-    else await typeText(text);
-  } catch (e) {
-    if (e instanceof DrawingOverlayError) throw e;
-    throw new ActPartialError(`клик в «${f.name}» ушёл, печать не удалась: ${msg(e)} — исход неизвестен, не повторяй вслепую`);
-  }
-  return { did: `напечатал ${text.length} симв. в «${f.name}»${note}`, screenX: r?.screenX, screenY: r?.screenY, physical: Boolean(p.physical) };
-}
-
-/**
- * type БЕЗ цели: печать в поле, где УЖЕ стоит фокус (после Ctrl+K/Ctrl+L, игрового чата) — без холодного input_type.
- * Кликать некуда; окно выбирает `app` act (фокус ДО печати). Упала посреди — часть символов могла уйти.
- */
-async function doTypeFocused(p: ActParams): Promise<ActDone> {
-  const text = p.text ?? "";
-  let note = "";
-  try {
-    if (text.length >= PASTE_FROM_CHARS) note = pasteNote(await pasteText(text));
-    else await typeText(text);
-  } catch (e) {
-    if (e instanceof DrawingOverlayError) throw e;
-    throw new ActPartialError(`печать в поле с фокусом не удалась: ${msg(e)} — часть текста могла уйти, исход неизвестен, не повторяй вслепую`);
-  }
-  return { did: `напечатал ${text.length} симв. в поле с фокусом${note}`, physical: true };
-}
-
 /** UIA-паттерн по handle (set/toggle/select/expand): без handle честно нельзя — паттерны только у элементов. */
 async function doPattern(f: FoundTarget, pattern: "setValue" | "toggle" | "select" | "expand", value?: string): Promise<ActDone> {
   if (!f.handle) throw new Error(`«${f.name}»: для ${pattern} нужен UIA-элемент (handle), а найдена только точка на экране`);
@@ -140,7 +107,7 @@ export async function performAct(found: FoundTarget | undefined, cmd: ActCommand
   }
   if (verb === "type" && !found) {
     if (!p.text) throw new Error("do:type без text");
-    return doTypeFocused(p);
+    return doTypeFocused(cmd, p);
   }
   if (!found) throw new Error(`do:${verb} без цели (target)`);
   switch (verb) {
@@ -152,7 +119,7 @@ export async function performAct(found: FoundTarget | undefined, cmd: ActCommand
       return physicalClick(found, p, { button: "right" });
     case "type":
       if (!p.text) throw new Error("do:type без text");
-      return doType(found, p);
+      return doType(found, cmd, p);
     case "set":
       if (!p.text) throw new Error("do:set без text (очистка поля — отдельное явное намерение)");
       return doPattern(found, "setValue", p.text);
@@ -161,7 +128,7 @@ export async function performAct(found: FoundTarget | undefined, cmd: ActCommand
     case "expand":
       return doPattern(found, verb);
     case "triple": case "middle": case "hover": case "drag": case "scroll":
-      return doPointer(found, verb, cmd, p); // W2: глаголы указателя — П4 (act-do-pointer.ts)
+      return doPointer(found, verb, cmd, p); // W2: глаголы указателя (act-do-pointer.ts)
     default: {
       const _x: never = verb;
       throw new Error(`неизвестный глагол act: ${String(_x)}`);

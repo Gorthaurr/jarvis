@@ -1,7 +1,8 @@
 // W1-ревью (LOOP-2, LOOP-8): жест ОТПРАВКИ одного вызова и долг его сверки — одно место для исхода «успех»
 // (tool-classify applySuccessEffects) и «исход неизвестен» (unknownOutcome: isError + uncertain). Разойдись они,
 // таймаут расширения после клика «Оформить» оставлял ход без долга сверки: «Заказ оформлен» уходило без взгляда.
-import { isSendKey, isPasteCombo, inspectBatchSteps, actGesture } from "./util.js";
+import { isSendKey, isPasteCombo, inspectBatchSteps } from "./util.js";
+import { actCallGesture, inspectActSeries, isActSeries } from "./act-gesture.js";
 import { inspectWebBatch, webActGesture } from "./browser-gesture.js";
 import type { LoopState } from "./state.js";
 import type { ToolResult } from "../../tools/dispatch.js";
@@ -27,8 +28,9 @@ const NO_GESTURE = { commit: false, composes: false };
  */
 export function sendGestureOf(tu: ToolUse, composedPending: boolean): SendGesture {
   const combo = (tu.input as { combo?: unknown }).combo;
-  const batch = tu.name === "input_batch" ? inspectBatchSteps(tu.input) : tu.name === "browser_batch" ? inspectWebBatch(tu.input) : NO_BATCH;
-  const actG = tu.name === "act" ? actGesture(tu.input) : tu.name === "browser_act" ? webActGesture(tu.input) : NO_GESTURE;
+  // W2 (П4): серия act{steps} — как берст; одиночный act с enter:true/triple — act-gesture.ts.
+  const batch = tu.name === "input_batch" ? inspectBatchSteps(tu.input) : tu.name === "browser_batch" ? inspectWebBatch(tu.input) : isActSeries(tu.name, tu.input) ? inspectActSeries(tu.input) : NO_BATCH;
+  const actG = tu.name === "act" ? actCallGesture(tu.input) : tu.name === "browser_act" ? webActGesture(tu.input) : NO_GESTURE;
   const commitGesture =
     (tu.name === "input_key" && isSendKey(combo)) || tu.name === "input_click" || tu.name === "input_mouse" || tu.name === "ui_invoke" || actG.commit;
   const sendCommit = ((commitGesture || batch.hasSend) && composedPending) || batch.committed || (actG.commit && actG.composes);

@@ -5,9 +5,7 @@
  *   - app.launch — запуск процесса (notepad/calc/браузер и т.п.) через PowerShell Start-Process (цель — через ENV, анти-инъекция).
  *   - app.focus — вынос окна на передний план.
  *
- * Фокус временно делается через PowerShell + WScript.Shell.AppActivate
- * (// TODO(M3): заменить на сайдкар-стаб apps/sidecar-win, который умеет
- *  honest SetForegroundWindow по UIA-handle без хрупкого AppActivate по заголовку).
+ * Фокус — сайдкар window.focus (честный readback), фолбэк — PowerShell + WScript.Shell.AppActivate. W2 (G-20): запуск ждёт окно.
  *
  * Замечание (§3): этот актуатор НЕ дергает SendInput/координаты — только
  * управление процессами/окнами на уровне ОС.
@@ -15,14 +13,15 @@
 import { spawn } from "node:child_process";
 import { createLogger } from "@jarvis/shared";
 import { LaunchError, smartLaunch } from "./app-resolve.js";
+import { type AppLaunchWindow, launchWindowNote, withLaunchWindow } from "./launch-window.js";
 import { builtinLaunchPath } from "./windows-builtins.js";
 import { noteFocusChange } from "./secret-memory.js";
 import { DrawingOverlayError, assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 
 const log = createLogger("actuator:apps");
 
-/** Результат низкоуровневого запуска: для маппинга в ActionResult.data. */
-export interface LaunchOutcome {
+/** Результат низкоуровневого запуска: для маппинга в ActionResult.data. W2 (G-20): + окно запуска (launch-window.ts). */
+export interface LaunchOutcome extends AppLaunchWindow {
   /** Цель, реально ушедшая в ОС (exe-путь или URI). */
   resolved: string;
   /** Реальный PID запущенного процесса (для exe; у URI его нет). */
@@ -155,7 +154,7 @@ export async function launchApp(app: string): Promise<LaunchOutcome> {
   // Встроенные программы Windows — абсолютным путём из %SystemRoot% (поиск находил обёртку Git/чужие ярлыки).
   const launchTarget = builtinLaunchPath(query) ?? query;
   log.info(`launch: "${app}" -> резолв "${launchTarget}"`);
-  const r = await smartLaunch(launchTarget);
+  const r = await withLaunchWindow(launchTarget, () => smartLaunch(launchTarget)); // W2 (G-20): дождаться окна ≤ 5 с
   noteFocusChange(); // П2 (§0): новое окно на переднем плане — набранное в прежнем поле к нему не относится
   // Ветка URI без признаков запуска (ms-settings:, https:, tg:) и стаб-лончеры UWP подтвердить нечем:
   // говорим это ПРЯМО в результате, иначе «ОС приняла обработчик» снова прочитается как «запустил»
@@ -169,9 +168,9 @@ export async function launchApp(app: string): Promise<LaunchOutcome> {
     source: r.source,
     confirmed,
     verified: r.verified,
-    note: confirmed
-      ? undefined
-      : "ОС приняла обработчик, но факт запуска НЕ подтверждён — если он важен, сверь (window_list/wait_for/screen_capture).",
+    window: r.window,
+    windowSeen: r.windowSeen,
+    note: confirmed ? launchWindowNote(r) : "ОС приняла обработчик, но факт запуска НЕ подтверждён — если он важен, сверь (window_list/wait_for/screen_capture).",
   };
 }
 

@@ -23,8 +23,8 @@ function patternFor(action: string): UiPattern | null {
     case "expand":
     case "collapse":
       return "expand";
-    case "scroll":
-      return "scroll";
+    // W2 (G-17): scroll НЕ пишется UIA-паттерном — ScrollPattern сайдкара крутит только вниз и мелким шагом, реплей
+    // прокрутил бы не туда. Колесом (точка + дельта) демонстрация его пока не несёт — честный пропуск (buildSkillDraft).
     case "setvalue":
     case "settext":
       return "setValue";
@@ -67,6 +67,13 @@ export interface SkillDraft {
   steps: SkillStep[];
   /** Требует ревью пользователя до первого применения (есть guard-шаги, §14). */
   needsReview: boolean;
+  /** W2: что из показанного в шаги НЕ записано (прокрутка) — честно, а не молча. */
+  skipped: string[];
+}
+
+/** Прокрутки демонстрации: в шаги не пишутся (см. patternFor) — перечисляем, чтобы пропуск был виден. */
+function skippedScrolls(events: readonly DemoEvent[]): string[] {
+  return events.filter((e) => e.action.toLowerCase() === "scroll").map((e) => `прокрутка «${e.name ?? e.role}»`);
 }
 
 /**
@@ -81,16 +88,19 @@ export function buildSkillDraft(params: {
   commentary?: string;
 }): SkillDraft {
   const steps = demoEventsToSteps(params.events);
+  const skipped = skippedScrolls(params.events);
+  const gap = skipped.length ? `[не записано: ${skipped.join(", ")} — колесом в навыке пока не повторить, прокрути сам]` : "";
+  const description = [params.commentary, gap].filter(Boolean).join(" ");
   const contentMd = serializeSkill(
     {
       id: params.id,
       name: params.name,
       version: 1,
       grounding: "a11y",
-      ...(params.commentary ? { description: params.commentary } : {}),
+      ...(description ? { description } : {}),
       source: "demonstration",
     },
     steps,
   );
-  return { contentMd, steps, needsReview: hasGuardSteps(steps) };
+  return { contentMd, steps, needsReview: hasGuardSteps(steps), skipped };
 }

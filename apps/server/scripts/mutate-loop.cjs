@@ -7,7 +7,9 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
-const FILES = ["src/brain/agent/index.ts", ...fs.readdirSync("src/brain/agent/loop").filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => "src/brain/agent/loop/" + f)];
+// W2 (П4): + серия act{steps} (маршрут dispatchTool, раскрытие по шагу) и её тест — к каталогу тестов петли.
+const FILES = ["src/brain/agent/index.ts", ...fs.readdirSync("src/brain/agent/loop").filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => "src/brain/agent/loop/" + f), "src/brain/tools/handlers/act-steps.ts", "src/brain/tools/handlers/act-steps-result.ts"];
+const TESTS = ["src/brain/agent", "src/brain/tools/handlers/act-steps.test.ts"];
 const MUTS = {
   "gate-snapshot": [`const gateStoppedPrevRound = st.honesty.gateStoppedRound;`, `const gateStoppedPrevRound = false;`],
   "declined-gates-mutate": [`if (r.declined !== true && r.uncertain !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) st.honesty.anyMutateSucceeded = true;`, `if (r.uncertain !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) st.honesty.anyMutateSucceeded = true;`],
@@ -17,6 +19,17 @@ const MUTS = {
   "verified-after-veil-rearm": [`st.honesty.verifiedAfterVeil = false;\n// Контроль-8 (verified-after-veil-rearm)`, `// Контроль-8 (verified-after-veil-rearm)`],
   "cap-by-loop-iters": [`st.progress.loopIters >= HARD_STEP_CAP && !st.progress.finalText && !st.exit.cancelled`, `st.progress.round >= HARD_STEP_CAP && !st.progress.finalText && !st.exit.cancelled`],
   "sent-required-for-outbound": [`(!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) st.honesty.anyMutateSucceeded = true;`, `true) st.honesty.anyMutateSucceeded = true;`],
+  // W2 (П4, G-8): стоп раунда после провала мутации и его края (round-stop-loop.test.ts, loop/round-stop.test.ts).
+  "round-stop": [`if (skipAfterStop(ctx, tu, round)) continue;`, `if (false) continue;`],
+  "round-stop-reads": [`if (round.stoppedBy === undefined || ctx.effectOf(tu.name, tu.input) !== "mutate") return false;`, `if (round.stoppedBy === undefined) return false;`],
+  "round-stop-count-stub": [`round.skippedIds.add(tu.id);`, `round.skippedIds.add(tu.id); round.roundErrors += 1;`],
+  "round-stop-anyerrored": [`const anyErrored = real.some((b) => b.type === "tool_result" && b.is_error === true);`, `const anyErrored = round.resultBlocks.some((b) => b.type === "tool_result" && b.is_error === true);`],
+  // W2 (П4): серия act{steps} — стоп на первом провале, отмена между шагами, кап картинок, отказ §14 наружу, тихие промежуточные.
+  "steps-stop-first-error": [`stop = stopReasonOf(r);`, `stop = null;`],
+  "steps-cancel": [`if (ctx.isCancelled?.()) stop = "cancelled";`, `if (false) stop = "cancelled";`],
+  "steps-image-cap": [`const keep = new Set(imageSteps.slice(-MAX_SERIES_IMAGES));`, `const keep = new Set(imageSteps);`],
+  "steps-declined-out": [`if (stop === "declined") out.declined = true;`, `if (false) out.declined = true;`],
+  "steps-observe-quiet": [`const quiet = !last && s.verify === undefined && s.observe === undefined;`, `const quiet = false;`],
 };
 /** Найти якорь (многострочный, по trim каждой строки) в файле; вернуть {from,to} индексы строк или null. */
 function findAnchor(lines, anchor) {
@@ -30,6 +43,16 @@ function findAnchor(lines, anchor) {
   return hits;
 }
 const names = process.argv[2] === "all" || !process.argv[2] ? Object.keys(MUTS) : [process.argv[2]];
+// W2 (П4): прерывание (timeout/Ctrl+C) посреди мутации не оставляет мутированный файл: сигнал обрабатывается, когда
+// вернётся spawnSync (прогон тестов), — файл восстанавливается из копии в памяти, и только потом выход.
+let pending = null;
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(sig, () => {
+    if (pending) fs.writeFileSync(pending.file, pending.raw);
+    console.error(`прервано (${sig}) — ${pending ? `${pending.file} восстановлен` : "мутаций в работе не было"}`);
+    process.exit(130);
+  });
+}
 const table = [];
 for (const name of names) {
   const [a, b] = MUTS[name];
@@ -45,6 +68,7 @@ for (const name of names) {
   if (found.error) { table.push({ name, error: found.error }); continue; }
   const { file, lines, at } = found;
   const raw = fs.readFileSync(file, "utf8");
+  pending = { file, raw };
   // замена: первая строка якоря → строка(и) мутации с тем же отступом; остальные строки якоря удаляются
   const indent = /^\s*/.exec(lines[at])[0];
   const mutated = [...lines];
@@ -53,7 +77,7 @@ for (const name of names) {
   mutated.splice(at, parts.length, replacedFirst, ...b.split("\n").slice(1).map((s) => indent + s.trim()));
   fs.writeFileSync(file, mutated.join("\n"));
   try {
-    const r = spawnSync("npx", ["vitest", "run", "src/brain/agent", "--reporter=json"], { encoding: "utf8", maxBuffer: 1 << 28, shell: true });
+    const r = spawnSync("npx", ["vitest", "run", ...TESTS, "--reporter=json"], { encoding: "utf8", maxBuffer: 1 << 28, shell: true });
     let failed = [];
     try {
       const j = JSON.parse(r.stdout.slice(r.stdout.indexOf("{")));
@@ -62,6 +86,7 @@ for (const name of names) {
     table.push({ name, file: path.basename(file), failed });
   } finally {
     fs.writeFileSync(file, raw);
+    pending = null;
   }
 }
 const out = process.argv[3] ?? path.join(require("os").tmpdir(), "mutation-table.json");
