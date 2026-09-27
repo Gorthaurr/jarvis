@@ -2,8 +2,9 @@
  * W2 (пакет 0, P0-f): ГЕЙТ РАЗМЕРОВ МОДУЛЕЙ — закон CLAUDE.md «модули < 150 строк, раздутые файлы не растут».
  * Без шебанга: модуль импортирует vitest, а на Windows-чекауте (CRLF) vite 5 не узнаёт `#!…\r\n` и вставляет
  * импорты ПЕРЕД ним → SyntaxError всего набора (27.09). Запуск — только `node …/module-size-gate.mjs`.
- * Точка входа — сравнение URL через pathToFileURL: на Windows argv[1] = `C:\…`, а import.meta.url = `file:///C:/…`;
- * склейка `file://${argv[1]}` не совпадала никогда → гейт молча отдавал 0 (27.09).
+ * Точка входа — сравнение URL через pathToFileURL(realpath): на Windows argv[1] = `C:\…`, а import.meta.url =
+ * `file:///C:/…`, склейка `file://${argv[1]}` не совпадала никогда → гейт молча отдавал 0 (27.09). realpath — потому
+ * что Node строит import.meta.url точки входа из realpath, а argv[1] — нет (запуск через junction/симлинк).
  *
  * Для каждого изменённого относительно BASE не-тестового `.ts` (по всему репозиторию, `git diff --numstat BASE`):
  *  - НОВЫЙ файл — не длиннее 150 строк;
@@ -15,7 +16,7 @@
  * Код выхода 1 при нарушении. Файл, который в BASE был ≤ 150 и вырос за 150, — тоже нарушение (новый раздутый).
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -79,4 +80,13 @@ function main(argv) {
   return bad.length ? 1 : 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exit(main(process.argv.slice(2)));
+/** Запущен ли модуль как скрипт (а не импортирован vitest'ом). Без argv[1] или с битым путём — нет. */
+function isEntry() {
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntry()) process.exit(main(process.argv.slice(2)));

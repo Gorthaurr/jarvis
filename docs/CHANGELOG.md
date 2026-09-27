@@ -3984,6 +3984,9 @@ keeper 5, typecheck. Живьём не проверено: чек-листы W1 
 ## 2026-09-27 — гейт размеров на Windows был молчащим no-op
 - `module-size-gate.mjs` звал `main()` по гарду ``import.meta.url === `file://${argv[1]}` ``: на Windows argv[1] =
   `C:\…`, url = `file:///C:/…` → не совпадало НИКОГДА, гейт печатал пустоту и отдавал 0 на любом BASE (закон «модули
-  < 150, раздутые не растут» не охранялся на ПК владельца). Фикс — `pathToFileURL(argv[1]).href`; usage-проверка — до
-  `git rev-parse`. Тест поведением: `node <абс. путь>` без BASE → код 2 + usage (на старом гарде — 0 и пусто).
-  Живьём (PowerShell): +1 строка в `router-ws.ts` → exit 1, с `--allow` → 0.
+  < 150, раздутые не растут» не охранялся на ПК владельца). Фикс — `pathToFileURL(realpathSync(argv[1])).href`:
+  import.meta.url точки входа Node строит из realpath, argv[1] — нет (без realpath запуск через junction снова молчал —
+  проверено живьём); usage-проверка — до `git rev-parse`. Тесты поведением: `node <путь>` без BASE → код 2 + usage,
+  напрямую и через ссылку на папку (реверт: старый гард — оба красные, без realpath — красный junction).
+  Живьём (PowerShell/Git Bash): +1 строка в `router-ws.ts` → exit 1, с `--allow` → 0; на правках #18 от `8af9087` —
+  ровно врезки `router-ws.ts` +4, `server.ts` +1.
