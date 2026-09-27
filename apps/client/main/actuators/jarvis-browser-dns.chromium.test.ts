@@ -6,7 +6,8 @@
  * Последний блок — настоящий публичный DNS (localtest.me), без таблиц; нет сети — пропуск.
  *
  * Реверт-проверка (из копии): гард судит только имя (без checkHostPublic) → «роутер» получает запросы → красный;
- * «не разрешилось» пропускается → nx доходит до «роутера» → красный.
+ * «не разрешилось» пропускается → nx доходит до «роутера» → красный. Rebinding здесь — с предподключением Chrome, как в
+ * бою (порядок «гард/прокси» плавает); детерминированный разбор суда прокси — jarvis-browser-pin.chromium.test.ts.
  */
 import { lookup as dnsLookup } from "node:dns/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -67,6 +68,13 @@ describe.skipIf(!chrome)("B-14 (DNS): имя, указывающее внутр�
     const r = await openErr(at("slow.jb.example"));
     expect(r).toMatch(/^ERR .*внутренний адрес/u);
     expect(r).not.toContain("SHOP");
+    expect(router.hits).toHaveLength(0);
+  }, 30_000);
+
+  it("DNS rebinding (первый ответ публичный, дальше 127.0.0.1) с предподключением Chrome → честная ошибка, запросов нет", async () => {
+    const r = await openErr(at("rebind-live.jb.example"));
+    expect(r).toMatch(/^ERR .*внутренний адрес/u);
+    expect(r).not.toContain("ROUTER-SECRET");
     expect(router.hits).toHaveLength(0);
   }, 30_000);
 
