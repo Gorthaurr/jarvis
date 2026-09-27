@@ -374,27 +374,30 @@ describe("skill-runner × контроль-5 (действие ушло / про
     });
     // У стора нет reset (drawEndedAt не обнуляется, повторное «выкл» без открытой вуали метку не двигает): открыть и
     // закрыть в эпохе 0 → drawingEndedAfter(t) = false для любого t ≥ 0. Иначе вуаль 3f осталась бы на экране, и
-    // соседние тесты файла на дефолтном overlayBlockReason/veiledSince легли бы об оверлей.
+    // соседние тесты файла на дефолтном overlayBlockReason/veiledSince легли бы об оверлей; а метка 3e (> tPoll при тех
+    // же часах) подменила бы в 3f флаг drawing.
     afterEach(() => {
       dateNow.mockRestore();
       selectionStore.setDrawing(true, 0);
       selectionStore.setDrawing(false, 0);
     });
 
-    /** Оверлей открылся и закрылся (Esc) во время OCR-опроса, опрос шёл и после — решение позже закрытия. */
+    /**
+     * Оверлей открылся и закрылся (Esc) во время OCR-опроса: закрытие — через 1 мс после tPoll (окно без запаса сверху),
+     * опрос шёл и после — решение позже закрытия.
+     */
     function veilBlinksDuringPoll(confirmed: boolean): SkillActuator["checkExpect"] {
       return vi.fn(async () => {
-        clock += 2;
         selectionStore.setDrawing(true);
-        clock += 3;
+        clock += 1;
         selectionStore.setDrawing(false);
-        clock += 5;
+        clock += 9;
         return confirmed;
       });
     }
 
-    function runTypeStep(checkExpect: SkillActuator["checkExpect"]) {
-      const execute = vi.fn(async () => undefined);
+    function runTypeStep(checkExpect: SkillActuator["checkExpect"], executeStep: SkillActuator["executeStep"] = async () => undefined) {
+      const execute = vi.fn(executeStep);
       const run = runSkill({
         skillId: "s",
         version: 1,
@@ -417,16 +420,24 @@ describe("skill-runner × контроль-5 (действие ушло / про
       expect(execute).toHaveBeenCalledTimes(1);
     });
 
-    it("runner-3d: вуаль закрылась ровно к началу опроса → окно от Date.now() начала опроса, граница строгая: честный «не подтвердил expect» с ретраем", async () => {
-      selectionStore.setDrawing(true, clock - 60_000);
-      selectionStore.setDrawing(false, clock); // = tPoll: сверка шла уже без вуали
-      const { execute, run } = runTypeStep(vi.fn(async () => {
-        clock += 5;
-        return false;
-      }));
+    it("runner-3d: вуаль мелькнула, пока шёл шаг, и закрылась ровно к началу опроса → окно от Date.now() начала опроса, граница строгая: честный «не подтвердил expect» с ретраем", async () => {
+      const { execute, run } = runTypeStep(
+        vi.fn(async () => {
+          clock += 5;
+          return false;
+        }),
+        async () => {
+          await Promise.resolve();
+          clock += 5;
+          selectionStore.setDrawing(true);
+          clock += 20;
+          selectionStore.setDrawing(false); // шаг кончился вместе с вуалью: метка закрытия = tPoll
+        },
+      );
       const r = await run;
       expect(r.ok).toBe(false);
-      expect(r.overlayDrawing).toBeFalsy(); // часы окна не с нуля и без запаса назад: закрытая к опросу вуаль — не «сверка под вуалью»
+      // Окно не с нуля, не от старта шага/реплея и без запаса назад: вуаль, закрытая к опросу, — не «сверка под вуалью».
+      expect(r.overlayDrawing).toBeFalsy();
       expect(r.message).toMatch(/не подтвердил expect/u);
       expect(r.actionInjected).toBe(true);
       expect(execute).toHaveBeenCalledTimes(2);
@@ -435,7 +446,7 @@ describe("skill-runner × контроль-5 (действие ушло / про
     it("runner-3e: expect ПОДТВЕРДИЛСЯ, хотя вуаль мелькнула в окне сверки → успех (провалом вуаль делает только неподтверждённый шаг)", async () => {
       const { execute, run } = runTypeStep(veilBlinksDuringPoll(true));
       const r = await run;
-      expect(r).toEqual({ ok: true }); // пометку veiled успеху ставит наблюдение skill.execute, а не раннер
+      expect(r).toEqual({ ok: true }); // пометка veiled — дело наблюдения skill.execute (по своему окну), не раннера
       expect(execute).toHaveBeenCalledTimes(1);
     });
 
@@ -451,6 +462,7 @@ describe("skill-runner × контроль-5 (действие ушло / про
           executeStep: execute,
           checkExpect: vi.fn(async () => {
             selectionStore.setDrawing(true); // метка открытия не участвует — решает флаг
+            clock += 5; // опрос идёт во времени: с timeoutMs > POLL_MS замороженные часы крутили бы опрос вечно
             return false;
           }),
         }),
