@@ -504,6 +504,20 @@ describe("эхо ошибки канала не выдаём за ответ м�
     await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/лимит подписки/);
   });
 
+  // Живой случай 25–27.09 (прод-лог, C2): на входе в Windows API отвечал 403, SDK прислал текст ошибки
+  // ассистентом и result с subtype:"success", но is_error:true — ход считался выполненным (outputTokens:0).
+  // Реверт: верни в subscription-session.ts судить провал только по subtype — тест упадёт.
+  it("result subtype:success, но is_error:true (ошибка API) → ход ПРОВАЛЕН, сырой текст ошибки не ответ", async () => {
+    _resetSubscriptionFailureForTest();
+    const API_ERR = 'API Error: 403 {"error":{"type":"forbidden","message":"Request not allowed"}}';
+    const sdk = fakeSdk([
+      { type: "assistant", message: { content: [{ type: "text", text: API_ERR }] } },
+      { type: "result", subtype: "success", is_error: true, api_error_status: 403, result: API_ERR },
+    ]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка:/);
+    expect(lastSubscriptionFailure()).toBeDefined();
+  });
+
   it("НАСТОЯЩИЙ частичный ответ обрывом не выбрасывается (работу модели не теряем)", async () => {
     _resetSubscriptionFailureForTest();
     const sdk = throwingSdk(

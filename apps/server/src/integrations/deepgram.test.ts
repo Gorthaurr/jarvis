@@ -264,6 +264,49 @@ describe("Deepgram ПЕРСИСТЕНТНЫЙ WS (§10, JARVIS_DEEPGRAM_PERSISTE
     expect(finals).toEqual(["привет как дела"]); // НЕ «привет привет как дела»
   });
 
+  // Прод 26.09 (C1): ход «слушаю» завис без аудио на 6 ч — Deepgram закрывал 1011 «did not receive audio»,
+  // мы переподключались, open обнулял бюджет и реплеил старый буфер → 1686 кругов в платный STT.
+  // Реверт: верни сброс reconnectAttempts на open и переподключение на 1011 без свежего аудио — тест упадёт.
+  it("ход без свежего аудио: 1011 по кругу НЕ переподключает бесконечно — ход закрыт, сокетов ≤ 2", async () => {
+    const provider = new DeepgramSttProvider("k");
+    const t = provider.open({ sampleRate: 16_000 });
+    let closed = false;
+    t.onClose(() => {
+      closed = true;
+    });
+    const ws1 = MockWS.instances[0]!;
+    ws1.fire("open");
+    t.pushAudio(new ArrayBuffer(640)); // в начале хода звук был
+    ws1.fire("close", { code: 1011, reason: "did not receive audio data" }); // дальше — тишина
+    for (let i = 0; i < 20; i++) {
+      await vi.advanceTimersByTimeAsync(2100);
+      const ws = MockWS.instances[MockWS.instances.length - 1]!;
+      if (ws === ws1 || closed) break;
+      ws.fire("open"); // реплей старого буфера, нового аудио нет
+      ws.fire("close", { code: 1011, reason: "did not receive audio data" });
+    }
+    expect(MockWS.instances.length).toBeLessThanOrEqual(2);
+    expect(closed).toBe(true); // пайплайн узнал, что стрим закрыт (переоткроет на следующей речи)
+  });
+
+  it("обрыв 1006 посреди хода при ИДУЩЕМ звуке по-прежнему переподключается (бюджет сбрасывает свежее аудио)", async () => {
+    const provider = new DeepgramSttProvider("k");
+    const t = provider.open({ sampleRate: 16_000 });
+    let closed = false;
+    t.onClose(() => {
+      closed = true;
+    });
+    for (let i = 0; i < 8; i++) {
+      const ws = MockWS.instances[MockWS.instances.length - 1]!;
+      ws.fire("open");
+      t.pushAudio(new ArrayBuffer(640)); // владелец продолжает говорить — прогресс есть
+      ws.fire("close", { code: 1006 });
+      await vi.advanceTimersByTimeAsync(2100);
+    }
+    expect(closed).toBe(false); // 8 обрывов > MAX_RECONNECTS, но каждый раз шло свежее аудио
+    expect(MockWS.instances.length).toBe(9);
+  });
+
   it("barge-in: beginTurn поверх незакрытого хода бросает старый (его close = no-op)", async () => {
     const provider = new DeepgramSttProvider("k");
     const t1 = provider.open({ sampleRate: 16_000 });

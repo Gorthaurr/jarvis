@@ -15,6 +15,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export const LIMIT = 150;
 export const ALLOW_GROWTH = 5;
@@ -76,4 +77,5 @@ function main(argv) {
   return bad.length ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main(process.argv.slice(2)));
+// pathToFileURL, а не `file://${argv[1]}`: на Windows это «file://C:…» против «file:///C:/…» — main не звался, гейт молча отвечал 0 (27.09).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exit(main(process.argv.slice(2)));
