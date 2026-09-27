@@ -7,7 +7,7 @@
  *  - окно app не найдено → ошибка ДО поиска и действия; фокус — факт в ответе (заголовок);
  *  - «не смог проверить» ≠ «не наступило» (unknown → unchecked, не failed); признак, видимый ДО действия, — unchecked;
  *  - W2 П1 (G-9): клавишное намерение (combo, «\n» в тексте) судится ДО первой инжекции (клика в поле); одобрение —
- *    только грант из области серверной команды (`commitApproved` в команде ничего не значит);
+ *    только грант из области серверной команды (прежний `commitApproved` удалён из протокола и ничего не значит);
  *  - W2: observe:false — ни снимка «до», ни наблюдения «после»; hwnd окна app доходит до поиска.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -100,9 +100,10 @@ describe("act — §14 до действия (W2 П1, G-9: ранняя пров
     serverExecutor(async (commandId) => (await run(), { commandId, ok: true, durationMs: 0 }))("srv-1", { kind: "gui.act", approval: { grants, expiresAt: Date.now() + 60_000 } });
 
   // Реверт: убери earlyKeyCheck в act.ts — Enter дойдёт до pressKey (листа), рубеж его уже не увидит.
-  it("app «tele» сфокусировал Telegram, Enter без гранта → отказ ДО нажатия; `commitApproved` в команде не одобряет; грант key:enter — нажимает", async () => {
+  it("app «tele» сфокусировал Telegram, Enter без гранта → отказ ДО нажатия; прежний `commitApproved` в теле не одобряет; грант key:enter — нажимает", async () => {
     await expect(act({ kind: "gui.act", app: "tele", do: "key", combo: "Enter" }, OPTS)).rejects.toMatchObject({ actionCode: "denied" });
-    await expect(act({ kind: "gui.act", app: "tele", do: "key", combo: "Enter", commitApproved: true }, OPTS)).rejects.toThrow(/§14.*Ничего не нажато/u);
+    const legacy = { kind: "gui.act", app: "tele", do: "key", combo: "Enter", commitApproved: true } as Parameters<typeof act>[0]; // поле удалено из протокола
+    await expect(act(legacy, OPTS)).rejects.toThrow(/§14.*Ничего не нажато/u);
     expect(st.pressKey).not.toHaveBeenCalled();
     await approve([{ signature: "key:enter", process: "telegram", count: 1 }], () => act({ kind: "gui.act", app: "Telegram", do: "key", combo: "Enter" }, OPTS));
     expect(st.pressKey).toHaveBeenCalledWith("Enter");

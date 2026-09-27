@@ -48,10 +48,10 @@ describe("область серверной команды", () => {
 });
 
 describe("мост — поля сервера срезаются, область без одобрения", () => {
-  it("approval/commitApproved из тела не доходят до dispatch; область bridge", async () => {
+  it("approval из тела не доходит до dispatch; область bridge", async () => {
     const seen: Array<{ cmd: ActionCommand; scope: ApprovalScope | undefined }> = [];
     const exec = bridgeExecutor(async (id, cmd) => (seen.push({ cmd, scope: currentScope() }), ok(id)));
-    await exec("b1", { kind: "input.key", combo: "Enter", approval: { grants: [grant], expiresAt: Date.now() + 60_000 }, commitApproved: true } as unknown as ActionCommand);
+    await exec("b1", { kind: "input.key", combo: "Enter", approval: { grants: [grant], expiresAt: Date.now() + 60_000 } } as unknown as ActionCommand);
     expect(seen[0]?.cmd).toEqual({ kind: "input.key", combo: "Enter" });
     expect(seen[0]?.scope).toEqual({ via: "bridge", commandId: "b1" });
   });

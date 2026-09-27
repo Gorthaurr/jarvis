@@ -86,7 +86,7 @@ function retryCommand(ctx: ToolContext, cmd: ActionCommand, grant: CommitGrant, 
     const kept = k > 0 ? narrowGrants(prior, batchIntents(ctx, cmd.steps, k)) : prior;
     return { ...cmd, steps: cmd.steps.slice(k), approval: approvalFor(mergeGrants([...kept, grant]), timeoutMs) };
   }
-  return { ...cmd, approval: approvalFor(mergeGrants([...prior, grant]), timeoutMs), ...(cmd.kind === "gui.act" ? { commitApproved: true } : {}) };
+  return { ...cmd, approval: approvalFor(mergeGrants([...prior, grant]), timeoutMs) };
 }
 
 /** Номер шага повтора — в нумерацию исходной серии (провал на j-м шаге хвоста = шаг k + j). */

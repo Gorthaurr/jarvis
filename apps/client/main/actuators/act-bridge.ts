@@ -68,7 +68,7 @@ export interface ActBridge {
 /**
  * Поднять loopback-мост актуаторов. dispatch внедряется (актуаторный dispatch клиента). Возвращает
  * {port, token, stop}. Жизненный цикл — на вызывающем (стартуем один раз на boot, гасим на выходе).
- * W2 П1: команда моста — без `approval`/`commitApproved` из тела и в области `bridge` БЕЗ одобрения (bridge-exec.ts),
+ * W2 П1: команда моста — без `approval` из тела и в области `bridge` БЕЗ одобрения (bridge-exec.ts),
  * даже если python запущен изнутри одобренной серверной команды; §14/§0/своё окно судит рубеж инжекции.
  */
 export function startActBridge(rawDispatch: DispatchFn): Promise<ActBridge> {

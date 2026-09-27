@@ -200,8 +200,6 @@ type ActionCommandKind =
       dx?: number;
       dy?: number;
       observe?: boolean;
-      /** @deprecated W2: заменяется `approval` (гранты), удаляется в интеграции. Ставит ТОЛЬКО сервер (контроль-2 №4). */
-      commitApproved?: boolean;
     }
   // §Волна2 (2.4): nameMode="substring" — матч имени по вхождению; automationId — устойчивый id элемента.
   | { kind: "ui.ground"; query: { role: string; name?: string; nameMode?: "exact" | "substring"; automationId?: string } } // -> handle/bbox в ActionResult.data

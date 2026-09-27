@@ -96,7 +96,6 @@ describe("needsApproval клиента: один вопрос, один повт
     expect(acts).toHaveLength(2);
     expect(acts[0]!.approval).toBeUndefined();
     expect(acts[1]!.approval?.grants).toEqual([{ signature: "click:отправить", process: "telegram", hwnd: 777, count: 1 }]);
-    expect((acts[1] as { commitApproved?: boolean }).commitApproved).toBe(true); // прежний флаг — до интеграции W2
   });
 
   it("часть действия ушла (stepActionInjected) → uncertain, вопроса и повтора нет", async () => {

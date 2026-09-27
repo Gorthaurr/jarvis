@@ -88,9 +88,10 @@ describe("GUI — коммит в опасном процессе на пере�
     expect(sendAction).toHaveBeenCalledTimes(1);
   });
 
-  // Контроль-2 №4: признак «владелец одобрил» едет клиенту ТОЛЬКО после вопроса; аргумент модели перекрывается.
-  // Реверт: убери `commitApproved = true` после одобрения — первый ассерт упадёт; убери перекрытие — второй.
-  it("act: commitApproved=true только после «да» владельца; модель сама себе одобрить не может", async () => {
+  // Контроль-2 №4 (W2: флаг `commitApproved` заменён грантами `approval`): одобрение едет клиенту ТОЛЬКО после вопроса;
+  // самоодобрение модели (`approval`/`commitApproved` в аргументах) срезается. Реверт: не клади гранты после «да» —
+  // первый ассерт упадёт; верни `{kind, ...input}` — второй.
+  it("act: гранты §14 только после «да» владельца; модель сама себе одобрить не может", async () => {
     const sent: ActionCommand[] = [];
     const sendAction = vi.fn<Send>(async (cmd) => {
       sent.push(cmd);
@@ -98,9 +99,11 @@ describe("GUI — коммит в опасном процессе на пере�
     });
     const sess = { sendAction } as unknown as ToolContext["session"];
     await dispatchTool("act", { app: "Telegram", do: "key", combo: "Enter" }, makeCtx({ session: sess, approved: true }));
-    await dispatchTool("act", { app: "notepad", do: "key", combo: "Enter", commitApproved: true }, makeCtx({ session: sess }));
-    expect((sent[0] as { commitApproved?: boolean }).commitApproved).toBe(true);
-    expect((sent[1] as { commitApproved?: boolean }).commitApproved).toBe(false);
+    const self = { grants: [{ signature: "key:enter", process: "telegram", count: 9 }], expiresAt: 9e15 };
+    await dispatchTool("act", { app: "notepad", do: "key", combo: "Enter", commitApproved: true, approval: self }, makeCtx({ session: sess }));
+    expect(sent[0]!.approval?.grants).toEqual([{ signature: "key:enter", process: "telegram", count: 1 }]);
+    expect(sent[1]!.approval).toBeUndefined();
+    expect("commitApproved" in sent[1]!).toBe(false);
   });
 
   // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter; в мессенджере уходил человеку мимо вопроса.

@@ -728,12 +728,11 @@ async function dispatchToolCore(
   if (!kind) return err(`Неизвестный инструмент: ${name}`);
 
   // W2 (решение №9): поля модели — ТОЛЬКО по схеме инструмента (command-fields.ts); служебные ставит СЕРВЕР:
-  // origin (§бесшумный-ввод: реактивный ход = "user"), approval (гранты §14), commitApproved у act (до интеграции W2).
+  // origin (§бесшумный-ввод: реактивный ход = "user") и approval (гранты §14 — единственный канал «да» до рубежа).
   const command = {
     ...commandFromInput(kind, name, input),
     origin: ctx.origin ?? "user",
     ...(gate.approval ? { approval: gate.approval } : {}),
-    ...(kind === "gui.act" ? { commitApproved: gate.commitApproved } : {}),
   } as ActionCommand;
   const sent = await sendActionApproved(ctx, command, actionTimeoutMs(kind));
   if ("tool" in sent) return sent.tool;
