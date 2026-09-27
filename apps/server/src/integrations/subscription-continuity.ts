@@ -59,5 +59,5 @@ export function continuationOutcomes(req: LlmRequest, pendingIds: Set<string>): 
 export function sessionFingerprint(req: LlmRequest, model: string, effort: string): string {
   // Навык и каталог в отпечатке: внутри сессии они зафиксированы на старте (в кеш-блок CLI не входят).
   const stable = [req.systemStatic, req.systemSkill, req.systemTools].filter((s) => s && s.trim()).join("\n\n");
-  return [model, effort, (req.tools ?? []).map((t) => t.name).join(","), stable].join(" ");
+  return [model, effort, (req.tools ?? []).map((t) => t.name).join(","), stable].join("\u0000"); // NUL — как в W2: не встречается в частях
 }
