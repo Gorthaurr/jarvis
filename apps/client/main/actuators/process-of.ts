@@ -8,6 +8,7 @@
  *  - мутирующий ground по role/name → сперва `scope:"active"`, затем `scope=<pid>` по ≤ 6 верхним окнам (без своего).
  * Не определено → null: рубеж отклоняет КАНДИДАТА в коммит честно («не смог определить программу — укажи app»).
  */
+import { normRole } from "@jarvis/shared";
 import { type InjectionFacts, type RawWindowFact, createInjectionFacts } from "./injection-facts.js";
 import { type MirrorEntry, attachPid, mirrorOf } from "./handle-mirror.js";
 import { type Point, physicalRectToDip } from "./coords.js";
@@ -54,11 +55,21 @@ export async function pointOf(f: InjectionFacts, p: Point): Promise<ProcFact | n
   return w ? toProc(w) : null;
 }
 
-/** handle → процесс его окна (pid зеркала; окно — под центром bbox, если того же pid, иначе верхнее окно pid). */
+const near = (a: number, b: number): boolean => Math.abs(a - b) <= 8;
+
+/**
+ * handle → процесс его окна. pid из зеркала (снапшот, ground по scope) → окно этого pid (под центром bbox, иначе
+ * верхнее). pid неизвестен (ground без scope, ground.at) → окно под центром bbox, НО только если элемент там сверху
+ * (ground.at в центре вернул его же): иначе «Отправить» Telegram под Блокнотом судилась бы как Блокнот.
+ */
 export async function handleOf(f: InjectionFacts, e: MirrorEntry): Promise<ProcFact | null> {
   const c = bboxCenterDip(e.bbox);
   const at = c ? await f.windowAt(c) : null;
-  if (e.pid === undefined) return at ? toProc(at) : null;
+  if (e.pid === undefined) {
+    const top = c && at ? await f.elementAt(c) : null;
+    const same = !!top && (top.name ?? "") === e.name && normRole(top.role) === normRole(e.role) && (["x", "y", "w", "h"] as const).every((k) => near(top.bbox[k], e.bbox[k]));
+    return same && at ? toProc(at) : null;
+  }
   if (at && at.pid === e.pid) return toProc(at);
   const w = (await f.rawWindows())?.find((x) => x.pid === e.pid);
   return w ? toProc(w) : null;

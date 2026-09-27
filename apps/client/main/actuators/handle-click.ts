@@ -11,12 +11,18 @@ import type { Point } from "./coords.js";
 import { createInjectionFacts } from "./injection-facts.js";
 import { bboxCenterDip, handleOf, mirrorLookup } from "./process-of.js";
 
-/** Точка (DIP) для физического клика по handle, если его процесс рискованный; иначе null — клик по handle. */
+/**
+ * Точка (DIP) для физического клика по handle: процесс рискованный ИЛИ поверх центра элемента чужое окно (клик попал
+ * бы в него — рубеж судит то, что сверху); иначе null — клик по handle, как прежде.
+ */
 export async function riskyHandlePoint(handle: string): Promise<Point | null> {
   const e = mirrorLookup(handle);
   const c = e ? bboxCenterDip(e.bbox) : null;
   if (!e || !c) return null;
-  const proc = await handleOf(createInjectionFacts(), e);
+  const f = createInjectionFacts();
+  const proc = await handleOf(f, e);
   const cat = proc ? guiProcessCategory(proc.process, proc.title) : null;
-  return cat && cat.category !== "remote" ? c : null;
+  if (cat && cat.category !== "remote") return c;
+  const top = await f.windowAt(c);
+  return proc && top && top.pid !== proc.pid ? c : null;
 }

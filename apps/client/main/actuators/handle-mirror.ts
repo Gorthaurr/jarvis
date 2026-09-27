@@ -56,7 +56,9 @@ export function noteSnapshot(
 
 /** Элемент ground/ground.at (роль «ControlType.Button», bbox уже разобран ground.ts). pid — если известен по scope. */
 export function noteGround(g: { handle: string; bbox: { x: number; y: number; w: number; h: number }; name?: string; role?: string }, gen: number, now = Date.now(), pid?: number): void {
-  put(g.handle, { name: g.name ?? "", role: g.role ?? "", bbox: g.bbox, gen, ...(pid !== undefined ? { pid } : {}) }, now);
+  const prev = entries.get(String(g.handle ?? ""));
+  const known = pid ?? (prev && prev.gen === gen ? prev.pid : undefined); // тот же handle в том же поколении — тот же элемент
+  put(g.handle, { name: g.name ?? "", role: g.role ?? "", bbox: g.bbox, gen, ...(known !== undefined ? { pid: known } : {}) }, now);
 }
 
 /** Процесс стал известен позже (ground по scope, окно под bbox) — дописать pid, не освежая запись. */

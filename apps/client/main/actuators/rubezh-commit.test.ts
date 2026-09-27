@@ -86,6 +86,31 @@ describe("процесс цели — реальный, не передний п
     expect(fake.count("key")).toBe(0);
   });
 
+  it("ui.ground без scope нашёл «Отправить» в Telegram ПОД Блокнотом → ui.invoke по handle не судится как Блокнот: отказ", async () => {
+    fake.windows = front(NOTEPAD, TELEGRAM);
+    fake.handlers.ground = () => sendBtn; // сайдкар: активное окно → весь стол, нашёл в Telegram
+    fake.at = () => ({ handle: 90, role: "document", name: "Текст", x: 0, y: 0, w: 1920, h: 1000 }); // сверху — Блокнот
+    expect((await run({ kind: "ui.ground", query: { role: "button", name: "Отправить" } })).ok).toBe(true);
+    const r = await run({ kind: "ui.invoke", target: { by: "handle", handle: "41" }, pattern: "invoke" });
+    expect(r.error?.code).toBe("denied");
+    expect(r.error?.message).toMatch(/не смог определить программу/u);
+    expect(fake.count("invoke")).toBe(0);
+    fake.windows = front(TELEGRAM); // элемент сверху (ground.at вернул его же) — процесс по окну под ним: вопрос telegram
+    fake.at = () => ({ handle: 41, role: "button", name: "Отправить", x: 500, y: 900, w: 90, h: 32 });
+    expect(needs(await run({ kind: "ui.invoke", target: { by: "handle", handle: "41" }, pattern: "invoke" }))?.process).toBe("telegram");
+  });
+
+  it("физический клик по handle Блокнота, а поверх его центра — окно Telegram → клик уходит в ТОЧКУ и судится она: отказ", async () => {
+    fake.windows = [{ ...TELEGRAM, x: 0, y: 850, w: 1920, h: 230, foreground: false }, { ...NOTEPAD, foreground: true }];
+    fake.snapshot = { window: NOTEPAD.title, pid: NOTEPAD.pid, items: [el(12, "Сохранить")], truncated: false };
+    await run({ kind: "ui.snapshot" });
+    fake.at = () => ({ handle: 41, role: "button", name: "Отправить", x: 500, y: 900, w: 90, h: 32 }); // что сверху в центре
+    const r = await run({ kind: "input.click", target: { by: "handle", handle: "12" }, method: "physical" });
+    expect(r.error?.code).toBe("denied");
+    expect(needs(r)).toMatchObject({ process: "telegram", signature: "click:отправить" });
+    expect(fake.mutations()).toEqual([]);
+  });
+
   it("mouse down без x/y — судится элемент под КУРСОРОМ; короткий drag по «Отправить» — как клик", async () => {
     electronModule.screen.getCursorScreenPoint = () => ({ x: 540, y: 910 });
     const down = await run({ kind: "input.mouse", op: "down" });
