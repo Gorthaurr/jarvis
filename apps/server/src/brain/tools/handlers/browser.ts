@@ -9,6 +9,7 @@ import { cutText } from "@jarvis/shared";
 import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
+import { navDnsRefusal } from "../nav-dns.js";
 import { assessWebCommit } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
 import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
@@ -106,6 +107,9 @@ export async function browserOpen(ctx: ToolContext, input: Record<string, unknow
   const url = String(input.url ?? "").trim();
   if (!url) return err("browser_open: пустой url");
   if (browserUrlBlocked(url)) return err("browser_open: адрес заблокирован (внутренняя сеть/loopback/метаданные или небезопасная схема).");
+  // B-14 (DNS): имя, указывающее внутрь (localtest.me → 127.0.0.1), — Chrome владельца с живыми логинами тоже не ведём.
+  const dnsRefusal = await navDnsRefusal("browser_open", url, ctx.resolveHost);
+  if (dnsRefusal) return dnsRefusal;
   // Контроль-9 (browser-open-ext-bypasses-veil): гейт вуали стоит ДО выбора канала. Контроль-7/8 закрыли только
   // ветку `sendAction` (расширение НЕ подключено); при подключённом расширении `openOrFocus` зовёт
   // `chrome.windows.update{focused:true, drawAttention:true}` — окно браузера встаёт поверх окна рисования и

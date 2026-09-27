@@ -290,7 +290,8 @@ describe("extractReadable / stripHtml (§12)", () => {
 // раньше redirect:"follow" успевал отправить GET во внутреннюю сеть до пост-проверки resp.url.
 describe("WebProvider.fetch — redirect-цепочка (SSRF до запроса)", () => {
   afterEach(() => vi.unstubAllGlobals());
-  const provider = () => new WebProvider(undefined);
+  // Логика цепочки/кодировок — поверх подменённого fetch; сокет с пиннингом адреса — pinned-fetch.test.ts.
+  const provider = () => new WebProvider(undefined, (url, init) => fetch(url, init));
 
   it("302 на приватный адрес: запрос в него НЕ уходит (отказ ДО второго fetch)", async () => {
     const mock = vi.fn().mockResolvedValueOnce(Response.redirect("http://169.254.169.254/latest/meta-data", 302));
@@ -348,7 +349,8 @@ describe("WebProvider.fetch — redirect-цепочка (SSRF до запрос�
 // дефект бы не воспроизвела).
 describe("WebProvider.fetch — кодировка тела (cp1251 из пролога/заголовка)", () => {
   afterEach(() => vi.unstubAllGlobals());
-  const provider = () => new WebProvider(undefined);
+  // Логика цепочки/кодировок — поверх подменённого fetch; сокет с пиннингом адреса — pinned-fetch.test.ts.
+  const provider = () => new WebProvider(undefined, (url, init) => fetch(url, init));
   // Байты cp1251 для «Австралийский доллар» (кириллица в cp1251 — один байт на символ).
   const NAME_CP1251 = Buffer.from([
     0xc0, 0xe2, 0xf1, 0xf2, 0xf0, 0xe0, 0xeb, 0xe8, 0xe9, 0xf1, 0xea, 0xe8, 0xe9, 0x20, 0xe4, 0xee, 0xeb, 0xeb, 0xe0, 0xf0,
@@ -398,7 +400,8 @@ describe("WebProvider.fetch — кодировка тела (cp1251 из про�
 // выдавало обрывок за целый документ («такого поля нет» вместо «я не дочитал»).
 describe("WebProvider.fetch — application/json отдаётся как есть + честное усечение", () => {
   afterEach(() => vi.unstubAllGlobals());
-  const provider = () => new WebProvider(undefined);
+  // Логика цепочки/кодировок — поверх подменённого fetch; сокет с пиннингом адреса — pinned-fetch.test.ts.
+  const provider = () => new WebProvider(undefined, (url, init) => fetch(url, init));
   const jsonResp = (body: string) =>
     vi.fn().mockResolvedValueOnce(new Response(Buffer.from(body, "utf8"), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }));
 

@@ -8,6 +8,7 @@
  * отдаётся КАК ЕСТЬ (readability его бы сломал); усечение всегда помечается явно.
  */
 import { type CacheStats, type Logger, TtlCache, createLogger, isPrivateHost } from "@jarvis/shared";
+import { type WebTransport, pinnedTransport } from "./pinned-fetch.js";
 
 const log: Logger = createLogger("web");
 
@@ -514,7 +515,8 @@ function decodeEntities(s: string): string {
 export class WebProvider implements IWebProvider {
   /** Поиск доступен ВСЕГДА: с ключом — Brave, без ключа — keyless DuckDuckGo (нужна лишь сеть). */
   readonly live = true;
-  constructor(private readonly braveApiKey: string | undefined) {
+  // transport — B-14 (DNS): fetch с пиннингом проверенного адреса (pinned-fetch.ts); DI — для тестов.
+  constructor(private readonly braveApiKey: string | undefined, private readonly transport: WebTransport = pinnedTransport()) {
     log.info("web.search", { provider: braveApiKey ? "brave (+ddg-фолбэк)" : "duckduckgo (keyless)" });
   }
 
@@ -576,16 +578,16 @@ export class WebProvider implements IWebProvider {
       // внутреннему сервису — уже side-effect, тело читать не обязательно). Теперь цепочка ручная:
       // КАЖДЫЙ hop (вкл. шортенеры) валидируется isFetchUrlAllowed ДО отправки запроса.
       // Общий бюджет времени прежний (WEB_TIMEOUT_MS на всю цепочку, как было при follow).
+      // B-14 (DNS): имя, указывающее внутрь, и rebinding режет транспорт — суд в lookup сокета, пиннинг адреса.
       const deadline = Date.now() + WEB_TIMEOUT_MS;
       let current = url;
       let resp: Response | null = null;
       for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
         const remaining = deadline - Date.now();
         if (remaining <= 0) return null; // бюджет цепочки исчерпан — честный null (как таймаут)
-        const r = await fetch(current, {
+        const r = await this.transport(current, {
           headers: { "User-Agent": "JarvisBot/0.1 (+readability)" },
           signal: AbortSignal.timeout(remaining),
-          redirect: "manual",
         });
         if (REDIRECT_STATUSES.has(r.status)) {
           try {
@@ -610,7 +612,7 @@ export class WebProvider implements IWebProvider {
         log.warn("web.fetch: слишком длинная redirect-цепочка", { url, cap: MAX_REDIRECT_HOPS });
         return null;
       }
-      if (!resp.ok) return null;
+      if (!resp.ok) { await resp.body?.cancel().catch(() => undefined); return null; } // сокет не держим до таймаута
       // Потоковое чтение с жёстким лимитом байт (не доверяем content-length, не буферизуем всё) +
       // декодирование по заявленной кодировке (cp1251 и т.п. — см. readCappedBody).
       const { text: body, truncated } = await readCappedBody(resp, MAX_HTML_BYTES);
