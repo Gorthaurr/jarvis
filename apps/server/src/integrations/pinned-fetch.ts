@@ -34,7 +34,7 @@ export function pinnedLookup(lookup?: HostLookup): LookupFunction {
       if (!pool.length) return callback(Object.assign(new Error(`DNS: у «${hostname}» нет адреса нужного семейства`), { code: "ENOTFOUND" }), "");
       if (options.all) return callback(null, pool);
       return callback(null, pool[0]!.address, pool[0]!.family);
-    });
+    }).catch((e: unknown) => callback(e as NodeJS.ErrnoException, "")); // необработанный reject = крах процесса сервера
   };
 }
 

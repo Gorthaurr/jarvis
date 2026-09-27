@@ -3953,3 +3953,13 @@ keeper 5, typecheck. Живьём не проверено: чек-листы W1 
   прокси, почему отложено — `SECURITY.md` «SSRF по DNS».
 - Грабли: `isPrivateHost("::1")` = false (голый IPv6 — не URL) — для ответов DNS нужен `isPrivateIp`. Одиночное имя
   (`router`, `x`) Windows резолвит через LLMNR ~2,3 с — это и есть LAN-цель, резолв не пропускаем.
+- Грабля на будущее: VPN/TUN с fake-IP в приватном диапазоне (100.64/10, 10/8) сделает «внутренними» ВСЕ сайты —
+  `web_*` и `web.fetch` откажут поголовно; первым делом смотреть `dns.lookup` (на ПК владельца — настоящие адреса,
+  v2rayN TUN без fake-IP; xray fakedns по умолчанию 198.18/15 — не приватный).
+Гейт на Windows: shared 199 (+5), сервер 3592 (+13), клиент 1044 (+7 chromium), typecheck; chromium-стенд 18/18
+(`jarvis-browser-dns` 7 — вкл. живой DNS `localtest.me`/`127.0.0.1.nip.io`, `jarvis-browser-ssrf` 5, e2e `web_act` 6);
+реверт-мутации 12/12 красные; гейт размеров ок (врезки: dispatch +1, handlers/browser +4, web +2, jarvis-browser +1,
+shared/index +1). Живой зонд: сервер из worktree (порт 8797, изолированные данные) через `/dev/bench/tool` —
+`web_open`/`web_login`/`browser_open`/`web_fetch` на `localtest.me`/`nip.io` → отказ, канарейка на 127.0.0.1 — 0 запросов;
+контроли `example.com`, `cbr.ru` (cp1251) через пиннинг-транспорт — ок. Живьём НЕ проверено: невидимый браузер с профилем
+владельца (Telegram) — код пути не менялся, кроме DNS-суда в перехвате навигации.

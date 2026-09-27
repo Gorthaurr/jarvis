@@ -58,6 +58,24 @@ describe("B-14 (DNS): транспорт web.fetch пиннит проверен
     expect(lookup.calls).toBe(1); // суд — ВНУТРИ подключения, отдельного (второго) резолва нет
   });
 
+  it("https (основной трафик web.fetch): тот же суд в lookup TLS-сокета — отказ PRIVATE_ADDRESS, TCP-соединений нет", async () => {
+    let connections = 0;
+    const count = () => void (connections += 1);
+    server.on("connection", count);
+    const lookup = table({ "pinned.example": ["127.0.0.1"] });
+    try {
+      const err = await pinnedTransport(lookup)(`https://pinned.example:${port}/`, { headers: {}, signal: signal() }).then(
+        () => null,
+        (e: NodeJS.ErrnoException) => e,
+      );
+      expect(err?.code).toBe(PRIVATE_ADDRESS); // не TLS-ошибка: до tls.connect дело не дошло
+      expect(lookup.calls).toBe(1);
+      expect(connections).toBe(0);
+    } finally {
+      server.off("connection", count);
+    }
+  });
+
   it("мультизапись «публичный + 127.0.0.1» → отказ, запросов нет", async () => {
     hits.length = 0;
     const lookup = table({ "mixed.example": ["203.0.113.10", "127.0.0.1"] });

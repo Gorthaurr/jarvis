@@ -69,7 +69,7 @@ export class NavGuard {
     }
     this.journal.push({ seq: ++this.seq, host, frameId: typeof p.frameId === "string" ? p.frameId : undefined, reason: verdict.reason });
     if (this.journal.length > 50) this.journal.shift();
-    log.warn("B-14: переход заблокирован", { host, ...verdict });
+    log.warn(verdict.reason === "private" ? "B-14: переход на внутренний адрес заблокирован" : "B-14: переход заблокирован — DNS не подтвердил адрес", { host, ...verdict });
     await this.conn.send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" }).catch(() => undefined);
   }
 
