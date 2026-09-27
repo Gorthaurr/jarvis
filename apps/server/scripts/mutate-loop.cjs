@@ -7,7 +7,9 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
-const FILES = ["src/brain/agent/index.ts", ...fs.readdirSync("src/brain/agent/loop").filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => "src/brain/agent/loop/" + f)];
+// W2 (П4): + серия act{steps} (маршрут dispatchTool, раскрытие по шагу) и её тест — к каталогу тестов петли.
+const FILES = ["src/brain/agent/index.ts", ...fs.readdirSync("src/brain/agent/loop").filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => "src/brain/agent/loop/" + f), "src/brain/tools/handlers/act-steps.ts", "src/brain/tools/handlers/act-steps-result.ts"];
+const TESTS = ["src/brain/agent", "src/brain/tools/handlers/act-steps.test.ts"];
 const MUTS = {
   "gate-snapshot": [`const gateStoppedPrevRound = st.honesty.gateStoppedRound;`, `const gateStoppedPrevRound = false;`],
   "declined-gates-mutate": [`if (r.declined !== true && r.uncertain !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) st.honesty.anyMutateSucceeded = true;`, `if (r.uncertain !== true && (!OUTBOUND_SEND_TOOLS.has(tu.name) || r.sent === true)) st.honesty.anyMutateSucceeded = true;`],
@@ -22,6 +24,12 @@ const MUTS = {
   "round-stop-reads": [`if (round.stoppedBy === undefined || ctx.effectOf(tu.name, tu.input) !== "mutate") return false;`, `if (round.stoppedBy === undefined) return false;`],
   "round-stop-count-stub": [`round.skippedIds.add(tu.id);`, `round.skippedIds.add(tu.id); round.roundErrors += 1;`],
   "round-stop-anyerrored": [`const anyErrored = real.some((b) => b.type === "tool_result" && b.is_error === true);`, `const anyErrored = round.resultBlocks.some((b) => b.type === "tool_result" && b.is_error === true);`],
+  // W2 (П4): серия act{steps} — стоп на первом провале, отмена между шагами, кап картинок, отказ §14 наружу, тихие промежуточные.
+  "steps-stop-first-error": [`stop = stopReasonOf(r);`, `stop = null;`],
+  "steps-cancel": [`if (ctx.isCancelled?.()) stop = "cancelled";`, `if (false) stop = "cancelled";`],
+  "steps-image-cap": [`const keep = new Set(imageSteps.slice(-MAX_SERIES_IMAGES));`, `const keep = new Set(imageSteps);`],
+  "steps-declined-out": [`if (stop === "declined") out.declined = true;`, `if (false) out.declined = true;`],
+  "steps-observe-quiet": [`const quiet = !last && s.verify === undefined && s.observe === undefined;`, `const quiet = false;`],
 };
 /** Найти якорь (многострочный, по trim каждой строки) в файле; вернуть {from,to} индексы строк или null. */
 function findAnchor(lines, anchor) {
@@ -58,7 +66,7 @@ for (const name of names) {
   mutated.splice(at, parts.length, replacedFirst, ...b.split("\n").slice(1).map((s) => indent + s.trim()));
   fs.writeFileSync(file, mutated.join("\n"));
   try {
-    const r = spawnSync("npx", ["vitest", "run", "src/brain/agent", "--reporter=json"], { encoding: "utf8", maxBuffer: 1 << 28, shell: true });
+    const r = spawnSync("npx", ["vitest", "run", ...TESTS, "--reporter=json"], { encoding: "utf8", maxBuffer: 1 << 28, shell: true });
     let failed = [];
     try {
       const j = JSON.parse(r.stdout.slice(r.stdout.indexOf("{")));
