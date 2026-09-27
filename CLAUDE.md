@@ -38,14 +38,16 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   сервер (рестарт, /healthz-watchdog, голосовой доклад о падениях) и КЛИЕНТ (`infra/client-keeper.mjs`: упал →
   перезапуск; «Выйти» из трея → маркер до следующего входа). Регистрация: `infra/register-autostart.ps1`.
 - Сервер руками: `apps/server` → `npx tsx src/index.ts` (порт **8787**; НЕ `tsx watch`). Логи: `apps/server/data/logs/
-  server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl` (task/round/mouth_to_ear/degradation), `server.out.log`.
+  server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl`, `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
-  под супервизором — `apps/client/client.{out,err}.log`.
-- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS → кадры → STT);
+  под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU.
+- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS→кадры→STT);
   dev-сессия, действия клиента — фейк. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
 - Тесты: `apps/server` `npx vitest run` (~3330), `apps/client` (~790), `packages/*`, `node --test infra/client-keeper.test.mjs`,
   стенд расширения `node --test "apps/extension/test/*.test.mjs"` (~230, настоящий Chromium; `CHROME_PATH`). Typecheck:
   `pnpm -r typecheck`. Линтера нет. Мутации петли: `scripts/mutate-loop.cjs`, длины функций: `scripts/fn-lengths.mjs`.
+- **Стенд (облако, `infra/bench/README.md`)**: `node infra/bench/bench.mjs up|status|tool|say|shot|log|down` — сервер,
+  Chromium+расширение на Xvfb, HTTPS-фикстуры на хостах §14; сценарии `node --test "infra/bench/scenarios/*.test.mjs"`.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
   Фолбэк PGlite. Docker не используется.
 - Модели (ASCII-путь!): `~/.jarvis/models` — слух (`fetch-hearing-models.mjs`), e5 в `hf/` (качается сам с `HF_ENDPOINT`).
@@ -105,7 +107,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - **Лестница восприятия**: `look` (UIA/OCR/окна) → `browser_read/inspect` → `screen_capture` последним.
 - **Проактив**: одна очередь озвучки на всех, retriable-реплики помечаются доставленными только по факту звука.
 - **Режим выделения**: `screen_selection{view}` — всегда свежий кадр рамки; под вуалью ввод гейтится `overlay_drawing`.
-- **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт по тиру (haiku medium / sonnet high / fable max);
+- **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт haiku/sonnet/fable → medium/high/max;
   thinking всегда adaptive; до `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` только персона (кеш CLI между задачами); `persistSession:false`.
 - **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`); «заткнись» / «тишина» /
   «вырубись» / голое «хватит» — разные действия (`tasks/control.ts`, CHANGELOG 24.09); подсказка навыка — raw ≥ 0.86.

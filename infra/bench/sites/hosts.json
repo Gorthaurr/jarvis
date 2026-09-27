@@ -1,0 +1,9 @@
+{
+  "web.max.ru": "messenger",
+  "online.sberbank.ru": "bank",
+  "lms.vuz-bench.ru": "moodle",
+  "shop.example.com": "shop",
+  "id.example.com": "login",
+  "news.example.com": "feed",
+  "video.example.com": "video"
+}

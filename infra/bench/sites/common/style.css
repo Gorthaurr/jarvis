@@ -1,0 +1,16 @@
+/* Стенд: общий вид фикстур — достаточно «живой», чтобы OCR/скриншот читались, без внешних шрифтов. */
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.45 "DejaVu Sans", Arial, sans-serif; background: #f3f4f6; color: #111827; }
+header { background: var(--brand, #1f2937); color: #fff; padding: 14px 24px; font-size: 20px; font-weight: 600; }
+main { max-width: 880px; margin: 24px auto; padding: 0 16px; }
+.card { background: #fff; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.card h2 { margin: 0 0 12px; font-size: 18px; }
+label { display: block; margin: 8px 0 4px; color: #374151; }
+input[type=text], input[type=number], input[type=password], input[type=email], textarea { width: 100%; padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 8px; font: inherit; }
+button, input[type=submit] { background: var(--brand, #2563eb); color: #fff; border: 0; border-radius: 8px; padding: 9px 18px; font: inherit; cursor: pointer; margin-top: 10px; }
+button.secondary { background: #e5e7eb; color: #111827; }
+.row { display: flex; gap: 10px; align-items: flex-end; }
+.row > * { flex: 1; }
+.row > button { flex: 0 0 auto; }
+.ok { color: #047857; font-weight: 600; }
+.muted { color: #6b7280; font-size: 14px; }
