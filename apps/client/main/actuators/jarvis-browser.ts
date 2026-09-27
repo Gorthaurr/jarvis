@@ -12,10 +12,6 @@
  * поля webK — ТОЛЬКО нативный CDP Input.insertText (+Enter); подтверждение — по реальному DOM.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { expandPath } from "./fs.js";
-import { assertReadable } from "./self-guard.js";
-import { promises as fsp } from "node:fs";
-import { basename } from "node:path";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -24,6 +20,7 @@ import { screen } from "electron";
 import { AsyncMutex, type Candidate, createLogger, nameSearchVariants, pickRecipient } from "@jarvis/shared";
 import { chromeCandidates, safeBrowserUrl } from "./browser-cdp.js";
 import { CdpConn } from "./cdp-conn.js";
+import { webAct } from "./jarvis-browser-act.js";
 import { NavGuard, blockedNavText } from "./jarvis-browser-nav-guard.js";
 import { PAGE } from "./jarvis-browser-page.js";
 
@@ -213,6 +210,7 @@ export class JarvisBrowser {
     await cdp.connect(wsUrl);
     this.cdp = cdp;
     this.mainFrameId = wsUrl.split("/").pop() ?? ""; // id главного фрейма вкладки = id её цели CDP
+    await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined); // окно за экраном — фокус как у видимого
     this.injected = false;
     await sleep(this.opts.settleMs ?? 2500); // дать странице подняться
   }
@@ -341,51 +339,14 @@ export class JarvisBrowser {
     });
   }
 
-  async act(intent: string, params: Record<string, unknown> = {}): Promise<string> {
+  /** web_act: те же page-функции, что у расширения (jarvis-browser-act.ts) — строгая цель, §0 и гард §14 на странице. */
+  async act(intent: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     return this.lock.run(async () => {
-    const cdp = await this.ensureBrowser();
-    await this.ensureInjected(cdp);
-    if (intent === "type") {
-      if (params.selector) await cdp.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(String(params.selector))}); if(e) e.focus();})()`);
-      await cdp.send("Input.insertText", { text: String(params.text ?? "") });
-      return "ok";
-    }
-    if (intent === "upload") {
-      // Файл с диска в <input type=file> через CDP (DOM.setFileInputFiles) — без DataTransfer и без лимита
-      // размера (причина №3 USER_SCENARIOS_2026-09-02: класса «загрузить файл» не было). Путь — от модели →
-      // секреты не отдаём (assertReadable), файл обязан существовать.
-      const path = String(params.path ?? "").trim();
-      if (!path) throw new Error("upload: нужен params.path (файл на диске)");
-      const abs = expandPath(path);
-      assertReadable(abs);
-      const st = await fsp.stat(abs).catch(() => null);
-      if (!st || !st.isFile()) throw new Error(`upload: файла «${abs}» нет или это не файл`);
-      const selector = String(params.selector ?? "input[type=file]");
-      const doc = (await cdp.send("DOM.getDocument", { depth: 1 })) as { root?: { nodeId?: number } };
-      const rootId = doc?.root?.nodeId;
-      if (!rootId) throw new Error("upload: не получил DOM-документ страницы");
-      const q = (await cdp.send("DOM.querySelector", { nodeId: rootId, selector })) as { nodeId?: number };
-      if (!q?.nodeId) throw new Error(`upload: элемент «${selector}» не найден на странице — сначала открой диалог/форму загрузки (web_inspect покажет input[type=file])`);
-      await cdp.send("DOM.setFileInputFiles", { nodeId: q.nodeId, files: [abs] });
-      return `ok:upload ${basename(abs)} (${Math.round(st.size / 1024)} КБ) в ${selector}`;
-    }
-    if (intent === "key") {
-      const key = String(params.key ?? "Enter");
-      const vk = key === "Enter" ? 13 : key === "Tab" ? 9 : key === "Escape" ? 27 : 0;
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
-      return "ok";
-    }
-    // click / scroll — через страничный eval (текст/селектор), JSON-литералы (анти-инъекция)
-    const I = JSON.stringify(intent); const P = JSON.stringify(params);
-    return cdp.evaluate<string>(`(() => {
-      const I = ${I}, P = ${P};
-      const byText = (t) => [...document.querySelectorAll('a,button,[role=button],[role=link],[role=tab],[role=menuitem],input[type=submit]')]
-        .find(e => ((e.innerText||e.value||e.getAttribute('aria-label')||'')).trim().toLowerCase().includes(String(t).toLowerCase()));
-      if (I === 'scroll') { window.scrollBy(0, Number(P.dy)||600); return 'ok'; }
-      if (I === 'click') { const el = P.selector ? document.querySelector(String(P.selector)) : (P.text ? byText(P.text) : null); if(!el) throw new Error('элемент не найден'); for(const t of ['pointerdown','mousedown','pointerup','mouseup','click']) el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window})); return 'ok'; }
-      throw new Error('неизвестный intent: '+I);
-    })()`);
+      const cdp = await this.ensureBrowser();
+      const mark = this.guard?.mark() ?? 0;
+      const out = await webAct(cdp, this.mainFrameId, intent, params);
+      const blocked = this.guard?.since(mark) ?? []; // B-14: действие увело во внутреннюю сеть — переход сорван, говорим
+      return blocked.length ? { ...out, blockedNav: blockedNavText(blocked) } : out;
     });
   }
 

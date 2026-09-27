@@ -26,6 +26,7 @@ describe.skipIf(!chrome)("B-14: невидимый браузер не уход�
     shop = await fixture({
       "/": `<h1>SHOP</h1><a id="l" href="${R}/secret">скидки</a>`,
       "/framed": `<h1>SHOP-FRAMED</h1><iframe src="${R}/frame"></iframe>`,
+      "/blank": `<h1>SHOP-BLANK</h1><a id="b" target="_blank" href="${R}/secret">в новой вкладке</a>`,
       "/redir": (_q, _b, res) => void res.writeHead(302, { location: `${R}/secret` }).end(),
     });
     ({ jb, dispose } = launchJarvisBrowser(chrome!));
@@ -56,6 +57,16 @@ describe.skipIf(!chrome)("B-14: невидимый браузер не уход�
     const read = await jb.read().then((p) => JSON.stringify(p), (e: Error) => `ERR ${e.message}`);
     expect(read).not.toContain("ROUTER-SECRET");
     expect(read).toMatch(/ERR .*внутренний адрес/u);
+    expect(router.hits).toHaveLength(0);
+  }, 30_000);
+
+  it("target=_blank на внутренний адрес (с жестом пользователя) → запросов нет: перехват уровня браузера видит новые вкладки", async () => {
+    await jb.open(shopUrl("/blank"));
+    // Синтетический клик web_act всплывающее окно не откроет (нет активации) — жмём С жестом пользователя через CDP
+    // той же вкладки: так новая вкладка РЕАЛЬНО открывается, и проверяется именно перехват, а не блокировщик окон.
+    const cdp = (jb as unknown as { cdp: { send(m: string, p: Record<string, unknown>): Promise<unknown> } }).cdp;
+    await cdp.send("Runtime.evaluate", { expression: "document.getElementById('b').click()", userGesture: true });
+    await new Promise((r) => setTimeout(r, 800));
     expect(router.hits).toHaveLength(0);
   }, 30_000);
 

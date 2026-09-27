@@ -11,9 +11,9 @@
  */
 import type { ActionCommand, ActionResult, ActionKind, ConfirmOutcomeKind } from "@jarvis/protocol";
 import type { VisionCap } from "@jarvis/shared";
-import { assessWebCommit, hostOfUrl, lastWebTarget, rememberUiHandles, rememberWebTarget } from "./commit-gate.js";
-import { markWebTargetStale, refreshWebTarget } from "./web-place.js";
-import { webActGateParams } from "./web-commit-guard.js";
+import { rememberUiHandles, rememberWebTarget } from "./commit-gate.js";
+import { markWebTargetStale } from "./web-place.js";
+import { webAct } from "./handlers/web-act.js";
 import { mailSend } from "./handlers/mail.js";
 import { actionTimeoutMs } from "@jarvis/protocol";
 import { metrics } from "../../obs/metrics.js";
@@ -695,18 +695,7 @@ async function dispatchToolCore(
   const gate = await guiGate(name, input, ctx);
   if (gate.denied) return gate.denied;
   if (name === "web_open" && typeof input.url === "string") rememberWebTarget(ctx.session as unknown as object, input.url);
-  if (name === "web_act") {
-    const params = webActGateParams(input); // судим то, что исполнит jarvis-browser.act (key — params.key ?? Enter)
-    // Прошлый web_act мог увести страницу (act адреса не отдаёт) — перед кликом/клавишей дочитываем текущий адрес.
-    if (/^(?:click|key|submit|enter|type)$/u.test(String(input.intent ?? ""))) await refreshWebTarget(ctx);
-    const lastUrl = lastWebTarget(ctx.session as unknown as object);
-    const risk = assessWebCommit({ host: hostOfUrl(lastUrl), url: lastUrl, intent: String(input.intent ?? ""), params });
-    if (risk) {
-      if (!ctx.confirm) return err(`web_act: ${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
-      const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
-      if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} на ${risk.where}`), gate.outcome);
-    }
-  }
+  if (name === "web_act") return webAct(ctx, input); // W4 B-2/п.6: allowlist полей, §14 до действия, гард страницы, один повтор
 
   // C5 SSRF: web_* (невидимый ЗАЛОГИНЕННЫЙ браузер Джарвиса) тоже навигируют по URL — прогоняем через тот
   // же гард, что browser_* (раньше web_* падали в generic-путь БЕЗ проверки → file:///…/id_rsa, loopback,

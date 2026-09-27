@@ -50,17 +50,6 @@ export function approvalFields(label: string, ref?: unknown): Record<string, unk
 }
 
 /**
- * web_act (невидимый браузер, srv-bypass-2): гейт судит ровно то, что исполнит jarvis-browser.act. Клиент берёт поля
- * только из `params` — у key это `params.key`, по умолчанию Enter (плоское `{key:"Tab"}` и `params.combo` он не читает).
- * Прочие интенты — params или плоская форма (лишний вопрос дешевле пропуска).
- */
-export function webActGateParams(input: Record<string, unknown>): Record<string, unknown> {
-  const own = input.params && typeof input.params === "object" && !Array.isArray(input.params) ? (input.params as Record<string, unknown>) : undefined;
-  if (String(input.intent ?? "").trim() !== "key") return own ?? input;
-  return { key: String(own?.key ?? "Enter") };
-}
-
-/**
  * Подпись из отказа расширения commit_confirm (элемент похож на коммит, клика не было): новое расширение кладёт её в
  * `label` ошибки (мост, контракт W1 §7), старое — в текст «commit_confirm: <подпись>». Не commit_confirm → null.
  */
