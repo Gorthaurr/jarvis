@@ -14,7 +14,10 @@ import { elementLabel, isSecretElement, keyEffect } from "./secret-signs.js";
 
 function memoryOf(handle: unknown, now: number): ClickMemory | null {
   const e = mirrorEntry(handle);
-  return e ? { secret: isSecretElement(e), label: elementLabel(e) || e.role, ...(e.pid !== undefined ? { pid: e.pid } : {}), at: now } : null;
+  if (!e) return null;
+  const secret = isSecretElement(e);
+  const label = elementLabel(e) || (secret ? "поле •••" : e.role);
+  return { secret, label, ...(e.pid !== undefined ? { pid: e.pid } : {}), at: now };
 }
 
 function clipboardText(): string {
