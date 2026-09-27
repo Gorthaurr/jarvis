@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Вход и каталог</title>
+</head>
+<body>
+<header>
+  <a id="nav-login" href="#login">Войти через VK</a>
+  <a id="nav-offers" href="#offers">Предложения</a>
+</header>
+<main>
+  <form id="login">
+    <label for="email">Электронная почта (email)</label> <input id="email" type="email">
+    <input type="password" id="pw-noname" autocomplete="off">
+    <input type="checkbox" id="remember"> <label for="remember">Запомнить меня</label>
+    <button id="btn-login" type="submit">Войти</button>
+  </form>
+  <div id="catalog"></div>
+</main>
+<script>
+  // 25 одинаковых кнопок «В корзину» — find отдаёт не больше 20 и помечает усечение.
+  const cat = document.getElementById("catalog");
+  for (let i = 1; i <= 25; i++) {
+    const b = document.createElement("button");
+    b.textContent = "В корзину";
+    b.setAttribute("aria-label", "В корзину: товар " + i);
+    cat.appendChild(b);
+  }
+  document.getElementById("login").addEventListener("submit", (e) => e.preventDefault());
+</script>
+</body>
+</html>

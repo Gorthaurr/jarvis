@@ -2,7 +2,7 @@
 
 > **Карта, а не летопись** (§8.3 ревью 09.09): ЧТО/ГДЕ/КАК и законы, файл ≤ 20 КБ. История и «почему» —
 > [`docs/CHANGELOG.md`](docs/CHANGELOG.md) (grep по имени механизма); механика и тестирование —
-> [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md); план и вердикт — [`docs/REVIEW_2026-09-24.md`](docs/REVIEW_2026-09-24.md).
+> [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md); план и вердикт — [`docs/REVIEW_2026-09-26.md`](docs/REVIEW_2026-09-26.md).
 > Меняешь архитектуру — одна-две строки сюда, абзац — в конец CHANGELOG.
 
 ## Что это
@@ -38,14 +38,16 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   сервер (рестарт, /healthz-watchdog, голосовой доклад о падениях) и КЛИЕНТ (`infra/client-keeper.mjs`: упал →
   перезапуск; «Выйти» из трея → маркер до следующего входа). Регистрация: `infra/register-autostart.ps1`.
 - Сервер руками: `apps/server` → `npx tsx src/index.ts` (порт **8787**; НЕ `tsx watch`). Логи: `apps/server/data/logs/
-  server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl` (task/round/mouth_to_ear/degradation), `server.out.log`.
+  server-YYYY-MM-DD.log` (JSONL), `metrics.jsonl`, `server.out.log`.
 - Клиент руками: `apps/client` → `node scripts/build.mjs` → `pnpm start`. Лог: `%APPDATA%/@jarvis/client/logs/`,
-  под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU — артефакт среды.
-- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS → кадры → STT);
+  под супервизором — `apps/client/client.{out,err}.log`. Electron из песочницы агента падает на GPU.
+- Драйверы: `node _jarvis_cmd.mjs "реплика"` (текст), `node _jarvis_voice.mjs "фраза"` (голос: TTS→кадры→STT);
   dev-сессия, действия клиента — фейк. Dev-HTTP (`/dev/*`, `/ext/*`) — только при `JARVIS_DEV_HTTP=1`.
-- Тесты: `apps/server` `npx vitest run` (~3050), `apps/client` `npx vitest run` (~790), `packages/*`, `node --test
-  infra/client-keeper.test.mjs`, `node --test "apps/extension/test/*.test.mjs"`. Typecheck: `pnpm -r typecheck`. Линтера нет. Мутационная таблица петли:
-  `node apps/server/scripts/mutate-loop.cjs`. Длины функций: `node apps/server/scripts/fn-lengths.mjs`.
+- Тесты: `apps/server` `npx vitest run` (~3330), `apps/client` (~790), `packages/*`, `node --test infra/client-keeper.test.mjs`,
+  стенд расширения `node --test "apps/extension/test/*.test.mjs"` (~230, настоящий Chromium; `CHROME_PATH`). Typecheck:
+  `pnpm -r typecheck`. Линтера нет. Мутации петли: `scripts/mutate-loop.cjs`, длины функций: `scripts/fn-lengths.mjs`.
+- **Стенд (облако, `infra/bench/README.md`)**: `node infra/bench/bench.mjs up|status|tool|say|shot|log|down` — сервер,
+  Chromium+расширение на Xvfb, HTTPS-фикстуры на хостах §14; сценарии `node --test "infra/bench/scenarios/*.test.mjs"`.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
   Фолбэк PGlite. Docker не используется.
 - Модели (ASCII-путь!): `~/.jarvis/models` — слух (`fetch-hearing-models.mjs`), e5 в `hf/` (качается сам с `HF_ENDPOINT`).
@@ -65,16 +67,14 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   `ws-routes.ts` (`/ws` клиент, `/ext` расширение с пиннингом `JARVIS_EXT_ID`), `dev-session.ts`.
 - `brain/agent/` — ядро. `index.ts`: `handleUserText` = голова + `turn-intercepts.ts` (имя, «не тебе», режим, эмоция,
   steer/дубль активной задачи, рефлексы памяти/обязательств, уточнение, эхо-гейт, «доделай») → tier0 → кэш ответов →
-  sync-first/фон. `loop/` — петля по фазам: `state.ts` (LoopState), `context.ts` (LoopCtx), `step.ts` (раунд),
-  `model-call`, `text-turn` + `nudge-policy` (анти-капитуляция, verify-нудж, goal-check), `tool-round` +
-  `tool-classify`, `post-round` (эскалация §7, anti-runaway), `outcome.ts` (чистый исход), `terminal.ts` (таблица
-  терминалов), `finalize.ts`. Рядом: `checkpoint*.ts` (журнал прерванной задачи), `mask-observations.ts`,
-  `prune-images.ts`, `replay-gate.ts`, `thinking-policy.ts`, `error-voice.ts` (эффекты инструментов:
-  mutate/verify/neutral, BLIND_MUTATE, OUTBOUND_SEND_TOOLS).
+  sync-first/фон. `loop/` — фазы: state, context, step, model-call, text-turn + nudge-policy (анти-капитуляция,
+  verify-нудж, goal-check), tool-round + tool-classify, post-round (§7, anti-runaway, `family-count`), outcome,
+  terminal, finalize. Рядом: `checkpoint*.ts` (журнал прерванной задачи), `mask-observations.ts`, `prune-images.ts`,
+  `error-voice.ts` (эффекты: mutate/verify/neutral, BLIND_MUTATE, OUTBOUND_SEND_TOOLS).
 - `brain/router/` — tier0 ($0: медиа, громкость, запуск, консьерж), вопрос vs действие, тир (рассуждение/биржа → fable).
 - `brain/tools/` — `dispatch.ts` (тонкий маршрутизатор) + `handlers/*` (browser, messaging, info, skills, code, act,
   self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`.
-- `brain/persona/persona.md` — системный промпт (v88, бампать version при правке), `modes.ts`, `emotion.ts`.
+- `brain/persona/persona.md` — системный промпт (v89, бампать version при правке), `modes.ts`, `emotion.ts`.
 - `brain/tasks/` — реестр задач §20 (durable `data/tasks.json`), scope (правка vs новая), control, narrate.
 - `brain/` ещё: `app-channels.ts` (каналы программ + частота W4.2), `capabilities.ts` (паспорт возможностей),
   `profile.ts`, `consent.ts`, `response-cache.ts`, `knowledge/`, `trading/`, `mcp/`.
@@ -107,20 +107,22 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - **Лестница восприятия**: `look` (UIA/OCR/окна) → `browser_read/inspect` → `screen_capture` последним.
 - **Проактив**: одна очередь озвучки на всех, retriable-реплики помечаются доставленными только по факту звука.
 - **Режим выделения**: `screen_selection{view}` — всегда свежий кадр рамки; под вуалью ввод гейтится `overlay_drawing`.
-- **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт по тиру (haiku medium / sonnet high / fable max);
+- **Подписка (W2)**: MCP-хендлер SDK ждёт результат НАШЕЙ петли; эффорт haiku/sonnet/fable → medium/high/max;
   thinking всегда adaptive; до `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` только персона (кеш CLI между задачами); `persistSession:false`.
-- **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`); реакции — разговор
-  (`router/reaction.ts`); «заткнись» / «тишина» / «вырубись» / голое «хватит» — разные действия (`tasks/control.ts`,
-  таблица — CHANGELOG 24.09); goal-check — при мутации или заявке «открыл…»; подсказка навыка — при raw ≥ 0.86.
+- **Ход голосом (24.09)**: промоушен в фон по первому tool_use (`agent/sync-promote.ts`); «заткнись» / «тишина» /
+  «вырубись» / голое «хватит» — разные действия (`tasks/control.ts`, CHANGELOG 24.09); подсказка навыка — raw ≥ 0.86.
 - **Dev-сессия изолирована** (`AgentDeps.devSession`): своя память; задачи `dev` не в истории/на диске и отделены от
   задач владельца (`activeForUser/cancelUser(…, dev)`); без самообучения/memory_write/skill_save/рефлексов.
 - **Гейты §0/§14**: act{type|set}, слоты skill_execute — под гардом паролей/карт; Enter и печать с `\n` в мессенджере/
   банке/1С — вопрос владельцу (почта — нет); act-коммит без `commitApproved` (ставит только сервер после «да»)
-  клиент сверяет с РЕАЛЬНО сфокусированным процессом; мост и реплей — тот же рубеж (`commit-guard.ts`). Веб: место —
-  по живой вкладке (`web-place.ts`), LMS — по пути; клик по селектору/ref судит страница (`web-commit-guard.ts`).
+  клиент сверяет с РЕАЛЬНО сфокусированным процессом; мост и реплей — тот же рубеж (`commit-guard.ts`).
+- **Браузерные руки (W1, 26.09)**: один ref-режим; `browser_inspect{query}` = find; `browser_act` + set/key/hover/scroll_to;
+  горячий `browser_batch` (стоп на uncertain/navigated/submitted); `browser_read{view:image}` — снимок/зум вкладки.
+  §14: место — по живой вкладке (`web-place.ts`), LMS — по пути; гард страницы на ЛЮБОМ сайте (Enter/Space на
+  кнопко-подобных, set, все submit формы); одобрение — `approvedRef` или видимая подпись (один вопрос); клавиши —
+  `shared/key-combo.ts` = `parseCombo` расширения (стык: `extension/test/fixtures/key-combos.json`); цель вкладки — по задаче.
 - **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается
-  (`gate-closer.ts`); mute посреди фразы → VAD `speech_cancel` (обрубок не исполняется); PTT — Ctrl+Alt+J (окно
-  адресации), кнопка микрофона — только открывает гейт; микрофон повторяется 1→30 с; renderer-guard.
+  (`gate-closer.ts`); mute посреди фразы → `speech_cancel`; PTT — Ctrl+Alt+J; микрофон повторяется 1→30 с.
 
 ## Решения владельца (не переигрывать)
 - Работаем **по подписке**, API не оплачиваем (2026-09-09). Резерв/основной — Claude-only, мульти-провайдер не берём.
@@ -148,5 +150,5 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
 - Строка прозы навыка, начинающаяся с имени шага (`verify`/`wait`/`launch`), становится шагом слепого реплея.
 
 ## Где искать
-- `docs/ARCHITECTURE.md` (история, механика — ссылки в шапке). План и вердикты: `docs/REVIEW_2026-09-24.md`, `docs/REVIEW_2026-09-09.md`, `docs/NEXT_SESSION.md`.
-- `docs/SECURITY.md`, `docs/USER_SCENARIOS_2026-09-02.md`, `docs/GUI_MANUALS_RESEARCH_2026-09-05.md`, `docs/PRODUCT_FRAMEWORK_PLAN_2026-09-02.md`.
+- План и вердикты: `docs/REVIEW_2026-09-26.md`, `docs/W2_PLAN_2026-09-26.md`, `docs/NEXT_SESSION.md`. Ещё в `docs/`:
+  ARCHITECTURE, SECURITY, USER_SCENARIOS_2026-09-02, GUI_MANUALS_RESEARCH_2026-09-05, PRODUCT_FRAMEWORK_PLAN_2026-09-02.

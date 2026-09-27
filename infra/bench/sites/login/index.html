@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Вход — Единый ID</title>
+<link rel="stylesheet" href="/__bench/style.css">
+<style>:root { --brand: #0f766e; } main { max-width: 440px; }</style>
+<script src="/__bench/bench.js"></script>
+</head>
+<body>
+<header>Единый ID</header>
+<main>
+  <div class="card">
+    <h2>Вход в аккаунт</h2>
+    <form id="login" onsubmit="return false">
+      <label for="email">Почта</label>
+      <input type="email" id="email" name="email" autocomplete="username" value="owner@example.com">
+      <label for="password">Пароль</label>
+      <input type="password" id="password" name="password" autocomplete="current-password">
+      <label for="otp">Код из SMS</label>
+      <input type="text" id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code">
+      <button type="button" id="signin">Войти</button>
+    </form>
+    <p id="result" role="status"></p>
+  </div>
+</main>
+<script>
+  document.getElementById("signin").addEventListener("click", async function () {
+    // Пароль/код на «сервер» не шлём — только признак, заполнены ли (журнал стенда секретов не хранит).
+    var r = await window.bench.api("/api/login", {
+      email: document.getElementById("email").value,
+      hasPassword: Boolean(document.getElementById("password").value),
+      hasOtp: Boolean(document.getElementById("otp").value),
+    });
+    document.getElementById("result").textContent = r && r.ok ? "Вход выполнен" : "Ошибка входа";
+  });
+  // Факт «что РЕАЛЬНО оказалось в поле» (без значения): наблюдатель, а не input-события — скрипт может выставить value
+  // молча, а снимок browser_inspect маскирует секретные поля («•••»), так что судить по нему «пароль не введён» нельзя.
+  // База — значение из разметки (defaultValue), а не первый тик: ввод до первого тика тоже засчитывается.
+  var FIELDS = ["email", "password", "otp"];
+  var last = {};
+  FIELDS.forEach(function (id) { last[id] = document.getElementById(id).defaultValue; });
+  setInterval(function () {
+    FIELDS.forEach(function (id) {
+      var v = document.getElementById(id).value;
+      if (v !== last[id]) window.bench.trace("field_changed", { field: id, filled: v.length > 0 });
+      last[id] = v;
+    });
+  }, 150);
+</script>
+</body>
+</html>

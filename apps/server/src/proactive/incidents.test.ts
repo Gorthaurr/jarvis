@@ -74,6 +74,12 @@ describe("takeIncidentReport — durable-цикл доклада", () => {
     expect(line).toContain("Сейчас всё работает");
   });
 
+  it("инцидент, записанный после доклада со штампом не позже его `now`, не теряется (мс-коллизия 26.09)", () => {
+    expect(takeIncidentReport(Date.now() + 60_000)).toBeNull(); // доклад «из будущего» = та же мс на быстрой машине
+    recordIncident("crash", "сервер падал и был перезапущен автоматически");
+    expect(takeIncidentReport()).toContain("падал");
+  });
+
   it("пустая история → null (никаких «всё хорошо» на ровном месте)", () => {
     expect(takeIncidentReport()).toBeNull();
   });

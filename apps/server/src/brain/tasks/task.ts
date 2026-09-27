@@ -10,6 +10,7 @@
  * собирались независимо вокруг одного контракта.
  */
 import type { TaskState } from "@jarvis/protocol";
+import { browserStepLabel } from "./browser-step-label.js";
 
 export type { TaskState };
 
@@ -386,14 +387,14 @@ export function stepLabelFor(toolName: string, input: Record<string, unknown>): 
     case "screen_read_text":
       return "Читаю текст с экрана";
     case "browser_read":
-      return "Читаю страницу";
     case "browser_inspect":
     case "browser_tabs":
-      return "Изучаю страницу";
-    case "browser_act":
+    case "browser_close":
     case "browser_batch":
-      // play/pause/next/prev — конкретно (через actionTitle); click/type/scroll/батч — общая метка.
-      return actionTitle(toolName, input) ?? "Действую на странице";
+      return browserStepLabel(toolName, input) ?? "Действую на странице";
+    case "browser_act":
+      // play/pause/next/prev — конкретно (через actionTitle); прочие интенты (W1: set/key/hover/scroll_to…) — по интенту.
+      return actionTitle(toolName, input) ?? browserStepLabel(toolName, input) ?? "Действую на странице";
     case "ui_ground":
     case "ui_snapshot":
       return "Ищу элемент на экране";

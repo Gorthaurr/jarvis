@@ -5,7 +5,7 @@ import type { LoopState } from "./state.js";
 import type { AgentDeps, LoopOpts } from "../types.js";
 import type { LlmMessage } from "../../../integrations/llm.js";
 import { type CheckpointReason, type TaskCheckpoint, buildResumeDigest, mergeDigests } from "../checkpoint.js";
-import { toolEffect } from "../error-voice.js";
+import { toolCallEffect } from "../error-voice.js";
 
 export interface NoteCore { deps: AgentDeps; opts: LoopOpts | undefined; st: LoopState; task: LoopCtx["task"]; taskId: string; text: string; convo: LlmMessage[]; priorDigest: string | undefined }
 
@@ -17,7 +17,8 @@ export function makeNoteHelpers(core: NoteCore) {
    * (иначе «мутирующий get_*» сворачивался бы как перечитываемый, а нейтральный `think` попадал в
    * «СДЕЛАНО»).
    */
-  const effectOf = (name: string): "verify" | "mutate" | "neutral" => deps.mcp?.declaredEffect?.(name) ?? toolEffect(name);
+  // W1: и по ВХОДУ вызова (toolCallEffect) — та же функция, что у петли (tool-classify): hover не «сделано», закрытие вкладки — да.
+  const effectOf = (name: string, input?: unknown): "verify" | "mutate" | "neutral" => deps.mcp?.declaredEffect?.(name) ?? toolCallEffect(name, input);
   /** Впрыснуть служебную врезку в user-роль и запомнить, что она НАША (не речь владельца). */
   const pushSystemNote = (note: string): void => {
     st.progress.systemNotes.add(note);

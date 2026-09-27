@@ -35,7 +35,7 @@ export interface LoopCtx extends LoopBase {
   ensureInput: () => Promise<boolean>;
   showStatus: () => void;
   notePartial: (source: string, k: number) => void;
-  effectOf: (name: string) => "verify" | "mutate" | "neutral";
+  effectOf: (name: string, input?: unknown) => "verify" | "mutate" | "neutral";
   pushSystemNote: (note: string) => void;
   saveCheckpoint: (reason: CheckpointReason, opts2?: { deliverable?: boolean }) => boolean;
   escalateForQuality: (reason: string) => void;

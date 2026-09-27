@@ -28,10 +28,42 @@ export function urlPathQuery(u) {
   }
 }
 
-/** Ошибка «целевой вкладки нет» — НЕ бьём в чужую активную (был баг: play/read уходили в Telegram). */
+/**
+ * Ошибка «целевой вкладки нет» — НЕ бьём в чужую активную (был баг: play/read уходили в Telegram). Код tab_gone: сервер
+ * отличает «вкладки нет» от «элемента нет в DOM» (иначе предлагал бы координатный клик — в чужое окно).
+ */
 export function noTabError(url) {
   const host = hostOf(url);
-  return new Error(host ? "вкладка " + host + " не открыта" : "нет подходящей вкладки");
+  return codedError("tab_gone", host ? "вкладка " + host + " не открыта — открой её (browser_open)" : "нет подходящей вкладки — открой страницу (browser_open)");
+}
+
+/**
+ * Ошибка с машинным кодом (контракт W1: secret_field, tab_closed, ref_stale, not_found, commit_confirm…). Код — ПЕРВЫМ
+ * словом текста (сервер до W1 разбирает текст: commit_confirm, ref_stale) и полем `code` в WS-кадре ошибки.
+ */
+export function codedError(code, message) {
+  const msg = String(message || "");
+  const e = new Error(code && !msg.startsWith(code) ? code + ": " + msg : msg);
+  if (code) e.code = code;
+  return e;
+}
+
+/** ref элемента из снимка: «e<gen>_<n>» (top-фрейм) или «f<frameId>e<gen>_<n>» (iframe) → {frame, localRef}; иначе null. */
+export function parseRef(raw) {
+  const m = /^(?:f(\d+))?(e\d+_\d+)$/.exec(String(raw == null ? "" : raw).trim());
+  return m ? { frame: m[1] !== undefined ? Number(m[1]) : undefined, localRef: m[2] } : null;
+}
+
+/**
+ * Провал page-функции ({ok:false, code?, error, label?}) → ошибка tab.act. С кодом — код первым словом («commit_confirm:
+ * <подпись>» — после двоеточия ТОЛЬКО подпись: сервер берёт её до конца строки); без кода — «tab.act <интент>: …».
+ */
+export function pageFailure(intent, r) {
+  const code = (r && r.code) || "";
+  const msg = String((r && r.error) || "не вышло");
+  const e = code ? codedError(code, msg) : new Error("tab.act " + intent + ": " + msg);
+  if (r && r.label) e.label = String(r.label);
+  return e;
 }
 
 /**

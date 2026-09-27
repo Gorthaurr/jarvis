@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Лента новостей</title>
+<link rel="stylesheet" href="/__bench/style.css">
+<style>:root { --brand: #1d4ed8; } .item { padding: 10px 0; border-bottom: 1px solid #e5e7eb; }</style>
+<script src="/__bench/bench.js"></script>
+</head>
+<body>
+<header>Лента новостей</header>
+<main>
+  <div class="card">
+    <h2>Свежее</h2>
+    <p class="muted">Следующая новость через <span id="countdown">2</span> с</p>
+    <div id="items" role="feed" aria-label="Новости"></div>
+    <button type="button" id="more" class="secondary">Показать ещё</button>
+  </div>
+</main>
+<script>
+  var n = 0;
+  var items = document.getElementById("items");
+  function add(prefix) {
+    n += 1;
+    var d = document.createElement("article");
+    d.className = "item";
+    d.textContent = prefix + " №" + n + ": событие дня в " + new Date().toLocaleTimeString("ru-RU");
+    items.prepend(d);
+  }
+  for (var i = 0; i < 3; i++) add("Новость");
+  var left = 2;
+  setInterval(function () {
+    left -= 1;
+    if (left <= 0) { add("Новость"); left = 2; }
+    document.getElementById("countdown").textContent = String(left);
+  }, 1000);
+  document.getElementById("more").addEventListener("click", function () {
+    for (var i = 0; i < 5; i++) add("Архив");
+    window.bench.api("/api/more", { shown: n });
+  });
+</script>
+</body>
+</html>

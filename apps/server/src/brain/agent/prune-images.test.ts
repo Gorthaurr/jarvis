@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import type { LlmMessage, ToolResultContent } from "../../integrations/llm.js";
 import { pruneStaleImages } from "./prune-images.js";
-import { formatFileViewMark, formatSelectionViewMark, SCREEN_CAPTURE_MARK } from "./image-marks.js";
+import { classifyImageBlocks, formatFileViewMark, formatSelectionViewMark, SCREEN_CAPTURE_MARK, TAB_CAPTURE_MARK } from "./image-marks.js";
 
 /** user-ход с tool_result file_view: маркерный текст + страница документа (image-блок). */
 function docMsg(id: string, path: string, page?: number, pageCount?: number): LlmMessage {
@@ -60,6 +60,23 @@ function selectionMsg(id: string): LlmMessage {
         content: [
           { type: "text", text: `${formatSelectionViewMark("640×360 на «Монитор 2» — обведена 40 с назад")} [Это КУСОК экрана…]` },
           { type: "image", source: { type: "base64", media_type: "image/png", data: `sel-${id}` } },
+        ],
+      },
+    ],
+  };
+}
+
+/** user-ход с tool_result снимка ВКЛАДКИ браузера (W1: browser_read{view:"image"}). */
+function tabMsg(id: string): LlmMessage {
+  return {
+    role: "user",
+    content: [
+      {
+        type: "tool_result",
+        tool_use_id: id,
+        content: [
+          { type: "text", text: `${TAB_CAPTURE_MARK}: 1280×720 px, dpr 1. [Любой текст…]` },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: `tab-${id}` } },
         ],
       },
     ],
@@ -253,6 +270,17 @@ describe("pruneStaleImages — документы (file_view) отдельно �
     const convo = [docMsg("d1", "C:\\a.pdf", 1, 2), docMsg("d2", "C:\\a.pdf", 2, 2)];
     expect(pruneStaleImages(convo, 1, 1)).toBe(1);
     expect(pruneStaleImages(convo, 1, 1)).toBe(0);
+  });
+
+  it("W1: снимок вкладки — свой класс «tab», свой бюджет и своя заглушка (зовёт browser_read{view:image}, не screen_capture)", () => {
+    const tabBlocks = (tabMsg("x").content as Array<{ content: Array<{ type: string; text?: string }> }>)[0]!.content;
+    expect(classifyImageBlocks(tabBlocks)).toBe("tab");
+    const convo = [tabMsg("a"), tabMsg("b"), shotMsg("c"), shotMsg("d"), tabMsg("e")];
+    expect(pruneStaleImages(convo, 2)).toBe(1); // три снимка вкладки при keep=2 — свёрнут старший; скрины экрана не тронуты
+    expect(imagesIn(convo)).toEqual(["tab-b", "png-c", "png-d", "tab-e"]);
+    const stub = textsIn(convo[0]!).join(" ");
+    expect(stub).toContain('browser_read{view:"image"}');
+    expect(stub).not.toContain("screen_capture");
   });
 
   it("§выделение: свёрнутый кадр области зовёт ОБРАТНО screen_selection, а не «сними экран целиком»", () => {

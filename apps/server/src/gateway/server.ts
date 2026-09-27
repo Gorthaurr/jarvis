@@ -88,6 +88,7 @@ import { startHeartbeat } from "./heartbeat.js";
 import { SessionRegistry } from "./registry.js";
 import { PreHandshakeBuffer } from "./pre-handshake-buffer.js";
 import { isDevSession } from "./dev-session.js";
+import { registerBenchRoutes } from "./bench/bench-routes.js";
 import {
   type BrainProviders,
   type SessionContext,
@@ -505,6 +506,9 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end" | "speech_cancel");
     return { ok: true, sessionId: ctx.session.sessionId, injected: state };
   });
+
+  // Стенд (infra/bench): /dev/bench/{tool,say,state,reset} — bench-сессия, §14-ответы по политике вызова, сценарный мозг.
+  registerBenchRoutes(app, { preHandler: devPre, registry, providers, brain, log: log.child("bench") });
   } // end if (devHttpOn) — §sec gate for DEV/EXT HTTP routes
 
   // ПРОДУКТОВЫЙ КАРКАС (2026-09-02): HTTP-роуты /v1/* (аккаунты, подписки, usage, вебхуки, админ/отчёты) и

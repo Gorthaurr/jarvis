@@ -8,7 +8,7 @@
  * Путей ввода семь: input_type, browser_act{type}, browser_batch, web_act{type}, ui_invoke{setValue},
  * system_clipboard{write} и те же действия внутри input_batch — каждый со своим кейсом.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ActionCommand } from "@jarvis/protocol";
 import { rememberUiHandles } from "./commit-gate.js";
 import { type ToolContext, dispatchTool } from "./dispatch.js";
@@ -40,6 +40,8 @@ function spyCtx(): Spy {
         elements: [
           { idx: 0, ref: "e3_0", role: "input", name: "Логин", selector: "#login" },
           { idx: 1, ref: "e3_1", role: "input", name: "Пароль", selector: "#pass" },
+          // W1 (контракт §2): страница сама помечает секрет; подпись немая — узнаём только по secret:true.
+          { idx: 2, ref: "e3_2", tag: "input", type: "text", role: "textbox", name: "Поле 3", secret: true, value: "•••" },
         ],
       }),
       tabAct: async () => {
@@ -60,18 +62,28 @@ function spyCtx(): Spy {
 }
 
 const TAB = { url: "https://site.test/login" };
-let refFlag: string | undefined;
-
-beforeAll(() => {
-  refFlag = process.env.JARVIS_BROWSER_REF;
-  process.env.JARVIS_BROWSER_REF = "1"; // browser_batch живёт только в ref-режиме
-});
-afterAll(() => {
-  if (refFlag === undefined) delete process.env.JARVIS_BROWSER_REF;
-  else process.env.JARVIS_BROWSER_REF = refFlag;
-});
 
 describe("пароли и коды подтверждения: ввод не доходит до компьютера", () => {
+  // Адверс-ревью W1 р2 (srv-bypass-3): аргументы SDK — z.record(unknown), модель может прислать ЧИСЛО; расширение
+  // печатает String(P.text), так что судить надо строковую форму. Форма входа — ровно JSON модели (number, не строка).
+  it("browser_act type с номером карты ЧИСЛОМ → ошибка, расширению не ушло", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("browser_act", { ...TAB, intent: "type", selector: "#card", text: 4111111111111111 }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.ext).toHaveLength(0);
+    expect(String(r.content)).toMatch(/платёжные реквизиты/i);
+  });
+
+  it("browser_act type кода ЧИСЛОМ в поле «Код из СМС» → ошибка; set value числом в поле пароля по ref — тоже", async () => {
+    const s = spyCtx();
+    await dispatchTool("browser_inspect", TAB, s.ctx);
+    const r1 = await dispatchTool("browser_act", { ...TAB, intent: "type", label: "Код из СМС", text: 123456 }, s.ctx);
+    const r2 = await dispatchTool("browser_act", { ...TAB, intent: "set", ref: "e3_1", value: 20242024 }, s.ctx);
+    const r3 = await dispatchTool("browser_batch", { ...TAB, steps: [{ ref: "e3_0", intent: "type", params: { text: "anton" } }, { ref: "e3_2", intent: "type", params: { text: 987654 } }] }, s.ctx);
+    expect([r1.isError, r2.isError, r3.isError]).toEqual([true, true, true]);
+    expect(s.ext).toHaveLength(0);
+  });
+
   it("input_type с номером карты → ошибка, ActionCommand НЕ отправлен", async () => {
     const s = spyCtx();
     const r = await dispatchTool("input_type", { text: "4111 1111 1111 1111" }, s.ctx);
@@ -184,6 +196,26 @@ describe("пароли и коды подтверждения: ввод не д�
     expect(s.ext).not.toContain("batch"); // ни один шаг не исполнен — логин заполняет владелец
   });
 
+  it("W1: browser_act set/type по ref поля, которое СТРАНИЦА пометила secret (подпись немая) → ошибка, расширение не вызвано", async () => {
+    const s = spyCtx();
+    await dispatchTool("browser_inspect", TAB, s.ctx);
+    const r1 = await dispatchTool("browser_act", { ...TAB, intent: "set", ref: "e3_2", value: "481502" }, s.ctx);
+    const r2 = await dispatchTool("browser_act", { ...TAB, intent: "type", params: { ref: "e3_2", text: "hunter2" } }, s.ctx);
+    for (const r of [r1, r2]) {
+      expect(r.isError).toBe(true);
+      expect(String(r.content)).toMatch(/не ввожу, введите сами/iu);
+    }
+    expect(s.ext).toHaveLength(0);
+  });
+
+  it("W1: browser_batch — шаг set в секретное поле (ref на шаге, value в params) → берст не отправлен", async () => {
+    const s = spyCtx();
+    await dispatchTool("browser_inspect", TAB, s.ctx);
+    const r = await dispatchTool("browser_batch", { ...TAB, steps: [{ ref: "e3_0", intent: "set", params: { value: "anton" } }, { ref: "e3_2", intent: "set", params: { value: "s3cret" } }] }, s.ctx);
+    expect(r.isError).toBe(true);
+    expect(s.ext).not.toContain("batch");
+  });
+
   it("input_batch: шаг input.type с номером карты → берст не отправлен", async () => {
     const s = spyCtx();
     const r = await dispatchTool(
@@ -217,6 +249,23 @@ describe("🔴 легитимная работа по тем же путям н�
     const r = await dispatchTool("browser_act", { ...TAB, intent: "type", params: { selector: "#search", text: "погода" } }, s.ctx);
     expect(r.isError).toBe(false);
     expect(s.ext).toContain("act");
+  });
+
+  it("W1: browser_act set обычного поля и галочки исполняется (form_input не сломан гардом)", async () => {
+    const s = spyCtx();
+    await dispatchTool("browser_inspect", TAB, s.ctx);
+    const r1 = await dispatchTool("browser_act", { ...TAB, intent: "set", ref: "e3_0", value: "anton" }, s.ctx);
+    const r2 = await dispatchTool("browser_act", { ...TAB, intent: "set", ref: "e3_0", checked: true }, s.ctx);
+    expect(r1.isError).toBe(false);
+    expect(r2.isError).toBe(false);
+    expect(s.ext).toEqual(["act", "act"]);
+  });
+
+  it("р2: число в обычное поле (год) печатается — строковая форма числа не ломает легитимный ввод", async () => {
+    const s = spyCtx();
+    const r = await dispatchTool("browser_act", { ...TAB, intent: "type", selector: "#year", text: 2026 }, s.ctx);
+    expect(r.isError).toBe(false);
+    expect(s.ext).toEqual(["act"]);
   });
 
   it("browser_batch без полей-секретов исполняется целиком", async () => {

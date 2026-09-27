@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>React-подобная страница</title>
+</head>
+<body>
+<div id="root">
+<main>
+  <!-- 1. React-обёртка (аналитика) вокруг обычной ссылки. -->
+  <div id="wrap"><a id="plain" href="#target">Каталог</a></div>
+  <!-- 2. react-router Link: onClick сам делает preventDefault + pushState, только для левой кнопки. -->
+  <a id="link" href="/real-page">Профиль</a>
+  <!-- 3. Свайпер глушит клик в capture-фазе: до слайда событие не доходит, живёт только React-onClick слайда. -->
+  <div id="swiper"><div id="slide" role="button" tabindex="0">Слайд</div></div>
+  <!-- 3б. Свайпер внутри React-карточки: у самого элемента пропа нет — onClick карточки (предка) звать нельзя. -->
+  <div id="card"><div id="swiper2"><span id="inner" role="button" tabindex="0">Внутри карточки</span></div></div>
+  <!-- 4. Кнопка с React-onClick, до которой клик доходит: onClick должен сработать ровно один раз. -->
+  <button id="rbtn">Лайк</button>
+  <!-- B-7: счётчик, портал-модалка, шум. -->
+  <p><span id="cnt">Товаров: 1</span> <button id="add">В корзину</button></p>
+  <button id="open-modal">Показать подсказку</button>
+  <button id="inert">Ничего не делает</button>
+  <p>Время: <span id="clock">12:00:00</span></p>
+  <div id="ticker"><span>новость</span></div>
+  <ul><li id="menu">Меню<ul id="sub" hidden><li><a href="#s1">Пункт подменю</a></li></ul></li></ul>
+</main>
+</div>
+<script>
+  window.__c = { wrap: 0, nav: 0, slide: 0, rbtn: 0, card: 0 };
+  const props = (el, p) => { el["__reactProps$abc"] = p; };
+  // Корневое делегирование, как у React 17+: синтетическое событие поверх нативного, обход от цели к корню.
+  document.getElementById("root").addEventListener("click", (native) => {
+    let stopped = false;
+    for (let n = native.target; n && n !== document; n = n.parentNode) {
+      const p = n["__reactProps$abc"];
+      if (p && typeof p.onClick === "function") {
+        p.onClick({
+          type: "click", button: native.button, target: native.target, currentTarget: n, nativeEvent: native,
+          metaKey: native.metaKey, altKey: native.altKey, ctrlKey: native.ctrlKey, shiftKey: native.shiftKey,
+          get defaultPrevented() { return native.defaultPrevented; },
+          preventDefault() { native.preventDefault(); }, stopPropagation() { stopped = true; },
+        });
+      }
+      if (stopped) break;
+    }
+  });
+  props(document.getElementById("wrap"), { onClick: () => window.__c.wrap++ });
+  props(document.getElementById("link"), {
+    onClick: (e) => {
+      if (e.button !== 0 || e.defaultPrevented || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey) return;
+      e.preventDefault();
+      history.pushState({}, "", "#profile");
+      window.__c.nav++;
+    },
+  });
+  document.getElementById("swiper").addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); }, true);
+  props(document.getElementById("slide"), { onClick: () => window.__c.slide++ });
+  document.getElementById("swiper2").addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); }, true);
+  props(document.getElementById("card"), { onClick: () => window.__c.card++ });
+  props(document.getElementById("rbtn"), { onClick: () => window.__c.rbtn++ });
+  let n = 1;
+  document.getElementById("add").addEventListener("click", () => { n++; document.getElementById("cnt").textContent = "Товаров: " + n; });
+  document.getElementById("open-modal").addEventListener("click", () => {
+    // Всплывашка-портал без роли диалога: её видит только наблюдатель изменений всего документа.
+    const m = document.createElement("div");
+    m.style.cssText = "position:fixed;top:20px;left:20px;width:200px;height:100px;background:#fff";
+    m.textContent = "Окно";
+    document.body.appendChild(m);
+  });
+  // Шум: часы и бегущая строка меняются сами, без действий.
+  const words = ["новость", "погода", "курс", "спорт"];
+  let k = 0;
+  setInterval(() => {
+    const d = new Date(Date.UTC(2026, 0, 1, 12, 0, k++));
+    document.getElementById("clock").textContent = d.toISOString().slice(11, 19);
+    const t = document.getElementById("ticker");
+    const s = document.createElement("span");
+    s.textContent = words[k % words.length];
+    t.replaceChildren(s);
+  }, 40);
+  const menu = document.getElementById("menu");
+  menu.addEventListener("mouseenter", () => { document.getElementById("sub").hidden = false; });
+</script>
+</body>
+</html>

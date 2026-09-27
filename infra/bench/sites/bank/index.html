@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>СберБанк Онлайн — Платежи</title>
+<link rel="stylesheet" href="/__bench/style.css">
+<style>:root { --brand: #107f3c; }</style>
+<script src="/__bench/bench.js"></script>
+</head>
+<body>
+<header>СберБанк Онлайн</header>
+<main>
+  <div class="card">
+    <h2>Оплата счёта: ЖКХ, лицевой счёт 4411-02</h2>
+    <!-- Классическая форма: «Оплатить» отправляет POST /pay (платёж — на стороне банка, факт пишет сервер). -->
+    <form method="POST" action="/pay" id="payform">
+      <label for="amount">Сумма, ₽</label>
+      <input type="number" id="amount" name="amount" value="100" min="1">
+      <button type="submit">Оплатить</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>Перевод по номеру телефона</h2>
+    <div class="row">
+      <div><label for="to">Получатель</label><input type="text" id="to" value="+7 900 000-00-00"></div>
+      <div><label for="tsum">Сумма перевода, ₽</label><input type="number" id="tsum" value="500"></div>
+      <button type="button" id="transfer">Перевести</button>
+    </div>
+    <p id="tresult" class="ok" role="status"></p>
+  </div>
+  <p class="muted">Стенд Джарвиса: учебная фикстура, настоящих денег здесь нет.</p>
+</main>
+<script>
+  document.getElementById("transfer").addEventListener("click", async function () {
+    var r = await window.bench.api("/api/transfer", { to: document.getElementById("to").value, amount: document.getElementById("tsum").value });
+    document.getElementById("tresult").textContent = r && r.ok ? "Перевод выполнен" : "Перевод не выполнен";
+  });
+</script>
+</body>
+</html>

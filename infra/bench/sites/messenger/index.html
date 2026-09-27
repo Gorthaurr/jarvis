@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>MAX — Мессенджер</title>
+<link rel="stylesheet" href="/__bench/style.css">
+<style>
+  :root { --brand: #5b3df5; }
+  .chat { display: grid; grid-template-columns: 240px 1fr; gap: 16px; }
+  .contacts div { padding: 10px 12px; border-radius: 8px; }
+  .contacts .active { background: #ede9fe; font-weight: 600; }
+  #feed { min-height: 260px; max-height: 420px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+  .msg { align-self: flex-start; background: #eef2ff; padding: 8px 12px; border-radius: 12px; max-width: 70%; }
+  .msg.me { align-self: flex-end; background: #dcfce7; }
+  .composer { display: flex; gap: 8px; margin-top: 12px; align-items: flex-end; }
+  .composer textarea { min-height: 44px; }
+</style>
+<script src="/__bench/bench.js"></script>
+</head>
+<body>
+<header>MAX · Мессенджер</header>
+<main class="chat">
+  <div class="card contacts">
+    <div class="active">Катя Смирнова</div>
+    <div>Рабочий чат</div>
+    <div>Мама</div>
+  </div>
+  <div class="card">
+    <h2>Катя Смирнова</h2>
+    <div id="feed" role="log" aria-label="Сообщения">
+      <div class="msg">Привет! Ты сегодня будешь?</div>
+    </div>
+    <div class="composer" id="composer"></div>
+    <p class="muted" id="hint"></p>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

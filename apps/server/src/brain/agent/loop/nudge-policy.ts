@@ -4,6 +4,7 @@ import type { LoopCtx } from "./context.js";
 import type { RoundSnapshot } from "./round-snapshot.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { claimsObservedResult, looksLikeGiveUp } from "../error-voice.js";
+import { launchOnlyClaim } from "./launch-claim.js";
 
 export function continueAfterMaxTokens(ctx: LoopCtx, step: number, resp: LlmResponse): boolean {
   const { sink, opts, st, convo, pushSystemNote } = ctx;
@@ -168,13 +169,16 @@ export function goalCheck(ctx: LoopCtx, resp: LlmResponse, snap: RoundSnapshot):
   // (меню Доты) → «Дота запущена, сэр» — lastRoundHadVerify ГАСИЛ сверку с целью, хотя модель
   // сверила глазами ПОДЦЕЛЬ (запуск), а не цель (поиск матча). Финал, звучащий как чистый
   // запуск/открытие, проходит goal-check ДАЖЕ после verify-раунда: запуск почти никогда не цель.
-  const launchOnlyClaim = /(?<![\p{L}])(запущен|запустил|поднялс|стартовал|открыл)\p{L}*/iu.test(resp.text || "");
+  // W1 (L-3) + р2 (loop-bypass-4): «заявка только о запуске» снимается сверенным делом, лишь если финал САМ заявляет
+  // дело сверх запуска и после дела не было нового запуска («Открыл блокнот и напечатал X» после act met — без лишнего
+  // раунда; «Дота запущена» после сверенного клика «Закрыть попап» — goal-check). См. launch-claim.ts.
+  const launchOnly = launchOnlyClaim(resp.text || "", st.honesty);
   // Контроль-4 (режим выделения): прошлый раунд остановило СОСТОЯНИЕ системы (вуаль / §14-гейт), и модель
   // честно сообщает, что НЕ сделала («оверлей открыт — дождусь») — сверять такой финал с целью незачем:
   // «выполнена ли целиком?» уже отвечено самим текстом, а нудж лишь жёг раунд и толкал в закрытый ввод.
   // Заявка УСПЕХА после такого раунда goal-check по-прежнему проходит (гард только на give-up-тексте).
   const goalCheckRedundant = gateStoppedPrevRound && looksLikeGiveUp(resp.text);
-  if (resp.stopReason === "end_turn" && !st.honesty.goalCheckDone && st.progress.round >= 2 && (!st.honesty.lastRoundHadVerify || launchOnlyClaim) && !goalCheckRedundant) {
+  if (resp.stopReason === "end_turn" && !st.honesty.goalCheckDone && st.progress.round >= 2 && (!st.honesty.lastRoundHadVerify || launchOnly) && !goalCheckRedundant) {
     st.honesty.goalCheckDone = true;
     // QUALITY-эскалацию на goal-check НЕ вешаем (ревью cost): launchOnlyClaim ловит «открыл/включил» —
     // частейшее ЛЕГИТИМНОЕ голосовое завершение (round≥2 «Открыл ютуб, включил видео») → эскалация на

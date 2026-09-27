@@ -96,7 +96,12 @@ function canonical(p: string): string {
   try {
     return realpathSync.native(p);
   } catch {
-    return p;
+    // Цели нет (опечатка в пути или висячая ссылка): канонизируем ближайшего СУЩЕСТВУЮЩЕГО предка и
+    // пристёгиваем хвост. Иначе путь сквозь junction наружу к несуществующему файлу возвращался «как
+    // написан» и проходил границу по написанию (26.09: всплыло, когда репозиторий лежал во вложенном worktree).
+    const parent = dirname(p);
+    if (parent === p) return p;
+    return join(canonical(parent), relative(parent, p));
   }
 }
 

@@ -11,6 +11,7 @@ import type { RecalledSkill } from "../../../memory/skills.js";
 import { verbalize } from "../../verbalize/index.js";
 import { type Task } from "../../tasks/task.js";
 import { SessionWarmth } from "../warmth.js";
+import { isCommitKeyCombo, parseKeyCombo } from "@jarvis/shared"; // разбор combo — общий с гейтом и расширением
 
 export const log: Logger = createLogger("agent");
 
@@ -88,7 +89,22 @@ export const PARALLEL_READONLY_TOOLS: ReadonlySet<string> = new Set([
   "self_weaknesses", "self_code_search", "self_code_read",
   "file_view", // §3.9: чтение картинки/страницы PDF с диска — чистое чтение, GUI не трогает
   "job_status",
+  // W1 «браузерные руки»: глаза во вкладке — чтение текста/снимок вкладки и find по странице. Мышь/фокус владельца
+  // не трогают (расширение), страницу не меняют: «найди поле A и поле B» — одним параллельным раундом.
+  "browser_read", "browser_inspect",
 ]);
+
+/**
+ * Можно ли этот КОНКРЕТНЫЙ вызов исполнить параллельно (имя из allowlist И операция — чистое чтение). Вызов уже
+ * КАНОНИЧЕСКИЙ (tool-round): browser_tabs{op:"close"} сюда приходит как browser_close (facades.ts) — не из allowlist.
+ * W1-ревью T4: снимок/зум вкладки (browser_read{view:"image"}) — не параллельно: зум по ref прокручивает страницу, а
+ * captureVisibleTab снимает общий вьюпорт — два зума разом вырезали бы чужую область.
+ */
+export function isParallelReadonlyCall(name: string, input: unknown): boolean {
+  if (!PARALLEL_READONLY_TOOLS.has(name)) return false;
+  if (name === "browser_read") return (input as { view?: unknown } | undefined)?.view !== "image";
+  return true;
+}
 
 /**
  * Консервативная оценка токенов блоков tool_result — для PROACTIVE контекст-гарда (аудит 2026-07-20).
@@ -206,15 +222,12 @@ export function replayUriUnsafe(value: unknown): boolean {
  */
 export const REPLAY_MACRO_SERVER_TIMEOUT_MS = SKILL_EXECUTE_SERVER_TIMEOUT_MS;
 
-/** Клавиша-«отправка» (Enter/Return, в т.ч. с Ctrl) — коммит сообщения/формы. Ревью р1 #16: SHIFT+Enter
- *  в мессенджерах — ПЕРЕНОС СТРОКИ, не отправка; считать его коммитом = сжечь пару «набрал→закоммитил»
- *  досрочно и пропустить настоящий Enter без сверки. Модификатор shift исключаем (ctrl+enter оставляем). */
+/** Клавиша-«отправка» (Enter/Return с любыми модификаторами и в любом порядке — «Enter+Ctrl», разбор общий с §14-гейтом,
+ *  W1-ревью р2 loop-bypass-1) — коммит сообщения/формы. Ревью р1 #16: SHIFT+Enter в мессенджерах — ПЕРЕНОС СТРОКИ, не
+ *  отправка; считать его коммитом = сжечь пару «набрал→закоммитил» досрочно и пропустить настоящий Enter без сверки. */
 export function isSendKey(combo: unknown): boolean {
-  if (typeof combo !== "string") return false;
-  const parts = combo.toLowerCase().split("+").map((p) => p.trim());
-  const last = parts[parts.length - 1] ?? "";
-  if (last !== "enter" && last !== "return") return false;
-  return !parts.includes("shift"); // shift+enter = перенос строки, НЕ коммит
+  if (typeof combo !== "string" || !isCommitKeyCombo(combo)) return false;
+  return parseKeyCombo(combo)?.shift !== true; // shift+enter = перенос строки, НЕ коммит
 }
 
 /** Вставка из буфера (Ctrl+V/Shift+Insert) — тоже ВВОД текста (ревью р1 #9): взводит «набрал». */

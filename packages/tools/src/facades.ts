@@ -73,6 +73,10 @@ export function canonicalToolCall(name: string, input: unknown): CanonicalCall {
           return { name, input: { ...i } };
       }
     }
+    // W1: browser_tabs{op:"close"} ≡ прежний browser_close (он ушёл в COLD; старые навыки зовут его по имени) — эффект,
+    // журнал и чип считаются по каноническому имени. op "list"/нет — сам browser_tabs.
+    case "browser_tabs":
+      return str(i.op) === "close" ? { name: "browser_close", input: pick(i, ["url", "tabId"]) } : { name, input: { ...i } };
     default:
       return { name, input: { ...i } };
   }

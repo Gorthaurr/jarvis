@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Книжная лавка — Мастер и Маргарита</title>
+<link rel="stylesheet" href="/__bench/style.css">
+<style>:root { --brand: #b45309; } .price { font-size: 22px; font-weight: 700; }</style>
+<script src="/__bench/bench.js"></script>
+</head>
+<body>
+<header>Книжная лавка</header>
+<main>
+  <div class="card">
+    <h1>Мастер и Маргарита</h1>
+    <p class="muted">М. А. Булгаков · твёрдый переплёт · 480 страниц</p>
+    <p class="price">690 ₽</p>
+    <div class="row">
+      <div><label for="qty">Количество</label><input type="number" id="qty" name="qty" value="1" min="1" max="20"></div>
+      <button type="button" id="add">Добавить в корзину</button>
+    </div>
+    <p id="cart" role="status">Корзина: 0 шт.</p>
+  </div>
+  <div class="card">
+    <h2>Корзина</h2>
+    <p class="muted">Доставка курьером завтра.</p>
+    <button type="button" id="order">Оформить заказ</button>
+    <p id="orderResult" class="ok" role="status"></p>
+  </div>
+</main>
+<script>
+  var total = 0;
+  document.getElementById("add").addEventListener("click", async function () {
+    var qty = Number(document.getElementById("qty").value || 1);
+    var r = await window.bench.api("/api/cart", { qty: qty });
+    if (r && r.ok) { total = r.total; document.getElementById("cart").textContent = "Корзина: " + total + " шт."; }
+  });
+  document.getElementById("order").addEventListener("click", async function () {
+    var r = await window.bench.api("/api/order", {});
+    document.getElementById("orderResult").textContent = r && r.ok ? "Заказ оформлен, номер " + r.id : "Корзина пуста";
+  });
+</script>
+</body>
+</html>

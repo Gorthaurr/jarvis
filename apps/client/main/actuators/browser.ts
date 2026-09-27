@@ -1,33 +1,18 @@
 /**
  * Актуатор драйва браузера через Chrome DevTools Protocol (§6).
  *
- * browser.open/act/read работают через выделенный Chrome-инстанс по CDP (browser-cdp.ts).
- * Интенты (play/next/scroll/click/type/back/...) и текст резолвятся в DOM-элементы по
- * видимому тексту/aria, а НЕ в хрупкие пиксели. За BrowserController позже встанет
- * hak-browser (anti-detect, профиль пользователя) — вызовы не изменятся.
+ * browser.open работает через выделенный Chrome-инстанс по CDP (browser-cdp.ts). Руки во вкладках владельца
+ * (клик/ввод/чтение) — расширение (W1); клиентские browser.act/browser.read по CDP удалены (B-12: мертвы на
+ * Chrome 136+, клик подстрокой мимо §14). За BrowserController позже встанет hak-browser — вызовы не изменятся.
  */
 import { createLogger } from "@jarvis/shared";
-import { type PageContent, browserController } from "./browser-cdp.js";
+import { browserController } from "./browser-cdp.js";
 
 const log = createLogger("actuator:browser");
-
-export type { PageContent };
 
 /** Открыть URL в управляемом браузере (CDP). */
 export async function open(url: string): Promise<void> {
   await browserController().open(url);
-}
-
-/** Выполнить интент в браузере (CDP): play/pause/next/prev/scroll/click/type/back/forward. */
-export async function act(intent: string, params?: Record<string, unknown>): Promise<void> {
-  log.debug("browser.act", { intent });
-  await browserController().act(intent, params);
-}
-
-/** Извлечь читаемый контент страницы (возвращается в ActionResult.data). */
-export async function read(selectorIntent: string): Promise<PageContent> {
-  log.debug("browser.read", { selectorIntent });
-  return browserController().read(selectorIntent);
 }
 
 /**

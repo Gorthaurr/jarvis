@@ -11,6 +11,27 @@
 import { describe, expect, it } from "vitest";
 import { carriesCardNumber, checkCredentialInput, collectTypedFields } from "./credential-guard.js";
 
+// W1 (B-3/S-10): признак секретности — от САМОЙ страницы (снимок secret:true), form_input (set) и плоская форма схемы.
+describe("W1: secret из снимка, set = form_input, плоские поля browser_act", () => {
+  const secretRef = (ref: string) => (ref === "e2_1" ? { hint: "Поле 2 textbox", secret: true } : { hint: "Поиск textbox", secret: false });
+  it("type/set по ref секретного поля с НЕМОЙ подписью («Поле 2») → отказ; то же поле без secret — печать", () => {
+    expect(checkCredentialInput("browser_act", { intent: "type", ref: "e2_1", text: "qwerty" }, secretRef).block).toMatch(/не ввожу, введите сами/iu);
+    expect(checkCredentialInput("browser_act", { intent: "set", params: { ref: "e2_1", value: "qwerty" } }, secretRef).block).toBeTruthy();
+    expect(checkCredentialInput("browser_act", { intent: "set", ref: "e2_5", value: "qwerty" }, secretRef).block).toBeUndefined();
+  });
+  it("set печатает value (а text — локатор): «Пароль» в text у set — признак поля", () => {
+    expect(checkCredentialInput("browser_act", { intent: "set", text: "Пароль", value: "hunter2" }).block).toBeTruthy();
+    expect(collectTypedFields("browser_act", { intent: "set", ref: "e1_0", checked: true })).toEqual([]); // галочка — не ввод
+  });
+  it("плоская форма + params одновременно: селектор поля пароля рядом с intent, текст в params → отказ", () => {
+    expect(checkCredentialInput("browser_act", { intent: "type", selector: 'input[type="password"]', params: { text: "hunter2" } }).block).toBeTruthy();
+  });
+  it("шаг берста: ref на шаге, value в params, set в секретное поле → отказ всего берста", () => {
+    const v = checkCredentialInput("browser_batch", { steps: [{ ref: "e2_5", intent: "type", params: { text: "anton" } }, { ref: "e2_1", intent: "set", params: { value: "s3cret" } }] }, secretRef);
+    expect(v.block).toBeTruthy();
+  });
+});
+
 describe("признак поля → блок ввода", () => {
   it("browser_act type в input[type=password] → отказ с честной формулировкой", () => {
     const v = checkCredentialInput("browser_act", { intent: "type", params: { selector: 'input[type="password"]', text: "hunter2" } });

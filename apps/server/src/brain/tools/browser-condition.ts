@@ -15,7 +15,7 @@ export type BrowserCondition = Extract<WaitCondition, { kind: "browser" }>;
 /** Мост-подмножество для чтения значения из вкладки (совпадает с ToolContext.ext / ExtensionBridge). */
 export interface BrowserReader {
   readonly connected: boolean;
-  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number, refMode?: boolean): Promise<unknown>;
+  tabAct(url: string, intent: string, params?: Record<string, unknown>, tabId?: number): Promise<unknown>;
 }
 
 /** Числовые свойства медиа читаются дешёвым интентом readMedia; прочее — обобщённым getValue. */

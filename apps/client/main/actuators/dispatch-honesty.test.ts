@@ -94,6 +94,17 @@ vi.mock("./sidecar-client.js", () => ({
 vi.mock("./observe.js", () => ({ observeAfterAction: () => st.observe(), captureUiFingerprint: async () => undefined }));
 // messaging тянет @jarvis/userbots (gramjs/vk-io) — тяжёлый импорт, не нужный ни одному сценарию.
 vi.mock("./messaging.js", () => ({ sendMessage: async () => ({ messageId: "1" }), configureSenders: () => undefined }));
+// W1 (B-12): лист CDP-браузера — фиксируем, что клиент в нём ДЕЛАЕТ (клик/чтение по CDP были удалены).
+const cdpCalls = vi.hoisted(() => [] as string[]);
+vi.mock("./browser-cdp.js", async (orig) => ({
+  ...(await orig<typeof import("./browser-cdp.js")>()),
+  browserController: () => ({
+    open: async () => void cdpCalls.push("open"),
+    act: async () => void cdpCalls.push("act"),
+    read: async () => (cdpCalls.push("read"), { title: "", url: "", text: "" }),
+    close: async () => undefined,
+  }),
+}));
 
 import type { ActionCommand } from "@jarvis/protocol";
 import { dispatch } from "./index.js";
@@ -480,6 +491,17 @@ describe("§режим выделения — проводка dispatch() (ко�
 });
 
 const run = (cmd: ActionCommand) => dispatch("cmd-1", cmd);
+
+describe("W1 (B-12): клиентский CDP-драйв вкладок удалён", () => {
+  it("кадры browser.act / browser.read (старый сервер, чужой клиент) — честная ошибка, CDP-клик и чтение не исполняются", async () => {
+    cdpCalls.length = 0;
+    const a = await run({ kind: "browser.act", intent: "click", params: { text: "Отправить" } } as unknown as ActionCommand);
+    const r = await run({ kind: "browser.read", selectorIntent: "" } as unknown as ActionCommand);
+    expect([a.ok, r.ok]).toEqual([false, false]);
+    expect(a.error?.message).toMatch(/unknown kind/u);
+    expect(cdpCalls).toEqual([]);
+  });
+});
 
 describe("dispatch() — провал актуатора никогда не становится ok (закон честности)", () => {
   it("успешный путь всё-таки ok — тест не проходит «потому что всё всегда ошибка»", async () => {

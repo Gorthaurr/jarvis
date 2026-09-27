@@ -13,7 +13,7 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-import { COMMIT_WORDS_RE, type RiskCategory, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, type RiskCategory, isCommitKeyCombo, isOnFlag, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
 import { LMS_COMMIT_RE, isLmsPage, lmsKeyCommits } from "./commit-lms.js";
 
 export type { RiskCategory };
@@ -75,13 +75,22 @@ export function riskyHostCategory(host: string): RiskCategory | null {
   return null;
 }
 
-function truthy(v: unknown): boolean {
-  return v === true || v === "true" || v === 1 || v === "1";
+/**
+ * Подпись элемента, по которой судим клик (W1-2): text/name/title модели + подпись ref из снимка. У type `text` — это
+ * ПЕЧАТАЕМОЕ, а не подпись: для подписи одобрения (approvedLabel) его не берём (см. commitApprovalLabel). Повтор одной
+ * подписи (text модели = имя из снимка) — один раз: владелец видит «клик «Оплатить»», а не «Оплатить Оплатить».
+ */
+export function webCommitLabelParts(intent: string, p: Record<string, unknown>, label?: string | readonly string[]): string[] {
+  const own = intent.trim() === "type" ? [p.label, p.name, p.title] : [p.text, p.name, p.title];
+  const ref = typeof label === "string" || label === undefined ? [label] : label;
+  const parts = [...own, ...ref].filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+  return parts.filter((v, i) => parts.findIndex((w) => w.toLowerCase() === v.toLowerCase()) === i);
 }
 
 /**
- * Веб: browser_act / browser_batch / web_act. `label` — подпись элемента, если известна (ref-хинт из
- * последнего browser_inspect). Коммит = enter/submit/type+enter либо клик по элементу с глаголом коммита.
+ * Веб: browser_act / browser_batch / web_act. `label` — ВИДИМЫЕ подписи элемента по ref из последнего browser_inspect
+ * (имя/текст/label/aria — не селектор/роль/тип: W1-D6, submit из `input[type=submit]` судил навигацию теста сдачей).
+ * Коммит = enter/submit/type+enter либо клик по элементу с глаголом коммита.
  */
 export function assessWebCommit(a: {
   host: string;
@@ -91,19 +100,25 @@ export function assessWebCommit(a: {
   unknownSite?: boolean;
   intent: string;
   params?: Record<string, unknown>;
-  label?: string;
+  label?: string | readonly string[];
 }): CommitRisk | null {
   const url = a.url ?? "";
   const category: RiskCategory | null = riskyHostCategory(a.host) ?? (isLmsPage(url) ? "edu" : a.unknownSite ? "unknown" : null);
   if (!category) return null;
   const p = a.params ?? {};
   const intent = a.intent.trim().toLowerCase();
-  const parts = [p.text, p.name, p.title, a.label].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  const parts = intent === "click" ? webCommitLabelParts(intent, p, a.label) : [];
   const text = parts.join(" ");
   // Ревью 26.09: type{submit:true} постит так же, как enter:true; web_act{key} без key — это Enter (jarvis-browser.ts).
-  const keyEnter = intent === "key" && /^(?:enter|return)?$/iu.test(String(p.key ?? p.combo ?? "").trim());
+  // W1: browser_act{key, combo} — Ctrl+Enter/Shift+Enter отправляют в мессенджерах так же, как Enter (общий с GUI-гейтом
+  // и клиентским рубежом isCommitKeyCombo). Пустая клавиша — Enter (web_act{key} без key).
+  const combo = String(p.combo ?? p.key ?? "").trim();
+  const keyEnter = intent === "key" && (combo === "" || isCommitKeyCombo(combo));
+  // W1-ревью р2 (srv-bypass-5): встряхивание (shake, клик «обновить…») расширение досылает Enter-фолбэком — в
+  // мессенджере это возможная отправка. Основы — зеркало isShake в tabAct расширения.
+  const shakeEnter = category === "messenger" && (intent === "shake" || (intent === "click" && /встрях|стряхн|обнов/iu.test(String(p.text ?? ""))));
   const commitByKey =
-    (intent === "enter" || intent === "submit" || keyEnter || (intent === "type" && (truthy(p.enter) || truthy(p.submit)))) &&
+    (intent === "enter" || intent === "submit" || keyEnter || shakeEnter || (intent === "type" && (isOnFlag(p.enter) || isOnFlag(p.submit)))) &&
     (category !== "edu" || lmsKeyCommits(url));
   const lmsWords = category === "edu" || category === "unknown"; // неизвестная вкладка может оказаться учебной
   const commitByClick = intent === "click" && (COMMIT_WORDS_RE.test(text) || (lmsWords && parts.some((s) => LMS_COMMIT_RE.test(s))));

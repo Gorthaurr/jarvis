@@ -112,7 +112,7 @@ export async function finishRound(ctx: LoopCtx, resp: LlmResponse, round: RoundR
   st.tier.cleanRoundsStreak = summary.anyErrored ? 0 : st.tier.cleanRoundsStreak + 1;
   escalateOnFailedRound(ctx, summary, round);
   if (antiRunawayIdentical(ctx, summary) === "break") return "break";
-  if (familyCap(ctx, resp, round) === "break") return "break";
+  if (familyCap(ctx) === "break") return "break";
   st.progress.round += 1;
   // Ревью #5: блокирующее ожидание wait_for(browser) НЕ тикает в потолок задачи (как очередь аренды) —
   // loopStartMs УЖЕ сдвинут при аккумуляции выше (устойчиво к continue/break). Здесь только вычитаем

@@ -154,6 +154,30 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
   return "mutate"; // browser_open/act, web_open/act, input_*, app_*, fs_write/edit, office_*, system_*, code_run…
 }
 
+/** W1 «браузерные руки»: интенты browser_act, которые страницу НЕ меняют — навести курсор, прокрутить к элементу. */
+const NEUTRAL_BROWSER_INTENTS = new Set(["hover", "scroll_to"]);
+
+/**
+ * Эффект КОНКРЕТНОГО вызова: у части инструментов под одним именем операции разной природы. Единая точка для петли
+ * и журнала — разойдись они, журнал звал бы «сделанным» то, что петля считала взглядом (и наоборот).
+ *  - screen_selection: `view` — свежий кадр области (сверка), start/clear — нейтральны;
+ *  - browser_act{hover|scroll_to} — нейтральны: ни дела, ни verify-долга (наведение/прокрутка ничего не отправляют).
+ * Вызов — КАНОНИЧЕСКИЙ (петля и журнал канонизируют до этого): browser_tabs{op:"close"} приходит как browser_close
+ * (facades.ts) и по имени — mutate. Без входа (потребители по одному имени) — эффект по имени, как раньше.
+ */
+export function toolCallEffect(name: string, input?: unknown): "verify" | "mutate" | "neutral" {
+  const i = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  if (name === "screen_selection") return String(i.op ?? "view") === "view" ? "verify" : "neutral";
+  if (name === "browser_act" && NEUTRAL_BROWSER_INTENTS.has(String(i.intent ?? ""))) return "neutral";
+  return toolEffect(name);
+}
+
+/**
+ * W1 (L-3): инструменты «только ЗАПУСК/открытие/фокус» — подготовка, а не дело. Сверенный такой вызов не делает
+ * финал «Открыл X» подтверждённым делом (запуск почти никогда не цель — goal-check обязан спросить про цель).
+ */
+export const LAUNCH_ONLY_TOOLS: ReadonlySet<string> = new Set(["app_launch", "browser_open", "web_open", "app_focus", "window_focus"]);
+
 // СЛЕПЫЕ меняющие действия (P0.2): их ok-результат НЕ доказывает достижение цели в реальном мире.
 // SendInput (input_*) не имеет обратной связи; browser_act/web_act/ui_invoke могут «нажать» в пустоту
 // (регион/нет элемента/потерян фокус) и вернуть ok; app_focus (AppActivate) хрупкий. После такого

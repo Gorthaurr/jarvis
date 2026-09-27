@@ -1,0 +1,149 @@
+// tab.capture (W1 A9): снимок/зум вкладки через service worker поверх настоящего Chromium (captureVisibleTab = CDP-снимок
+// вьюпорта), отрисовка кропа — та же функция renderCapture, исполненная в странице.
+import assert from "node:assert/strict";
+import { after, before, describe, it } from "node:test";
+import { findChrome, fixtureUrl, launchPage, loadServiceWorker, swOnPage } from "./cdp-harness.mjs";
+import { renderCapture } from "../modules/capture-render.js";
+import { replyFor } from "../modules/reply.js";
+
+const PIXEL = `async (d, x, y) => {
+  const bm = await createImageBitmap(await (await fetch(d)).blob());
+  const c = new OffscreenCanvas(bm.width, bm.height);
+  const g = c.getContext("2d");
+  g.drawImage(bm, 0, 0);
+  return { w: bm.width, h: bm.height, px: [...g.getImageData(x, y, 1, 1).data].slice(0, 3) };
+}`;
+
+describe("tab.capture — снимок и зум вкладки", { skip: !findChrome() && "нет Chrome" }, () => {
+  let page;
+  // Вьюпорт фиксирован (800×600, dpr 1): у headless Chromium innerHeight и высота снимка иначе расходятся на пару px
+  // (ревью W1-T7), и точные размеры кропа зависели бы от среды.
+  const pin = (deviceScaleFactor = 1) => page.cdp("Emulation.setDeviceMetricsOverride", { width: 800, height: 600, deviceScaleFactor, mobile: false });
+  before(async () => { page = await launchPage(); await pin(); });
+  after(async () => { await page?.close(); });
+  const sw = (extra = {}) => swOnPage(page, { renderCapture: (d, p) => page.call(renderCapture.toString(), d, p), ...extra });
+  const shot = (env, opts) => env.tabCapture("", 1, opts, env.captureTargetIsolated);
+  const pixel = (d, x, y) => page.call(PIXEL, d, x, y);
+
+  it("зум rect: кроп красного блока ×2, в центре — красный", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    const { env } = sw();
+    const r = await shot(env, { rect: { x: 40, y: 30, w: 100, h: 50 } });
+    assert.equal(r.ok, true, JSON.stringify({ ...r, dataUrl: undefined }));
+    assert.deepEqual([r.width, r.height, r.dpr], [200, 100, 1]);
+    assert.deepEqual({ ...r.cssRect }, { x: 40, y: 30, w: 100, h: 50 });
+    const p = await pixel(r.dataUrl, 100, 50);
+    assert.deepEqual([p.w, p.h, p.px], [200, 100, [255, 0, 0]]);
+  });
+
+  it("без rect — весь вьюпорт в пределах потолка", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    const { env } = sw();
+    const r = await shot(env, {});
+    assert.equal(r.ok, true);
+    assert.ok(Math.max(r.width, r.height) <= 1568 && r.width * r.height <= 1_150_000);
+    assert.match(r.dataUrl, /^data:image\/png;base64,/u);
+  });
+
+  it("зум по ref элемента ниже сгиба: прокручивает к нему, в кадре — сам элемент", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    const { env } = sw();
+    const ref = (await env.tabInspect("", "", 80, 1)).elements.find((e) => e.selector === "#far").ref;
+    const r = await shot(env, { ref });
+    assert.equal(r.ok, true, JSON.stringify({ ...r, dataUrl: undefined }));
+    const p = await pixel(r.dataUrl, Math.floor(r.width / 2), Math.floor(r.height / 2));
+    assert.deepEqual(p.px, [0, 255, 0]);
+  });
+
+  it("dpr 2: кроп в ФИЗИЧЕСКИХ пикселях", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    await pin(2);
+    try {
+      const { env } = sw();
+      const r = await shot(env, { rect: { x: 40, y: 30, w: 100, h: 50 } });
+      assert.equal(r.dpr, 2);
+      assert.deepEqual([r.width, r.height], [400, 200]);
+      assert.deepEqual((await pixel(r.dataUrl, 200, 100)).px, [255, 0, 0]);
+    } finally {
+      await pin();
+    }
+  });
+
+  it("вкладка не на переднем плане → tab_not_visible, снимок не делается", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    let shots = 0;
+    const { env } = sw({ tabs: { get: async () => ({ id: 1, windowId: 1, active: false, status: "complete", url: "file:///x" }), captureVisibleTab: async () => { shots += 1; return ""; } } });
+    const r = await shot(env, {});
+    assert.deepEqual([r.ok, r.code, shots], [false, "tab_not_visible", 0]);
+  });
+
+  it("владелец переключил вкладку во время снимка → tab_not_visible, чужой кадр не отдаём", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    let switched = false;
+    const tab = () => ({ id: 1, windowId: 1, active: !switched, status: "complete", url: "file:///x" });
+    const { env } = sw({ tabs: { get: async () => tab(), query: async () => [tab()], captureVisibleTab: async () => { switched = true; return page.screenshot(); } } });
+    const r = await shot(env, {});
+    assert.deepEqual([r.ok, r.code], [false, "tab_not_visible"]);
+  });
+
+  it("ref во встроенном фрейме → capture_failed без инжекции; провал — данными, не исключением", async () => {
+    await page.open(fixtureUrl("capture.html"));
+    const { env, calls } = sw();
+    const r = await shot(env, { ref: "f3e12345_1" });
+    assert.deepEqual([r.ok, r.code, calls.length], [false, "capture_failed", 0]);
+    const reply = await replyFor({ id: "c1", type: "tab.capture", url: "", tabId: 1, ref: "f3e12345_1" }, env.handle);
+    assert.equal(reply.ok, true);
+    assert.equal(reply.data.code, "capture_failed");
+  });
+});
+
+// Р2 (W1-T4 остаток): две задачи снимают вкладки одновременно — «прокрутить ref в центр» одной не должно вклиниться
+// между прокруткой и captureVisibleTab другой (кадр с чужой прокруткой и чужим rect).
+describe("tab.capture: снимки двух задач сериализованы", () => {
+  it("вторая задача не трогает страницу, пока первая не сняла кадр", async () => {
+    const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const TAB = { id: 1, windowId: 1, active: true, url: "https://x.example/", status: "complete" };
+    const log = [];
+    let n = 0;
+    const env = loadServiceWorker({
+      tabs: { get: async () => TAB, query: async () => [TAB], captureVisibleTab: async () => { log.push("capture"); return PNG; } },
+      windows: { get: async () => ({ state: "normal" }) },
+      scripting: {
+        executeScript: async () => {
+          const k = (n += 1);
+          log.push(`target${k}`);
+          await new Promise((r) => setTimeout(r, k === 1 ? 30 : 0)); // первая «прокрутка к ref» дольше второй
+          log.push(`target${k}:done`);
+          return [{ result: { ok: true, w: 1, h: 1, dpr: 1 } }];
+        },
+      },
+      // Настоящие таймеры: очередь выдерживает квоту Chrome между снимками (W1-D5) — пауза должна истечь.
+      setTimeout,
+      clearTimeout,
+    });
+    const [a, b] = await Promise.all([env.tabCapture("", 1, {}, () => {}), env.tabCapture("", 1, {}, () => {})]);
+    assert.deepEqual([a.ok, b.ok], [true, true], JSON.stringify([a, b]));
+    assert.deepEqual(log, ["target1", "target1:done", "capture", "target2", "target2:done", "capture"]);
+  });
+
+  it("зависший снимок (страница не отвечает) не держит очередь вечно — следующий идёт по истечении слота", async () => {
+    const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const TAB = { id: 1, windowId: 1, active: true, url: "https://x.example/", status: "complete" };
+    let n = 0;
+    const slots = [];
+    const env = loadServiceWorker({
+      tabs: { get: async () => TAB, query: async () => [TAB], captureVisibleTab: async () => PNG },
+      windows: { get: async () => ({ state: "normal" }) },
+      scripting: { executeScript: () => ((n += 1) === 1 ? new Promise(() => {}) : Promise.resolve([{ result: { ok: true, w: 1, h: 1, dpr: 1 } }])) },
+      // Слот очереди «истекает» по команде теста (без реальных 15 с).
+      setTimeout: (fn) => { slots.push(fn); return slots.length; },
+      clearTimeout: () => {},
+    });
+    void env.tabCapture("", 1, {}, () => {});
+    const second = env.tabCapture("", 1, {}, () => {});
+    await new Promise((r) => setImmediate(r));
+    slots.shift()();
+    const res = await Promise.race([second, new Promise((r) => setTimeout(() => r("hung"), 500))]);
+    assert.equal(res.ok, true, `второй снимок завис за первым: ${JSON.stringify(res)}`);
+  });
+});

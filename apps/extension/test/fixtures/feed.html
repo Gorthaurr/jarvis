@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Лента</title>
+</head>
+<body>
+<header><a href="#">Главная</a></header>
+<div class="feed">
+  <article><h2>Пост первый</h2><p>Текст первого поста про погоду.</p></article>
+  <article><h2>Пост второй</h2><p>Текст второго поста про курс валют.</p></article>
+  <p id="filler"></p>
+</div>
+<script>
+  // Длинная лента: портал-модалка в конце body иначе срезалась бы капом текста.
+  document.getElementById("filler").textContent = "Ещё посты ленты. ".repeat(600);
+  const m = document.createElement("div");
+  m.setAttribute("role", "dialog");
+  m.setAttribute("aria-modal", "true");
+  m.style.cssText = "position:fixed;top:10px;left:10px;width:300px;height:120px;background:#fff";
+  m.textContent = "Подтвердите возраст: вам есть 18?";
+  document.body.appendChild(m);
+</script>
+</body>
+</html>

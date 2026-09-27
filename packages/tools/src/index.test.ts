@@ -62,8 +62,6 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "app.focus",
       "app.close",
       "browser.open",
-      "browser.act",
-      "browser.read",
       "code.run",
       "skill.execute",
       "screen.capture",

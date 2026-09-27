@@ -15,8 +15,13 @@ export const SCREEN_CAPTURE_MARK = "Снимок рабочего экрана";
  * на что он показывал.
  */
 export const SELECTION_VIEW_MARK = "[выделенная область]";
+/**
+ * W1: маркер снимка/зума ВКЛАДКИ браузера (browser_read{view:"image"}). Устаревает, как скриншот (страница живёт),
+ * но заглушка свёртки обязана звать снимок вкладки, а не screen_capture: вкладка может быть не на экране вовсе.
+ */
+export const TAB_CAPTURE_MARK = "Снимок вкладки браузера";
 
-export type ImageClass = "doc" | "screenshot" | "selection" | "other";
+export type ImageClass = "doc" | "screenshot" | "selection" | "tab" | "other";
 
 /**
  * Класс image-блоков одного tool_result по его текстовым блокам: документ (file_view), скриншот
@@ -29,6 +34,7 @@ export function classifyImageBlocks(blocks: ReadonlyArray<{ type: string; text?:
     if (b.type !== "text" || typeof b.text !== "string") continue;
     if (isFileViewMark(b.text)) return "doc";
     if (b.text.startsWith(SELECTION_VIEW_MARK)) return "selection"; // кроп области владельца — свой бюджет
+    if (b.text.startsWith(TAB_CAPTURE_MARK)) return "tab"; // снимок вкладки — свой класс и своя заглушка
     if (b.text.startsWith(SCREEN_CAPTURE_MARK)) cls = "screenshot";
   }
   return cls;
