@@ -427,6 +427,7 @@ describe("skill-runner × контроль-5 (действие ушло / про
           return false;
         }),
         async () => {
+          // В бою так идёт бесшумный UIA-шаг (runner-3): печать под открытой вуалью отверг бы рубеж инжекции.
           await Promise.resolve();
           clock += 5;
           selectionStore.setDrawing(true);
