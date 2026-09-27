@@ -3938,3 +3938,18 @@ protocol 20, typecheck, `mutate-loop all` 17/17, облачный стенд 31/
   стаб»; основной ход по подписке не задет.
 Гейт на Windows: сервер 3567 (+12 гейта размеров), клиент 1037, protocol 20, shared 194, tools 34, расширение 252,
 keeper 5, typecheck. Живьём не проверено: чек-листы W1 (Chrome владельца) и W2 (MAG) — ждут «можно».
+
+## 2026-09-27 — B-14 (DNS): имя, указывающее во внутреннюю сеть
+- **Дефект (живой факт того же дня).** Все SSRF-гарды судили ИМЯ хоста: `localtest.me`, `127.0.0.1.nip.io` (→ 127.0.0.1)
+  проходили `web_open` сервера (`browserUrlBlocked`) и перехват навигации клиента — невидимый Chrome реально ходил на
+  dev-HTTP 8787; `web.fetch` сервера — тоже. Заодно `rememberWebTarget` стоял ВЫШЕ SSRF-гарда: отклонённый URL
+  становился «последней целью» `web_act`.
+- **Второй слой — суд по ответу DNS** (`shared/host-resolve.ts` `checkHostPublic` + `isPrivateIp`): приватен любой
+  адрес ответа → отказ; не разрешилось/таймаут 3 с → `unresolved`. `web.fetch` — ПИННИНГ адреса (`pinned-fetch.ts`:
+  суд внутри `lookup` сокета node:http(s) — у глобального fetch своего lookup нет; rebinding закрыт); `web_*{url}`,
+  `web_login`, `browser_open` — серверный отказ до §14-вопроса и отправки (`nav-dns.ts`; `unresolved` пропускается —
+  сервер не подключается); невидимый браузер — каждый Document-запрос в `NavGuard` (`unresolved` = отказ, честный
+  текст про DNS). **Не закрыт** rebinding при CDP-навигации (Chrome резолвит сам): решение — локальный SOCKS5-пиннинг-
+  прокси, почему отложено — `SECURITY.md` «SSRF по DNS».
+- Грабли: `isPrivateHost("::1")` = false (голый IPv6 — не URL) — для ответов DNS нужен `isPrivateIp`. Одиночное имя
+  (`router`, `x`) Windows резолвит через LLMNR ~2,3 с — это и есть LAN-цель, резолв не пропускаем.

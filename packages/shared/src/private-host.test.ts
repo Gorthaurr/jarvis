@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPrivateHost, isPrivateHttpUrl, urlHostname } from "./private-host.js";
+import { isPrivateHost, isPrivateHttpUrl, isPrivateIp, urlHostname } from "./private-host.js";
 
 describe("B-14: одно правило «приватный хост»", () => {
   it("приватно: loopback, RFC1918, link-local/метаданные, CGNAT, 0/8, mDNS/.internal/.localhost", () => {
@@ -48,5 +48,16 @@ describe("B-14: одно правило «приватный хост»", () => 
     expect(isPrivateHttpUrl("http://192.168.0.1/")).toBe(true);
     expect(isPrivateHttpUrl("ftp://192.168.0.1/")).toBe(false);
     expect(urlHostname("https://[::1]:8080/x")).toBe("::1");
+  });
+
+  it("isPrivateIp: голые адреса из ответа DNS, в т.ч. IPv6 без скобок и с зоной; мусор — приватно (fail-closed)", () => {
+    for (const a of ["127.0.0.1", "10.1.2.3", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "::", "fe80::1%12", "fd00::5", "::ffff:127.0.0.1", "::ffff:192.168.0.1", "[::1]", "", "not-an-ip", "fe80::zz"]) {
+      expect(isPrivateIp(a), a).toBe(true);
+    }
+    for (const a of ["149.154.167.99", "8.8.8.8", "203.0.113.10", "2001:4860:4860::8888", "::ffff:8.8.8.8"]) {
+      expect(isPrivateIp(a), a).toBe(false);
+    }
+    // Ловушка, ради которой isPrivateIp существует: правило по имени голый IPv6 не разбирает.
+    expect(isPrivateHost("::1")).toBe(false);
   });
 });

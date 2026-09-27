@@ -6,7 +6,8 @@
  * Приватно: loopback (127/8, ::1), «этот хост» (0/8, ::), RFC1918 (10/8, 172.16/12, 192.168/16), link-local
  * (169.254/16 — вкл. облачные метаданные, fe80::/10), CGNAT (100.64/10), IPv6 ULA (fc00::/7), IPv4-mapped/
  * -compatible IPv6 с приватным IPv4, имена `localhost`, `*.localhost`, `*.local` (mDNS), `*.internal`.
- * Судим ИМЯ из URL, не результат DNS: публичное имя, указывающее на приватный IP (DNS-rebinding), не ловим.
+ * Здесь суд по ИМЕНИ из URL (синхронно, без сети). Публичное имя, указывающее на приватный IP (`localtest.me`,
+ * `127.0.0.1.nip.io`), ловит второй слой — суд по ОТВЕТУ DNS (`host-resolve.ts` checkHostPublic + `isPrivateIp`).
  */
 
 /** Хост из URL или голого «host[:port]»: без [] у IPv6, без хвостовой точки, в нижнем регистре. "" — не разобрать. */
@@ -60,6 +61,18 @@ export function isPrivateHost(urlOrHost: string): boolean {
   if (host === "localhost" || /\.(?:localhost|local|internal)$/u.test(host)) return true;
   if (host.includes(":")) return ipv6Private(host);
   return ipv4Private(host) === true;
+}
+
+/**
+ * Голый адрес из ответа DNS (IPv4 или IPv6 без скобок, у link-local бывает зона `%12`) → приватный? `isPrivateHost("::1")`
+ * его не разберёт (`https://::1` — не URL → "" → «не приватный»), поэтому IPv6 оборачиваем в [] сами. Непарсящийся
+ * адрес — приватный: резолвер вернул мусор, подключаться к нему не будем (fail-closed).
+ */
+export function isPrivateIp(address: string): boolean {
+  const a = String(address ?? "").trim().replace(/%.*$/u, "").replace(/^\[|\]$/gu, "");
+  if (!a.includes(":")) return ipv4Private(a) ?? true;
+  const host = urlHostname(`http://[${a}]`);
+  return host ? ipv6Private(host) : true;
 }
 
 /** http(s)-адрес на приватном хосте (для перехвата навигации и ответов вкладок; прочие схемы судит свой гард). */
