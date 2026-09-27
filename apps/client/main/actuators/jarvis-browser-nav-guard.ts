@@ -16,7 +16,7 @@
  * резолвит сам ПОСЛЕ нас и может получить другой ответ; закрыть его может только пиннинг адреса (локальный
  * прокси) — почему отложен, см. docs/SECURITY.md «SSRF по DNS».
  */
-import { type HostLookup, checkHostPublic, createLogger, urlHostname } from "@jarvis/shared";
+import { type HostLookup, checkHostPublic, createLogger, limitLookup, systemLookup, urlHostname } from "@jarvis/shared";
 import type { CdpConn } from "./cdp-conn.js";
 
 const log = createLogger("actuator:jarvis-browser:nav-guard");
@@ -35,11 +35,16 @@ export class NavGuard {
   private readonly journal: BlockedNav[] = [];
   private seq = 0;
 
+  /** Резолв на КАЖДЫЙ Document-запрос: ≤2 getaddrinfo разом + кеш (пул libuv процесса не отдаём странице, адверс-ревью). */
+  private readonly lookup: HostLookup;
+
   /** lookup — DI стенда (таблица имён); нет → системный DNS. */
   constructor(
     private readonly conn: CdpConn,
-    private readonly lookup?: HostLookup,
-  ) {}
+    lookup?: HostLookup,
+  ) {
+    this.lookup = limitLookup(lookup ?? systemLookup);
+  }
 
   /** Включить перехват. Без него браузер НЕ используется (вызывающий перезапускает — fail-closed). */
   async start(): Promise<void> {
@@ -84,13 +89,13 @@ export class NavGuard {
   }
 }
 
-/** Честный текст о заблокированном переходе (хост — имя из URL: только [a-z0-9.:-], делимитер не разорвать). */
+/**
+ * Честный текст о заблокированном переходе. БЕЗ имён хостов (адверс-ревью): имя задаёт страница (302 на выдуманный хост),
+ * WHATWG пропускает в нём буквы, `_`, скобки, кавычки — это проза-инструкция в ДОВЕРЕННОМ тексте ошибки. Имена — в лог.
+ */
 export function blockedNavText(blocked: BlockedNav[]): string {
-  const hosts = (reason: BlockedNav["reason"]) => [...new Set(blocked.filter((b) => b.reason === reason).map((b) => b.host))].slice(0, 3).join(", ");
   const parts: string[] = [];
-  const priv = hosts("private");
-  if (priv) parts.push(`переход на внутренний адрес (${priv}) заблокирован — адрес ведёт в локальную сеть (напрямую, редиректом, ссылкой или именем, которое DNS отдаёт как внутренний IP); туда не хожу и оттуда не читаю`);
-  const unresolved = hosts("unresolved");
-  if (unresolved) parts.push(`переход на ${unresolved} не выполнен — адрес не прошёл проверку DNS (имя не разрешилось или DNS не ответил); без проверки адреса браузер Джарвиса не пускаю`);
+  if (blocked.some((b) => b.reason === "private")) parts.push("переход на внутренний адрес заблокирован — адрес ведёт в локальную сеть (напрямую, редиректом, ссылкой или именем, которое DNS отдаёт как внутренний IP); туда не хожу и оттуда не читаю");
+  if (blocked.some((b) => b.reason === "unresolved")) parts.push("переход не выполнен — адрес не прошёл проверку DNS (имя не разрешилось или DNS не ответил); без проверки адреса браузер Джарвиса не пускаю");
   return parts.join("; ");
 }

@@ -28,6 +28,7 @@ function privateIpv4(a: number, b: number): boolean {
   if (a === 169 && b === 254) return true; // link-local (169.254.169.254 — метаданные облака)
   if (a === 172 && b >= 16 && b <= 31) return true; // private-B
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT (100.64/10)
+  if (a >= 224) return true; // мультикаст 224/4, резерв 240/4, broadcast — не веб-сервер
   return false;
 }
 
@@ -38,20 +39,41 @@ function ipv4Private(host: string): boolean | null {
   return privateIpv4(Number(m[1]), Number(m[2]));
 }
 
-/** IPv6 (без скобок): loopback/unspecified, ULA, link-local, mapped/compatible IPv4. */
-function ipv6Private(host: string): boolean {
-  if (host === "::1" || host === "::") return true;
-  if (/^f[cd][0-9a-f]{0,2}:/u.test(host)) return true; // fc00::/7
-  if (/^fe[89ab][0-9a-f]?:/u.test(host)) return true; // fe80::/10
-  // ::ffff:a.b.c.d / ::a.b.c.d (точечная) и их hex-формы ::ffff:7f00:1 / ::7f00:1 (так нормализует WHATWG URL).
-  const dotted = /^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/u.exec(host);
-  if (dotted) return ipv4Private(dotted[1]!) === true;
-  const hex = /^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(host);
-  if (hex) {
-    const hi = Number.parseInt(hex[1]!, 16);
-    return privateIpv4(hi >> 8, hi & 0xff);
+/** IPv6 (без скобок, любая запись) → 8 чисел; хвост a.b.c.d разворачивается. null — не IPv6. */
+function hextets(host: string): number[] | null {
+  let h = host;
+  const v4 = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(h);
+  if (v4) {
+    const [a, b, c, d] = v4.slice(1).map(Number) as [number, number, number, number];
+    h = `${h.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
-  return false;
+  const parts = h.split("::");
+  if (parts.length > 2) return null;
+  const side = (x: string | undefined) => (x ? x.split(":").map((t) => (/^[0-9a-f]{1,4}$/iu.test(t) ? Number.parseInt(t, 16) : Number.NaN)) : []);
+  const head = side(parts[0]);
+  const tail = side(parts[1]);
+  const fill = parts.length === 2 ? 8 - head.length - tail.length : 0;
+  const all = [...head, ...new Array<number>(Math.max(fill, 0)).fill(0), ...tail];
+  return fill >= 0 && all.length === 8 && all.every((n) => Number.isInteger(n)) ? all : null;
+}
+
+/**
+ * IPv6 (без скобок): loopback/unspecified, ULA fc00::/7, link-local fe80::/10, site-local fec0::/10, мультикаст, и
+ * ВСЕ формы со встроенным IPv4 — mapped/compatible, SIIT ::ffff:0:0/96, NAT64 64:ff9b::/96 (+ локальный /48), 6to4
+ * 2002::/16 — по встроенному адресу; Teredo 2001::/32 — целиком (веб-сервер на нём не живёт). Непарсящийся — приватный.
+ */
+function ipv6Private(host: string): boolean {
+  const x = hextets(host);
+  if (!x) return true;
+  const v4 = (i: number) => privateIpv4(x[i]! >> 8, x[i]! & 0xff); // первые два октета IPv4 в хекстете i
+  const zeros = (n: number) => x.slice(0, n).every((v) => v === 0);
+  if (zeros(7) && x[7]! <= 1) return true; // :: и ::1
+  if ((x[0]! & 0xfe00) === 0xfc00 || (x[0]! & 0xffc0) === 0xfe80 || (x[0]! & 0xffc0) === 0xfec0 || x[0]! >= 0xff00) return true;
+  if (zeros(5) && (x[5] === 0 || x[5] === 0xffff)) return v4(6); // ::a.b.c.d, ::ffff:a.b.c.d
+  if (zeros(4) && x[4] === 0xffff && x[5] === 0) return v4(6); // SIIT
+  if (x[0] === 0x64 && x[1] === 0xff9b) return x[2] === 1 || v4(6); // NAT64
+  if (x[0] === 0x2002) return v4(1); // 6to4
+  return x[0] === 0x2001 && x[1] === 0; // Teredo
 }
 
 /** Приватный/локальный хост (SSRF-класс). Пустой/битый хост (about:blank, data:) — НЕ приватный: сети там нет. */
@@ -70,7 +92,11 @@ export function isPrivateHost(urlOrHost: string): boolean {
  */
 export function isPrivateIp(address: string): boolean {
   const a = String(address ?? "").trim().replace(/%.*$/u, "").replace(/^\[|\]$/gu, "");
-  if (!a.includes(":")) return ipv4Private(a) ?? true;
+  if (!a.includes(":")) {
+    const oct = a.split(".");
+    if (oct.length !== 4 || oct.some((o) => !/^(0|[1-9]\d{0,2})$/u.test(o) || Number(o) > 255)) return true; // «999.1.1.1», «01.02.03.04»
+    return ipv4Private(a) === true;
+  }
   const host = urlHostname(`http://[${a}]`);
   return host ? ipv6Private(host) : true;
 }

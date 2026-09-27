@@ -346,8 +346,9 @@ export class JarvisBrowser {
       const cdp = await this.ensureBrowser();
       const mark = this.guard?.mark() ?? 0;
       const out = await webAct(cdp, this.mainFrameId, intent, params);
-      const blocked = this.guard?.since(mark) ?? []; // B-14: действие увело во внутреннюю сеть — переход сорван, говорим
-      return blocked.length ? { ...out, blockedNav: blockedNavText(blocked) } : out;
+      // B-14: действие увело во внутреннюю сеть — переход сорван, говорим; мёртвое имя стороннего iframe — не провал действия.
+      const blocked = (this.guard?.since(mark) ?? []).filter((b) => b.reason === "private" || b.frameId === this.mainFrameId);
+      return blocked.length ? { ...out, blockedNav: blockedNavText(blocked), blockedNavReason: blocked.some((b) => b.reason === "private") ? "private" : "unresolved" } : out;
     });
   }
 

@@ -11,6 +11,7 @@ import { batchGate } from "../batch-commit.js";
 import { batchStepsFromInput } from "../command-fields.js";
 import { credentialGate } from "../credential-gate.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
+import { stepsNavRefusal } from "../nav-dns.js";
 import { sendActionApproved } from "../send-approved.js";
 import { type PostActionObservation, channelDownResult, overlayDeniedResult, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, ok, applyVeil, stripVeilFields } from "../dispatch-util.js";
 
@@ -46,6 +47,8 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   // W2 П3 (G-3(4)): §0 по ЗАПОЛНЕННЫМ шагам — цепочка «клик в поле пароля → печать» (слот с немым именем «value»).
   const cred = credentialGate("input_batch", { steps }, ctx);
   if (cred.block) return err(cred.block.replace(/^input_batch/u, `навык «${skillId}»`));
+  const navRefusal = await stepsNavRefusal("skill_execute", steps, ctx.resolveHost); // SSRF: навык мог записать модель
+  if (navRefusal) return navRefusal;
   // W2 П3 (G-1/S-3): §14 по ЗАПОЛНЕННЫМ шагам — один вопрос с перечнем и гранты с кратностью (batch-commit.ts).
   const gate = await batchGate(ctx, steps, `навык «${skillId}»`);
   if (gate.denied) return gate.denied;
@@ -173,6 +176,8 @@ export async function inputBatch(ctx: ToolContext, input: Record<string, unknown
   const built = batchStepsFromInput(input);
   if ("error" in built) return err(built.error);
   const steps = built.steps;
+  const navRefusal = await stepsNavRefusal("input_batch", steps, ctx.resolveHost); // SSRF: browser.open/app.launch{http}
+  if (navRefusal) return navRefusal;
   // W2 П3 (G-1/S-3): коммиты шагов с известной меткой — один вопрос с перечнем текста, гранты с кратностью.
   const gate = await batchGate(ctx, steps, "берст");
   if (gate.denied) return gate.denied;

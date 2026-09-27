@@ -6,7 +6,7 @@
  * Реверт-проверки (из копии): убрать navDnsRefusal из dispatch → web_open уходит клиенту → красный; вернуть
  * rememberWebTarget выше гарда → «последняя цель» = отклонённый URL → красный; убрать гейт из browser_open → красный.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import type { HostLookup } from "@jarvis/shared";
 import { lastWebTarget } from "./commit-gate.js";
@@ -18,6 +18,7 @@ const DNS: Record<string, string[]> = {
   "shop.example": ["203.0.113.10"],
 };
 const resolveHost: HostLookup = async (h) => {
+  if (h === "slow.example") throw Object.assign(new Error("DNS не ответил"), { code: "ETIMEOUT" }); // как withTimeout
   const v = DNS[h];
   if (!v) throw Object.assign(new Error("nx"), { code: "ENOTFOUND" });
   return v;
@@ -74,5 +75,68 @@ describe("B-14 (DNS): навигация браузера по имени, ук�
     expect(r.isError).toBe(true);
     expect(String(r.content)).toMatch(/внутреннюю сеть/u);
     expect(l.sent).toEqual([]);
+  });
+});
+
+describe("B-14 (DNS), адверс-ревью: прочие пути к браузеру и честность текста", () => {
+  it("DNS молчит (таймаут) → отказ и web_open, и browser_open (Chrome ждёт дольше нас — NS атакующего успел бы)", async () => {
+    const l = link();
+    for (const [tool, url] of [["web_open", "https://slow.example/"], ["browser_open", "http://slow.example:8787/"]] as const) {
+      const r = await l.tool(tool, { url });
+      expect(r.isError, tool).toBe(true);
+      expect(String(r.content)).toMatch(/DNS не ответил/u);
+    }
+    expect(l.sent).toEqual([]);
+  });
+
+  it("input_batch с browser.open и app_launch{http} на имя → 127.0.0.1 — отказ, на клиент ничего (раньше гарда не было вовсе)", async () => {
+    const l = link();
+    const batch = await l.tool("input_batch", { steps: [{ action: "browser.open", params: { url: "http://evil.example:8787/healthz" } }] });
+    expect(batch.isError).toBe(true);
+    expect(String(batch.content)).toMatch(/внутреннюю сеть/u);
+    const launch = await l.tool("app_launch", { app: "http://evil.example:8787/" });
+    expect(launch.isError).toBe(true);
+    expect(l.sent).toEqual([]);
+  });
+
+  it("skill_execute: навык (его могла записать модель) с browser.open на имя → 127.0.0.1 — отказ до клиента", async () => {
+    const skill = { id: "sk1", name: "открыть", version: 1, steps: [{ action: "browser.open", params: { url: "evil.example:8787/dev/say" } }] };
+    const l = link();
+    const ctx = { ...l.ctx, skills: { get: vi.fn(async () => skill), list: vi.fn(async () => [skill]) } } as unknown as ToolContext;
+    const r = await dispatchTool("skill_execute", { skillId: "sk1" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).toMatch(/внутреннюю сеть/u);
+    expect(l.sent).toEqual([]);
+  });
+
+  it("watch_create с predicate.url на имя → 127.0.0.1 — отказ (self-heal переоткрывал бы его в Chrome владельца)", async () => {
+    const add = vi.fn(() => ({ ok: true, id: "w1" }));
+    const ctx = { ...link().ctx, sessionId: "s1", watch: { add } } as unknown as ToolContext;
+    const r = await dispatchTool("watch_create", { what: "видео", condition: "дошло", predicate: { kind: "browser", value: 10, url: "http://evil.example:8787/" } }, ctx);
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).toMatch(/внутреннюю сеть/u);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("browser_read вкладки владельца на имени → 127.0.0.1 — содержимое модели не отдаём", async () => {
+    const tabRead = vi.fn(async () => ({ url: "http://evil.example:8787/admin", title: "Router", text: "ROUTER-SECRET" }));
+    const ext = { connected: true, tabRead, tabList: vi.fn(async () => ({ tabs: [], count: 0 })), openOrFocus: vi.fn(async () => ({ tabId: 1 })) };
+    const ctx = { ...link().ctx, ext } as unknown as ToolContext;
+    expect((await dispatchTool("browser_open", { url: "https://shop.example/" }, ctx)).isError).toBeFalsy(); // публичный
+    const r = await dispatchTool("browser_read", {}, ctx); // а страница увела вкладку на имя → 127.0.0.1
+    expect(tabRead).toHaveBeenCalled();
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).not.toContain("ROUTER-SECRET");
+  });
+
+  it("web_act: блок по DNS (unresolved) — честный «не выполнен», а не ложное «внутренний адрес»", async () => {
+    const reply = (reason: string) => async (): Promise<ActionResult> => ({ commandId: "c", ok: true, durationMs: 1, data: { ok: true, changed: true, blockedNav: "…", blockedNavReason: reason } });
+    for (const [reason, re] of [["unresolved", /не прошёл проверку DNS/u], ["private", /внутренний адрес ЗАБЛОКИРОВАН/u]] as const) {
+      const ctx = { ...link().ctx, session: { sendAction: reply(reason) } } as unknown as ToolContext;
+      const r = await dispatchTool("web_act", { intent: "click", params: { selector: "#go" } }, ctx);
+      expect(String(r.content), reason).toMatch(re);
+    }
+    const ctx = { ...link().ctx, session: { sendAction: reply("unresolved") } } as unknown as ToolContext;
+    expect(String((await dispatchTool("web_act", { intent: "click", params: { selector: "#go" } }, ctx)).content)).not.toMatch(/внутренний адрес/u);
   });
 });

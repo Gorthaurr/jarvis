@@ -697,7 +697,8 @@ async function dispatchToolCore(
   // же гард, что browser_* (раньше web_* падали в generic-путь БЕЗ проверки → file:///…/id_rsa, loopback,
   // 169.254.169.254-метаданные, chrome:// проходили в браузер с живыми куками; prompt-injection из
   // web_read мог навести открыть локальный файл/внутренний адрес). B-14: + суд по ответу DNS; всё — ДО §14 и памяти цели.
-  const navRefusal = URL_NAV_TOOLS.has(name) && typeof input.url === "string" ? await navUrlRefusal(name, input.url, ctx.resolveHost) : null;
+  const navUrl = URL_NAV_TOOLS.has(name) ? input.url : name === "app_launch" && /^\s*https?:\/\//iu.test(String(input.app ?? "")) ? input.app : undefined; // app_launch{http} = shell-open браузера
+  const navRefusal = typeof navUrl === "string" ? await navUrlRefusal(name, navUrl.trim(), ctx.resolveHost) : null;
   if (navRefusal) return navRefusal;
 
   // §14 ГЕЙТ НЕОБРАТИМЫХ КЛИКОВ в GUI (gui-gate.ts): отказ/нет канала → готовый результат, команда не уходит.

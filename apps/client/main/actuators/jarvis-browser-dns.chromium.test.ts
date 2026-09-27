@@ -33,6 +33,8 @@ describe.skipIf(!chrome)("B-14 (DNS): имя, указывающее внутр�
       "/": `<h1>SHOP</h1><a id="l" href="${at("evil.jb.example")}">скидки</a>`,
       "/framed": `<h1>SHOP-FRAMED</h1><iframe src="${at("evil.jb.example", "/frame")}"></iframe>`,
       "/redir": (_q, _b, res) => void res.writeHead(302, { location: at("evil.jb.example") }).end(),
+      "/nx-frame": `<h1>NX-FRAME</h1><button id="f" onclick="document.body.insertAdjacentHTML('beforeend', '<iframe src=&quot;${at("nx.jb.example", "/ad")}&quot;></iframe>')">баннер</button>`,
+      "/nx-link": `<h1>NX-LINK</h1><a id="n" href="${at("nx.jb.example", "/x")}">мёртвая ссылка</a>`,
     });
     ({ jb, dispose } = launchJarvisBrowser(chrome!));
   }, 60_000);
@@ -55,6 +57,7 @@ describe.skipIf(!chrome)("B-14 (DNS): имя, указывающее внутр�
       const r = await openErr(at(host));
       expect(r, host).toMatch(/^ERR .*внутренний адрес/u);
       expect(r).not.toContain("ROUTER-SECRET");
+      expect(r).not.toContain(host); // имя задаёт страница — в доверенный текст ошибки не попадает (инъекция)
     }
     expect(router.hits).toHaveLength(0);
   }, 30_000);
@@ -82,6 +85,25 @@ describe.skipIf(!chrome)("B-14 (DNS): имя, указывающее внутр�
     const framed = await jb.open(shopUrl("/framed"));
     expect(framed.text).toContain("SHOP-FRAMED");
     expect(JSON.stringify(framed)).not.toContain("ROUTER-FRAME-SECRET");
+    expect(router.hits).toHaveLength(0);
+  }, 30_000);
+
+  it("клик вставил iframe с мёртвым именем → действие НЕ помечено «переход заблокирован» (не провал действия)", async () => {
+    await jb.open(shopUrl("/nx-frame"));
+    const out = await jb.act("click", { selector: "#f" });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(out.blockedNav).toBeUndefined();
+    expect((await jb.read()).text).toContain("NX-FRAME");
+    expect(router.hits).toHaveLength(0);
+  }, 30_000);
+
+  it("клик по ссылке на мёртвое имя (главный фрейм) → web_read честно про DNS, не «внутренний адрес»", async () => {
+    await jb.open(shopUrl("/nx-link"));
+    await jb.act("click", { selector: "#n" }).catch(() => "act-error");
+    await new Promise((r) => setTimeout(r, 600));
+    const read = await jb.read().then((p) => `OK ${JSON.stringify(p)}`, (e: Error) => `ERR ${e.message}`);
+    expect(read).toMatch(/^ERR .*проверку DNS/u);
+    expect(read).not.toMatch(/внутренний адрес/u);
     expect(router.hits).toHaveLength(0);
   }, 30_000);
 
