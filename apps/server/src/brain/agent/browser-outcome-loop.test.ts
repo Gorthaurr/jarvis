@@ -97,6 +97,20 @@ describe("W1: исход браузерных рук доходит до жур�
     expect(line).not.toContain("ОШИБКА");
   }, 20_000);
 
+  // W1-D1 (стенд): клик увёл страницу (POST-форма), executeScript вернулся без результата → page_gone. Раньше «Не вышло»:
+  // журнал писал «ОШИБКА», и «доделай» жало кнопку второй раз — вторая оплата.
+  it("клик увёл страницу без результата (page_gone) → «ИСХОД НЕИЗВЕСТЕН — СВЕРЬ», а не «ОШИБКА»", async () => {
+    const ext = extWith({
+      tabAct: async () => {
+        throw extReplyError("page_gone: страница сменила документ во время «click» и результата не вернула — исход неизвестен", "page_gone");
+      },
+    });
+    const digest = await digestAfter("u-browser-page-gone", { id: "b0", name: "browser_act", input: { url: SITE, intent: "click", ref: "e1_3" } }, ext);
+    const line = digest.split("\n").find((l) => l.includes("browser_act(")) ?? "";
+    expect(line).toContain("ИСХОД НЕИЗВЕСТЕН");
+    expect(line).not.toContain("ОШИБКА");
+  }, 20_000);
+
   it("берст остановился на 2-м шаге из 3 → «ЧАСТИЧНО — шаги 1..1 УЖЕ ВЫПОЛНЕНЫ», а не «ОШИБКА» (повтор не наберёт текст дважды)", async () => {
     const ext = extWith({ tabBatch: async () => ({ ok: false, code: "not_found", done: 1, total: 3, stoppedAt: 1, error: "нет элемента" }) });
     const digest = await digestAfter(
