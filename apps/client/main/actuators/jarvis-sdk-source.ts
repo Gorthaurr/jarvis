@@ -198,7 +198,7 @@ def snapshot(pid=None, max_items=200):
         raise _overlay_error("ui.snapshot")
     # bbox элементов приходят в ФИЗИЧЕСКИХ пикселях UIA, НЕ в screen-DIP системе SDK — прямой click по ним
     # (дефолт space="screen") промахнулся бы на масштабированном дисплее и вернул ok = ЛОЖНЫЙ УСПЕХ.
-    # Действие по элементу идёт через handle→invoke, поэтому координаты не отдаём (как rect-ветка ocr()).
+    # Действие по элементу идёт через handle→invoke, поэтому координаты не отдаём (кликать — find().click()).
     for it in data.get("items", []):
         for k in ("x", "y", "w", "h", "bbox"):
             it.pop(k, None)
@@ -206,7 +206,7 @@ def snapshot(pid=None, max_items=200):
 
 
 def ocr(monitor=None, rect=None, lang=None):
-    "Локальный OCR экрана: {text, lines:[...], space}. Для окон без UIA-дерева (игры/canvas). Для ПОЛНОГО кадра (без rect) строки несут x,y,w,h в АБСОЛЮТНЫХ экранных DIP (space=='screen') — можно кликать click(x,y) напрямую. Для rect координаты НЕ отдаются (только text): они неклик­абельны в единой системе — кликать по региону через find() или полноэкранный ocr()."
+    "Локальный OCR экрана: {text, lines:[...], space}. Для окон без UIA-дерева (игры/canvas). Строки (и полного кадра, и региона rect — rect в экранных DIP) несут x,y,w,h в АБСОЛЮТНЫХ экранных DIP (space=='screen') — можно кликать click(x,y) напрямую. Нет пересчёта (старый клиент) — координаты убираются, остаётся text: клик по ним был бы мимо."
     f = {}
     if monitor is not None:
         f["monitor"] = monitor
@@ -235,7 +235,7 @@ def ocr(monitor=None, rect=None, lang=None):
                 ln["h"] = ln["h"] / s
         data["space"] = "screen"
     else:
-        # Нет mapping (rect / space:"screen"-rect): координаты в неоднозначной, НЕ screen-DIP системе.
+        # Нет mapping (W2 П5: клиент отдаёт его всегда, и для rect — это старый клиент/сбой): система координат неизвестна.
         # Убираем x/y/w/h (текст оставляем) — иначе click(ln["x"],ln["y"]) с дефолтом space="screen"
         # ушёл бы мимо и вернул ok = ЛОЖНЫЙ УСПЕХ. Теперь попытка взять ln["x"] честно упадёт ошибкой.
         for ln in data.get("lines", []):

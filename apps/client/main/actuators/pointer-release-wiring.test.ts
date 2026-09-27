@@ -20,7 +20,7 @@ vi.mock("./sidecar-client.js", () => ({
   }),
 }));
 // Листья, которые тянет actuators/selection.ts: Electron-захват экрана и окна оверлея нам не нужны.
-vi.mock("./screen.js", () => ({ getLastCaptureMapping: () => null, captureScreen: async () => ({ image: "", width: 0, height: 0 }), perceptualHash: async () => "0" }));
+vi.mock("./screen.js", () => ({ captureScreen: async () => ({ image: "", width: 0, height: 0 }), perceptualHash: async () => "0" }));
 vi.mock("../selection/overlay.js", () => ({ selectionOverlay: { start: async () => ({}), showFrame: () => undefined, hideAll: () => undefined, submit: () => undefined, drawing: false } }));
 vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 }, screen: {} })); // screen: перевод физика→DIP рубежа (на Linux без Windows-API — как есть)
 

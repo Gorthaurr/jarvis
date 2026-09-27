@@ -18,7 +18,7 @@ vi.mock("./sidecar-client.js", () => ({
     },
   }),
 }));
-vi.mock("./screen.js", () => ({ getLastCaptureMapping: () => null }));
+vi.mock("./screen.js", () => ({})); // захват экрана сценарию не нужен (W2 П5: lastMapping удалён — кадры)
 vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 }, screen: {} })); // screen: перевод физика→DIP рубежа (на Linux без Windows-API — как есть)
 
 import { pressKey, resetHeldKeys } from "./input.js";
