@@ -157,6 +157,12 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
   файлов (синтетический `input.change` и drag-drop игнорируются — защита). Настоящее голосовое — только GramJS (нужен api_id,
   которого Telegram-цензура у Антона не даёт: my.telegram.org режет создание app с РФ-IP, страна номера≠IP).
 - `browser_open/read/act` — в реальных вкладках через `chrome.scripting` (мышь не трогаем). `browser_inspect` — глаза в DOM.
+- **Расширение пропало → доклад владельцу** (`gateway/ext-absence*.ts`, 27.09): учёт в `data/ext-presence.json` —
+  `lastSeenAt` по событиям моста, наблюдённое отсутствие и «Chrome на переднем плане» по тикам `client.context`.
+  Chrome ≥ 10 мин из ≥ 2 ч без расширения → уверенный доклад; ≥ 12 ч без признаков Chrome → мягкий. Говорит на реплике
+  владельца (голос коротко + чат с путём), раз до восстановления связи. Проверить руками: засеять файл (формат — в
+  `ext-absence.ts`) в изолированном `JARVIS_DATA_DIR`, сервер на другом `PORT` через `JARVIS_ENV_PATH`, клиент с
+  НЕ-dev `clientVersion` (у `_jarvis_cmd.mjs` — dev, он доклад не получает) шлёт `client.context` + `dev.text`.
 
 ---
 
