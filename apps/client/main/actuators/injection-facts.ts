@@ -34,6 +34,12 @@ export interface InjectionFacts {
   focused(): Promise<FocusedLine | null>;
   /** В фокусе ли окно самого Джарвиса (без сайдкара). */
   ownFocused(): boolean;
+  /** Точка внутри видимого СВОЕГО окна (Electron, DIP) — фолбэк, когда window.list недоступен. */
+  ownWindowAt(dip: Point): boolean;
+  /** Позиция курсора (DIP) — туда жмёт `mouse down` без координат. */
+  cursor(): Point | null;
+  /** pid переднего окна по UIA (`ui.snapshot{maxItems:1}`) — у окна без заголовка window.list его не знает. */
+  snapshotPid(): Promise<number | null>;
   clipboardText(): string;
 }
 
@@ -41,9 +47,14 @@ export const FACTS_DEADLINE_MS = 4_000;
 const WINDOW_LIST_MS = 1_500;
 const UIA_FACT_MS = 2_000;
 
+type OwnWindow = { isVisible(): boolean; getBounds(): { x: number; y: number; width: number; height: number } };
 export interface FactsDeps {
   now?: () => number;
-  electronApi?: { BrowserWindow?: { getFocusedWindow(): unknown }; clipboard?: { readText(): string } };
+  electronApi?: {
+    BrowserWindow?: { getFocusedWindow(): unknown; getAllWindows?(): OwnWindow[] };
+    clipboard?: { readText(): string };
+    screen?: { getCursorScreenPoint?(): Point };
+  };
 }
 
 type RawSidecarWindow = Omit<RawWindowFact, "rect"> & { x: number; y: number; w: number; h: number };
@@ -101,6 +112,30 @@ export function createInjectionFacts(deps: FactsDeps = {}): InjectionFacts {
         return false;
       }
     },
+    ownWindowAt: (p) => {
+      try {
+        return (el().BrowserWindow?.getAllWindows?.() ?? []).some((w) => {
+          const b = w.isVisible() ? w.getBounds() : null;
+          return !!b && p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height;
+        });
+      } catch {
+        return false;
+      }
+    },
+    cursor: () => {
+      try {
+        return el().screen?.getCursorScreenPoint?.() ?? null;
+      } catch {
+        return null;
+      }
+    },
+    snapshotPid: () =>
+      once("snapPid", async () => {
+        const ms = budget(UIA_FACT_MS);
+        if (ms <= 0) return null;
+        const data = (await sidecar().request("ui.snapshot", { maxItems: 1 }, ms)) as { pid?: unknown };
+        return typeof data?.pid === "number" && data.pid > 0 ? data.pid : null;
+      }),
     clipboardText: () => {
       try {
         return el().clipboard?.readText() ?? "";

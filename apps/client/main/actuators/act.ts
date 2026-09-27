@@ -20,8 +20,10 @@ import { type FoundTarget, findTarget } from "./act-find.js";
 import { type ActDone, performAct } from "./act-do.js";
 import { type ActVerdict, precheckVerify, verifyOutcome } from "./act-verify.js";
 import { focusApp } from "./apps.js";
-import { assertActCommitAllowed } from "./commit-guard.js";
+import { withExpectedForeground } from "./approval-scope.js";
+import { preflightKeys, preflightText } from "./injection-guard.js";
 import { captureUiFingerprint } from "./observe.js";
+import { PASTE_FROM_CHARS } from "./paste-text.js";
 import { focusWindow } from "./windows.js";
 
 const log = createLogger("actuator:act");
@@ -62,18 +64,37 @@ async function focusAppWindow(app: string): Promise<{ title: string; hwnd?: numb
   );
 }
 
+/**
+ * G-9 (П1): РАННЯЯ проверка клавишных намерений — сразу после поиска цели, ДО первой инжекции (клика в поле):
+ * «привет\n» в Telegram без гранта = ни клика, ни буквы. Клики судит рубеж на первой же инжекции.
+ * Длинный текст идёт вставкой (act-do, H-T1) — перевод строки в ней не Enter.
+ */
+async function earlyKeyCheck(cmd: ActCommand): Promise<void> {
+  const verb = cmd.do ?? "click";
+  if (verb === "key" && cmd.combo) await preflightKeys([cmd.combo]);
+  if (verb === "type" && cmd.text && cmd.text.length < PASTE_FROM_CHARS && /[\r\n]/u.test(cmd.text)) await preflightText(cmd.text);
+  if (cmd.enter === true) await preflightKeys(["Enter"]); // П4: Enter после печати — тот же рубеж, но до первой буквы
+}
+
 export async function act(cmd: ActCommand, opts: { restoreCursor: boolean }): Promise<ActOutcome> {
   validateAct(cmd);
   const deadline = Date.now() + ACT_BUDGET_MS;
   const win = cmd.app?.trim() ? await focusAppWindow(cmd.app.trim()) : undefined;
+  // G-11 (П1): окно app известно по hwnd — вся клавиатура act уходит только в него (рубеж сверяет живой передний план).
+  const run = (): Promise<ActOutcome> => actIn(cmd, opts, deadline, win);
+  return win?.hwnd ? withExpectedForeground({ hwnd: win.hwnd, title: win.title }, run) : run();
+}
+
+async function actIn(cmd: ActCommand, opts: { restoreCursor: boolean }, deadline: number, win: { title: string; hwnd?: number } | undefined): Promise<ActOutcome> {
   const found = cmd.target !== undefined ? await findTarget(cmd.target, deadline, { hwnd: win?.hwnd }) : undefined;
   log.info("act", { verb: cmd.do ?? "click", via: found?.via, name: found?.name, app: win?.title });
+  await earlyKeyCheck(cmd);
   // W2: observe:false (промежуточный шаг act{steps}) — без снимков до/после; сверка — признак verify или следующий шаг.
   const observe = cmd.observe !== false;
   // Снимок «до» — база дельты; на UIA-слепом окне OCR той же области, что и «после» (нужна точка).
   const before = observe ? await captureUiFingerprint(found?.point) : undefined;
   const preMet = await precheckVerify(cmd.verify, deadline); // H-V1: признак, видимый ДО действия, исход не доказывает
-  await assertActCommitAllowed(cmd); // контроль-2 №4: §14 по реально сфокусированному процессу, ДО действия
+  // §14 (W2): коммит судит рубеж инжекции по НАЙДЕННОМУ элементу и реальному процессу; одобрение — гранты области.
   const done = await performAct(found, cmd, { restoreCursor: opts.restoreCursor });
   const clickPoint = found?.point ?? (done.screenX !== undefined && done.screenY !== undefined ? { x: done.screenX, y: done.screenY } : undefined);
   const verdict = await verifyOutcome(cmd.verify, { before, clickPoint, deadline, preMet, observe });

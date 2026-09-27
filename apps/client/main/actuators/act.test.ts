@@ -1,12 +1,13 @@
 /**
- * W4 «Руки»: примитив act — ОРКЕСТРАТОР (окно app → поиск → снимок «до» → рубеж → действие → сверка). Тесты идут через
- * РЕАЛЬНЫЙ act(); мокаются только листья (test-support/act-mocks). W2 (пакет 0): поиск — act-find.test.ts (П5),
- * действие — act-do.test.ts (П4), здесь — оркестрация (П1).
+ * W4 «Руки»: примитив act — ОРКЕСТРАТОР (окно app → поиск → ранняя проверка клавиш → снимок «до» → действие → сверка).
+ * Тесты идут через РЕАЛЬНЫЙ act() и НАСТОЯЩИЙ рубеж инжекции (судьи, факты на fake-sidecar в реальной форме); мокаются
+ * только листья act (test-support/act-mocks). W2: поиск — act-find.test.ts (П5), действие — act-do.test.ts (П4).
  *
  * Что охраняется (каждый кейс — реверт-проверяемый):
  *  - окно app не найдено → ошибка ДО поиска и действия; фокус — факт в ответе (заголовок);
  *  - «не смог проверить» ≠ «не наступило» (unknown → unchecked, не failed); признак, видимый ДО действия, — unchecked;
- *  - §14-рубеж act стоит ДО действия (контроль-2 №4);
+ *  - W2 П1 (G-9): клавишное намерение (combo, «\n» в тексте) судится ДО первой инжекции (клика в поле); одобрение —
+ *    только грант из области серверной команды (`commitApproved` в команде ничего не значит);
  *  - W2: observe:false — ни снимка «до», ни наблюдения «после»; hwnd окна app доходит до поиска.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,13 +21,27 @@ vi.mock("./paste-text.js", async () => (await import("../test-support/act-mocks.
 vi.mock("./observe.js", async () => (await import("../test-support/act-mocks.js")).actMocks.observe(st));
 vi.mock("./windows.js", async () => (await import("../test-support/act-mocks.js")).actMocks.windows(st));
 vi.mock("./apps.js", async () => (await import("../test-support/act-mocks.js")).actMocks.apps(st));
+// W2 П1: рубеж инжекции — настоящий; его факты (окна, фокус) — фейковый сайдкар в реальной форме и мок Electron.
+vi.mock("electron", async () => (await import("../test-support/electron-mock.js")).electronModule);
+vi.mock("./sidecar-client.js", async () => (await import("../test-support/fake-sidecar.js")).fakeSidecarModule());
 
+import { type FakeSidecar, useFakeSidecar } from "../test-support/fake-sidecar.js";
+import { resetElectronMock } from "../test-support/electron-mock.js";
 import { resetActState } from "../test-support/act-mocks.js";
 import { act } from "./act.js";
 import { verifyCondition } from "./act-verify.js";
+import { serverExecutor } from "./approval-scope.js";
 
 const OPTS = { restoreCursor: true };
-beforeEach(() => resetActState(st));
+const TG = { hwnd: 1, pid: 7, process: "Telegram", title: "Telegram", foreground: true, x: 0, y: 0, w: 1920, h: 1080 };
+let fake: FakeSidecar;
+beforeEach(() => {
+  resetActState(st);
+  resetElectronMock();
+  fake = useFakeSidecar();
+  fake.windows = [TG];
+  fake.focusedText = "ControlType.Edit: Сообщение";
+});
 
 describe("act — окно app", () => {
   it("app не найдено (сайдкар и AppActivate не сфокусировали) → ошибка ДО поиска и действия", async () => {
@@ -37,8 +52,10 @@ describe("act — окно app", () => {
   });
 
   it("app сфокусировано → ответ несёт focused; do:key → pressKey без цели; do:key без combo → ошибка", async () => {
-    const r = await act({ kind: "gui.act", app: "Telegram", do: "key", combo: "Ctrl+S" }, OPTS);
-    expect(r.focused).toBe("Telegram");
+    fake.windows = [{ ...TG, process: "notepad", title: "Блокнот" }];
+    st.focusWindow = async () => ({ focused: true, hwnd: 1, title: "Блокнот" });
+    const r = await act({ kind: "gui.act", app: "Блокнот", do: "key", combo: "Ctrl+S" }, OPTS);
+    expect(r.focused).toBe("Блокнот");
     expect(st.pressKey).toHaveBeenCalledWith("Ctrl+S");
     await expect(act({ kind: "gui.act", do: "key" }, OPTS)).rejects.toThrow(/без combo/u);
   });
@@ -78,13 +95,31 @@ describe("act — сверка", () => {
   });
 });
 
-describe("act — §14 до действия", () => {
-  // Контроль-2 №4: проводка рубежа в самом act. Реверт: убери вызов assertActCommitAllowed в act.ts — Enter нажмётся.
-  it("app «tele» сфокусировал Telegram, Enter без подтверждения сервера → отказ ДО нажатия; с подтверждением — нажимает", async () => {
-    st.fg = "Telegram";
-    await expect(act({ kind: "gui.act", app: "tele", do: "key", combo: "Enter" }, OPTS)).rejects.toThrow(/§14.*Ничего не нажато/u);
+describe("act — §14 до действия (W2 П1, G-9: ранняя проверка клавиш)", () => {
+  const approve = (grants: Array<{ signature: string; process: string; count: number; hwnd?: number }>, run: () => Promise<unknown>) =>
+    serverExecutor(async (commandId) => (await run(), { commandId, ok: true, durationMs: 0 }))("srv-1", { kind: "gui.act", approval: { grants, expiresAt: Date.now() + 60_000 } });
+
+  // Реверт: убери earlyKeyCheck в act.ts — Enter дойдёт до pressKey (листа), рубеж его уже не увидит.
+  it("app «tele» сфокусировал Telegram, Enter без гранта → отказ ДО нажатия; `commitApproved` в команде не одобряет; грант key:enter — нажимает", async () => {
+    await expect(act({ kind: "gui.act", app: "tele", do: "key", combo: "Enter" }, OPTS)).rejects.toMatchObject({ actionCode: "denied" });
+    await expect(act({ kind: "gui.act", app: "tele", do: "key", combo: "Enter", commitApproved: true }, OPTS)).rejects.toThrow(/§14.*Ничего не нажато/u);
     expect(st.pressKey).not.toHaveBeenCalled();
-    await act({ kind: "gui.act", app: "Telegram", do: "key", combo: "Enter", commitApproved: true }, OPTS);
+    await approve([{ signature: "key:enter", process: "telegram", count: 1 }], () => act({ kind: "gui.act", app: "Telegram", do: "key", combo: "Enter" }, OPTS));
     expect(st.pressKey).toHaveBeenCalledWith("Enter");
+  });
+
+  it("«привет\n» в поле Telegram без гранта → отказ ДО клика в поле: ни клика, ни печати; needsApproval — key:enter", async () => {
+    let err: unknown;
+    await approve([], () => act({ kind: "gui.act", app: "Telegram", do: "type", target: "Поиск", text: "привет\n" }, OPTS)).catch((e) => (err = e));
+    expect(err).toMatchObject({ actionCode: "denied", actionData: { needsApproval: { signature: "key:enter", process: "telegram", category: "messenger" } } });
+    expect(st.click).not.toHaveBeenCalled();
+    expect(st.typeText).not.toHaveBeenCalled();
+  });
+
+  it("G-11: act сфокусировал Блокнот (hwnd 11), а спереди уже Telegram → клавиша не уходит: «фокус ушёл», ничего не нажато", async () => {
+    fake.windows = [TG, { ...TG, hwnd: 11, pid: 9, process: "notepad", title: "Блокнот", foreground: false }];
+    st.focusWindow = async () => ({ focused: true, hwnd: 11, title: "Блокнот" });
+    await expect(act({ kind: "gui.act", app: "Блокнот", do: "key", combo: "Ctrl+S" }, OPTS)).rejects.toThrow(/фокус ушёл с «Блокнот» на «Telegram»/u);
+    expect(st.pressKey).not.toHaveBeenCalled();
   });
 });

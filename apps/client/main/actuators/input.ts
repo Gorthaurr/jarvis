@@ -21,8 +21,12 @@ export { DrawingOverlayError };
 import type { Target } from "@jarvis/protocol";
 import { createLogger, isBlockedCombo, normalizeCombo } from "@jarvis/shared";
 import { sidecar } from "./sidecar-client.js";
-import { toDipPoint } from "./coords.js";
-import { ground, groundAtPoint, invoke } from "./ground.js";
+import { physicalRectToDip, toDipPoint } from "./coords.js";
+import { groundAtPoint, invoke } from "./ground.js";
+import { actionErrorOf } from "./action-error.js";
+import { riskyHandlePoint } from "./handle-click.js";
+import { invokableAtPoint } from "./point-policy.js";
+import { groundForAction } from "./process-of.js";
 // W2 (пакет 0): все мутирующие RPC — через рубеж инжекции (inject.ts); печать — type-chunks.ts, готовность — sidecar-ready.ts.
 import { injectRpc } from "./inject.js";
 import { NotImplementedError, ensureSidecar as ensure } from "./sidecar-ready.js";
@@ -154,7 +158,7 @@ export async function click(
   method: "silent" | "physical" = "silent",
   restoreCursor = true,
   opts?: { button?: "left" | "right" | "middle"; count?: number },
-): Promise<{ screenX: number; screenY: number } | undefined> {
+): Promise<{ screenX: number; screenY: number; pressed?: string } | undefined> {
   const button = opts?.button ?? "left";
   const count = Math.max(1, Math.min(3, opts?.count ?? 1));
   // §режим выделения (контроль-3): явно ФИЗИЧЕСКИЙ клик (coords / physical / правая-средняя-дабл) гейтим
@@ -165,6 +169,8 @@ export async function click(
   // coords модели → логические DIP virtual-desktop (coords.ts: кадр / последний screen_capture; space="screen" — как есть).
   const coords = target.by === "coords" ? toDipPoint(target.x, target.y, target) : null;
   const resolved = coords ? { screenX: coords.x, screenY: coords.y } : undefined;
+  /** W2 (G-10): что РЕАЛЬНО под точкой — в отчёт «нажат Role «Name»» (а не текст запроса). */
+  let pressed: string | undefined;
 
   // БЕСШУМНАЯ лестница (ступени 1-2). Провал ступени → честный фолбэк на физ.клик ниже (не молча).
   // §Волна2 (2.4): правый/средний/дабл-клик UIA-invoke не выразить — сразу физический путь.
@@ -177,10 +183,15 @@ export async function click(
       }
       if (coords) {
         const g = await groundAtPoint(coords.x, coords.y); // элемент под точкой
-        await invoke({ by: "handle", handle: g.handle }, "invoke");
-        return resolved;
+        pressed = `${String(g.role ?? "").replace(/^ControlType\./u, "") || "элемент"} «${String(g.name ?? "").slice(0, 60)}»`;
+        // W2 (G-10): invoke — только МАЛОГО элемента; строка списка 400×64 с «×» — физически ровно в точку.
+        if (invokableAtPoint(physicalRectToDip(g.bbox))) {
+          await invoke({ by: "handle", handle: g.handle }, "invoke");
+          return { screenX: coords.x, screenY: coords.y, pressed };
+        }
       }
     } catch (e) {
+      if (actionErrorOf(e)?.code === "denied") throw e; // W2: отказ рубежа — не повод нажать то же физически
       log.debug("бесшумный клик не удался — фолбэк на физ.клик (курсор вернём при простое)", e instanceof Error ? e.message : String(e));
       // проваливаемся ниже в физ.клик
     }
@@ -197,14 +208,15 @@ export async function click(
   const t0 = Date.now();
   if (target.by === "coords") {
     await injectRpc("click", { x: coords!.x, y: coords!.y, restoreCursor, button, count });
-  } else if (target.by === "handle") {
-    await injectRpc("click", { handle: target.handle, restoreCursor, button, count });
   } else {
-    const g = await ground({ role: target.role, name: target.name }); // role → handle → физ.клик по центру
-    await injectRpc("click", { handle: g.handle, restoreCursor, button, count });
+    // role → ground с процессом найденного (W2 П1: не «весь стол»); handle → как есть.
+    const handle = target.by === "handle" ? target.handle : (await groundForAction({ role: target.role, name: target.name })).handle;
+    // W2 (безопасность №11): в рискованной программе — в центр bbox, и рубеж судит элемент ПОД этой точкой.
+    const pt = await riskyHandlePoint(handle);
+    await injectRpc("click", pt ? { x: pt.x, y: pt.y, restoreCursor, button, count } : { handle, restoreCursor, button, count });
   }
   assertNoOverlayDuring(t0, "Клик");
-  return resolved;
+  return resolved && pressed ? { ...resolved, pressed } : resolved;
 }
 
 /** Параметры полной мыши (§Волна2 2.4) — зеркало ActionCommand input.mouse без kind. */

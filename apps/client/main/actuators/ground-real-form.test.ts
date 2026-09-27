@@ -12,7 +12,6 @@ import type { FakeSidecar } from "../test-support/fake-sidecar.js";
 vi.mock("electron", async () => (await import("../test-support/electron-mock.js")).electronModule);
 vi.mock("./sidecar-client.js", async () => (await import("../test-support/fake-sidecar.js")).fakeSidecarModule());
 vi.mock("./observe.js", () => ({ captureUiFingerprint: async () => undefined, observeAfterAction: async () => undefined }));
-vi.mock("./commit-guard.js", () => ({ assertActCommitAllowed: async () => undefined }));
 
 import { useFakeSidecar } from "../test-support/fake-sidecar.js";
 import { resetElectronMock } from "../test-support/electron-mock.js";
@@ -23,6 +22,8 @@ import { act } from "./act.js";
 let fake: FakeSidecar;
 beforeEach(() => {
   fake = useFakeSidecar();
+  // W2 П1: рубеж инжекции судит процесс под точкой — Блокнот на весь экран (не рискованный).
+  fake.windows = [{ hwnd: 5, pid: 4242, process: "notepad", title: "Блокнот", foreground: true, x: 0, y: 0, w: 1920, h: 1080 }];
   resetElectronMock();
   resetMirror();
 });

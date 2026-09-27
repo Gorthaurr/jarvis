@@ -15,6 +15,7 @@ import { NotImplementedError, ensureSidecar } from "./sidecar-ready.js";
 import { sidecar } from "./sidecar-client.js";
 import { injectRpc } from "./inject.js";
 import { noteGround, noteSnapshot } from "./handle-mirror.js";
+import { groundForAction } from "./process-of.js";
 
 const log = createLogger("actuator:ground");
 
@@ -61,26 +62,17 @@ function asGroundResult(data: unknown): GroundResult {
   return g;
 }
 
-/** Найти элемент по роли/имени в активном окне (a11y-first, §6). §Волна2 (2.4): nameMode="substring"
- *  — матч имени по вхождению; automationId — устойчивый id. Scope в сайдкаре: активное окно → фолбэк
- *  на весь рабочий стол. §Волна3 ревью (#6): scope="active" — ТОЛЬКО активное окно, без фолбэка на
- *  стол (для предусловий шага навыка — иначе чужое фоновое окно даёт ложный pass). */
-export async function ground(query: {
-  role: string;
-  name?: string;
-  nameMode?: "exact" | "substring";
-  automationId?: string;
-  scope?: "active";
-}): Promise<GroundResult> {
+/** Найти элемент по роли/имени (a11y-first, §6). nameMode="substring" — по вхождению; automationId — устойчивый id.
+ *  scope: нет → активное окно, затем весь стол; "active" — ТОЛЬКО активное (предусловия навыка, ревью #6);
+ *  "<pid>" — окно процесса (W2: мутирующий ground судится по процессу найденного — process-of.groundForAction). */
+export async function ground(
+  query: { role: string; name?: string; nameMode?: "exact" | "substring"; automationId?: string; scope?: string },
+  timeoutMs = UIA_TIMEOUT_MS,
+): Promise<GroundResult> {
   ensure();
   log.debug("ui.ground", query);
-  return asGroundResult(
-    await sidecar().request(
-      "ground",
-      { role: query.role, name: query.name, nameMode: query.nameMode, automationId: query.automationId, scope: query.scope },
-      UIA_TIMEOUT_MS,
-    ),
-  );
+  const { role, name, nameMode, automationId, scope } = query;
+  return asGroundResult(await sidecar().request("ground", { role, name, nameMode, automationId, scope }, timeoutMs));
 }
 
 /** §Волна2 (2.4): интерактивные элементы окна одним списком (set-of-marks) — дешёвые «глаза». */
@@ -132,7 +124,8 @@ export async function invoke(target: Target, pattern: UiPattern, value?: string)
   }
   let handle: string;
   if (target.by === "handle") handle = target.handle;
-  else if (target.by === "role") handle = (await ground({ role: target.role, name: target.name })).handle;
+  // W2 П1: по роли — ground с процессом найденного (активное окно, затем верхние по z-order), не «весь стол».
+  else if (target.by === "role") handle = (await groundForAction({ role: target.role, name: target.name })).handle;
   else throw new NotImplementedError("ui.invoke по координатам невозможен — нужен a11y-handle");
   await injectRpc("invoke", { handle, pattern, value }, UIA_TIMEOUT_MS); // W2: через рубеж инжекции
 }

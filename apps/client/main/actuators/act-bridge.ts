@@ -12,8 +12,7 @@ import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
-import { runWithoutApproval } from "./approval-scope.js";
-import { foregroundProcess, guardedDispatch } from "./commit-guard.js";
+import { BRIDGE_LOCAL_KINDS, bridgeExecutor } from "./bridge-exec.js";
 
 const log = createLogger("actuator:act-bridge");
 
@@ -69,13 +68,11 @@ export interface ActBridge {
 /**
  * Поднять loopback-мост актуаторов. dispatch внедряется (актуаторный dispatch клиента). Возвращает
  * {port, token, stop}. Жизненный цикл — на вызывающем (стартуем один раз на boot, гасим на выходе).
- * W2 (пакет 0): гард §14 моста (commit-guard) и область БЕЗ одобрения — внутри моста, а не у вызывающего: команда
- * моста исполняется в `runWithoutApproval("bridge")`, даже если python запущен изнутри одобренной серверной команды.
- * `fg` — передний план для гарда (тесты подменяют).
+ * W2 П1: команда моста — без `approval`/`commitApproved` из тела и в области `bridge` БЕЗ одобрения (bridge-exec.ts),
+ * даже если python запущен изнутри одобренной серверной команды; §14/§0/своё окно судит рубеж инжекции.
  */
-export function startActBridge(rawDispatch: DispatchFn, fg: () => Promise<string | null> = foregroundProcess): Promise<ActBridge> {
-  const guarded = guardedDispatch(rawDispatch, fg);
-  const dispatch: DispatchFn = (commandId, cmd) => runWithoutApproval("bridge", () => guarded(commandId, cmd), commandId);
+export function startActBridge(rawDispatch: DispatchFn): Promise<ActBridge> {
+  const dispatch: DispatchFn = bridgeExecutor(rawDispatch);
   const token = randomUUID();
   let counter = 0;
 
@@ -114,7 +111,7 @@ export function startActBridge(rawDispatch: DispatchFn, fg: () => Promise<string
       }
       // Гейт возможностей моста: только механический GUI/восприятие. Привилегированные каналы (отправка/
       // заказы/креды/необратимое) — 403, обязаны идти серверным путём с §14-гардами (см. BRIDGE_ALLOWED_KINDS).
-      if (!BRIDGE_ALLOWED_KINDS.has(cmd.kind)) {
+      if (!BRIDGE_ALLOWED_KINDS.has(cmd.kind) && !BRIDGE_LOCAL_KINDS.has(cmd.kind)) {
         log.warn("act-bridge: kind вне allowlist отклонён", { kind: cmd.kind });
         res
           .writeHead(403, { "content-type": "application/json" })
