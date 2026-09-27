@@ -25,6 +25,16 @@ describe("InputBuffer", () => {
     expect(b.digits(2)).toBe("42");
   });
 
+  it("забой стирает последний символ и из текста, и из хвоста цифр; empty — эпоха пуста", () => {
+    const b = new InputBuffer();
+    expect(b.empty).toBe(true);
+    b.append("4276 16009");
+    b.backspace();
+    expect(b.recent()).toBe("4276 1600");
+    expect(b.digits()).toBe("4276 1600");
+    expect(b.empty).toBe(false);
+  });
+
   it("кап текста; время последней печати", () => {
     const b = new InputBuffer();
     b.append("x".repeat(1000), 5);

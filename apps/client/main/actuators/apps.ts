@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import { createLogger } from "@jarvis/shared";
 import { LaunchError, smartLaunch } from "./app-resolve.js";
 import { builtinLaunchPath } from "./windows-builtins.js";
+import { noteFocusChange } from "./secret-memory.js";
 import { DrawingOverlayError, assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 
 const log = createLogger("actuator:apps");
@@ -155,6 +156,7 @@ export async function launchApp(app: string): Promise<LaunchOutcome> {
   const launchTarget = builtinLaunchPath(query) ?? query;
   log.info(`launch: "${app}" -> резолв "${launchTarget}"`);
   const r = await smartLaunch(launchTarget);
+  noteFocusChange(); // П2 (§0): новое окно на переднем плане — набранное в прежнем поле к нему не относится
   // Ветка URI без признаков запуска (ms-settings:, https:, tg:) и стаб-лончеры UWP подтвердить нечем:
   // говорим это ПРЯМО в результате, иначе «ОС приняла обработчик» снова прочитается как «запустил»
   // (живой дефект steam://rungameid/<мусор> → «Готово»; у Steam-игры теперь есть настоящая сверка).
