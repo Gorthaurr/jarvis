@@ -252,7 +252,7 @@ export async function browserRead(ctx: ToolContext, input: Record<string, unknow
             media?: { currentTime?: number; currentTimeLabel?: string; duration?: number; durationLabel?: string; paused?: boolean };
           }
         | undefined;
-      const internal = privateTabRead("browser_read", r); if (internal) return internal; // B-14: вкладку увели во внутреннюю сеть
+      const internal = await privateTabRead("browser_read", r, ctx.resolveHost); if (internal) return internal; // B-14: вкладку увели во внутреннюю сеть
       const hs = Array.isArray(r?.headings) ? (r?.headings as unknown[]).map(String).filter(Boolean).slice(0, 20) : [];
       const outline = hs.length ? `\n[Разделы страницы: ${hs.join(" | ")}]` : "";
       // Честность фильтра: query задан, но ничего не выделил → модель знает, что ниже ОБЩИЙ дамп, а не «нашлось».
@@ -303,7 +303,7 @@ export async function browserInspect(ctx: ToolContext, input: Record<string, unk
     const r = (await ctx.ext.tabInspect(target.url, query, cap, target.tabId)) as
       | { url?: string; title?: string; count?: number; truncated?: boolean; gen?: number; elements?: unknown[] }
       | undefined;
-    const internal = privateTabRead("browser_inspect", r); if (internal) return internal; // B-14
+    const internal = await privateTabRead("browser_inspect", r, ctx.resolveHost); if (internal) return internal; // B-14
     rememberRefHints(ctx, r?.elements); // W1: дописывает (find не стирает подписи и secret прежних ref)
     // B-16: снимок под кап символов — длинные value/подписи и сотни элементов не раздувают контекст.
     const shown = capInspectElements(r?.elements);
@@ -407,7 +407,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       // value/checked НЕ в diagObj (доверенное тело) — синхронный обработчик враждебного фрейма может
       // переписать el.value на инъекцию во время dispatch input/change, а readback перечитывает уже её.
       // B-6 (старое расширение): back/forward на видео перематывали плеер — это не переход, «Сделал» было бы ложью.
-      const internal = privateActResult(intent, r); if (internal) return internal; // B-14: действие было, вкладка ушла внутрь
+      const internal = await privateActResult(intent, r, ctx.resolveHost); if (internal) return internal; // B-14: действие было, вкладка ушла внутрь
       const seekNotHistory = historySeekMismatch(intent, r);
       if (seekNotHistory) return seekNotHistory;
       const diagObj: Record<string, unknown> = {};

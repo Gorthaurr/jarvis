@@ -4,7 +4,9 @@
  *
  * Реверт-проверки (из копии): одноярусное имя идёт в резолвер → «интранет» красный; слот отпускается по таймауту
  * вердикта, а не по ответу резолвера → «слот до ответа» красный; нет дедупа/кеша → «одно имя — один резолв» красный;
- * ушедший клиент всё равно резолвится → «снят из очереди» красный; слотов больше одного → «по одному» красный.
+ * ушедший клиент всё равно резолвится → «снят из очереди» красный; слотов больше одного → «по одному» красный;
+ * слот не отпускается при ошибке резолвера → «резолвер бросил» красный (прокси умер бы на первом NXDOMAIN); кеш без
+ * лимита → «лимит кеша» красный; IPv6-литерал принят за одноярусное имя → «литералы» красный.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostJudge } from "./jarvis-browser-proxy-judge.js";
@@ -78,7 +80,7 @@ describe("B-14: суд пиннинг-прокси бережёт пул рез�
     expect((await next).ok).toBe(true);
   });
 
-  it("одно имя: в полёте — один резолв, публичный вердикт помнится 30 с, потом спрашиваем заново", async () => {
+  it("одно имя: в полёте — один резолв, публичный вердикт помнится 40 с (≥ окна гарда 35 с), потом спрашиваем заново", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const m = manualLookup();
     const j = new HostJudge({ lookup: m.lookup });
@@ -89,11 +91,48 @@ describe("B-14: суд пиннинг-прокси бережёт пул рез�
     expect(await b).toEqual(await a);
     expect(await j.judge("web.telegram.org")).toEqual(await a);
     expect(m.asked).toHaveLength(1);
-    vi.setSystemTime(Date.now() + 31_000);
+    vi.setSystemTime(Date.now() + 36_000);
+    expect(await j.judge("web.telegram.org")).toEqual(await a); // в окне сопоставления гарда — ещё из кеша
+    expect(m.asked).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 5_000);
     const c = j.judge("web.telegram.org");
     await vi.waitFor(() => expect(m.asked).toHaveLength(2));
     m.answer(1, ["127.0.0.1"]);
     expect(await c).toMatchObject({ ok: false, reason: "private" });
+  });
+
+  it("резолвер бросил (NXDOMAIN) → слот отпущен, следующее имя резолвится", async () => {
+    const asked: string[] = [];
+    const j = new HostJudge({
+      lookup: async (h) => {
+        asked.push(h);
+        if (h === "nx.test") throw Object.assign(new Error("nx"), { code: "ENOTFOUND" });
+        return ["203.0.113.10"];
+      },
+    });
+    expect(await j.judge("nx.test")).toMatchObject({ ok: false, reason: "unresolved" });
+    expect((await j.judge("ok.test")).ok).toBe(true);
+    expect(asked).toEqual(["nx.test", "ok.test"]);
+  });
+
+  it("литералы IPv4/IPv6 — не интранет: публичный проходит без резолва, loopback — отказ", async () => {
+    const m = manualLookup();
+    const j = new HostJudge({ lookup: m.lookup });
+    expect(await j.judge("8.8.8.8")).toEqual({ ok: true, addresses: ["8.8.8.8"] });
+    expect(await j.judge("2001:4860:4860::8888")).toEqual({ ok: true, addresses: ["2001:4860:4860::8888"] });
+    expect(await j.judge("::1")).toMatchObject({ ok: false, reason: "private" });
+    expect(m.asked).toEqual([]);
+  });
+
+  it("лимит кеша: 300 имён — самое старое вытеснено и спрашивается заново, свежее — из кеша", async () => {
+    const asked: string[] = [];
+    const j = new HostJudge({ lookup: async (h) => (asked.push(h), ["203.0.113.10"]) });
+    for (let i = 0; i < 300; i++) await j.judge(`h${i}.test`);
+    asked.length = 0;
+    await j.judge("h299.test");
+    expect(asked).toEqual([]);
+    await j.judge("h0.test");
+    expect(asked).toEqual(["h0.test"]);
   });
 
   it("отказ не кешируется: приватный ответ спрашивается заново", async () => {

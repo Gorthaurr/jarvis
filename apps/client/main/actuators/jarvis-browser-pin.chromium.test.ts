@@ -55,8 +55,9 @@ describe.skipIf(!chrome)("B-14 (rebinding): невидимый браузер п
   it("web_open: гарду DNS ответил публичным, подключению — 127.0.0.1 → отказ прокси, честная ошибка, «роутер» без запросов", async () => {
     expect((await jb.open(shopUrl("/"))).text).toContain("SHOP"); // контроль: обычный путь через прокси жив
     const r = await openErr(at("rebind1.jb.example"));
-    expect(r).toMatch(/^ERR .*внутренний адрес \(rebind1\.jb\.example\)/u);
+    expect(r).toMatch(/^ERR .*внутренний адрес/u);
     expect(r).not.toContain("ROUTER-SECRET");
+    expect(r).not.toContain("rebind1.jb.example"); // имя задаёт страница — в доверенный текст не попадает (B-14)
     expect(rebindAsked.get("rebind1.jb.example")).toBe(2); // суд гарда (публичный) + суд подключения (127.0.0.1)
     expect(proxyBlocked()).toContain("rebind1.jb.example");
     expect(router.hits).toHaveLength(0);
@@ -67,7 +68,7 @@ describe.skipIf(!chrome)("B-14 (rebinding): невидимый браузер п
     await jb.act("click", { selector: "#l" }).catch(() => "act-error");
     await new Promise((r) => setTimeout(r, 800));
     const read = await jb.read().then((p) => JSON.stringify(p), (e: Error) => `ERR ${e.message}`);
-    expect(read).toMatch(/^ERR .*внутренний адрес \(rebind2\.jb\.example\)/u);
+    expect(read).toMatch(/^ERR .*внутренний адрес/u);
     expect(read).not.toContain("ROUTER-SECRET");
     expect(proxyBlocked()).toContain("rebind2.jb.example");
     expect(router.hits).toHaveLength(0);

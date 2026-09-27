@@ -7,7 +7,7 @@
  */
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createServer, get, type Server } from "node:http";
-import { gzipSync } from "node:zlib";
+import { brotliCompressSync, gzipSync } from "node:zlib";
 import type { HostLookup } from "@jarvis/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PRIVATE_ADDRESS, pinnedLookup, pinnedTransport, toResponse } from "./pinned-fetch.js";
@@ -16,12 +16,19 @@ import { WebProvider } from "./web.js";
 let server: Server;
 let port = 0;
 const hits: string[] = [];
+let hangClosedAt = 0;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
     hits.push(req.url ?? "/");
     if (req.url === "/gz") return void res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-encoding": "gzip" }).end(gzipSync("разжатое тело"));
     if (req.url === "/empty") return void res.writeHead(204).end();
+    if (req.url === "/gzbr") return void res.writeHead(200, { "content-encoding": "gzip, br" }).end(brotliCompressSync(gzipSync("два слоя сжатия")));
+    if (req.url === "/zstd") return void res.writeHead(200, { "content-encoding": "zstd" }).end("(µ/ý сырые байты");
+    if (req.url === "/gz-hang") {
+      req.socket.on("close", () => void (hangClosedAt = Date.now()));
+      return void res.writeHead(200, { "content-encoding": "gzip" }).write(gzipSync("x".repeat(50_000)).subarray(0, 200)); // тело не кончается
+    }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end("<h1>ROUTER-SECRET</h1>");
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
@@ -109,6 +116,19 @@ describe("B-14 (DNS): транспорт web.fetch пиннит проверен
     const empty = toResponse(await raw("/empty"));
     expect(empty.status).toBe(204);
     expect(empty.body).toBeNull();
+    // Адверс-ревью: «gzip, br» раньше уходил модели сжатыми байтами; неизвестное сжатие — честный отказ, не мусор.
+    expect(await toResponse(await raw("/gzbr")).text()).toBe("два слоя сжатия");
+    const zstd = await raw("/zstd");
+    expect(() => toResponse(zstd)).toThrow(/неизвестное сжатие/u);
+  });
+
+  it("отмена тела на пути разжатия закрывает и сокет (раньше висел до таймаута цепочки)", async () => {
+    hangClosedAt = 0;
+    const res = await new Promise<import("node:http").IncomingMessage>((r) => get(`http://127.0.0.1:${port}/gz-hang`, r));
+    const t0 = Date.now();
+    await toResponse(res).body!.cancel();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(hangClosedAt).toBeGreaterThanOrEqual(t0);
   });
 });
 

@@ -54,3 +54,46 @@ export async function checkHostPublic(host: string, opts: { lookup?: HostLookup;
   const bad = addresses.find((a) => isPrivateIp(a));
   return bad ? { ok: false, reason: "private", address: bad } : { ok: true, addresses };
 }
+
+/**
+ * Резолвер для ЧАСТЫХ вызовов (перехват каждой навигации в процессе клиента): getaddrinfo идёт в пул libuv (4 потока на
+ * весь процесс, fs/zlib/crypto там же), а таймаут withTimeout поток НЕ освобождает — страница с iframe на имена с
+ * молчащим NS занимала бы весь пул. Здесь: ≤ concurrency одновременных запросов, одно имя в полёте — один запрос,
+ * удачный ответ — кеш ttlMs (ошибки не кешируем).
+ */
+export function limitLookup(lookup: HostLookup, opts: { concurrency?: number; ttlMs?: number } = {}): HostLookup {
+  const max = opts.concurrency ?? 2;
+  const ttl = opts.ttlMs ?? 30_000;
+  let active = 0;
+  const queue: Array<() => void> = [];
+  // Слот освобождается передачей следующему в очереди (без окна, где новый вызов обгонит разбуженного).
+  const slot = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active < max) active += 1;
+    else await new Promise<void>((r) => queue.push(r));
+    try {
+      return await fn();
+    } finally {
+      const next = queue.shift();
+      if (next) next();
+      else active -= 1;
+    }
+  };
+  const cache = new Map<string, { at: number; addresses: string[] }>();
+  const inflight = new Map<string, Promise<string[]>>();
+  return (host) => {
+    const hit = cache.get(host);
+    if (hit && Date.now() - hit.at < ttl) return Promise.resolve(hit.addresses);
+    const pending = inflight.get(host);
+    if (pending) return pending;
+    const p = slot(() => lookup(host))
+      .then((addresses) => {
+        cache.delete(host);
+        cache.set(host, { at: Date.now(), addresses });
+        if (cache.size > 500) cache.delete(cache.keys().next().value as string);
+        return addresses;
+      })
+      .finally(() => inflight.delete(host));
+    inflight.set(host, p);
+    return p;
+  };
+}

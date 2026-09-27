@@ -43,6 +43,8 @@ export interface PinProxy {
 }
 
 const HANDSHAKE_MS = 10_000;
+/** Сколько ждём суда (слот + резолв) — не дольше таймаута SOCKS-подключения Chrome; дальше клиент не ждёт. */
+const JUDGE_WAIT_MS = 35_000;
 const CONNECT_MS = 15_000;
 /** Имя-заглушка: net.connect зовёт НАШ lookup (он отдаёт проверенные адреса), а не DNS. */
 const PINNED = "pinned.jarvis.invalid";
@@ -62,7 +64,7 @@ const pinnedLookup = (addrs: string[]): LookupFunction => (_host, o, cb) => {
 async function serve(sock: Socket, opts: PinProxyOpts, judge: HostJudge, blocked: ProxyBlock[]): Promise<void> {
   const target = await readConnectTarget(sock);
   if (!target) return;
-  sock.setTimeout(0);
+  sock.setTimeout(JUDGE_WAIT_MS, () => sock.destroy()); // очередь суда не держит молчащий сокет вечно
   const host = urlHostname(target.raw); // как у гарда: имя из URL в той же канонической записи (IPv6 — сжатая)
   const v = await judge.judge(host, () => !sock.destroyed);
   if (sock.destroyed) return; // Chrome бросил запрос, пока шёл суд
@@ -88,6 +90,7 @@ async function serve(sock: Socket, opts: PinProxyOpts, judge: HostJudge, blocked
   up.once("connect", () => {
     live = true;
     up.setTimeout(0);
+    sock.setTimeout(0); // дальше — долгоживущий канал (wss webK), простой не рвём
     up.setNoDelay(true);
     sock.setNoDelay(true);
     sock.write(reply(REP.ok));

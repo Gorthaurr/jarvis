@@ -3,13 +3,14 @@
  * ВНУТРИ `lookup` сокета: соединение открывается ровно к проверенному адресу, второго резолва нет — ни
  * `localtest.me`/`*.nip.io` (имя → 127.0.0.1), ни DNS rebinding (проверке — публичный, подключению — 127.0.0.1) не
  * проходят. Глобальный fetch (undici) свой lookup не принимает → node:http(s) и обёртка в WHATWG Response: остальной
- * web.fetch (ручные редиректы с гардом на каждом hop, чтение с капом, кодировки) не меняется. Свои Agent'ы без
- * keep-alive: сокет чужого пула (открытый не через наш lookup) по имени хоста не переиспользуется.
+ * web.fetch (ручные редиректы с гардом на каждом hop, чтение с капом, кодировки) не меняется. Свои Agent'ы с keep-alive:
+ * в их пуле только сокеты, открытые через pinnedLookup (к проверенному адресу), — переиспользовать их безопасно;
+ * глобальный пул (сокеты не через наш lookup) не трогаем.
  */
 import http from "node:http";
 import https from "node:https";
 import type { LookupFunction } from "node:net";
-import { Readable } from "node:stream";
+import { type Duplex, Readable, pipeline } from "node:stream";
 import zlib from "node:zlib";
 import { type HostLookup, checkHostPublic } from "@jarvis/shared";
 
@@ -21,7 +22,13 @@ export const PRIVATE_ADDRESS = "EJARVIS_PRIVATE_ADDRESS";
 
 /** `lookup` для net/tls: суд над ответом DNS и выдача ТОЛЬКО проверенных адресов (их сокет и откроет). */
 export function pinnedLookup(lookup?: HostLookup): LookupFunction {
-  return (hostname, options, callback) => {
+  return (hostname, options, cb) => {
+    let done = false; // ровно один ответ сокету, даже если колбэк бросит
+    const callback = ((...args: Parameters<typeof cb>) => {
+      if (done) return;
+      done = true;
+      cb(...args);
+    }) as typeof cb;
     void checkHostPublic(hostname, { lookup }).then((v) => {
       if (!v.ok) {
         const private_ = v.reason === "private";
@@ -38,16 +45,20 @@ export function pinnedLookup(lookup?: HostLookup): LookupFunction {
   };
 }
 
-const agents = { http: new http.Agent({ keepAlive: false }), https: new https.Agent({ keepAlive: false }) };
+const agents = { http: new http.Agent({ keepAlive: true }), https: new https.Agent({ keepAlive: true }) };
 /** Статусы без тела (Response с телом для них бросает). */
 const NULL_BODY = new Set([204, 205, 304]);
 
-function decoderFor(encoding: string): zlib.Gunzip | zlib.BrotliDecompress | zlib.Inflate | null {
-  const e = encoding.trim().toLowerCase();
-  if (e === "gzip" || e === "x-gzip") return zlib.createGunzip();
-  if (e === "br") return zlib.createBrotliDecompress();
-  if (e === "deflate") return zlib.createInflate();
-  return null;
+/** Цепочка разжатия по Content-Encoding (`gzip, br` — снимаем в обратном порядке). Неизвестное сжатие → null. */
+function decodersFor(encoding: string): Duplex[] | null {
+  const out: Duplex[] = [];
+  for (const e of encoding.split(",").map((t) => t.trim().toLowerCase()).filter((t) => t && t !== "identity").reverse()) {
+    if (e === "gzip" || e === "x-gzip") out.push(zlib.createGunzip());
+    else if (e === "br") out.push(zlib.createBrotliDecompress());
+    else if (e === "deflate") out.push(zlib.createInflate());
+    else return null;
+  }
+  return out;
 }
 
 /** Ответ node:http → WHATWG Response (как у fetch: разжатие, статусы без тела). Экспорт — для теста механики. */
@@ -68,14 +79,20 @@ export function toResponse(res: http.IncomingMessage): Response {
     res.resume();
     return new Response(null, { status, headers });
   }
-  // Как у fetch: сжатое тело разжимаем прозрачно (длина после разжатия другая — заголовок убираем).
-  const decoder = decoderFor(headers.get("content-encoding") ?? "");
+  // Как у fetch: сжатое тело разжимаем прозрачно (длина после разжатия другая — заголовок убираем). Неизвестное сжатие —
+  // отказ: сырые байты ушли бы модели «текстом страницы» (закон 1). pipeline: отмена/ошибка любого звена рушит и сокет.
+  const encoding = headers.get("content-encoding") ?? "";
+  const decoders = decodersFor(encoding);
+  if (!decoders) {
+    res.destroy();
+    throw new Error(`неизвестное сжатие ответа «${encoding.slice(0, 40)}» — тело не прочитать`);
+  }
   let body: Readable = res;
-  if (decoder) {
+  if (decoders.length) {
     headers.delete("content-encoding");
     headers.delete("content-length");
-    res.on("error", (e) => decoder.destroy(e));
-    body = res.pipe(decoder);
+    pipeline([res, ...decoders], () => undefined);
+    body = decoders[decoders.length - 1]!;
   }
   return new Response(Readable.toWeb(body) as unknown as ReadableStream<Uint8Array>, { status, statusText: res.statusMessage ?? "", headers });
 }
@@ -87,7 +104,7 @@ export function pinnedTransport(lookup?: HostLookup): WebTransport {
     new Promise<Response>((resolve, reject) => {
       const u = new URL(url);
       const tls = u.protocol === "https:";
-      const opts = { method: "GET", headers: { ...init.headers, "accept-encoding": "gzip, br" }, signal: init.signal, lookup: pinned, agent: tls ? agents.https : agents.http };
+      const opts = { method: "GET", headers: { accept: "*/*", ...init.headers, "accept-encoding": "gzip, br" }, signal: init.signal, lookup: pinned, agent: tls ? agents.https : agents.http };
       // Бросок в колбэке ответа — неперехваченное исключение процесса сервера: только через reject.
       const req = (tls ? https : http).request(u, opts, (res) => {
         try {

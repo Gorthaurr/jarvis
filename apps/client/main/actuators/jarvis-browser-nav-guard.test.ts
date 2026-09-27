@@ -64,6 +64,17 @@ describe("B-14: блок пиннинг-прокси → запись журна
     expect(guard.since(0)).toEqual([]);
   });
 
+  it("одноярусное имя документа (iframe на `router`) — отказ без резолва: гард не отдаёт странице пул getaddrinfo", async () => {
+    const conn = new FakeConn();
+    const asked: string[] = [];
+    const guard = new NavGuard(conn as unknown as CdpConn, async (h) => (asked.push(h), ["203.0.113.10"]));
+    await guard.start();
+    conn.paused("r0", "http://router/admin", "F9");
+    await vi.waitFor(() => expect(conn.sent.map((s) => s.method)).toContain("Fetch.failRequest"));
+    expect(asked).toEqual([]);
+    expect(guard.since(0)).toEqual([expect.objectContaining({ frameId: "F9", reason: "private" })]);
+  });
+
   it("устаревший (дольше 35 с назад — таймаут SOCKS Chrome + вердикт) документ не сопоставляется", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const { guard } = await released([["http://shop.test/", "F1"]]);
