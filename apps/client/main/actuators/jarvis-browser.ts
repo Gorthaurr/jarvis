@@ -22,6 +22,7 @@ import { chromeCandidates, safeBrowserUrl } from "./browser-cdp.js";
 import { CdpConn } from "./cdp-conn.js";
 import { webAct } from "./jarvis-browser-act.js";
 import { NavGuard, blockedNavText } from "./jarvis-browser-nav-guard.js";
+import { type PinProxy, pinProxyArgs, startPinProxy } from "./jarvis-browser-proxy.js";
 import { PAGE } from "./jarvis-browser-page.js";
 
 const log = createLogger("actuator:jarvis-browser");
@@ -126,8 +127,8 @@ export interface ImportCookie {
 }
 
 /** DI для стенда (настоящий Chromium в тесте): путь, доп. флаги, профиль, стартовая страница, пауза после запуска,
- *  резолвер для суда гарда навигации по DNS (B-14; нет → системный). */
-export interface JarvisBrowserOpts { chromePath?: string; extraArgs?: string[]; profileDir?: string; startUrl?: string; settleMs?: number; resolveHost?: HostLookup }
+ *  резолвер суда гарда и прокси пиннинга (B-14; нет → системный), подмена адреса подключения (только стенд). */
+export interface JarvisBrowserOpts { chromePath?: string; extraArgs?: string[]; profileDir?: string; startUrl?: string; settleMs?: number; resolveHost?: HostLookup; mapAddress?: (ip: string) => string }
 
 /**
  * Браузер Джарвиса: ТЁПЛЫЙ невидимый Chrome со своим профилем, общий слой для веб-действий.
@@ -138,6 +139,7 @@ export class JarvisBrowser {
   private proc?: ChildProcess;
   /** B-14: перехват навигации на соединении уровня браузера; без живого гарда браузер не используется. */
   private guard?: NavGuard;
+  private proxy?: PinProxy; // B-14 (rebinding): весь трафик Chrome — через суд и пиннинг адреса
   private mainFrameId = "";
   private readMark = 0;
   private loginProc?: ChildProcess; // видимое окно входа (общий профиль) — трекаем, чтобы убить перед тёплым
@@ -179,6 +181,7 @@ export class JarvisBrowser {
     const exe = this.opts.chromePath ?? resolveChrome();
     this.port = await getFreePort();
     const off = offscreenPos();
+    this.proxy = await startPinProxy({ lookup: this.opts.resolveHost, mapAddress: this.opts.mapAddress, onBlock: (b) => this.guard?.proxyBlocked(b) });
     const args = [
       `--remote-debugging-port=${this.port}`,
       `--user-data-dir=${this.opts.profileDir ?? profileDir()}`,
@@ -189,6 +192,7 @@ export class JarvisBrowser {
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-background-networking",
+      ...pinProxyArgs(this.proxy.port),
       ...STEALTH_FLAGS,
       `--window-position=${off.x},${off.y}`,
       "--window-size=520,800",
@@ -490,7 +494,7 @@ export class JarvisBrowser {
   async close(): Promise<void> {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = undefined; }
     try { this.cdp?.close(); } catch { /* ignore */ }
-    try { this.guard?.close(); } catch { /* ignore */ }
+    try { this.guard?.close(); this.proxy?.close(); } catch { /* ignore */ } // прокси пиннинга живёт ровно с браузером
     this.guard = undefined;
     try { this.proc?.kill(); } catch { /* ignore */ }
     try { this.loginProc?.kill(); } catch { /* ignore */ } // закрыть видимое окно входа (тот же профиль)
