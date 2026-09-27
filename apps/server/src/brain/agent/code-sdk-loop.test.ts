@@ -145,7 +145,7 @@ describe("code_run с SDK jarvis — аренда ввода и фон (G-14)", 
       return { ok: true };
     });
     const spoken: string[] = [];
-    const bg = new Set<Promise<unknown>>();
+    const bg = new Set<Promise<void>>();
     const common = { inputArbiter: arbiter, speakResult: (r: { voice: string }) => void spoken.push(r.voice), bgTasks: bg, tasks: undefined };
     const llm1 = new SnapLlm([{ toolUses: [run("c1", SDK)] }, { toolUses: [LOOK] }, { text: "Готово, сэр." }]);
     const llm2 = new SnapLlm([{ toolUses: [{ id: "a1", name: "act", input: { target: "Настройки", do: "click" } }] }, { text: "Открыл настройки, сэр." }]);
