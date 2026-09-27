@@ -39,11 +39,14 @@ class CtrlTtsStream implements TtsStream {
   onDone(cb: () => void) { this.doneCb = cb; }
   cancel() { this._cancelled = true; }
   get cancelled() { return this._cancelled; }
+  push() { this.chunkCb?.({ audio: new ArrayBuffer(1), seq: 0, last: true }); }
+  finish() { this.doneCb?.(); }
 }
 class CtrlTtsProvider implements ITtsProvider {
   readonly live = false;
   texts: string[] = [];
-  synthesize(text: string): TtsStream { this.texts.push(text); return new CtrlTtsStream(); }
+  last: CtrlTtsStream | null = null;
+  synthesize(text: string): TtsStream { this.texts.push(text); this.last = new CtrlTtsStream(); return this.last; }
 }
 
 function make(onUserTurn: () => Promise<{ voice: string }>) {
@@ -370,5 +373,64 @@ describe("потерянные итоги названы вслух, а не п�
     pipe.speakQueued("Обычный итог.");
     await flush();
     expect(tts.texts.join(" ")).not.toMatch(/не успел проговорить/);
+  });
+});
+
+/**
+ * 🔴 Аудит прод-логов 27.09 (A3, сессия 24.09 18:37): владелец в полноэкранной игре задал вопрос, следом
+ * сказал ещё фразу — она отменила ход (один ход за раз), а уже готовый ответ «спасся» в очередь как ПРОАКТИВ.
+ * Busy-гейт §9 выпускает из очереди только срочное → ответ на его же вопрос пролежал до TTL и выброшен молча;
+ * предупреждение о потере цеплялось только к очередной речи, которую в полном экране тоже не выпускают.
+ */
+describe("A3: спасённый ответ на вопрос владельца не глохнет под busy-гейтом", () => {
+  function makeTurns(busy: boolean) {
+    const clock = { t: 1_000_000 };
+    const turns: ((r: { voice: string }) => void)[] = [];
+    const stt = new CtrlSttProvider();
+    const tts = new CtrlTtsProvider();
+    const pipe = new VoicePipeline({
+      stt, tts,
+      onUserTurn: () => new Promise((res) => { turns.push(res); }),
+      sendSpeakChunk: () => {}, sendClientState: () => {}, followupMs: 50,
+      isUserBusy: () => busy,
+      now: () => clock.t,
+    });
+    return { stt, tts, pipe, turns, clock };
+  }
+
+  it("занят (полный экран): ход A отменён фразой B, ответ A готов позже → звучит после ответа B, а не протухает", async () => {
+    const { stt, tts, pipe, turns, clock } = makeTurns(true);
+    pipe.onWake();
+    stt.last!.emit({ text: "что у меня на экране", final: true }); // ход A
+    await flush();
+    expect(pipe.state).toBe("thinking");
+    pipe.onVadEvent("speech_start"); // владелец заговорил снова — новый лиз, ход A жив
+    stt.last!.emit({ text: "ладно, сделаем потом", final: true }); // ход B отменяет A
+    await flush();
+    turns[0]!({ voice: "На экране открыт редактор кода." }); // A договорил ПОСЛЕ отмены → salvage
+    await flush();
+    turns[1]!({ voice: "Хорошо, сэр." }); // B отвечает прямо
+    await flush();
+    expect(tts.texts).toEqual(["Хорошо, сэр."]); // спасённый не лезет поверх ответа B
+    tts.last!.push();
+    tts.last!.finish(); // синтез B кончился → speak_done
+    clock.t += 2_000; // клиент доиграл ответ B (сильно раньше TTL 120 с)
+    pipe.setClientPlayback(false);
+    expect(tts.texts).toContain("На экране открыт редактор кода.");
+  });
+
+  it("потеря названа вслух и в ПРЯМОМ ответе хода, а не только в очередной реплике", async () => {
+    const { stt, tts, pipe, turns, clock } = makeTurns(false);
+    pipe.onWake();
+    stt.last!.emit({ text: "долгая задача", final: true });
+    await flush();
+    pipe.speakQueued("Итог, который протух."); // канал занят раздумьем → в очередь
+    clock.t += 3 * 60_000; // пролежал дольше TTL
+    pipe.drainPending(); // протухший выброшен — счётчик потерь +1
+    turns[0]!({ voice: "Сейчас три часа." }); // следующая произносимая реплика — прямой ответ хода
+    await flush();
+    expect(tts.texts.join(" ")).not.toContain("который протух");
+    const direct = tts.texts.find((t) => t.includes("Сейчас три часа."));
+    expect(direct).toMatch(/не успел проговорить/);
   });
 });

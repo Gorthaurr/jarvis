@@ -9,7 +9,7 @@ import { MACRO_NOTE_MARKER } from "../checkpoint.js";
 import { prefillNeedsLlmSteps } from "../skill-prefill.js";
 import { autoReplayBlocked } from "../replay-gate.js";
 import { verbalize } from "../../verbalize/index.js";
-import { costUsd } from "../../../obs/pricing.js";
+import { chargedCostUsd, usageChannel } from "../../../obs/pricing.js";
 
 export function replayGate(ctx: LoopCtx) {
   const { text, opts, st, task, isConversational, recalled } = ctx;
@@ -84,10 +84,11 @@ export async function runReplay(ctx: LoopCtx, recalled: RecalledSkill, replaySte
       {
         llm: deps.llm,
         model: deps.models.sonnet,
-        onUsage: (u) => {
+        onUsage: (u, channel) => {
+          const charged = chargedCostUsd({ usage: u, channel }, deps.models.sonnet); // C6: подписка = $0
           deps.spend.recordStep(taskId);
-          deps.spend.recordUsage(taskId, u.inputTokens + u.outputTokens, costUsd(deps.models.sonnet, u));
-          deps.usageSink?.({ taskId, model: deps.models.sonnet, usage: u, costUsd: costUsd(deps.models.sonnet, u), kind: "prefill", channel: "api" });
+          deps.spend.recordUsage(taskId, u.inputTokens + u.outputTokens, charged);
+          deps.usageSink?.({ taskId, model: deps.models.sonnet, usage: u, costUsd: charged, kind: "prefill", channel: usageChannel({ channel }) });
         },
       },
       text,

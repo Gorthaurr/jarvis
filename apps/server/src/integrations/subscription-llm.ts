@@ -27,6 +27,7 @@
  *  • Эффорт по тиру (medium/high/max) — единственный рычаг скорости, не меняющий модель (Opus 5).
  */
 import { existsSync, mkdirSync } from "node:fs";
+import { isRegionBlock } from "./api-error-classify.js";
 import { join } from "node:path";
 import { z } from "zod";
 import { type Logger, createLogger } from "@jarvis/shared";
@@ -128,6 +129,7 @@ export function classifySubscriptionError(text: string): SubscriptionFailure {
   if (/rate.?limit|429|too many requests/i.test(t)) {
     return { kind: "rate_limit", human: "подписка временно ограничивает частоту запросов", at: Date.now() };
   }
+  if (isRegionBlock(t, undefined)) return { kind: "other", human: "подписка: сервис модели не пускает запрос из этой сети — проверьте VPN", at: Date.now() }; // C3
   return { kind: "other", human: `резервный канал не ответил: ${t.slice(0, 160)}`, at: Date.now() };
 }
 

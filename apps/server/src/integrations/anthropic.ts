@@ -16,6 +16,7 @@ import type {
   StopReason,
   ToolUse,
 } from "./llm.js";
+import { type ApiFailure, classifyApiError } from "./api-error-classify.js";
 
 const log: Logger = createLogger("llm:anthropic");
 
@@ -420,41 +421,12 @@ export function parseResponse(resp: RawResponse): LlmResponse {
   };
 }
 
-/**
- * Причина последнего отказа API — чтобы НАЗВАТЬ её пользователю. Живой прогон 2026-09-02: на исчерпанном
- * балансе ключа человек слышал «Связь с сервером прервалась», хотя связь была в порядке. Неверно названная
- * причина — та же неправда, что ложное «Готово»: владелец пойдёт чинить сеть вместо баланса.
- */
-export type ApiFailureKind = "credits" | "auth" | "rate_limit" | "overloaded" | "other";
-export interface ApiFailure {
-  kind: ApiFailureKind;
-  /** Что сказать ВЛАДЕЛЬЦУ/пользователю голосом — коротко и по делу. */
-  human: string;
-  at: number;
-}
+// Причина последнего отказа API и её классификация (credits/auth/region/…) — api-error-classify.ts (C3).
+export { type ApiFailure, type ApiFailureKind, classifyApiError } from "./api-error-classify.js";
 
 /** Причина считается актуальной полчаса: разовая 429 не должна неделю числиться «каналом не отвечает». */
 const API_FAILURE_TTL_MS = 30 * 60_000;
 let lastApiFailure_: ApiFailure | undefined;
-
-/** Классификация текста ошибки API (чистая функция — зеркало classifySubscriptionError). */
-export function classifyApiError(text: string, status?: number): ApiFailure {
-  const t = String(text ?? "");
-  const at = Date.now();
-  if (/credit balance is too low|insufficient.{0,20}credit|billing/i.test(t)) {
-    return { kind: "credits", human: "у сервиса кончился баланс доступа к модели — я не смог к ней обратиться", at };
-  }
-  if (status === 401 || status === 403 || /invalid x-api-key|authentication|unauthorized|permission/i.test(t)) {
-    return { kind: "auth", human: "ключ доступа к модели не принят — обращение не прошло", at };
-  }
-  if (status === 429 || /rate.?limit|too many requests/i.test(t)) {
-    return { kind: "rate_limit", human: "модель сейчас ограничивает частоту запросов — повторите через минуту", at };
-  }
-  if (status === 529 || /overloaded/i.test(t)) {
-    return { kind: "overloaded", human: "модель сейчас перегружена — повторите чуть позже", at };
-  }
-  return { kind: "other", human: "связь с сервером прервалась", at };
-}
 
 /** Последняя АКТУАЛЬНАЯ причина отказа API (протухшая исчезает — мы про «сейчас» не знаем). */
 export function lastApiFailure(): ApiFailure | undefined {

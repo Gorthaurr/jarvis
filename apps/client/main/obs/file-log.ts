@@ -2,16 +2,18 @@
  * Durable файловый лог КЛИЕНТА (аудит 2026-07-28): половина «вчера оглох» была диагностически слепа —
  * захват аудио, VAD, wake, актуаторы и реконнекты писали только в консоль Electron, закрытую у живого
  * пользователя. Зеркало серверного `apps/server/src/obs/file-log.ts` (буфер + флаш по таймеру, ротация
- * по дню, retention), но: префикс файла `client-`, каталог — `%APPDATA%/Jarvis/logs` (app.getPath
+ * по дню, retention), но: префикс файла `client-`, каталог — `%APPDATA%/@jarvis/client/logs` (app.getPath
  * ("userData")) — клиент не знает серверного JARVIS_DATA_DIR и не должен писать в cwd.
  *
- * Fail-safe: любой сбой ФС проглатывается (консоль — основной канал, файл — бонус). Формат JSONL.
+ * Fail-safe: сбой ФС не роняет процесс, но и не теряет строки молча (C4/B5 27.09 → `durable-append.ts`:
+ * отложить, предупредить с кодом, после N сбоев подряд — запасной `client-<день>.<pid>.log`). Формат JSONL.
  * Выключатель: JARVIS_CLIENT_FILE_LOG=0.
  */
-import { appendFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { app } from "electron";
 import { type LogSink, addLogSink, createLogger } from "@jarvis/shared";
+import { DurableAppender } from "@jarvis/shared/durable-append";
 
 const log = createLogger("client:file-log");
 
@@ -36,7 +38,7 @@ export function pruneOldClientLogs(dir: string, retentionDays: number, now: Date
     return; // папки ещё нет
   }
   for (const name of names) {
-    const m = /^client-(\d{4})-(\d{2})-(\d{2})\.log$/.exec(name);
+    const m = /^client-(\d{4})-(\d{2})-(\d{2})(?:\.\d+)?\.log$/.exec(name); // + запасные `.<pid>.log`
     if (!m) continue;
     const fileDay = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
     if (fileDay < cutoff) {
@@ -57,6 +59,7 @@ export class ClientFileLogSink {
   private readonly dir: string;
   private readonly retentionDays: number;
   private readonly flushMs: number;
+  private readonly out = new DurableAppender(log);
 
   constructor(opts: { dir?: string; retentionDays?: number; flushMs?: number } = {}) {
     this.dir = opts.dir ?? join(app.getPath("userData"), "logs");
@@ -91,9 +94,9 @@ export class ClientFileLogSink {
     if (this.buf.length >= 2000) this.flush(); // защита на спам-пиках (аудио-кадры/VAD)
   };
 
-  /** Слить буфер на диск (ротация по дню). Fail-safe. */
+  /** Слить буфер (и отложенное после сбоя) на диск, ротация по дню. Fail-safe. */
   flush(): void {
-    if (this.buf.length === 0) return;
+    if (this.buf.length === 0 && this.out.idle) return;
     const lines = this.buf;
     this.buf = [];
     const day = dayStr(new Date());
@@ -105,11 +108,7 @@ export class ClientFileLogSink {
         /* не критично */
       }
     }
-    try {
-      appendFileSync(join(this.dir, `client-${day}.log`), lines.join("\n") + "\n");
-    } catch {
-      /* сбой записи — порция потеряна, консоль уже отработала */
-    }
+    this.out.write(join(this.dir, `client-${day}.log`), join(this.dir, `client-${day}.${process.pid}.log`), lines);
   }
 
   /** Периодический флаш (unref — не держит процесс). Идемпотентно. */

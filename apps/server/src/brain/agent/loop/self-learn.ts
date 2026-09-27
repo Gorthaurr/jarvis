@@ -5,7 +5,7 @@ import { type Tier } from "@jarvis/shared";
 import { TOOL_SCHEMAS } from "@jarvis/tools";
 import type { LlmContentBlock, LlmMessage } from "../../../integrations/llm.js";
 import { type ToolContext, dispatchTool } from "../../tools/dispatch.js";
-import { costUsd } from "../../../obs/pricing.js";
+import { chargedCostUsd, usageChannel } from "../../../obs/pricing.js";
 
 /** Узкий набор для рефлексии самообучения (§8): только мета-навыки, без реальных действий. */
 export const SELF_LEARN_TOOLS = TOOL_SCHEMAS.filter((t) => t.name === "skill_save" || t.name === "skill_list");
@@ -73,8 +73,9 @@ export async function selfLearnSkill(args: {
         tools: SELF_LEARN_TOOLS,
       });
       deps.spend.recordStep(reflectId);
-      deps.spend.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(model, resp.usage));
-      deps.usageSink?.({ taskId: reflectId, model, usage: resp.usage, costUsd: costUsd(model, resp.usage), kind: "reflect", channel: resp.channel === "subscription" ? "subscription" : "api" });
+      const charged = chargedCostUsd(resp, model); // C6: подписка = $0 — и SpendGuard, и COGS
+      deps.spend.recordUsage(reflectId, resp.usage.inputTokens + resp.usage.outputTokens, charged);
+      deps.usageSink?.({ taskId: reflectId, model, usage: resp.usage, costUsd: charged, kind: "reflect", channel: usageChannel(resp) });
 
       if (resp.toolUses.length === 0) return null; // модель решила не сохранять — это нормально
 

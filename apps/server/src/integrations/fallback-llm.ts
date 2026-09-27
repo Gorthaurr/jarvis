@@ -82,7 +82,7 @@ function breakerCooldownMs(): number {
   return Number.isFinite(n) && n >= 0 ? n : 300_000;
 }
 
-/** Отказы, которые повтором НЕ лечатся: нужно действие владельца (пополнить баланс / поправить ключ). */
+/** Не лечатся повтором (пополнить баланс / поправить ключ). `region` (403 без VPN, C3) — транзиентный, не здесь. */
 const TERMINAL_KINDS: ReadonlySet<ApiFailureKind> = new Set<ApiFailureKind>(["credits", "auth"]);
 
 /**

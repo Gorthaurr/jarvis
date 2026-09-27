@@ -24,7 +24,7 @@ import { autonomyFreeze } from "../../autonomy/freeze.js";
 import { autonomyThrottle } from "../../autonomy/throttle.js";
 import type { ILlmProvider } from "../../integrations/llm.js";
 import type { SpendGuard } from "../../billing/index.js";
-import { costUsd } from "../../obs/pricing.js";
+import { chargedCostUsd } from "../../obs/pricing.js";
 import { describeRepeat, describeWhen, parseRepeat, resolveFireAt } from "../../proactive/reminders/reminder.js";
 import type { ReminderService } from "../../proactive/reminders/service.js";
 
@@ -122,7 +122,7 @@ export async function reflectCommitmentFromUtterance(args: CommitmentReflectArgs
       tools: [schema],
     });
     args.spend?.recordStep(taskId);
-    args.spend?.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, costUsd(args.model, resp.usage));
+    args.spend?.recordUsage(taskId, resp.usage.inputTokens + resp.usage.outputTokens, chargedCostUsd(resp, args.model)); // C6: подписка = $0
     const tu = resp.toolUses.find((t) => t.name === "set_reminder");
     if (!tu) return; // обязательства нет — штатный (частый) исход
     const input = tu.input as Record<string, unknown>;

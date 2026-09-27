@@ -573,6 +573,13 @@ describe("эхо ошибки канала не выдаём за ответ м�
     expect(r.stubbed).toBe(false);
   });
 
+  // C3 (аудит 27.09): 403 «Request not allowed» на входе в Windows — сеть/VPN, а не «резерв не ответил» сырой строкой.
+  it("classifySubscriptionError: 403 forbidden «Request not allowed» → совет про VPN, без сырого текста", () => {
+    const f = classifySubscriptionError('API Error: 403 {"error":{"type":"forbidden","message":"Request not allowed"}}');
+    expect(f.human).toMatch(/VPN/u);
+    expect(f.human).not.toMatch(/API Error/u);
+  });
+
   it("isErrorEcho: подстрока ошибки — эхо; осмысленный ответ — нет", () => {
     expect(isErrorEcho(LIMIT, `Claude Code returned an error result: ${LIMIT}`)).toBe(true);
     expect(isErrorEcho("  you've hit your SESSION limit · resets 2:20pm (Europe/Moscow) ", LIMIT)).toBe(true);

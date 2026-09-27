@@ -1,6 +1,6 @@
 // Волна G: резерв мозга на подписке — переключение каналов и ЧЕСТНОСТЬ исходов.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { _resetApiFailureForTest, _setApiFailureForTest } from "./anthropic.js";
+import { AnthropicLlmProvider, _resetApiFailureForTest, _setApiFailureForTest } from "./anthropic.js";
 import { FallbackLlmProvider } from "./fallback-llm.js";
 import { _resetSubscriptionFailureForTest, _setSubscriptionFailureForTest } from "./subscription-llm.js";
 import type { ILlmProvider, LlmDelta, LlmRequest, LlmResponse } from "./llm.js";
@@ -368,6 +368,26 @@ describe("терминальный отказ основного канала �
   });
 
   /**
+   * 🔴 C3 (аудит прод-логов 27.09): 403 «Request not allowed» на входе в Windows — это VPN, который ещё не
+   * поднялся, а не ключ. Прежде он латчил канал на 6 часов как «ключ не принят»; теперь — транзиентный
+   * предохранитель (5 минут) и канал в паспорте не «выключен».
+   */
+  const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
+
+  it("403 гео-блока (VPN) канал НЕ выключает латчем — транзиентный путь с полуоткрытой пробой", async () => {
+    let clock = 0;
+    const primary = primaryWithFailure(REGION_403, 403);
+    const secondary = fake({ live: true, result: resp({ text: "по подписке" }) });
+    const p = new FallbackLlmProvider(primary, secondary, {}, () => clock);
+    await p.complete(REQ);
+    expect(p.channelStatus().primary).toBe("ok"); // до фикса: off / auth / «ключ не принят»
+    await p.complete(REQ); // порог транзиентного предохранителя
+    clock += 400_000; // VPN поднялся за 5 минут — канал обязан попробоваться снова
+    await p.complete(REQ);
+    expect(primary.calls).toBe(3); // до фикса: 1 — канал выключен на 6 часов
+  });
+
+  /**
    * 🔴 Адверс-ревью правки (2026-09-02): «выключенный» канал всё равно получал HTTP-запрос — стаб
    * добывался вызовом `primary.complete(req)`. Пока резерв отвечал, это было не видно; стоило ему
    * упасть — и на КАЖДОМ ходе уходил обречённый запрос в API, ровно то, что латч должен был убрать.
@@ -511,5 +531,54 @@ describe("W0 (2026-09-09): стрим основного канала пробр
     const r = await p.completeStream(REQ, (d) => seen.push(d.text));
     expect(r.text).toBe("по подписке");
     expect(seen).toEqual(["по подписке"]);
+  });
+});
+
+/**
+ * C3 ПРОВОДКОЙ: настоящий AnthropicLlmProvider (подменён только HTTP-клиент SDK) бросает 403 гео-блока так,
+ * как бросает SDK (`status` + `${status} ${body}`), дальше — настоящая классификация, настоящий стаб и
+ * настоящая фолбэк-цепочка. Владелец при двух лёгших каналах слышит про VPN, а не «ключ не принят».
+ */
+describe("403 гео-блока через настоящий провайдер API (C3)", () => {
+  const REGION_403 = '403 {"type":"error","error":{"type":"forbidden","message":"Request not allowed"}}';
+
+  function realPrimaryThrowing403(): AnthropicLlmProvider {
+    const p = new AnthropicLlmProvider({ apiKey: "sk-test", maxRetries: 0 });
+    const fail = async (): Promise<never> => {
+      throw Object.assign(new Error(REGION_403), { status: 403 });
+    };
+    (p as unknown as { clientPromise: Promise<unknown> }).clientPromise = Promise.resolve({ messages: { create: fail, stream: fail } });
+    return p;
+  }
+
+  const resetReasons = (): void => {
+    _resetApiFailureForTest();
+    _resetSubscriptionFailureForTest(); // причина резерва из соседних кейсов не должна подменить нашу (TTL 30 мин)
+  };
+  beforeEach(resetReasons);
+  afterEach(resetReasons);
+
+  it("оба канала недоступны → честный стаб с советом про VPN, не про ключ", async () => {
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(), fake({ live: false }));
+    const r = await p.complete(REQ);
+    expect(r.stubbed).toBe(true);
+    expect(r.text).toMatch(/VPN/); // до фикса: «Ключ доступа к модели не принят…»
+    expect(r.text).not.toMatch(/ключ/i);
+  });
+
+  it("резерв настроен, но тоже упал без известной причины (как в бою на входе в Windows) → всё равно про VPN", async () => {
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(), fake({ live: true, throws: new Error("подписка: сеть недоступна") }));
+    const r = await p.complete(REQ);
+    expect(r.stubbed).toBe(true);
+    expect(r.text).toMatch(/VPN/); // до фикса: «Ключ доступа к модели не принят…»
+  });
+
+  it("резерв жив → ход по подписке, а API-канал в паспорте НЕ выключен как «ключ»", async () => {
+    const p = new FallbackLlmProvider(realPrimaryThrowing403(), fake({ live: true, result: resp({ text: "по подписке" }) }));
+    const r = await p.complete(REQ);
+    expect(r.text).toBe("по подписке");
+    const st = p.channelStatus();
+    expect(st.primary).not.toBe("off"); // до фикса: off / kind auth — латч на 6 часов
+    expect(st.kind).not.toBe("auth");
   });
 });
