@@ -100,7 +100,8 @@ export async function runReplay(ctx: LoopCtx, recalled: RecalledSkill, replaySte
     // (needsLlm input.key с пустым combo → «enter»; browser.open с пустым url → «file:///…»).
     // Перепроверяем ЗАПОЛНЕННЫЕ шаги тем же гардом — иначе оба гарда (#5/#7) обходимы префиллом.
     if (replayUnsafe(prefilled)) throw new Error("после префилла шаги небезопасны для слепого реплея (URI/отправка)");
-    if (await stepsNavRefusal("реплей", prefilled)) throw new Error("URL шага ведёт во внутреннюю сеть по ответу DNS — слепой реплей запрещён");
+    const nav = await stepsNavRefusal("реплей", prefilled);
+    if (nav) throw new Error(`слепой реплей запрещён — ${String(nav.content).slice(0, 200)}`);
     replaySteps = prefilled;
     if (!(await ensureInput())) throw new Error("ввод занят другой задачей (таймаут аренды)");
     if (task.cancel.cancelled) throw new Error("cancelled");

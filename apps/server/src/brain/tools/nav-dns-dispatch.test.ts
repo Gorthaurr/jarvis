@@ -140,3 +140,37 @@ describe("B-14 (DNS), адверс-ревью: прочие пути к брау
     expect(String((await dispatchTool("web_act", { intent: "click", params: { selector: "#go" } }, ctx)).content)).not.toMatch(/внутренний адрес/u);
   });
 });
+
+describe("B-14 (DNS), адверс-ревью р2: схема без «//» и молчащий DNS у вкладки владельца", () => {
+  it("http:host и http:\host (браузер откроет как http://host/) — отказ на всех путях к браузеру", async () => {
+    const l = link();
+    const add = vi.fn(() => ({ ok: true, id: "w1" }));
+    const ctx = { ...l.ctx, sessionId: "s1", watch: { add } } as unknown as ToolContext;
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["web_open", { url: "http:evil.example" }],
+      ["browser_open", { url: "http:\evil.example:8787/dev/say" }],
+      ["app_launch", { app: "http:evil.example" }],
+      ["input_batch", { steps: [{ action: "browser.open", params: { url: "https:evil.example/x" } }] }],
+      ["watch_create", { what: "видео", condition: "дошло", predicate: { kind: "browser", value: 10, url: "http:evil.example:8787/" } }],
+    ];
+    for (const [tool, input] of calls) {
+      const r = await dispatchTool(tool, input, ctx);
+      expect(r.isError, tool).toBe(true);
+      expect(String(r.content), tool).toMatch(/внутреннюю сеть/u);
+    }
+    expect(l.sent).toEqual([]);
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("browser_read: DNS молчит на адресе вкладки → «не проверить», а не ложное «внутренний адрес» (закон 1)", async () => {
+    const tabRead = vi.fn(async () => ({ url: "https://slow.example/cart", title: "Корзина", text: "SECRET-OR-NOT" }));
+    const ext = { connected: true, tabRead, tabList: vi.fn(async () => ({ tabs: [], count: 0 })), openOrFocus: vi.fn(async () => ({ tabId: 1 })) };
+    const ctx = { ...link().ctx, ext } as unknown as ToolContext;
+    await dispatchTool("browser_open", { url: "https://shop.example/" }, ctx);
+    const r = await dispatchTool("browser_read", {}, ctx);
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).toMatch(/не проверить/u);
+    expect(String(r.content)).not.toMatch(/внутренн/u);
+    expect(String(r.content)).not.toContain("SECRET-OR-NOT");
+  });
+});

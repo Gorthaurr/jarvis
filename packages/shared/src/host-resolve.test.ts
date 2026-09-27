@@ -79,3 +79,25 @@ describe("limitLookup: частые резолвы перехвата навиг
     expect(await look("x.example")).toEqual(["203.0.113.10"]);
   });
 });
+
+describe("limitLookup: очередь с дедлайном (адверс-ревью р2)", () => {
+  it("ждавший дольше maxWaitMs выбывает, НЕ запустив резолв; сверх maxQueue — сразу ETIMEOUT", async () => {
+    const started: string[] = [];
+    let releaseHang: () => void = () => undefined;
+    const lookup: HostLookup = (h) => {
+      started.push(h);
+      if (h === "hang.example") return new Promise((r) => (releaseHang = () => r(["203.0.113.1"])));
+      return Promise.resolve(["203.0.113.2"]);
+    };
+    const look = limitLookup(lookup, { concurrency: 1, maxWaitMs: 30, maxQueue: 1 });
+    const hang = look("hang.example");
+    const stale = look("stale.example"); // встала в очередь
+    await expect(look("overflow.example")).rejects.toMatchObject({ code: "ETIMEOUT" }); // очередь полна
+    await new Promise((r) => setTimeout(r, 60)); // дедлайн очереди прошёл
+    releaseHang();
+    await hang;
+    await expect(stale).rejects.toMatchObject({ code: "ETIMEOUT" });
+    expect(started).toEqual(["hang.example"]); // «мёртвые» запросы в резолвер не ушли
+    expect(await look("fresh.example")).toEqual(["203.0.113.2"]); // слот освобождён
+  });
+});

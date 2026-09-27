@@ -69,6 +69,12 @@ describe("B-14: одно правило «приватный хост»", () => 
       expect(isPrivateIp(a), a).toBe(false);
     }
     expect(isPrivateHost("http://[64:ff9b::7f00:1]/")).toBe(true);
+    // Адверс-ревью р2: схема без «//» — хост тот же, что у new URL и браузера (раньше «» → суд пропускал).
+    expect(urlHostname("http:evil.example")).toBe("evil.example");
+    expect(urlHostname("http:\\evil.example:8787/dev/say")).toBe("evil.example");
+    expect(urlHostname("https:/x.example")).toBe("x.example");
+    expect(urlHostname("shop.ru:8080/x")).toBe("shop.ru"); // голый host:port — по-прежнему хост
+    expect(isPrivateHttpUrl("http:localhost:8787/")).toBe(true);
     expect(isPrivateHost("http://[2002:7f00:1::]/")).toBe(true);
   });
 });

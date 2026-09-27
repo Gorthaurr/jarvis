@@ -16,6 +16,8 @@ describe("renderCapabilityPassport", () => {
     const t = renderCapabilityPassport({ ...base, extensionConnected: false });
     expect(t).toContain("НЕ ПОДКЛЮЧЕНО");
     expect(t).toContain("chrome://extensions");
+    // 24.09: распакованное пропало из Chrome целиком (переезд папки) — «перезагрузить» его уже нельзя.
+    expect(t).toContain("Загрузить распакованное");
   });
 
   it("MCP: подключённые и упавшие показываются РАЗДЕЛЬНО (упавший ≠ доступный)", () => {
