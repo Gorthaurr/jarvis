@@ -123,8 +123,7 @@ describe("проводка: обёртка доезжает до модели в
       spend: new SpendGuard(),
       userId: "u1",
     });
-    const last = llm.requests[1]?.messages.at(-1);
-    const block = Array.isArray(last?.content) ? last.content.find((b) => b.type === "tool_result") : undefined;
+    const block = llm.requests[1]?.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).find((b) => b.type === "tool_result" && b.tool_use_id === "c1");
     expect(block).toBeDefined();
     expectWrapped((block as { content?: unknown }).content, /"exitCode":0/u);
   });
