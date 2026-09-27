@@ -9,7 +9,7 @@ import type { SkillStep } from "@jarvis/protocol";
 import { REPLAY_TYPE_MAX_CHARS, type UiPattern } from "@jarvis/protocol";
 import { createLogger, sleep } from "@jarvis/shared";
 import * as apps from "../actuators/apps.js";
-import { assertReplayCommitAllowed, assertReplayTypeAllowed } from "../actuators/commit-guard.js";
+import { assertLaunchAllowed } from "../actuators/bridge-uri.js";
 import * as ground from "../actuators/ground.js";
 import * as input from "../actuators/input.js";
 import type { SkillActuator } from "./index.js";
@@ -47,6 +47,8 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
         );
       }
       const p = step.params ?? {};
+      // W2 П1 (№17): запуск — имя программы или http/https («skype:?call» — действие мимо §14); §14/§0 шагов — рубеж inject.ts.
+      if (step.action === "app.launch" || step.action === "browser.open") assertLaunchAllowed(step.action === "app.launch" ? p.app : p.url, step.action);
       switch (step.action) {
         case "app.launch":
           await apps.launchApp(str(p.app));
@@ -80,7 +82,6 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
               `input.type: текст ${text.length} символов не влезает в бюджет реплея (кап ${REPLAY_TYPE_MAX_CHARS}) — длинный ввод не через навык`,
             );
           }
-          await assertReplayTypeAllowed(text); // контроль-2 №3: перевод строки в мессенджере = Enter мимо §14
           await input.typeText(text);
           return;
         }
@@ -89,8 +90,6 @@ export function createClientActuator(options: ClientActuatorOptions = {}): Skill
           // при игровом удержании), а исключение stepGatedUnderVeil для up было мёртвым.
           {
             const mode = p.mode === "down" || p.mode === "up" ? p.mode : undefined;
-            // W0 §14: Enter в мессенджере/банке/1С из реплея — необратимая отправка мимо подтверждения владельца.
-            await assertReplayCommitAllowed(str(p.combo), mode);
             await input.pressKey(str(p.combo), mode, p.scancode === true);
           }
           return;

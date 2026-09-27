@@ -24,7 +24,7 @@ describe("область одобрения — мост и транспорт",
     live = await startActBridge(async (commandId: string): Promise<ActionResult> => {
       seen.push(currentScope());
       return { commandId, ok: true, durationMs: 0 };
-    }, async () => null);
+    });
     const approval = { grants: [{ signature: "key:enter", process: "telegram", count: 5 }], expiresAt: Date.now() + 60_000 };
     const r = await post(live, { kind: "input.key", combo: "Enter", approval, commitApproved: true });
     expect(r.status).toBe(200);
@@ -38,7 +38,7 @@ describe("область одобрения — мост и транспорт",
     live = await startActBridge(async (commandId: string): Promise<ActionResult> => {
       seen.push(currentScope());
       return { commandId, ok: true, durationMs: 0 };
-    }, async () => null);
+    });
     const bridge = live;
     const approval = { grants: [{ signature: "click:отправить", process: "telegram", count: 1 }], expiresAt: Date.now() + 60_000 };
     const exec = serverExecutor(async (commandId: string, _cmd: ActionCommand): Promise<ActionResult> => {

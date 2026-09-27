@@ -10,14 +10,16 @@ const st = vi.hoisted(() => ({ fail: false }));
 vi.mock("./sidecar-client.js", () => ({
   sidecar: () => ({
     ready: true,
-    request: async () => {
+    // W2 П1: рубеж спрашивает окна (Блокнот спереди — не рискованный); падает только само нажатие.
+    request: async (op: string) => {
+      if (op === "window.list") return { windows: [{ hwnd: 5, pid: 4242, process: "notepad", title: "Блокнот", foreground: true, minimized: false, x: 0, y: 0, w: 4000, h: 3000 }] };
       if (st.fail) throw new Error("сайдкар не ответил");
       return {};
     },
   }),
 }));
 vi.mock("./screen.js", () => ({ getLastCaptureMapping: () => null }));
-vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 } }));
+vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 }, screen: {} })); // screen: перевод физика→DIP рубежа (на Linux без Windows-API — как есть)
 
 import { pressKey, resetHeldKeys } from "./input.js";
 

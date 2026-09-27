@@ -87,8 +87,11 @@ vi.mock("./selection.js", () => ({
   selectionView: (s: unknown) => st.selView(s),
   selectionClear: (o: unknown) => st.selClear(o),
 }));
+// W2 П1: рубеж инжекции спрашивает окна (window.list) — отвечаем реальной формой: Блокнот на весь экран, не рискованный.
+// Остальные операции — управляемый st.sidecarRequest (вуаль посреди RPC действия, а не посреди факта рубежа).
+const NOTEPAD = { hwnd: 5, pid: 4242, process: "notepad", title: "Блокнот", foreground: true, minimized: false, x: 0, y: 0, w: 4000, h: 3000 };
 vi.mock("./sidecar-client.js", () => ({
-  sidecar: () => ({ ready: st.sidecarReady, request: () => st.sidecarRequest() }),
+  sidecar: () => ({ ready: st.sidecarReady, request: (op: string) => (op === "window.list" ? Promise.resolve({ windows: [NOTEPAD] }) : st.sidecarRequest()) }),
 }));
 // Наблюдение после действия (fused observe) в этих сценариях не участвует — глушим, чтобы не лезло в UIA.
 vi.mock("./observe.js", () => ({ observeAfterAction: () => st.observe(), captureUiFingerprint: async () => undefined }));
@@ -108,6 +111,7 @@ vi.mock("./browser-cdp.js", async (orig) => ({
 
 import type { ActionCommand } from "@jarvis/protocol";
 import { dispatch } from "./index.js";
+import { noteGround } from "./handle-mirror.js";
 import { DrawingOverlayError } from "./input.js";
 import { selectionStore } from "../selection/store.js";
 import { type WaitOutcome, waitFor } from "./sensors-cheap.js";
@@ -131,6 +135,8 @@ beforeEach(() => {
   st.invoke = async () => undefined;
   st.observe = async () => undefined;
   selectionStore.setDrawing(false);
+  // W2 П1: handle, по которым кликают сценарии, рубеж знает из зеркала (в бою его наполняют снапшот/ground; здесь ground замокан).
+  for (const handle of ["7", "42"]) noteGround({ handle, bbox: { x: 10, y: 10, w: 80, h: 30 }, name: "OK", role: "ControlType.Button" }, 0, Date.now(), NOTEPAD.pid);
 });
 
 describe("§режим выделения — контроль-4: пометка вуали по окну команды и по наблюдению", () => {
