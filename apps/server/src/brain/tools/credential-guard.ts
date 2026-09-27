@@ -19,8 +19,11 @@
  * Карточную эвристику НЕ переизобретаем — зовём `assertNoCardData` (Луна + нормализация разделителей):
  * разойдись две копии, «номер карты» значил бы РАЗНОЕ на разных путях.
  */
-import { CardDataError, assertNoCardData } from "../orders/order-guard.js";
+// W2 (пакет 0): регэкспы полей и Луна — в @jarvis/shared/credential-risk (одна эвристика с клиентским рубежом §0).
+import { CARD_FIELD_RE, OTP_FIELD_RE, PASSWORD_FIELD_RE, carriesCardNumber } from "@jarvis/shared";
 import { browserActParams, browserStepFields } from "./browser-params.js";
+
+export { carriesCardNumber };
 
 /** Единая формулировка отказа: расходящиеся тексты = расходящаяся политика. */
 export const CREDENTIAL_REFUSAL = "Пароли и коды подтверждения не ввожу, введите сами";
@@ -50,18 +53,6 @@ interface TypedField {
 export type RefHintResolver = (ref: string) => string | { hint?: string; secret?: boolean } | undefined;
 /** Подпись UIA-элемента по handle из последнего look{elements}/ui_snapshot — handle сам по себе немой. */
 export type HandleHintResolver = (handle: unknown) => string | undefined;
-
-// Поле пароля. Пишем целыми словами: «pass» отдельно матчит passenger/passport, а урок денилистов
-// проекта — либо точная форма, либо сломанная легитимная работа. `type="password"` ловится тем же.
-const PASSWORD_FIELD_RE = /парол|password|passwd|passphrase|\bpwd\b|passcode/iu;
-// Поле одноразового кода/второго фактора. «code» отдельно НЕ берём — это промокод, почтовый индекс
-// и редактор кода; берём только квалифицированные формы.
-const OTP_FIELD_RE =
-  /\botp\b|one[-_ ]?time|\btotp\b|\b2fa\b|\bmfa\b|sms[-_ ]?code|verification[-_ ]?code|confirmation[-_ ]?code|auth[-_ ]?code|security[-_ ]?code|\bpin[-_ ]?code\b|код\s*из\s*(смс|sms)|смс[-\s]?код|код\s*подтвержден|одноразов\p{L}*\s*(код|парол)|пин[-\s]?код/iu;
-// Поле платёжных реквизитов. Голое `card` НЕ берём: класс `.card` из Bootstrap стоит на половине
-// сайтов — селектор формы внутри карточки блокировал бы любую печать (ровно тот ложный отказ,
-// от которого предостерегает задача). Луна по значению закрывает остальное.
-const CARD_FIELD_RE = /card[-_ ]?(number|num|no)\b|cardnumber|\bcvv2?\b|\bcvc2?\b|номер\s*карты|card[-_ ]?holder/iu;
 
 /** Ключи параметров, которые описывают ПОЛЕ (а не печатаемый текст). `ref`/`handle` сюда не входят:
  *  «e3_5» не несёт смысла, и принимать его за признак поля значило бы глушить предупреждение. */
@@ -212,34 +203,6 @@ export function collectTypedFields(
     default:
       return [];
   }
-}
-
-/**
- * Кандидат в номер карты: 13-19 цифр, разделённых максимум ОДНИМ типовым разделителем, и не
- * приклеенных к другим цифрам (та же граница `(?<!\d)…(?!\d)`, что у order-guard — иначе кусок
- * 25-значного идентификатора считался бы картой там, где заказ её не видит).
- */
-const CARD_CANDIDATE_RE = /(?<!\d)\d(?:[ \t\-.,/ ]?\d){12,18}(?!\d)/g;
-
-/**
- * Номер карты в печатаемом тексте. Вердикт выносит ТА ЖЕ `assertNoCardData` (Луна + нормализация
- * разделителей) — второй эвристики не заводим.
- *
- * 🔴 Но скармливаем ей КАНДИДАТА, а не всю строку. Живой ложный отказ, пойманный собственным
- * тестом: order-guard считает разделителем ЛЮБОЙ не-латинский символ, поэтому в свободном тексте
- * кириллица стирается и цифры разных слов СКЛЕИВАЮТСЯ — «const timeout = 120000; // 2026 год,
- * версия 1.2.3» превращалось в 13-значный «номер», проходивший Луна, и владельцу отказывали
- * печатать собственный код. В заказе поля структурные, там это не всплывало.
- */
-export function carriesCardNumber(text: string): boolean {
-  for (const m of text.matchAll(CARD_CANDIDATE_RE)) {
-    try {
-      assertNoCardData({ text: m[0] });
-    } catch (e) {
-      if (e instanceof CardDataError) return true;
-    }
-  }
-  return false;
 }
 
 /** Голый одноразовый код: 4-8 цифр и ничего кроме них (пробел/дефис — разбивка «123 456»). */

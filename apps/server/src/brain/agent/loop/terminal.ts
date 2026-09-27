@@ -24,7 +24,7 @@ export function makeTerminal(ctx: LoopCtx) {
 export interface TerminalEnv { terminal: (voice: string) => AgentReply; doneRounds: number }
 
 export function refreshResumeJournal(ctx: LoopCtx): void {
-  const { deps, opts, st, taskId, convo, priorDigest, effectOf } = ctx;
+  const { deps, opts, st, taskId, convo, priorDigest, digestOpts } = ctx;
   // 🔴 Волна C (контрольное ревью, HIGH): если это ПРОДОЛЖЕНИЕ и заход успел поработать — журнал в
   // сторе обязан включать ЭТОТ заход, КАКИМ БЫ ни был терминал. Иначе комбинация двух фиксов давала
   // тихую ловушку: peek (не take) оставляет чекпойнт живым, а saveCheckpoint зовут лишь три терминала
@@ -38,7 +38,7 @@ export function refreshResumeJournal(ctx: LoopCtx): void {
       deps.checkpoints.refreshJournal(
         deps.userId,
         opts.resumeFrom.taskId,
-        mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes: st.progress.systemNotes, effectOf, confirmedSends: st.honesty.confirmedSends, declinedCalls: st.honesty.declinedCalls, uncertainCalls: st.honesty.uncertainCalls, partialCalls: st.honesty.partialCalls })),
+        mergeDigests(priorDigest, buildResumeDigest(convo, digestOpts())),
         Math.max(st.progress.round, st.progress.committedToolRounds),
       );
     } catch (e) {

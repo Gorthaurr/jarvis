@@ -19,57 +19,23 @@ import { keyGatedUnderVeil, mouseGatedUnderVeil } from "../selection/veil-policy
 import { DrawingOverlayError, assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 export { DrawingOverlayError };
 import type { Target } from "@jarvis/protocol";
-import { createLogger } from "@jarvis/shared";
+import { createLogger, isBlockedCombo, normalizeCombo } from "@jarvis/shared";
 import { sidecar } from "./sidecar-client.js";
-import { getLastCaptureMapping } from "./screen.js";
+import { toDipPoint } from "./coords.js";
 import { ground, groundAtPoint, invoke } from "./ground.js";
+// W2 (пакет 0): все мутирующие RPC — через рубеж инжекции (inject.ts); печать — type-chunks.ts, готовность — sidecar-ready.ts.
+import { injectRpc } from "./inject.js";
+import { NotImplementedError, ensureSidecar as ensure } from "./sidecar-ready.js";
+export { NotImplementedError };
+export { typeText } from "./type-chunks.js";
 
 const log = createLogger("actuator:input");
 
-function ensure(): void {
-  if (!sidecar().ready) throw new NotImplementedError("сайдкар не запущен");
-}
-
 /**
- * Опасные глобальные комбо, которые НЕЛЬЗЯ слать вслепую эмуляцией ввода (§6 «не навреди»).
- * Инцидент: «закрой Доту» → агент сфокусировал окно и послал Alt+F4 → закрыл САМ Джарвис.
- * Alt+F4 закрывает активное окно (часто — не то), Win+L/R/D/M и Ctrl+Alt+Del трогают систему/
- * безопасность. Закрытие приложений — отдельным БЕЗОПАСНЫМ путём (app.close по процессу,
- * исключая Джарвис), а не клавишами. Блокировка нормализует регистр/порядок/алиасы.
+ * Опасные глобальные комбо (§6 «не навреди»: инцидент «закрой Доту» → Alt+F4 закрыл САМ Джарвис) и их нормализация —
+ * W2: данные в @jarvis/shared/commit-keys (один список с рубежом инжекции; + Win+V). Реэкспорт — для прежних импортов.
  */
-const BLOCKED_COMBOS: ReadonlySet<string> = new Set(
-  ["Alt+F4", "Win+L", "Win+R", "Win+D", "Win+M", "Win+Tab", "Ctrl+Alt+Delete", "Ctrl+Alt+Del", "Alt+Space"].map(
-    normalizeCombo,
-  ),
-);
-
-/** Нормализовать комбо: нижний регистр, без пробелов, алиасы (meta/super/lwin→win, del→delete), сорт. */
-export function normalizeCombo(combo: string): string {
-  return combo
-    .toLowerCase()
-    .split("+")
-    .map((k) => k.trim())
-    .filter(Boolean)
-    .map((k) =>
-      k === "meta" || k === "super" || k === "lwin" || k === "rwin" || k === "windows" || k === "cmd"
-        ? "win"
-        : k === "del"
-          ? "delete"
-          : k === "control"
-            ? "ctrl"
-            : k,
-    )
-    // Дедуп клавиш ПЕРЕД сортировкой: иначе «Alt+Alt+F4» → «alt+alt+f4» ≠ «alt+f4» обходил блок-лист
-    // (ОС трактует дубль модификатора так же). new Set схлопывает повтор.
-    .reduce<string[]>((acc, k) => (acc.includes(k) ? acc : [...acc, k]), [])
-    .sort()
-    .join("+");
-}
-
-/** Запрещённое ли это комбо (закрывает/блокирует окно/систему, в т.ч. может закрыть Джарвис). */
-export function isBlockedCombo(combo: string): boolean {
-  return BLOCKED_COMBOS.has(normalizeCombo(combo));
-}
+export { isBlockedCombo, normalizeCombo };
 
 /**
  * §6 «не навреди», H4: множество ФИЗИЧЕСКИ УДЕРЖИВАЕМЫХ клавиш между вызовами. Режимы down/up
@@ -98,22 +64,6 @@ export function resetHeldKeys(): void {
 /** Тест-хелпер: засеять «удерживаемые» клавиши (эмуляция успешного down без сайдкара). */
 export function seedHeldKeys(combo: string): void {
   for (const k of comboKeys(combo)) heldKeys.add(k);
-}
-
-/** Печать текста посимвольно с человеческим джиттером в сайдкаре (§3 принцип 3). */
-export async function typeText(text: string): Promise<void> {
-  assertNoDrawingOverlay();
-  noteJarvisInput();
-  ensure();
-  log.debug("input.type", { len: text.length });
-  // Таймаут по длине: посимвольный ввод с джиттером — десятки секунд на абзац. Дефолтные 5с
-  // рвали длинный текст на полуслове (RPC reject), а сайдкар продолжал печатать → рассинхрон.
-  const timeoutMs = Math.min(180_000, 5_000 + text.length * 120);
-  const t0 = Date.now();
-  await sidecar().request("type", { text }, timeoutMs);
-  // Контроль-6 (C5R-2): печать идёт секунды — вуаль, открывшаяся ПОСРЕДИ, забирает остаток нажатий в окно
-  // рисования, а сайдкар отвечает ok. Честно: ушло, исход не подтверждён (не «выполнено» и не «не выполнено»).
-  assertNoOverlayDuring(t0, "Печать текста");
 }
 
 /**
@@ -164,7 +114,7 @@ export async function pressKey(
   // зажатый Alt, и следующий `press F4` собирал Alt+F4 мимо блок-листа (инцидент «закрыл сам себя»).
   const newlyHeld = mode === "down" ? keys.filter((k) => !heldKeys.has(k)) : [];
   try {
-    await sidecar().request("key", { combo, mode, scancode });
+    await injectRpc("key", { combo, mode, scancode });
   } catch (e) {
     for (const k of newlyHeld) heldKeys.delete(k);
     throw e;
@@ -212,17 +162,8 @@ export async function click(
   // Бесшумную ступень (UIA invoke по handle/role) не трогаем: её же советует текст отказа.
   if (method === "physical" || target.by === "coords" || !(button === "left" && count === 1)) assertNoDrawingOverlay();
   ensure();
-  // coords приходят в координатах ПОСЛЕДНЕГО screen_capture (thumbnail монитора) → логические virtual-desktop.
-  // space="screen" (§8 реплей-макрос) — уже АБСОЛЮТНЫЕ экранные DIP: маппинг снимка не применяем.
-  const coords =
-    target.by === "coords"
-      ? target.space === "screen"
-        ? { x: target.x, y: target.y }
-        : (() => {
-            const m = getLastCaptureMapping();
-            return { x: m ? m.boundsX + target.x / m.scale : target.x, y: m ? m.boundsY + target.y / m.scale : target.y };
-          })()
-      : null;
+  // coords модели → логические DIP virtual-desktop (coords.ts: кадр / последний screen_capture; space="screen" — как есть).
+  const coords = target.by === "coords" ? toDipPoint(target.x, target.y, target) : null;
   const resolved = coords ? { screenX: coords.x, screenY: coords.y } : undefined;
 
   // БЕСШУМНАЯ лестница (ступени 1-2). Провал ступени → честный фолбэк на физ.клик ниже (не молча).
@@ -255,12 +196,12 @@ export async function click(
   // сайдкар отвечал ok → раунд засчитывался УСПЕШНОЙ мутацией. Для typeText/mouse этот класс закрыт контролем-6.
   const t0 = Date.now();
   if (target.by === "coords") {
-    await sidecar().request("click", { x: coords!.x, y: coords!.y, restoreCursor, button, count });
+    await injectRpc("click", { x: coords!.x, y: coords!.y, restoreCursor, button, count });
   } else if (target.by === "handle") {
-    await sidecar().request("click", { handle: target.handle, restoreCursor, button, count });
+    await injectRpc("click", { handle: target.handle, restoreCursor, button, count });
   } else {
     const g = await ground({ role: target.role, name: target.name }); // role → handle → физ.клик по центру
-    await sidecar().request("click", { handle: g.handle, restoreCursor, button, count });
+    await injectRpc("click", { handle: g.handle, restoreCursor, button, count });
   }
   assertNoOverlayDuring(t0, "Клик");
   return resolved;
@@ -277,6 +218,7 @@ export interface MouseParams {
   dy?: number;
   dx?: number;
   space?: "screen";
+  frame?: string;
 }
 
 /**
@@ -291,12 +233,7 @@ export async function mouse(params: MouseParams): Promise<void> {
   // при закрытии вуали.
   if (mouseGatedUnderVeil(params.op)) assertNoDrawingOverlay();
   ensure();
-  const m = params.space === "screen" ? null : getLastCaptureMapping();
-  const map = (x?: number, y?: number): { x?: number; y?: number } => {
-    if (x === undefined || y === undefined) return { x, y };
-    if (!m) return { x, y };
-    return { x: m.boundsX + x / m.scale, y: m.boundsY + y / m.scale };
-  };
+  const map = (x?: number, y?: number): { x?: number; y?: number } => (x === undefined || y === undefined ? { x, y } : toDipPoint(x, y, params));
   const from = map(params.x, params.y);
   const to = map(params.toX, params.toY);
   log.debug("input.mouse", { op: params.op, button: params.button });
@@ -313,7 +250,7 @@ export async function mouse(params: MouseParams): Promise<void> {
     heldButtons.add(btn);
     autoReleased.delete(btn);
   } else if (params.op === "up") heldButtons.delete(btn);
-  await sidecar().request(
+  await injectRpc(
     "mouse",
     {
       op: params.op,
@@ -344,6 +281,7 @@ export async function releaseHeldPointer(): Promise<void> {
   for (const button of buttons) {
     try {
       noteJarvisInput();
+      // W2: ОСОЗНАННО мимо рубежа инжекции (inject.ts): отпустить НАШУ зажатую кнопку — не новое действие.
       await sidecar().request("mouse", { op: "up", button }, 5_000);
       // Контроль-10 (release-held-pointer-silent): факт авто-отпускания ЗАПОМИНАЕТСЯ. Кнопка отпускается там, где
       // сейчас курсор (владелец только что рисовал рамку), то есть перетаскивание завершилось НЕ там, где агент
@@ -365,13 +303,5 @@ export class PointerAutoReleasedError extends Error {
         "Сверь состояние (ui_snapshot/screen_capture) и не повторяй жест вслепую.",
     );
     this.name = "PointerAutoReleasedError";
-  }
-}
-
-/** Единый маркер «не реализовано/недоступно» — dispatch маппит его в error.runtime. */
-export class NotImplementedError extends Error {
-  constructor(what: string) {
-    super(`${what}: синтетический ввод недоступен (win-сайдкар apps/sidecar-win)`);
-    this.name = "NotImplementedError";
   }
 }

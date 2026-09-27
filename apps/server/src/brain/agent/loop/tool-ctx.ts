@@ -4,6 +4,20 @@ import type { AgentDeps, LoopOpts } from "../types.js";
 import type { ToolContext } from "../../tools/dispatch.js";
 import { newId } from "@jarvis/protocol";
 import type { Session } from "../../../gateway/session.js";
+import { type VisionCap, visionCapFor } from "@jarvis/shared";
+import { subscriptionModelId } from "../../../integrations/subscription-llm.js";
+
+/**
+ * W2 (решение №8): кап кадра — по зрению моделей, которые МОГУТ увидеть картинку задачи: модель подписки (жив резерв)
+ * ∪ тиры API (основной канал не выключен). Минимум по набору: стандартное зрение любой из них сузит кадр для всех.
+ */
+export function taskVisionCap(deps: Pick<AgentDeps, "llm" | "models">): VisionCap {
+  const ch = deps.llm.channelStatus?.();
+  const ids: string[] = [];
+  if (!ch || ch.subscriptionLive) ids.push(subscriptionModelId());
+  if (!ch || ch.primary !== "off") ids.push(...Object.values(deps.models));
+  return visionCapFor(ids);
+}
 
 export function makeToolCtx(deps: AgentDeps, session: Session, opts: LoopOpts | undefined): ToolContext {
   const toolCtx = {
@@ -56,6 +70,7 @@ export function makeToolCtx(deps: AgentDeps, session: Session, opts: LoopOpts | 
     ext: deps.ext, // §: браузер пользователя через расширение (browser_open/read/act в его вкладках)
     toolActivation: deps.toolActivation, // §15: набор подгруженных холодных инструментов (tool_load)
     mcp: deps.mcp, // § MCP-host: исполнение mcp__-инструментов через callTool
+    visionCap: taskVisionCap(deps), // W2: кап кадра screen_capture по зрению моделей задачи
   };
   return toolCtx;
 }

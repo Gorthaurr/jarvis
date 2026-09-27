@@ -27,7 +27,7 @@ export function ladderHint(ctx: LoopCtx): void {
 }
 
 export function commitRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult): void {
-  const { deps, opts, st, taskId, convo, priorDigest, effectOf, saveCheckpoint } = ctx;
+  const { deps, opts, st, taskId, convo, priorDigest, digestOpts, saveCheckpoint } = ctx;
   const { KEEP_SCREENSHOTS, KEEP_SELECTION_VIEWS, KEEP_DOC_IMAGES } = ctx.cfg;
   // Волна C: результаты раунда УЖЕ в истории (мутации совершены) — даже если петля сейчас выйдет по
   // обрыву канала/отмене до `round += 1`, журнал чекпойнта обязан их включить.
@@ -43,7 +43,7 @@ export function commitRound(ctx: LoopCtx, resp: LlmResponse, round: RoundResult)
         deps.checkpoints.refreshJournal(
           deps.userId,
           opts.resumeFrom.taskId,
-          mergeDigests(priorDigest, buildResumeDigest(convo, { systemNotes: st.progress.systemNotes, effectOf, confirmedSends: st.honesty.confirmedSends, declinedCalls: st.honesty.declinedCalls, uncertainCalls: st.honesty.uncertainCalls, partialCalls: st.honesty.partialCalls })),
+          mergeDigests(priorDigest, buildResumeDigest(convo, digestOpts())),
           Math.max(st.progress.round + 1, st.progress.committedToolRounds),
         );
       } else if (st.budget.preventiveCheckpoint) {

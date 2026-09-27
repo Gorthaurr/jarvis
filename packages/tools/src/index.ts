@@ -23,6 +23,8 @@
  */
 
 import type { ActionKind } from "@jarvis/protocol";
+import { ACT_TOOL, SCREEN_RECT_SCHEMA, TARGET_SCHEMA } from "./gui-schemas.js";
+import { schemaFields } from "./input-fields.js";
 
 /** Инструмент в формате Anthropic tool-use (§6, §12). */
 export interface ToolSchema {
@@ -36,73 +38,8 @@ export interface ToolSchema {
 
 // ───────────────────────────── Вспомогательные под-схемы ─────────────────────────────
 
-/**
- * Target — цель действия (§6): по роли/имени (предпочтительно), по handle из
- * предыдущего ui_ground, либо по координатам (крайний vision-fallback).
- * Соответствует протокольному типу Target (discriminated по полю `by`).
- */
-const TARGET_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  description:
-    "Цель действия. Грундится по роли/имени (предпочтительно) или по handle из ui_ground; coords — крайний vision-fallback, использовать только если a11y-грундинг невозможен (§6).",
-  oneOf: [
-    {
-      type: "object",
-      properties: {
-        by: { const: "role" },
-        role: { type: "string", description: "Роль в a11y-дереве, напр. \"button\", \"edit\"." },
-        name: { type: "string", description: "Видимое имя/label элемента (необязательно)." },
-      },
-      required: ["by", "role"],
-      additionalProperties: false,
-    },
-    {
-      type: "object",
-      properties: {
-        by: { const: "handle" },
-        handle: { type: "string", description: "Хендл элемента, полученный из ui_ground." },
-      },
-      required: ["by", "handle"],
-      additionalProperties: false,
-    },
-    {
-      type: "object",
-      properties: {
-        by: { const: "coords" },
-        x: { type: "number" },
-        y: { type: "number" },
-        space: {
-          type: "string",
-          enum: ["screen"],
-          description:
-            "АБСОЛЮТНЫЕ экранные DIP, без маппинга последнего снимка. Ставь ИМЕННО его для координат, " +
-            "посчитанных по подсказке кропа screen_capture (лупа) и для координат из ocr полного кадра.",
-        },
-      },
-      required: ["by", "x", "y"],
-      additionalProperties: false,
-    },
-  ],
-};
-
 /** UIA-паттерны для act — основной путь действия (§6). */
 const UI_PATTERN_ENUM = ["invoke", "setValue", "select", "toggle", "expand", "scroll"] as const;
-
-/** Регион экрана (§Волна2 2.3): координаты ПОСЛЕДНЕГО полного screen_capture; space="screen" — DIP. */
-const SCREEN_RECT_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  description:
-    "Регион экрана. По умолчанию x/y/w/h — в координатах ПОСЛЕДНЕГО полного screen_capture (как клики by:'coords'); space:'screen' — абсолютные экранные координаты.",
-  properties: {
-    x: { type: "number" },
-    y: { type: "number" },
-    w: { type: "number" },
-    h: { type: "number" },
-    space: { type: "string", enum: ["screen"], description: "Абсолютные экранные координаты (без маппинга снимка)." },
-  },
-  required: ["x", "y", "w", "h"],
-  additionalProperties: false,
-};
 
 /** Языки ограниченного раннера кода (§6). */
 const CODE_LANG_ENUM = ["python", "node", "powershell"] as const;
@@ -199,52 +136,7 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
 };
 
 const ACTUATOR_TOOLS: ToolSchema[] = [
-  {
-    name: "act",
-    description:
-      "ГЛАВНЫЙ инструмент рук в GUI (W4): «нажми «Отправить» в Telegram», «открой вкладку «Настройки»», «напечатай X в поле «Поиск»» — ОДНИМ вызовом. Клиент САМ находит цель лестницей (handle → UIA-снапшот активного окна по тексту/роли → локальный OCR всего экрана → элемент под точкой), делает действие БЕЗ курсора где возможно (UIA invoke; физический клик — только фолбэк или physical:true), и СВЕРЯЕТ исход: снимок структуры окна ДО/ПОСЛЕ (дельта «+появилось/−исчезло») плюс ожидание признака verify. Ответ: found{via,name,role} — что реально найдено и как; did — что сделано; verified: \"met\" (признак наступил — исход подтверждён) | \"failed\" (действие УШЛО, признак за timeoutMs не наступил — НЕ повторяй вслепую, сверь глазами: look{what:'elements'}/look{what:'text'}) | \"unchecked\" (verify не задан или сенсор не смог ответить — сверь сам); detail; наблюдение-дельта. Не найдено → ЧЕСТНАЯ ошибка со списком видимых элементов (подбери точное имя из них) — не «клик мимо с ok». Несколько одинаковых → ошибка с кандидатами (уточни role/automationId/x,y). target: строка = видимый текст элемента (кнопка/пункт/вкладка/поле), объект — {text, role, automationId, handle из look{what:'elements'}, x/y точка}. app — сперва сфокусировать окно по подстроке заголовка/процесса («Telegram», «Блокнот»); окна нет → ошибка, ничего не нажато. do: click (дефолт) | double | right | type (клик в поле + печать text; БЕЗ target — печать в поле, где фокус УЖЕ стоит: после Ctrl+K/Ctrl+L или поиска, открытого клавишей; перевод строки в text = Enter, в мессенджере спросит владельца) | set (UIA setValue text — мгновенно, для полей) | toggle | select | expand | key (нажать combo, напр. «Ctrl+S»; target не нужен). ВСЕГДА задавай verify, когда знаешь признак успеха («Отправлено», новое окно, исчезновение диалога) — это и есть сверка. §14: Enter/«Отправить»/«Оплатить» в мессенджере/банке/1С → подтверждение владельца. Игра/canvas (UIA слепа): цель по тексту найдётся через OCR; пиксельный геймплей НЕ обещай — потолок у всех агентов (OSWorld 2.0 ~20%).",
-    input_schema: obj(
-      {
-        target: {
-          description: "Строка — видимый текст элемента; ИЛИ объект {text?, role?, automationId?, handle?, x?, y?, space?:\"screen\"} (x/y — координаты последнего screen_capture; space:\"screen\" — абсолютные DIP).",
-          anyOf: [
-            { type: "string" },
-            {
-              type: "object",
-              properties: {
-                text: { type: "string" },
-                role: { type: "string", description: "Роль UIA: Button, Edit, ListItem, TabItem, MenuItem, CheckBox, ComboBox, Hyperlink, TreeItem…" },
-                automationId: { type: "string" },
-                handle: { type: "string", description: "handle из look{what:'elements'} — точная адресация без поиска." },
-                x: { type: "number" },
-                y: { type: "number" },
-                space: { type: "string", enum: ["screen"] },
-              },
-              additionalProperties: false,
-            },
-          ],
-        },
-        app: { type: "string", description: "Сначала сфокусировать окно (подстрока заголовка/процесса). Не найдено → ошибка, действие не выполняется." },
-        do: { type: "string", enum: ["click", "double", "right", "type", "set", "toggle", "select", "expand", "key"], description: "Действие (дефолт click)." },
-        text: { type: "string", description: "Для do=type/set: что напечатать/установить." },
-        combo: { type: "string", description: "Для do=key: клавиша/сочетание в нотации input_key («Enter», «Ctrl+S»)." },
-        verify: {
-          type: "object",
-          description: "Признак исхода: text (появился на экране), element {role,name} (есть в окне), title (заголовок окна содержит); gone:true — ждать исчезновения; timeoutMs (деф 4000, макс 15000).",
-          properties: {
-            text: { type: "string" },
-            element: { type: "object", properties: { role: { type: "string" }, name: { type: "string" } }, required: ["role"], additionalProperties: false },
-            title: { type: "string" },
-            gone: { type: "boolean" },
-            timeoutMs: { type: "integer", minimum: 500, maximum: 15000 },
-          },
-          additionalProperties: false,
-        },
-        physical: { type: "boolean", description: "Сразу физический клик SendInput (игра/canvas, где UIA заведомо слепа)." },
-      },
-      [],
-    ),
-  },
+  ACT_TOOL, // W2: схема act — в gui-schemas.ts (новые глаголы, frame, steps)
   {
     name: "look",
     description:
@@ -556,6 +448,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
         button: { type: "string", enum: ["left", "right", "middle"], description: "Кнопка (down/up/drag), деф left." },
         dy: { type: "integer", description: "wheel: вертикальные тики (+вверх/−вниз)." },
         dx: { type: "integer", description: "wheel: горизонтальные тики." },
+        frame: { type: "string", description: "id кадра screen_capture, в котором видны x/y." },
       },
       ["op"],
     ),
@@ -880,7 +773,7 @@ const ACTUATOR_TOOLS: ToolSchema[] = [
   {
     name: "wait_for",
     description:
-      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет), 'gsi' (состояние, которое игра/программа САМА пушит на локальный листенер — напр. Dota 2 Game State Integration: включается конфигом gamestate_integration_*.cfg с uri http://127.0.0.1:3730/dota; НАДЁЖНЕЕ скриншотов для игр), 'file' (ФАЙЛ появился/исчез: path; stableMs — считать готовым, только когда размер и mtime не меняются N мс — «появился» ≠ «дописан» при рендере/экспорте/скачивании; minBytes — не пустой; gone:true — ждать исчезновения), 'process' (процесс завершился: pid из code_run{background} или name 'ffmpeg.exe', gone:true — ждать завершения), 'file' (ФАЙЛ появился/исчез: path; stableMs — считать готовым, только когда размер и mtime не меняются N мс — «появился» ≠ «дописан» при рендере/экспорте/скачивании; minBytes — не пустой; gone:true — ждать исчезновения), 'process' (процесс завершился: pid из code_run{background} или name 'ffmpeg.exe', gone:true — ждать завершения), 'file' (ФАЙЛ появился/исчез: path; stableMs — считать готовым, только когда размер и mtime не меняются N мс — «появился» ≠ «дописан» при рендере/экспорте/скачивании; minBytes — не пустой; gone:true — ждать исчезновения), 'process' (процесс завершился: pid из code_run{background} или name 'ffmpeg.exe', gone:true — ждать завершения), 'browser' (ЗНАЧЕНИЕ из ОТКРЫТОЙ вкладки браузера — читается через расширение, НЕ OCR: главный кейс «видео дошло до N секунд» = {kind:'browser', prop:'currentTime', op:'>=', value:1560}; так надёжно ждать таймкод видео и делать действие: wait_for(browser) → потом browser_act seek). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text'/'browser' — реально наблюдённое состояние.",
+      "ДОЖДАТЬСЯ события на ПК одним вызовом (§Волна2, ActionCommand wait.for) — клиент сам поллит условие, БЕЗ твоих повторных скриншотов («дождись загрузки/появления/исчезновения» = 1 вызов вместо N взглядов). condition.kind: 'window' (окно появилось/исчезло: titleContains/process, gone:true = ждать исчезновения), 'ui' (UIA-элемент role/name появился/пропал), 'text' (текст виден на экране через локальный OCR — работает и в играх/canvas; rect сужает область), 'sound' (звук системы идёт/нет), 'gsi' (состояние, которое игра/программа САМА пушит на локальный листенер — напр. Dota 2 Game State Integration: включается конфигом gamestate_integration_*.cfg с uri http://127.0.0.1:3730/dota; НАДЁЖНЕЕ скриншотов для игр), 'file' (ФАЙЛ появился/исчез: path; stableMs — считать готовым, только когда размер и mtime не меняются N мс — «появился» ≠ «дописан» при рендере/экспорте/скачивании; minBytes — не пустой; gone:true — ждать исчезновения), 'process' (процесс завершился: pid из code_run{background} или name 'ffmpeg.exe', gone:true — ждать завершения), 'browser' (ЗНАЧЕНИЕ из ОТКРЫТОЙ вкладки браузера — читается через расширение, НЕ OCR: главный кейс «видео дошло до N секунд» = {kind:'browser', prop:'currentTime', op:'>=', value:1560}; так надёжно ждать таймкод видео и делать действие: wait_for(browser) → потом browser_act seek). Возвращает ЧЕСТНЫЙ {met, elapsedMs, detail}: met:false = НЕ дождались за timeoutMs (реши сам: ждать ещё / посмотреть глазами / доложить). met:true при 'ui'/'window'/'text'/'browser' — реально наблюдённое состояние.",
     input_schema: obj(
       {
         condition: {
@@ -2311,6 +2204,14 @@ export * from "./facades.js";
  * переноса другого в COLD — падение сборки, а не молчаливый рост кешируемого префикса (§15).
  */
 export const HOT_TOOL_CEILING = 60;
+
+/** W2 (решение №9): поля верхнего уровня схемы — allowlist сборки ActionCommand (сервер, command-fields.ts). */
+export function toolInputFields(name: string): ReadonlySet<string> {
+  const t = TOOLS_BY_NAME[name];
+  return t ? schemaFields(t.input_schema) : new Set<string>();
+}
+export { pickBySchema, schemaFields } from "./input-fields.js";
+export { ACT_STEPS_MAX, ACT_VERBS } from "./gui-schemas.js";
 
 /** Имена ГОРЯЧИХ инструментов (схема уходит в каждый ход): всё, что не в COLD. Чистая функция. */
 export function hotToolNames(): string[] {

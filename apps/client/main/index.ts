@@ -21,7 +21,7 @@ import { Transport } from "./transport/index.js";
 import { dispatch, ownerPresenceNow } from "./actuators/index.js";
 import { noteOwnerInput } from "./actuators/input-mark.js";
 import { type ActBridge, startActBridge } from "./actuators/act-bridge.js";
-import { guardedDispatch } from "./actuators/commit-guard.js";
+import { runWithoutApproval, serverExecutor } from "./actuators/approval-scope.js";
 import { createSherpaHearing } from "./hearing/sherpa-hearing.js";
 import { setActBridge } from "./actuators/code-runner.js";
 import { submitTypedText } from "./submit-text.js";
@@ -304,7 +304,7 @@ function startSensors(): void {
 
 /** Поднять транспорт и связать его события с renderer-IPC. */
 function startTransport(): void {
-  transport = new Transport(transportConfig(), dispatch);
+  transport = new Transport(transportConfig(), serverExecutor(dispatch)); // W2: одобрение §14 — только из области серверной команды
   startSensors(); // §9: контекст занятости (locked) → серверу для «не мешать»
 
   // Аудио-координатор (§3): гейтит стрим, прокидывает кадры/VAD на сервер,
@@ -493,13 +493,10 @@ async function runSavedSkill(id: string): Promise<void> {
   win?.webContents.send(IPC.display, { title: `Повторяю: ${skill.name}`, markdown: `${skill.steps.length} шагов…` });
   setState("thinking");
   try {
-    const outcome = await runSkill({
-      skillId: id,
-      version: skill.version,
-      steps: skill.steps,
-      cancel: { cancelled: false },
-      actuator: createClientActuator(),
-    });
+    // W2: локальный реплей из UI — область БЕЗ одобрения (§8 решение №1: коммиты в нём — честный отказ, П1).
+    const outcome = await runWithoutApproval("local", () =>
+      runSkill({ skillId: id, version: skill.version, steps: skill.steps, cancel: { cancelled: false }, actuator: createClientActuator() }),
+    );
     win?.webContents.send(IPC.display, {
       title: outcome.ok ? `Готово: ${skill.name}` : `Сбой: ${skill.name}`,
       markdown: outcome.ok ? "Навык выполнен." : `Не получилось: ${outcome.message ?? "ошибка"}.`,
@@ -895,8 +892,8 @@ function bootstrap(): void {
   // jarvis SDK (среда исполнения «1 раунд = вся задача»): поднимаем loopback-мост актуаторов и отдаём
   // его code-runner'у, чтобы python-скрипт модели драйвил актуаторы ОДНИМ скриптом (jarvis.*), не бегая
   // в LLM между шагами. Сбой не критичен (обычный code_run/актуаторы работают) — jarvis-скрипт честно упадёт.
-  // W0: рискованный коммит (Enter в мессенджере/банке/1С) с моста — честный отказ, не исполнение (см. commit-guard).
-  void startActBridge(guardedDispatch(dispatch))
+  // W0/W2: рискованный коммит с моста — честный отказ (гард и область без одобрения — внутри act-bridge).
+  void startActBridge(dispatch)
     .then((bridge) => {
       actBridge = bridge;
       setActBridge({ port: bridge.port, token: bridge.token });

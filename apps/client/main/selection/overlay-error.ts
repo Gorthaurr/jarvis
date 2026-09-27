@@ -7,6 +7,8 @@
 import { selectionStore } from "./store.js";
 
 export class DrawingOverlayError extends Error {
+  /** W2: протокольный код для общего catch dispatch (actuators/action-error.ts). */
+  readonly actionCode = "overlay_drawing" as const;
   /** Действие УЖЕ УШЛО в GUI (RPC вернулся), а вуаль открылась в его окне — исход не подтверждён, а не «не выполнено». */
   readonly injected: boolean;
   constructor(reason: string, injected = false) {

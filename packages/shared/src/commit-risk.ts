@@ -18,8 +18,10 @@ export const RISKY_PROCESSES: ReadonlyArray<readonly [RegExp, RiskCategory, stri
   [/^1cv8/i, "edo", "1С"],
   [/sbbol|ibank|bankclient|client-?bank|interbank|isfront|bss\b/i, "bank", "банк-клиент"],
   [/cryptopro|cryptoarm|vipnet|signtool/i, "edo", "подпись"],
-  [/^(telegram|discord|whatsapp|viber|slack|teams|zoom|max)$/i, "messenger", "мессенджер"],
-  [/^(outlook|thunderbird|thebat)/i, "messenger", "почта"],
+  // W2: + ms-teams (новые Teams), signal, skype, VK Teams, element.
+  [/^(telegram|discord|whatsapp|viber|slack|teams|ms-teams|zoom|max|signal|skype|vk ?teams|element)$/i, "messenger", "мессенджер"],
+  // W2: + olk (новый Outlook), hxoutlook (Почта Windows).
+  [/^(outlook|olk|hxoutlook|thunderbird|thebat)/i, "messenger", "почта"],
 ];
 
 export function riskyProcessCategory(processName: string): { category: RiskCategory; human: string } | null {
@@ -45,8 +47,25 @@ const APP_NAME_ALIASES: Record<string, string> = {
   тимс: "teams",
   зум: "zoom",
   аутлук: "outlook",
+  сигнал: "signal",
+  скайп: "skype",
   "1с": "1cv8",
 };
+
+/** Слова, которые — и мессенджеры, и части чужих названий («3ds Max», «Zoom Player»): их — только целым именем. */
+const AMBIGUOUS_WORDS: ReadonlySet<string> = new Set(["max", "zoom"]);
+
+/**
+ * Кандидаты имени процесса из свободной строки модели (`app`) или заголовка: вся строка, слитно, каждое слово
+ * (кроме неоднозначных); русские имена — через алиасы. Общая база `riskyAppCategory` и `canonicalProcess` (W2).
+ */
+export function appNameCandidates(app: string): string[] {
+  const s = String(app ?? "").trim().toLowerCase().replace(/\.exe$/u, "");
+  if (!s) return [];
+  // Слова — и по любому разделителю, и с дефисом внутри («ms-teams»).
+  const words = [...s.split(/[^\p{L}\p{N}]+/u), ...s.split(/[^\p{L}\p{N}-]+/u)].filter((w) => w && !AMBIGUOUS_WORDS.has(w));
+  return [...new Set([s, s.replace(/[^\p{L}\p{N}]+/gu, ""), ...words])].map((c) => APP_NAME_ALIASES[c] ?? c);
+}
 
 /**
  * Ревью 2026-09-24: `act{app}` судится по ИМЕНИ из `app`, а не по переднему плану (act сам фокусирует это окно). Но
@@ -55,15 +74,31 @@ const APP_NAME_ALIASES: Record<string, string> = {
  * Нестрого: вся строка, каждое слово, русские имена. Ложное срабатывание стоит одного лишнего вопроса.
  */
 export function riskyAppCategory(app: string): { category: RiskCategory; human: string } | null {
-  const s = app.trim().toLowerCase().replace(/\.exe$/u, "");
-  if (!s) return null;
-  const words = s.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  // «max»/«zoom» — и мессенджеры, и слова в чужих названиях («3ds Max», «Zoom Player»): их — только целым именем.
-  const AMBIGUOUS = new Set(["max", "zoom"]);
-  for (const cand of [s, s.replace(/[^\p{L}\p{N}]+/gu, ""), ...words.filter((w) => !AMBIGUOUS.has(w))]) {
-    const hit = riskyProcessCategory(APP_NAME_ALIASES[cand] ?? cand);
+  for (const cand of appNameCandidates(app)) {
+    const hit = riskyProcessCategory(cand);
     if (hit) return hit;
   }
+  return null;
+}
+
+/** W2: удалённый доступ и ВМ — внутрь сессии UIA не видит, поэтому судятся только клавиши (решение №7). */
+export const REMOTE_PROCESSES: RegExp = /^(mstsc|vmconnect|virtualboxvm|vmware.*|vmplayer|anydesk|teamviewer|rustdesk)$/i;
+/** W2: браузеры — GUI-действия в них судятся как категория web (вкладка по tabList на сервере). browser — Яндекс. */
+export const BROWSER_PROCESSES: RegExp = /^(chrome|msedge|firefox|opera|brave|browser|vivaldi)$/i;
+
+export type GuiCategory = RiskCategory | "web" | "remote";
+
+/**
+ * W2: категория GUI-процесса для рубежа §14. Рискованный → его категория; удалённый доступ/ВМ → "remote"; браузер →
+ * "web"; ApplicationFrameHost (UWP-хост: Почта Windows) или процесс неизвестен → по заголовку окна. Прочее → null.
+ */
+export function guiProcessCategory(process: string | null | undefined, title?: string): { category: GuiCategory; human: string } | null {
+  const p = String(process ?? "").trim().replace(/\.exe$/iu, "");
+  if (!p || /^applicationframehost$/i.test(p)) return title ? riskyAppCategory(title) : null;
+  const risky = riskyProcessCategory(p);
+  if (risky) return risky;
+  if (REMOTE_PROCESSES.test(p)) return { category: "remote", human: "удалённый доступ" };
+  if (BROWSER_PROCESSES.test(p)) return { category: "web", human: "браузер" };
   return null;
 }
 

@@ -28,7 +28,7 @@ describe("skill-runner × вуаль режима выделения (контр
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("input.click", { target: { by: "coords", x: 1, y: 1 } as never, retries: 2 })],
+      steps: [step("input.click", { target: { by: "coords", x: 1, y: 1, space: "screen" } as never, retries: 2 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ executeStep: execute }),
       sleep: noSleep,

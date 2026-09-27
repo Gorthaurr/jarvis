@@ -1,20 +1,19 @@
 /**
  * Локальный мост актуаторов (jarvis SDK, среда исполнения «1 раунд = вся задача»).
  *
- * ЗАЧЕМ. Раньше многошаговая GUI/системная задача шла как N отдельных LLM-раундов (скриншот → клик →
- * снова скриншот). Мост даёт code_run-скрипту (питон, спавнится code-runner'ом ОТДЕЛЬНЫМ процессом)
- * прямой доступ к тем же актуаторам, что дёргает сервер — через loopback-HTTP. Модель пишет ОДИН скрипт
- * с `jarvis.*` (focus/press/click/wait_for/find/ocr…), который делает ВСЮ процедуру за один раунд.
- *
- * БЕЗОПАСНОСТЬ. Мост НЕ расширяет полномочия: code_run уже исполняет произвольный код на машине; вызов
- * актуатора через мост идёт через тот же `dispatch` с его гардами (USER_BUSY, fs self-guard, честный
- * провал). Дополнительно: bind ТОЛЬКО на 127.0.0.1 (loopback) + токен per-boot в заголовке (случайный,
- * отдаётся лишь в env спавнутого раннера) → чужой локальный процесс не дёрнет. Тело ≤ BODY_CAP.
+ * ЗАЧЕМ. Многошаговая GUI-задача шла как N LLM-раундов (скриншот → клик → скриншот). Мост даёт code_run-скрипту
+ * (питон, ОТДЕЛЬНЫЙ процесс) прямой доступ к тем же актуаторам через loopback-HTTP: ОДИН скрипт с `jarvis.*`
+ * (focus/press/click/wait_for/find/ocr…) делает ВСЮ процедуру за один раунд.
+ * БЕЗОПАСНОСТЬ. Мост НЕ расширяет полномочия: code_run уже исполняет произвольный код; вызов идёт через тот же
+ * `dispatch` с его гардами (USER_BUSY, fs self-guard, честный провал) + рубеж инжекции. Bind ТОЛЬКО на 127.0.0.1 +
+ * токен per-boot в заголовке (лишь в env спавнутого раннера) → чужой локальный процесс не дёрнет. Тело ≤ BODY_CAP.
  */
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
+import { runWithoutApproval } from "./approval-scope.js";
+import { foregroundProcess, guardedDispatch } from "./commit-guard.js";
 
 const log = createLogger("actuator:act-bridge");
 
@@ -22,16 +21,12 @@ const log = createLogger("actuator:act-bridge");
 const BODY_CAP = 512 * 1024;
 
 /**
- * ALLOWLIST разрешённых на мосту ActionCommand.kind (ревью jarvis SDK, HIGH security-guard-bypass).
- *
- * Мост НЕ должен быть вторым, НЕГЕЙТЁННЫМ входом в клиентский dispatch для привилегированных каналов.
- * Серверные §14-гарды (confirm-once/cadence/idempotency/card-red-line) и креды (Telegram StringSession/
- * VK-токен из safeStorage, залогиненный jarvis-browser) живут В СЕРВЕРНОМ пути ДО эмита команды —
- * клиентские хендлеры telegram.send/message.send/order.place/jbrowser.* исполняют БЕЗ них («гарды уже
- * пройдены на сервере»). Раз code_run-скрипт (в т.ч. под prompt-injection) может сырым POST дёрнуть мост,
- * пускаем сюда ТОЛЬКО механический GUI + восприятие, которые SDK реально нужны. Отправка сообщений/
- * заказы/креды/необратимое/секреты (message.send, telegram.*, order.place, jbrowser.*, code.run, fs.*,
- * office.*, system.*) обязаны идти штатным серверным tool-путём с §14-гейтом, а не через loopback-мост.
+ * ALLOWLIST разрешённых на мосту ActionCommand.kind (ревью jarvis SDK, HIGH security-guard-bypass). Мост НЕ должен
+ * быть вторым, НЕГЕЙТЁННЫМ входом для привилегированных каналов: серверные §14-гарды (confirm-once/cadence/
+ * idempotency/card-red-line) и креды (Telegram StringSession, VK-токен, залогиненный jarvis-browser) живут В СЕРВЕРНОМ
+ * пути ДО эмита команды, клиентские хендлеры исполняют без них. code_run-скрипт (в т.ч. под prompt-injection) может
+ * сырым POST дёрнуть мост — поэтому здесь ТОЛЬКО механический GUI + восприятие; отправка/заказы/креды/необратимое
+ * (message.send, telegram.*, order.place, jbrowser.*, code.run, fs.*, office.*, system.*) — серверным tool-путём.
  */
 export const BRIDGE_ALLOWED_KINDS: ReadonlySet<string> = new Set<string>([
   // запуск / окна (механический GUI)
@@ -74,8 +69,13 @@ export interface ActBridge {
 /**
  * Поднять loopback-мост актуаторов. dispatch внедряется (актуаторный dispatch клиента). Возвращает
  * {port, token, stop}. Жизненный цикл — на вызывающем (стартуем один раз на boot, гасим на выходе).
+ * W2 (пакет 0): гард §14 моста (commit-guard) и область БЕЗ одобрения — внутри моста, а не у вызывающего: команда
+ * моста исполняется в `runWithoutApproval("bridge")`, даже если python запущен изнутри одобренной серверной команды.
+ * `fg` — передний план для гарда (тесты подменяют).
  */
-export function startActBridge(dispatch: DispatchFn): Promise<ActBridge> {
+export function startActBridge(rawDispatch: DispatchFn, fg: () => Promise<string | null> = foregroundProcess): Promise<ActBridge> {
+  const guarded = guardedDispatch(rawDispatch, fg);
+  const dispatch: DispatchFn = (commandId, cmd) => runWithoutApproval("bridge", () => guarded(commandId, cmd), commandId);
   const token = randomUUID();
   let counter = 0;
 

@@ -1,17 +1,15 @@
 /**
  * W4 «Руки» (2026-09-10): ДЕЙСТВИЕ примитива gui.act над найденной целью.
  *
- * Правило честности, ради которого модуль отдельный: ПОВТОР ТОЛЬКО ЕСЛИ НИЧЕГО НЕ УШЛО. UIA invoke по handle
- * либо срабатывает, либо бросает ДО действия (паттерн не поддержан / элемент пропал) — тогда законен
- * физический клик по тому же handle. Но если действие ушло (invoke вернул ok, печать началась), второй попытки
- * нет ни здесь, ни по провалу verify: второй клик по «Отправить» — это дубль сообщения.
- *
- * Бесшумный путь (UIA, курсор не трогаем) — по умолчанию; физический SendInput — только фолбэк, physical:true,
- * правый/двойной клик и цель-точка без UIA-элемента. Печать (type) = клик в поле (лестница input.click:
- * invoke → физический по handle) + посимвольный ввод; set = UIA setValue (мгновенно, без клавиатуры).
+ * Правило честности, ради которого модуль отдельный: ПОВТОР ТОЛЬКО ЕСЛИ НИЧЕГО НЕ УШЛО. UIA invoke по handle либо
+ * срабатывает, либо бросает ДО действия (паттерн не поддержан / элемент пропал) — тогда законен физический клик по тому
+ * же handle. Если действие ушло (invoke вернул ok, печать началась), второй попытки нет ни здесь, ни по провалу verify.
+ * Бесшумный путь (UIA) — по умолчанию; физический SendInput — фолбэк, physical:true, правый/двойной клик и точка без
+ * UIA-элемента. type = клик в поле (лестница input.click) + печать; set = UIA setValue (мгновенно, без клавиатуры).
  */
-import type { ActVerb } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
+import type { ActCommand } from "./act-args.js";
+import { doPointer } from "./act-do-pointer.js";
 import { DrawingOverlayError } from "../selection/overlay-error.js";
 import type { FoundTarget } from "./act-find.js";
 import { invoke } from "./ground.js";
@@ -30,11 +28,10 @@ export interface ActDone {
   physical: boolean;
 }
 
-/**
- * Часть действия УЖЕ УШЛА в GUI, остаток не удался (клик в поле прошёл, печать упала). Это не «не выполнено»:
- * dispatch помечает результат stepActionInjected, сервер — «исход неизвестен», повтор вслепую запрещён.
- */
+/** Часть действия УЖЕ УШЛА (клик в поле прошёл, печать упала): stepActionInjected, «исход неизвестен», без повтора. */
 export class ActPartialError extends Error {
+  readonly actionCode = "runtime" as const; // W2: общий catch dispatch (action-error.ts) ставит stepActionInjected
+  readonly injected = true;
   constructor(message: string) {
     super(message);
     this.name = "ActPartialError";
@@ -109,9 +106,8 @@ async function doType(f: FoundTarget, p: ActParams): Promise<ActDone> {
 }
 
 /**
- * type БЕЗ цели: печать в поле, где УЖЕ стоит фокус (после Ctrl+K/Ctrl+L, поиска, открытого клавишей, игрового чата).
- * Ревью 2026-09-24: раньше для этого нужен был холодный input_type (tool_load = лишний раунд). Кликать некуда —
- * клика нет; окно для печати выбирает `app` act (фокус ДО печати). Упала посреди — часть символов могла уйти.
+ * type БЕЗ цели: печать в поле, где УЖЕ стоит фокус (после Ctrl+K/Ctrl+L, игрового чата) — без холодного input_type.
+ * Кликать некуда; окно выбирает `app` act (фокус ДО печати). Упала посреди — часть символов могла уйти.
  */
 async function doTypeFocused(p: ActParams): Promise<ActDone> {
   const text = p.text ?? "";
@@ -133,8 +129,10 @@ async function doPattern(f: FoundTarget, pattern: "setValue" | "toggle" | "selec
   return { did: pattern === "setValue" ? `установил значение «${(value ?? "").slice(0, 40)}» в «${f.name}»` : `${pattern} «${f.name}»`, physical: false };
 }
 
-/** Выполнить глагол над целью. found не нужен только для key. */
-export async function performAct(found: FoundTarget | undefined, verb: ActVerb, p: ActParams): Promise<ActDone> {
+/** Выполнить глагол команды над целью. found не нужен только для key (и type без цели). W2: вход — команда целиком. */
+export async function performAct(found: FoundTarget | undefined, cmd: ActCommand, opts: { restoreCursor: boolean }): Promise<ActDone> {
+  const verb = cmd.do ?? "click";
+  const p: ActParams = { text: cmd.text, combo: cmd.combo, physical: cmd.physical, restoreCursor: opts.restoreCursor };
   if (verb === "key") {
     if (!p.combo) throw new Error("do:key без combo");
     await pressKey(p.combo);
@@ -162,6 +160,8 @@ export async function performAct(found: FoundTarget | undefined, verb: ActVerb, 
     case "select":
     case "expand":
       return doPattern(found, verb);
+    case "triple": case "middle": case "hover": case "drag": case "scroll":
+      return doPointer(found, verb, cmd, p); // W2: глаголы указателя — П4 (act-do-pointer.ts)
     default: {
       const _x: never = verb;
       throw new Error(`неизвестный глагол act: ${String(_x)}`);

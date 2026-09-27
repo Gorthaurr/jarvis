@@ -8,6 +8,7 @@
  * Brain эмитит абстрактные ActionCommand; клиент мапит их на актуаторы.
  * Brain не знает про SendInput/puppeteer.
  */
+import type { CommitApproval, FrameId } from "./gui.js";
 
 /**
  * Цель действия. Грундится по роли/имени; coords — крайний fallback (§6).
@@ -15,10 +16,9 @@
 export type Target =
   | { by: "role"; role: string; name?: string }
   | { by: "handle"; handle: string } // из предыдущего ui.ground
-  // coords: по умолчанию — vision-координаты ПОСЛЕДНЕГО screen_capture (клиент переводит через
-  // маппинг снимка). space="screen" — АБСОЛЮТНЫЕ экранные DIP virtual-desktop, без маппинга
-  // (реплей-макросы §8: клик записан в разрешённых координатах и воспроизводится без скрина).
-  | { by: "coords"; x: number; y: number; space?: "screen" };
+  // coords: frame — кадр задачи, в котором модель видела точку (W2); space="screen" — АБСОЛЮТНЫЕ экранные DIP
+  // (только SDK и реплей-макросы §8). Без обоих — пока координаты последнего screen_capture (П5 делает это ошибкой).
+  | { by: "coords"; x: number; y: number; space?: "screen"; frame?: FrameId };
 
 /** UIA-паттерны для ui.invoke — ОСНОВНОЙ путь действия (по handle, без фокуса/захвата курсора, §6). */
 export type UiPattern =
@@ -41,14 +41,14 @@ export type MouseButton = "left" | "right" | "middle";
 /**
  * W4 «Руки»: цель примитива gui.act. Строка — видимый текст элемента (кнопка/пункт/вкладка), объект —
  * уточнение: text (подстрока/точное имя), role (Button/Edit/…), automationId, handle (из ui.snapshot),
- * x/y — точка (vision-координаты последнего screen_capture; space:"screen" — абсолютные DIP).
+ * x/y — точка в кадре frame (W2; space:"screen" — абсолютные DIP для SDK/§8).
  */
 export type ActTarget =
   | string
-  | { text?: string; role?: string; automationId?: string; handle?: string; x?: number; y?: number; space?: "screen" };
+  | { text?: string; role?: string; automationId?: string; handle?: string; x?: number; y?: number; space?: "screen"; frame?: FrameId };
 
-/** W4 «Руки»: что сделать с найденной целью. */
-export type ActVerb = "click" | "double" | "right" | "type" | "set" | "toggle" | "select" | "expand" | "key";
+/** W4 «Руки»: что сделать с найденной целью. W2: triple/middle/hover/drag/scroll (drag — к `to`, scroll — dx/dy). */
+export type ActVerb = "click" | "double" | "right" | "type" | "set" | "toggle" | "select" | "expand" | "key" | "triple" | "middle" | "hover" | "drag" | "scroll";
 
 /**
  * W4 «Руки»: признак исхода, который клиент ждёт ПОСЛЕ действия (короткий wait.for на клиенте, ≤15 с):
@@ -64,16 +64,14 @@ export interface ActVerify {
   timeoutMs?: number;
 }
 
-/**
- * Регион экрана (§Волна2 2.3): по умолчанию — в координатах ПОСЛЕДНЕГО полного screen_capture
- * (как Target.coords); space="screen" — абсолютные экранные DIP virtual-desktop без маппинга.
- */
+/** Регион экрана (§Волна2 2.3): в кадре frame (W2, как Target.coords); space="screen" — абсолютные DIP. */
 export interface ScreenRect {
   x: number;
   y: number;
   w: number;
   h: number;
   space?: "screen";
+  frame?: FrameId;
 }
 
 /**
@@ -133,23 +131,19 @@ export type ExcelOp = "read" | "write_cell" | "append_row";
 export type WordOp = "read" | "write" | "append";
 
 /**
- * Абстрактная команда действия (server -> client).
- * Конверт: envelope.id = commandId; payload несёт timeoutMs (§5).
- */
-/**
- * `proactive?` — команда инициирована САМИМ Джарвисом (напоминание/проактив), а НЕ в ответ на просьбу юзера.
- * Сторож USER_BUSY (`actuators/index.ts`) глушит физический ввод (мышь/клава) ТОЛЬКО при `proactive===true`
- * — ЗАПРОШЕННОЕ юзером действие НЕ блокируется (он сам попросил, мешать тут нечему). По умолчанию
- * (undefined/false) = реактивная команда = выполняется, даже если юзер сейчас за вводом.
+ * Абстрактная команда действия (server -> client). Конверт: envelope.id = commandId; payload несёт timeoutMs (§5).
+ * `proactive?` — команда инициирована САМИМ Джарвисом (напоминание/проактив): сторож USER_BUSY (`actuators/index.ts`)
+ * глушит физический ввод ТОЛЬКО при `proactive===true`; ЗАПРОШЕННОЕ юзером действие НЕ блокируется.
  */
 export type ActionCommand = ActionCommandKind & {
   proactive?: boolean;
   /**
-   * Происхождение хода (ставится СЕРВЕРОМ, не моделью): "user" = явная реплика юзера → физ.ввод НЕ гейтить
-   * (он сам попросил); "proactive" = само-инициатива Джарвиса → гейт присутствия глушит физ.ввод при активном
-   * юзере. Канон; `proactive` оставлен для совместимости (proactive===true эквивалент origin==="proactive").
+   * Происхождение хода (ставится СЕРВЕРОМ, не моделью): "user" = реплика юзера → физ.ввод НЕ гейтить; "proactive" =
+   * само-инициатива → гейт присутствия. Канон; `proactive` — для совместимости (true ≡ origin==="proactive").
    */
   origin?: "user" | "proactive";
+  /** W2: одобрение §14 (гранты). Ставит ТОЛЬКО сервер; клиент читает лишь из области транспорта (approval-scope). */
+  approval?: CommitApproval;
 };
 
 type ActionCommandKind =
@@ -178,6 +172,7 @@ type ActionCommandKind =
       dy?: number; // wheel: вертикальные тики (+вверх/−вниз)
       dx?: number; // wheel: горизонтальные тики
       space?: "screen"; // как у Target.coords: абсолютные экранные DIP без маппинга снимка
+      frame?: FrameId; // W2: кадр задачи координат
     }
   | { kind: "ui.invoke"; target: Target; pattern: UiPattern; value?: string } // UIA-паттерны — ОСНОВНОЙ путь
   // W4 «Руки» (2026-09-10, ревью §7): ОДИН примитив «сделай X с элементом Y» — клиент САМ находит цель лестницей
@@ -197,18 +192,22 @@ type ActionCommandKind =
       combo?: string;
       verify?: ActVerify;
       physical?: boolean;
-      /**
-       * Контроль-2 №4 (ревью 2026-09-24): §14-подтверждение владельца на этот коммит УЖЕ получено сервером. Ставит
-       * ТОЛЬКО сервер (аргумент модели перекрывается). Без него клиент перед коммитом сверяет РЕАЛЬНО сфокусированный
-       * процесс: `app` — подстрока («tele», «general»), и сервер по ней программу мог не узнать.
-       */
+      // W2: clear — очистить поле перед печатью; enter — Enter после печати (через рубеж §14); to — конец drag;
+      // dx/dy — тики колеса scroll; observe:false — без снимков до/после (промежуточный шаг act{steps}).
+      clear?: boolean;
+      enter?: boolean;
+      to?: ActTarget;
+      dx?: number;
+      dy?: number;
+      observe?: boolean;
+      /** @deprecated W2: заменяется `approval` (гранты), удаляется в интеграции. Ставит ТОЛЬКО сервер (контроль-2 №4). */
       commitApproved?: boolean;
     }
   // §Волна2 (2.4): nameMode="substring" — матч имени по вхождению; automationId — устойчивый id элемента.
   | { kind: "ui.ground"; query: { role: string; name?: string; nameMode?: "exact" | "substring"; automationId?: string } } // -> handle/bbox в ActionResult.data
   // §Волна2 (2.4): set-of-marks — интерактивные элементы окна {handle, role, name, automationId, bbox}
-  // одним дешёвым списком (~сотни токенов текста вместо 2K-скрина). pid не задан → активное окно.
-  | { kind: "ui.snapshot"; pid?: number; maxItems?: number }
+  // одним дешёвым списком (~сотни токенов текста вместо 2K-скрина). pid не задан → активное окно. frame — система bbox (W2).
+  | { kind: "ui.snapshot"; pid?: number; maxItems?: number; frame?: FrameId }
   // §Волна2 (2.4): окна верхнего уровня on-demand (hwnd/pid/process/title/foreground/minimized).
   | { kind: "window.list" }
   // §Волна2 (2.4): фокус окна по hwnd (из window.list) или подстроке заголовка/имени процесса —
@@ -255,9 +254,10 @@ type ActionCommandKind =
     } // клиентский skill-runner, §8
   // §Волна2 (2.3): rect — кроп региона (координаты ПОСЛЕДНЕГО полного снимка; space:"screen" = DIP
   // virtual-desktop); scale — доп. масштаб кропа (1 = как есть). Сверка кнопки ~50-200 ток вместо 2K.
-  | { kind: "screen.capture"; monitor?: string | number; rect?: ScreenRect; scale?: number } // monitor: "active"(дефолт, под курсором)|"primary"|"jarvis"|индекс
+  // W2: maxEdge/maxPixels — кап копии для модели по зрению её семейства (shared/vision-caps).
+  | { kind: "screen.capture"; monitor?: string | number; rect?: ScreenRect; scale?: number; maxEdge?: number; maxPixels?: number } // monitor: "active"(дефолт, под курсором)|"primary"|"jarvis"|индекс
   // §Волна2 (2.3): локальный OCR (Windows.Media.Ocr в сайдкаре) — текст с canvas/игр БЕЗ vision-раунда.
-  | { kind: "screen.ocr"; monitor?: string | number; rect?: ScreenRect; lang?: string }
+  | { kind: "screen.ocr"; monitor?: string | number; rect?: ScreenRect; lang?: string; frame?: FrameId } // frame — система координат строк (W2)
   // §Волна2 (2.3): $0-проба «изменилось ли» — перцептивный хеш региона (сравнивать между вызовами).
   | { kind: "screen.probe"; rect?: ScreenRect; monitor?: string | number }
   // §Волна2 (2.3): клиентское ОЖИДАНИЕ события без LLM-поллинга — один tool-вызов вместо N vision-раундов.

@@ -58,7 +58,7 @@ export function actionTimeoutMs(kind: string): number {
     case "skill.execute":
       return SKILL_EXECUTE_SERVER_TIMEOUT_MS; // ревью фиксов Волны 3 (#12): строго выше клиентского бюджета реплея
     case "app.launch":
-      return 30_000; // холодный резолв + Start-Sleep + поллинг steam/uri; перекрывает hard-25с лаунчера +запас
+      return 36_000; // холодный резолв + поллинг steam/uri (hard-25с лаунчера) + W2 G-20: ожидание окна ≤5с + запас
     case "app.close":
     case "app.focus":
     case "browser.open":

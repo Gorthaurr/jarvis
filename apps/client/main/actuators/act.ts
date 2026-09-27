@@ -14,8 +14,8 @@
  * иначе успешное действие рапортовалось бы таймаутом и ретрай модели ПОВТОРИЛ бы клик. Поднимаешь одно —
  * пересчитай другое.
  */
-import type { ActionCommand } from "@jarvis/protocol";
 import { createLogger } from "@jarvis/shared";
+import { type ActCommand, validateAct } from "./act-args.js";
 import { type FoundTarget, findTarget } from "./act-find.js";
 import { type ActDone, performAct } from "./act-do.js";
 import { type ActVerdict, precheckVerify, verifyOutcome } from "./act-verify.js";
@@ -29,29 +29,32 @@ const log = createLogger("actuator:act");
 /** Клиентский бюджет всего примитива (см. шапку и protocol/constants.ts: серверный потолок 60 с). */
 export const ACT_BUDGET_MS = 45_000;
 
-export type ActCommand = Extract<ActionCommand, { kind: "gui.act" }>;
+export type { ActCommand };
 
 /** Ответ модели: что нашли, что сделали, подтверждён ли исход. Наблюдение — в том же формате, что у input_click. */
 export interface ActOutcome extends Pick<ActDone, "screenX" | "screenY" | "physical">, Pick<ActVerdict, "verified" | "detail" | "observation"> {
-  found?: Pick<FoundTarget, "via" | "name" | "role" | "handle" | "note">;
+  found?: Pick<FoundTarget, "via" | "name" | "role" | "handle" | "note" | "query">;
   did: string;
   /** Окно, которое сфокусировали по app (заголовок) — факт, не claim. */
   focused?: string;
 }
 
-/** Сфокусировать окно по подстроке: сайдкар (честный readback) → AppActivate; не вышло → ошибка ДО действия. */
-async function focusAppWindow(app: string): Promise<string> {
+/**
+ * Сфокусировать окно по подстроке: сайдкар (честный readback) → AppActivate; не вышло → ошибка ДО действия.
+ * W2: + hwnd окна (П1: expectedForeground/G-11, поиск цели в окне app); у AppActivate-пути hwnd неизвестен.
+ */
+async function focusAppWindow(app: string): Promise<{ title: string; hwnd?: number }> {
   let title = "";
   let sidecarErr = "";
   try {
     const r = await focusWindow({ query: app });
-    if (r.focused) return r.title || app;
+    if (r.focused) return { title: r.title || app, ...(r.hwnd ? { hwnd: r.hwnd } : {}) };
     title = r.title;
   } catch (e) {
     sidecarErr = e instanceof Error ? e.message : String(e);
   }
   const legacy = await focusApp(app);
-  if (legacy.focused) return title || app;
+  if (legacy.focused) return { title: title || app };
   throw new Error(
     title
       ? `окно «${title}» найдено, но фокус не перешёл (foreground-lock) — ничего не нажато.`
@@ -59,32 +62,24 @@ async function focusAppWindow(app: string): Promise<string> {
   );
 }
 
-/** Проверка аргументов ДО любого действия: неверная форма — честная ошибка, а не клик наугад. */
-function validate(cmd: ActCommand): void {
-  const verb = cmd.do ?? "click";
-  if (verb === "key" && !cmd.combo?.trim()) throw new Error("act do:key без combo");
-  if ((verb === "type" || verb === "set") && !cmd.text) throw new Error(`act do:${verb} без text`);
-  // key и type без цели законны: клавиша — в фокус; печать — в поле, где уже стоит фокус (после Ctrl+K/Ctrl+L).
-  if (verb !== "key" && verb !== "type" && cmd.target === undefined) throw new Error(`act do:${verb} без target`);
-}
-
 export async function act(cmd: ActCommand, opts: { restoreCursor: boolean }): Promise<ActOutcome> {
-  validate(cmd);
+  validateAct(cmd);
   const deadline = Date.now() + ACT_BUDGET_MS;
-  const verb = cmd.do ?? "click";
-  const focused = cmd.app?.trim() ? await focusAppWindow(cmd.app.trim()) : undefined;
-  const found = cmd.target !== undefined ? await findTarget(cmd.target, deadline) : undefined;
-  log.info("act", { verb, via: found?.via, name: found?.name, app: focused });
+  const win = cmd.app?.trim() ? await focusAppWindow(cmd.app.trim()) : undefined;
+  const found = cmd.target !== undefined ? await findTarget(cmd.target, deadline, { hwnd: win?.hwnd }) : undefined;
+  log.info("act", { verb: cmd.do ?? "click", via: found?.via, name: found?.name, app: win?.title });
+  // W2: observe:false (промежуточный шаг act{steps}) — без снимков до/после; сверка — признак verify или следующий шаг.
+  const observe = cmd.observe !== false;
   // Снимок «до» — база дельты; на UIA-слепом окне OCR той же области, что и «после» (нужна точка).
-  const before = await captureUiFingerprint(found?.point);
+  const before = observe ? await captureUiFingerprint(found?.point) : undefined;
   const preMet = await precheckVerify(cmd.verify, deadline); // H-V1: признак, видимый ДО действия, исход не доказывает
   await assertActCommitAllowed(cmd); // контроль-2 №4: §14 по реально сфокусированному процессу, ДО действия
-  const done = await performAct(found, verb, { text: cmd.text, combo: cmd.combo, physical: cmd.physical, restoreCursor: opts.restoreCursor });
+  const done = await performAct(found, cmd, { restoreCursor: opts.restoreCursor });
   const clickPoint = found?.point ?? (done.screenX !== undefined && done.screenY !== undefined ? { x: done.screenX, y: done.screenY } : undefined);
-  const verdict = await verifyOutcome(cmd.verify, { before, clickPoint, deadline, preMet });
+  const verdict = await verifyOutcome(cmd.verify, { before, clickPoint, deadline, preMet, observe });
   return {
-    ...(found ? { found: { via: found.via, name: found.name, role: found.role, handle: found.handle, note: found.note } } : {}),
-    ...(focused ? { focused } : {}),
+    ...(found ? { found: { via: found.via, name: found.name, role: found.role, handle: found.handle, note: found.note, ...(found.query ? { query: found.query } : {}) } } : {}),
+    ...(win ? { focused: win.title } : {}),
     did: done.did,
     physical: done.physical,
     screenX: done.screenX,
