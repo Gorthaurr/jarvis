@@ -13,7 +13,7 @@
  * стоят один вопрос, ложно-отрицательные — необратимый дубль). Чистый модуль, списки — данные.
  */
 
-import { COMMIT_WORDS_RE, type RiskCategory, isCommitKeyCombo, isOnFlag, riskyAppCategory, riskyProcessCategory } from "@jarvis/shared";
+import { COMMIT_WORDS_RE, type RiskCategory, isCommitKeyCombo, isOnFlag, riskyProcessCategory } from "@jarvis/shared";
 import { LMS_COMMIT_RE, isLmsPage, lmsKeyCommits } from "./commit-lms.js";
 
 export type { RiskCategory };
@@ -128,103 +128,16 @@ export function assessWebCommit(a: {
   return { category, where, what, summary: `Необратимое действие в браузере (${CATEGORY_HUMAN[category]}): ${what} на ${where}.` };
 }
 
-/** «На переднем плане: <process> «title»» из живого снимка client.system (sensors/system-snapshot.ts). */
-export function parseForegroundProcess(systemContext: string): string | null {
-  const m = /На переднем плане:\s*([^\s«(·]+)/u.exec(systemContext);
-  return m ? m[1]! : null;
+// W2 (П3): суд GUI-коммитов по запросу — gui-intents.ts/gui-gate.ts (подписи и процесс из shared, гранты); память
+// handle → имя/роль/секрет — gate-memory.ts. Реэкспорт — для прежних потребителей (dispatch запоминает снимки).
+export { rememberUiHandles, uiHandleLabel } from "./gate-memory.js";
+
+/** Человеческое имя категории риска — для текста вопроса владельцу (веб и браузер через GUI). */
+export function categoryHuman(c: RiskCategory): string {
+  return CATEGORY_HUMAN[c];
 }
 
-/**
- * GUI: ui_invoke / input_key / input_click в опасном ПРОЦЕССЕ на переднем плане. `label` — имя элемента
- * (для ui_invoke — из последнего ui_snapshot по handle). Координатный клик судить нельзя → не гейтится.
- */
-export function assessGuiCommit(a: {
-  foregroundProcess: string | null;
-  /** act{app}: окно, которое act сам сфокусирует — судим по НЕМУ (нестрого: «дискорд», «Telegram Desktop»). */
-  app?: string | null;
-  tool: "ui_invoke" | "input_key" | "input_click" | "act" | "input_type";
-  input: Record<string, unknown>;
-  label?: string;
-}): CommitRisk | null {
-  const name = a.app?.trim() ? a.app.trim() : a.foregroundProcess;
-  if (!name) return null;
-  const proc = a.app?.trim() ? riskyAppCategory(name) : riskyProcessCategory(name);
-  if (!proc) return null;
-  const where = `${name} (${proc.human})`;
-  const mk = (what: string): CommitRisk => ({
-    category: proc.category,
-    where,
-    what,
-    summary: `Необратимое действие в программе ${where}: ${what}.`,
-  });
-  // Ревью 2026-09-24: перевод строки в печатаемом тексте — это Enter (синтетический \r/\n мессенджер читает как
-  // «отправить»). «act{do:"type", text:"привет\n"}» в Telegram уходил человеку МИМО вопроса владельца.
-  // Контроль-2: в ПОЧТОВОМ клиенте перевод строки — новый абзац письма, отправка там — кнопкой (судится отдельно).
-  const typedNewline = (t: unknown): boolean => proc.human !== "почта" && typeof t === "string" && /[\r\n]/u.test(t);
-  if (a.tool === "input_type") {
-    return typedNewline(a.input.text) ? mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит") : null;
-  }
-  if (a.tool === "input_key") {
-    // Ревью 2026-09-24: поле схемы input_key — `combo`. Гейт читал `key`, которого модель не шлёт, и Enter в мессенджере
-    // уходил БЕЗ вопроса владельцу (тесты кормили тем же неверным полем — фикстура била мимо). `key` оставлен как синоним.
-    const key = String(a.input.combo ?? a.input.key ?? "").toLowerCase();
-    const mode = String(a.input.mode ?? "");
-    if (/enter|return/u.test(key) && mode !== "up") return mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение");
-    return null;
-  }
-  // W4 «Руки»: act do:key «Enter» ≡ input_key; act click/double по тексту-коммиту ≡ клик по подписи. Печать/set/
-  // toggle сами ничего не отправляют — не судятся (как у input_type).
-  if (a.tool === "act") {
-    const verb = String(a.input.do ?? "click");
-    if (verb === "key") {
-      const combo = String(a.input.combo ?? "").toLowerCase();
-      return /enter|return/u.test(combo) ? mk(proc.category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/проведение") : null;
-    }
-    if (verb === "type" && typedNewline(a.input.text)) {
-      return mk(proc.category === "messenger" ? "печать с переводом строки — Enter отправит сообщение" : "печать с переводом строки — Enter подтвердит");
-    }
-    if (verb !== "click" && verb !== "double") return null;
-    const t = a.input.target;
-    const own = typeof t === "string" ? t : t && typeof t === "object" ? String((t as { text?: unknown }).text ?? "") : "";
-    // H-S1: цель по handle судится подписью элемента из последнего снапшота (label) — иначе «Отправить» по handle шло мимо гейта.
-    const text = own.trim() ? own : (a.label ?? "");
-    return text && COMMIT_WORDS_RE.test(text) ? mk(`клик «${text.trim().slice(0, 60)}»`) : null;
-  }
-  const target = (a.input.target && typeof a.input.target === "object" ? (a.input.target as Record<string, unknown>) : {}) as Record<string, unknown>;
-  const text = [a.label, a.input.name, a.input.text, target.text, target.name, target.query]
-    .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
-    .join(" ");
-  if (!text || !COMMIT_WORDS_RE.test(text)) return null;
-  return mk(`${a.tool === "ui_invoke" ? "вызов" : "клик"} «${text.trim().slice(0, 60)}»`);
-}
-
-// ── Память сессии: подписи UIA-элементов по handle (для ui_invoke) и последняя цель web_open (для web_act) ──
-
-const uiHandles = new WeakMap<object, Map<number, string>>();
-const UI_HANDLES_MAX = 400;
-
-/** Запомнить handle→имя из результата ui_snapshot ({items:[{handle,name,role}]}). Подписи — данные страницы/окна:
- *  используются ТОЛЬКО в сторону «похоже на коммит → спросить» (враждебная подпись даст лишний вопрос, не утечку). */
-export function rememberUiHandles(session: object | undefined, data: unknown): void {
-  if (!session || !data || typeof data !== "object") return;
-  const items = (data as { items?: unknown }).items;
-  if (!Array.isArray(items)) return;
-  const map = new Map<number, string>();
-  for (const raw of items) {
-    if (!raw || typeof raw !== "object") continue;
-    const it = raw as { handle?: unknown; name?: unknown; role?: unknown };
-    if (typeof it.handle !== "number") continue;
-    const name = [it.name, it.role].filter((v): v is string => typeof v === "string" && v.length > 0).join(" ");
-    if (name) map.set(it.handle, name.slice(0, 160));
-    if (map.size >= UI_HANDLES_MAX) break;
-  }
-  uiHandles.set(session, map);
-}
-
-export function uiHandleLabel(session: object | undefined, handle: unknown): string | undefined {
-  if (!session || typeof handle !== "number") return undefined;
-  return uiHandles.get(session)?.get(handle);
-}
+// ── Память сессии: последняя цель web_open (для web_act) ──
 
 const webTargets = new WeakMap<object, string>();
 export function rememberWebTarget(session: object | undefined, url: string): void {
