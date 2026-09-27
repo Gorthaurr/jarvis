@@ -117,6 +117,9 @@ describe("tab.capture: снимки двух задач сериализован
           return [{ result: { ok: true, w: 1, h: 1, dpr: 1 } }];
         },
       },
+      // Настоящие таймеры: очередь выдерживает квоту Chrome между снимками (W1-D5) — пауза должна истечь.
+      setTimeout,
+      clearTimeout,
     });
     const [a, b] = await Promise.all([env.tabCapture("", 1, {}, () => {}), env.tabCapture("", 1, {}, () => {})]);
     assert.deepEqual([a.ok, b.ok], [true, true], JSON.stringify([a, b]));

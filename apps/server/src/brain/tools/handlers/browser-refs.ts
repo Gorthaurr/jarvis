@@ -14,8 +14,14 @@
 import type { ToolContext } from "../dispatch.js";
 
 export interface RefInfo {
-  /** Подпись для суда о риске (§14) и §0: имя/текст/подпись + selector/role/type. */
+  /** Признаки поля для §0 (пароль/код/карта): имя/текст/подпись + selector/role/type (`#password` — тоже признак). */
   hint: string;
+  /**
+   * ВИДИМЫЕ подписи (имя/текст/label/aria) — по ним §14 судит клик и их же показывает владельцу. W1-D6: суд по хинту
+   * брал слово submit из селектора `input[type="submit"][name="next"]` и типа — «Следующая страница» теста Moodle
+   * судилась сдачей; вопрос владельцу показывал CSS-селектор («Оплатить #payform > button:nth-of-type(1) button»).
+   */
+  labels: string[];
   /** Подпись ОДОБРЕНИЯ §14 — видимое имя элемента (без selector/role/type): её страница сверяет с подписью цели. */
   approval: string;
   secret: boolean;
@@ -47,10 +53,11 @@ export function rememberRefHints(ctx: ToolContext, elements: unknown): void {
     // судил бы «Действие» вместо «Оплатить заказ». Кроме полей ввода: там e.text — содержимое, не подпись.
     const text = isEditable(e) ? "" : str(e.text);
     const hint = [e.name, text, e.label, e.aria, e.selector, e.role, e.type].map(str).filter(Boolean).join(" ").slice(0, 160);
+    const labels = [...new Set([e.name, text, e.label, e.aria].map(str).filter(Boolean))];
     // Контракт одобрения (W1-ревью р2, NEW-1): одна видимая подпись — её страница сравнивает с частью подписи цели.
-    const approval = [e.name, text, e.label, e.aria].map(str).find(Boolean) ?? "";
+    const approval = labels[0] ?? "";
     map.delete(e.ref); // свежая запись — в конец порядка вытеснения
-    map.set(e.ref, { hint, approval, secret: e.secret === true });
+    map.set(e.ref, { hint, labels, approval, secret: e.secret === true });
   }
   while (map.size > REF_INFOS_MAX) {
     const oldest = map.keys().next().value;
@@ -68,6 +75,11 @@ export function refFieldInfo(ctx: ToolContext, ref: string): RefInfo | undefined
 /** Подпись элемента по ref (для §14: «клик по ref с подписью-коммитом»). Пустая подпись → undefined. */
 export function refFieldHint(ctx: ToolContext, ref: string): string | undefined {
   return refFieldInfo(ctx, ref)?.hint || undefined;
+}
+
+/** Видимые подписи цели по ref для суда §14 и вопроса владельцу (без selector/role/type). Нет снимка → []. */
+export function refCommitLabels(ctx: ToolContext, ref: unknown): string[] {
+  return typeof ref === "string" ? (refFieldInfo(ctx, ref)?.labels ?? []) : [];
 }
 
 /** Подпись одобрения §14 для цели по ref (видимое имя). Нет снимка или имени → undefined. */

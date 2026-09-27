@@ -77,16 +77,20 @@ export function riskyHostCategory(host: string): RiskCategory | null {
 
 /**
  * Подпись элемента, по которой судим клик (W1-2): text/name/title модели + подпись ref из снимка. У type `text` — это
- * ПЕЧАТАЕМОЕ, а не подпись: для подписи одобрения (approvedLabel) его не берём (см. commitApprovalLabel).
+ * ПЕЧАТАЕМОЕ, а не подпись: для подписи одобрения (approvedLabel) его не берём (см. commitApprovalLabel). Повтор одной
+ * подписи (text модели = имя из снимка) — один раз: владелец видит «клик «Оплатить»», а не «Оплатить Оплатить».
  */
-export function webCommitLabelParts(intent: string, p: Record<string, unknown>, label?: string): string[] {
+export function webCommitLabelParts(intent: string, p: Record<string, unknown>, label?: string | readonly string[]): string[] {
   const own = intent.trim() === "type" ? [p.label, p.name, p.title] : [p.text, p.name, p.title];
-  return [...own, label].filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+  const ref = typeof label === "string" || label === undefined ? [label] : label;
+  const parts = [...own, ...ref].filter((v): v is string => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
+  return parts.filter((v, i) => parts.findIndex((w) => w.toLowerCase() === v.toLowerCase()) === i);
 }
 
 /**
- * Веб: browser_act / browser_batch / web_act. `label` — подпись элемента, если известна (ref-хинт из
- * последнего browser_inspect). Коммит = enter/submit/type+enter либо клик по элементу с глаголом коммита.
+ * Веб: browser_act / browser_batch / web_act. `label` — ВИДИМЫЕ подписи элемента по ref из последнего browser_inspect
+ * (имя/текст/label/aria — не селектор/роль/тип: W1-D6, submit из `input[type=submit]` судил навигацию теста сдачей).
+ * Коммит = enter/submit/type+enter либо клик по элементу с глаголом коммита.
  */
 export function assessWebCommit(a: {
   host: string;
@@ -96,7 +100,7 @@ export function assessWebCommit(a: {
   unknownSite?: boolean;
   intent: string;
   params?: Record<string, unknown>;
-  label?: string;
+  label?: string | readonly string[];
 }): CommitRisk | null {
   const url = a.url ?? "";
   const category: RiskCategory | null = riskyHostCategory(a.host) ?? (isLmsPage(url) ? "edu" : a.unknownSite ? "unknown" : null);
