@@ -59,7 +59,8 @@ function withPartial(out: ToolResult, k: number): ToolResult {
 async function decide(ctx: ToolContext, cmd: ActionCommand, na: NeedsApproval, k: number): Promise<{ grant: CommitGrant } | { tool: ToolResult }> {
   const procName = cleanUntrusted(na.process, 40);
   const cat = guiProcessCategory(na.process, na.windowTitle); // категорию считаем сами — клиентской не верим
-  const process = canonicalProcess(na.process) ?? procName.toLowerCase();
+  // Процесс гранта: канон (как ищет клиент по реальному процессу) или ровно то, что прислал клиент (незнакомая программа).
+  const process = canonicalProcess(na.process) ?? na.process;
   const grant: CommitGrant = { signature: na.signature, process, count: retryCount(cmd, k, na.signature), ...(typeof na.hwnd === "number" ? { hwnd: na.hwnd } : {}) };
   let where = `программе ${procName}${cat ? ` (${cat.human})` : ""}`;
   if (cat?.category === "web") {

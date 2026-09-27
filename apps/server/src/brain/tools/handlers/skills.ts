@@ -9,6 +9,7 @@ import { fillSlots } from "../../../memory/skill-slots.js";
 import { isQuarantined } from "../../../memory/skills.js";
 import { batchGate } from "../batch-commit.js";
 import { batchStepsFromInput } from "../command-fields.js";
+import { credentialGate } from "../credential-gate.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { sendActionApproved } from "../send-approved.js";
 import { type PostActionObservation, channelDownResult, overlayDeniedResult, confirmDeclineText, declined, formatObservationBlock, gateDeclined, err, ok, applyVeil, stripVeilFields } from "../dispatch-util.js";
@@ -42,6 +43,9 @@ export async function skillExecute(ctx: ToolContext, input: Record<string, unkno
   if (missing.length > 0) {
     return err(`навык «${skillId}»: не заполнены переменные ${missing.map((m) => `{{${m}}}`).join(", ")} — передай их значения в params.`);
   }
+  // W2 П3 (G-3(4)): §0 по ЗАПОЛНЕННЫМ шагам — цепочка «клик в поле пароля → печать» (слот с немым именем «value»).
+  const cred = credentialGate("input_batch", { steps }, ctx);
+  if (cred.block) return err(cred.block.replace(/^input_batch/u, `навык «${skillId}»`));
   // W2 П3 (G-1/S-3): §14 по ЗАПОЛНЕННЫМ шагам — один вопрос с перечнем и гранты с кратностью (batch-commit.ts).
   const gate = await batchGate(ctx, steps, `навык «${skillId}»`);
   if (gate.denied) return gate.denied;

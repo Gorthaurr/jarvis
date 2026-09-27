@@ -67,6 +67,28 @@ describe("S-6: печать в фокус и вставка наследуют �
     expect(s.mut().map((c) => c.kind)).toEqual(["system.clipboard", "input.click"]);
   });
 
+  it("буфер обмена прочитан (владелец скопировал карту) → Ctrl+V в любое поле → отказ; обычный текст в буфере — вставка уходит", async () => {
+    const sent: ActionCommand[] = [];
+    let clip = "4111 1111 1111 1111";
+    const ctx = {
+      session: {
+        sendAction: async (cmd: ActionCommand) => {
+          sent.push(cmd);
+          return { commandId: "c", ok: true, durationMs: 1, ...(cmd.kind === "system.clipboard" ? { data: { ok: true, stdout: clip } } : {}) };
+        },
+      },
+      userId: "u1",
+    } as unknown as ToolContext;
+    await dispatchTool("system_clipboard", { op: "read" }, ctx);
+    const r = await dispatchTool("input_key", { combo: "Ctrl+V" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(String(r.content)).toMatch(/платёжные реквизиты/u);
+    clip = "адрес доставки";
+    await dispatchTool("system_clipboard", { op: "read" }, ctx);
+    expect((await dispatchTool("input_key", { combo: "Ctrl+V" }, ctx)).isError).toBe(false);
+    expect(sent.map((c) => c.kind)).toEqual(["system.clipboard", "system.clipboard", "input.key"]);
+  });
+
   it("фокус ушёл (Tab) или другое окно — наследования нет: печать в следующее поле проходит", async () => {
     const s = setup();
     await dispatchTool("act", { target: "Пароль" }, s.ctx);
@@ -98,6 +120,16 @@ describe("G-3(4): цепочка «клик → печать» в input_batch", 
         s.ctx,
       ),
     );
+    expect(s.mut()).toHaveLength(0);
+  });
+
+  it("skill_execute: заполненные шаги [клик «Пароль», печать {{value}}] → отказ, реплей не ушёл (слот с немым именем)", async () => {
+    const s = setup();
+    const steps = [{ action: "input.click", target: { by: "role", role: "Edit", name: "Пароль" } }, { action: "input.type", params: { text: "{{value}}" } }];
+    (s.ctx as unknown as { skills: unknown }).skills = { get: async () => ({ id: "login", version: 1, steps }) };
+    const r = await dispatchTool("skill_execute", { skillId: "login", params: { value: "hunter2" } }, s.ctx);
+    refused(r);
+    expect(String(r.content)).toMatch(/^навык «login»/u);
     expect(s.mut()).toHaveLength(0);
   });
 

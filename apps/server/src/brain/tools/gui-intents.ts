@@ -61,6 +61,7 @@ export function targetName(input: Record<string, unknown>, mem?: HandleInfo): st
  */
 export function serverIntents(tool: string, input: Record<string, unknown>, where: GuiWhere, mem?: HandleInfo): CommitIntent[] {
   if (!where.category) return [];
+  if (tool === "input_click" && input.button === "right") return []; // правый клик открывает меню — клиент тоже не судит
   const t = input.target;
   const tobj = t && typeof t === "object" ? (t as Record<string, unknown>) : undefined;
   const role = str(tobj?.role) || mem?.role || "";

@@ -123,6 +123,9 @@ export function noteGateTarget(session: object | undefined, name: string, input:
   const clickedElsewhere = name === "input_mouse" && (input.op === "down" || input.op === "drag");
   if (name === "app_focus" || name === "app_launch" || name === "window_focus" || clickedElsewhere) m.aimed = undefined;
   if (name === "system_clipboard" && str(input.op) === "write") m.clipboard = typeof input.text === "string" ? input.text : String(input.text ?? "");
+  // Прочитанный буфер (его мог скопировать владелец: карта из банка) — вставка судится по нему (G-3(5)).
+  const read = asObj(data)?.stdout;
+  if (name === "system_clipboard" && str(input.op) === "read" && typeof read === "string") m.clipboard = read;
 }
 
 export function aimedTarget(session: object | undefined): AimedTarget | undefined {

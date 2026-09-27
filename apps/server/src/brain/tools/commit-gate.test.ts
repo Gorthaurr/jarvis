@@ -109,6 +109,8 @@ describe("W2 П3: суд GUI по запросу (guiPlan) + передний п
     expect(gui({ foregroundProcess: "notepad", tool: "input_key", input: { combo: "enter" } })).toBeNull();
     expect(gui({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } })).toBeNull();
     expect(gui({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "role", role: "Button", name: "Отправить" } } })).toEqual(["click:отправить"]);
+    // Правый клик открывает контекстное меню — не коммит (как у клиентского opCommitIntent): лишнего вопроса нет.
+    expect(gui({ foregroundProcess: "Discord", tool: "input_click", input: { target: { by: "role", role: "Button", name: "Отправить" }, button: "right" } })).toBeNull();
   });
   it("память handle → ТОЛЬКО имя (роль и секрет отдельно) из ui_snapshot; последняя цель web_open", () => {
     const session = {};
