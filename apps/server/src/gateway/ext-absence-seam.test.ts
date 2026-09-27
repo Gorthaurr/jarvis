@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ExtensionBridge } from "./extension-bridge.js";
 import { CHROME_EVIDENCE_MS, ExtAbsence, STRONG_ABSENT_MS } from "./ext-absence.js";
 import { trackExtPresence } from "./ext-absence-seam.js";
+import { JARVIS_WEB_HANDS_EXT_ID as OURS } from "./ext-id.js";
 
 const HOUR = 3_600_000;
 const OTHER_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -56,18 +57,20 @@ describe("trackExtPresence: события моста → учёт", () => {
     expect(tracker.due(false)?.lastSeenAt).toBe(lostAt);
   });
 
-  it("отказ пиннингом, пока нашего нет, — улика для доклада (с ID)", () => {
+  it("отказ пиннингом НАШЕГО ID, пока нас нет, — улика для доклада; чужой ID — нет", () => {
     const { tracker, routes, observe } = setup();
     routes.rejected?.(OTHER_ID);
     observe(STRONG_ABSENT_MS + HOUR / 60, "explorer");
-    expect(tracker.due(false)).toMatchObject({ kind: "chrome", pinRejectedId: OTHER_ID });
+    expect(tracker.due(false)).toBeNull();
+    routes.rejected?.(OURS);
+    expect(tracker.due(false)).toMatchObject({ kind: "chrome", pinRejectedId: OURS });
   });
 
   it("отказ самозванцу при ЖИВОМ расширении не оставляет улики на будущий провал", () => {
     const { tracker, routes, observe, sock } = setup();
     const s = sock();
     routes.attach(s);
-    routes.rejected?.(OTHER_ID);
+    routes.rejected?.(OURS); // подделка нашего Origin при живом расширении (S-12 держит канал)
     routes.detach(s); // Chrome закрыли вечером
     observe(STRONG_ABSENT_MS + HOUR / 60, "explorer");
     expect(tracker.due(false)).toBeNull(); // без улики — только мягкий порог (12 ч), до него молчим

@@ -169,7 +169,7 @@ describe("S-12: /ext не отдаётся самозванцу и не выши
 });
 
 describe("учёт отсутствия (ext-absence): отказ пиннингом доходит до трекера по настоящему /ext", () => {
-  it("наше расширение с чужим ID отклонено → улика с этим ID; настоящее подключилось → улика погашена", async () => {
+  it("чужой ID — не улика; НАШ ID отклонён устаревшим JARVIS_EXT_ID → улика; разрешённое подключилось → погашена", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ext-channel-absence-"));
     const clock = { t: Date.UTC(2026, 8, 24, 18, 0) };
     const tracker = new ExtAbsence(() => join(dir, "ext-presence.json"), () => clock.t);
@@ -180,12 +180,16 @@ describe("учёт отсутствия (ext-absence): отказ пиннинг
         tracker.tick("explorer", false);
       }
     };
-    const { port, bridge } = await boot(undefined, (b) => trackExtPresence(b, () => tracker));
+    const override = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const { port, bridge } = await boot(override, (b) => trackExtPresence(b, () => tracker));
     const other = extClient(port, "other", { origin: "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
     await until(() => other.state.closedWith !== null);
     observe();
-    expect(tracker.due(false)).toMatchObject({ kind: "chrome", pinRejectedId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
-    extClient(port, "real", { origin: PINNED });
+    expect(tracker.due(false)).toBeNull(); // чужое расширение: ни «моё», ни совет вписать его ID
+    const ours = extClient(port, "ours", { origin: PINNED });
+    await until(() => ours.state.closedWith !== null);
+    expect(tracker.due(false)).toMatchObject({ kind: "chrome", pinRejectedId: JARVIS_WEB_HANDS_EXT_ID });
+    extClient(port, "override", { origin: `chrome-extension://${override}` });
     await until(() => bridge.connected);
     expect(tracker.due(false)).toBeNull();
   });

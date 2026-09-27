@@ -4,12 +4,13 @@
  * Реверт-проверки: «Chrome открыт» в настоящем времени → «прошедшее время»; дата/цифры в голосе → «голос без
  * дат»; лечение «Загрузить распакованное» при отказе пиннингом → «пиннинг»; голос раньше чата → «сбой голоса».
  */
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ExtAbsence, type ExtAbsenceDue } from "./ext-absence.js";
-import { flushExtAbsence, formatExtAbsence } from "./ext-absence-report.js";
+import { extensionDir, flushExtAbsence, formatExtAbsence } from "./ext-absence-report.js";
+import { JARVIS_WEB_HANDS_EXT_ID as OURS } from "./ext-id.js";
 
 const SEEN = new Date(2026, 8, 24, 21, 15).getTime();
 const due = (over: Partial<ExtAbsenceDue> = {}): ExtAbsenceDue => ({
@@ -32,7 +33,7 @@ describe("formatExtAbsence", () => {
   });
 
   it("голос без дат, цифр и путей (verbalize их не склоняет) — во всех видах доклада", () => {
-    for (const d of [due(), due({ kind: "unknown" }), due({ pinRejectedId: "a".repeat(32) })]) {
+    for (const d of [due(), due({ kind: "unknown" }), due({ pinRejectedId: OURS })]) {
       const v = formatExtAbsence(d, "C:\\x").voice;
       expect(v).not.toMatch(/\d|chrome:\/\/|\\/);
     }
@@ -45,12 +46,21 @@ describe("formatExtAbsence", () => {
     expect(t.chat).toContain("node apps/client/scripts/build.mjs"); // папка не найдена/не собрана — подсказать сборку
   });
 
-  it("отказ пиннингом: лечение — ID (JARVIS_EXT_ID / key), а не «Загрузить распакованное»", () => {
-    const t = formatExtAbsence(due({ pinRejectedId: "a".repeat(32) }), "C:\\x", "b".repeat(32));
-    expect(t.chat).toContain("a".repeat(32));
+  it("отказ пиннингом нашего ID: лечение — убрать устаревший JARVIS_EXT_ID, а не «Загрузить распакованное»", () => {
+    const t = formatExtAbsence(due({ pinRejectedId: OURS }), "C:\\x", "b".repeat(32));
+    expect(t.chat).toContain(OURS);
     expect(t.chat).toContain("b".repeat(32));
-    expect(t.chat).toContain("JARVIS_EXT_ID");
+    expect(t.chat).toMatch(/Уберите JARVIS_EXT_ID/);
     expect(t.chat).not.toContain("Загрузить распакованное");
+  });
+
+  it("extensionDir: путь только к СОБРАННОМУ расширению (SW = dist/background.js), иначе null", () => {
+    const d = mkdtempSync(join(tmpdir(), "ext-dir-"));
+    writeFileSync(join(d, "manifest.json"), "{}");
+    expect(extensionDir(d)).toBeNull();
+    mkdirSync(join(d, "dist"));
+    writeFileSync(join(d, "dist", "background.js"), "");
+    expect(extensionDir(d)).toBe(d);
   });
 });
 

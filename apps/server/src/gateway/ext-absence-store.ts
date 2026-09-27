@@ -5,6 +5,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { JARVIS_WEB_HANDS_EXT_ID } from "./ext-id.js";
 
 export type AbsenceKind = "chrome" | "unknown";
 
@@ -17,7 +18,7 @@ export interface AbsenceState {
   chromeMs: number;
   /** Какой доклад уже сделан в ЭТОМ провале (гасится восстановлением связи). */
   reportedKind: AbsenceKind | null;
-  /** ID расширения, которое стучалось на /ext и было отклонено пиннингом, пока нашего не было. */
+  /** Наш ID (из `key` манифеста), отклонённый пиннингом /ext, пока нашего не было на связи (устарел JARVIS_EXT_ID). */
   pinRejectedId: string | null;
 }
 
@@ -35,7 +36,7 @@ export function loadAbsence(file: string, now: number): AbsenceState {
   try {
     const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
     const kind = raw.reportedKind === "chrome" || raw.reportedKind === "unknown" ? raw.reportedKind : null;
-    const id = typeof raw.pinRejectedId === "string" && /^[a-p]{32}$/u.test(raw.pinRejectedId) ? raw.pinRejectedId : null;
+    const id = raw.pinRejectedId === JARVIS_WEB_HANDS_EXT_ID ? JARVIS_WEB_HANDS_EXT_ID : null;
     return {
       lastSeenAt: inRange(raw.lastSeenAt, EPOCH_2020, now + 24 * 3_600_000),
       absentMs: inRange(raw.absentMs, 0, YEAR_MS) ?? 0,
@@ -52,6 +53,11 @@ export function loadAbsence(file: string, now: number): AbsenceState {
 export function saveAbsence(file: string, s: AbsenceState): void {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ v: 2, ...s }), "utf8");
-  renameSync(tmp, file);
+  const data = JSON.stringify({ v: 2, ...s });
+  writeFileSync(tmp, data, "utf8");
+  try {
+    renameSync(tmp, file);
+  } catch {
+    writeFileSync(file, data, "utf8"); // EPERM/EBUSY (антивирус/индексатор держит файл) — неатомарно, но не теряем
+  }
 }

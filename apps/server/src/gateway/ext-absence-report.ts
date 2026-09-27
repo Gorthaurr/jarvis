@@ -12,15 +12,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Logger, createLogger } from "@jarvis/shared";
 import type { ExtAbsence, ExtAbsenceDue } from "./ext-absence.js";
-import { pinnedExtIdOrDefault } from "./ext-id.js";
+import { JARVIS_WEB_HANDS_EXT_ID, pinnedExtIdOrDefault } from "./ext-id.js";
 
 const log: Logger = createLogger("ext-absence");
 
-/** Папка распакованного расширения (apps/extension) — если она рядом с сервером И собрана (SW = dist/background.js). */
-export function extensionDir(): string | null {
+/** Папка распакованного расширения (apps/extension рядом с сервером) — если она есть И собрана (SW = dist/background.js). */
+export function extensionDir(dir?: string): string | null {
   try {
-    const dir = fileURLToPath(new URL("../../../extension", import.meta.url));
-    return existsSync(join(dir, "manifest.json")) && existsSync(join(dir, "dist", "background.js")) ? dir : null;
+    const d = dir ?? fileURLToPath(new URL("../../../extension", import.meta.url));
+    return existsSync(join(d, "manifest.json")) && existsSync(join(d, "dist", "background.js")) ? d : null;
   } catch {
     return null;
   }
@@ -35,10 +35,11 @@ export function formatExtAbsence(d: ExtAbsenceDue, dir: string | null, expectedI
   const loss = "Без него не работают вкладки, Telegram, почта и календарь из браузера.";
   if (d.pinRejectedId) {
     return {
-      voice: "Сэр, руки в браузере отключены: моё расширение стучится с чужим номером, и я его не пускаю. Подробности написал в чат.",
+      voice: "Сэр, руки в браузере отключены: моё расширение подключается, но в настройках сервера задан другой номер. Подробности написал в чат.",
       chat:
-        `Руки в браузере отключены: расширение из Chrome подключается с ID ${d.pinRejectedId}, а сервер ждёт ${expectedId} и отклоняет его${since}. ` +
-        `${loss} Проверьте JARVIS_EXT_ID в .env сервера и поле key в apps/extension/manifest.json, затем перезапустите сервер.`,
+        `Руки в браузере отключены: моё расширение (ID ${JARVIS_WEB_HANDS_EXT_ID}) подключается, а сервер отклоняет его — в JARVIS_EXT_ID ` +
+        `задан другой ID (${expectedId})${since}. ${loss} Уберите JARVIS_EXT_ID из .env сервера (по умолчанию пускается ID из key ` +
+        "манифеста) и перезапустите сервер.",
     };
   }
   const remedy =

@@ -9,13 +9,14 @@
  *  • счётчики — ТИКАМИ `client.context` (раз в 15 с): только НАБЛЮДЁННОЕ время — разрыв > MAX_TICK_GAP (ПК спал,
  *    лежал клиент/сервер) и заблокированный экран (ночь с включённым ПК) не в счёт; `chromeMs` — сколько из него
  *    Chrome был на переднем плане (расширение подключается при старте Chrome и по будильнику SW ~24 с);
- *  • `pinRejectedId` — наше расширение стучалось, но /ext отклонил его по ID: Chrome точно открыт, лечение другое.
+ *  • `pinRejectedId` — НАШЕ расширение (ID из `key` манифеста) стучалось, но /ext отклонил его: устарел JARVIS_EXT_ID.
  * Доклад — раз до восстановления связи; мягкий («Chrome мог быть закрыт») может ОДИН раз эскалировать до уверенного,
  * когда появятся улики Chrome (иначе мягкий съедал бы флаг, и провал снова оставался немым — ревью 27.09, HIGH).
  */
 import { type Logger, createLogger } from "@jarvis/shared";
 import { lazyDataPath } from "../paths.js";
 import { type AbsenceKind, type AbsenceState, freshAbsence, loadAbsence, saveAbsence } from "./ext-absence-store.js";
+import { JARVIS_WEB_HANDS_EXT_ID } from "./ext-id.js";
 
 /** Уверенный доклад: наблюдали ≥ 2 ч без расширения, из них Chrome на переднем плане ≥ 10 мин. */
 export const STRONG_ABSENT_MS = 2 * 3_600_000;
@@ -60,9 +61,13 @@ export class ExtAbsence {
     this.save();
   }
 
-  /** /ext отклонил расширение по ID, пока нашего нет на связи. */
+  /**
+   * /ext отклонил по ID, пока нашего нет на связи. Улика — ТОЛЬКО наш ID (из `key` манифеста): чужое расширение
+   * нельзя ни назвать «моим», ни советовать вписать в JARVIS_EXT_ID (это сняло бы пиннинг S-12), а произвольная
+   * строка из Origin не должна дойти до чата владельца (контрольное ревью 27.09).
+   */
   notePinRejected(extId: string): void {
-    if (this.state.pinRejectedId === extId) return;
+    if (extId !== JARVIS_WEB_HANDS_EXT_ID || this.state.pinRejectedId === extId) return;
     this.state.pinRejectedId = extId;
     this.save();
   }
