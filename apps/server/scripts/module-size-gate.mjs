@@ -13,8 +13,9 @@
  * Код выхода 1 при нарушении. Файл, который в BASE был ≤ 150 и вырос за 150, — тоже нарушение (новый раздутый).
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const LIMIT = 150;
 export const ALLOW_GROWTH = 5;
@@ -76,4 +77,18 @@ function main(argv) {
   return bad.length ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main(process.argv.slice(2)));
+/**
+ * Запущен как `node …/module-size-gate.mjs`, а не импортирован тестом. Сравниваем ПУТИ, не строки: на Windows
+ * argv[1] = `C:\…`, а import.meta.url = `file:///C:/…` — строковая сверка `file://${argv[1]}` не совпадала
+ * никогда, и гейт молча выходил с кодом 0 (27.09). realpath — как у самого node для главного модуля
+ * (junction, регистр буквы диска).
+ */
+function isEntry() {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntry()) process.exit(main(process.argv.slice(2)));
