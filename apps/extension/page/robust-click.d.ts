@@ -25,5 +25,18 @@ export interface RobustClickDone {
   navigated?: string;
 }
 
+/**
+ * Документ ушёл (pagehide) посреди ожидания после жеста: жёсткий переход, в bfcache страница ЗАМОРОЖЕНА и иначе не ответила
+ * бы вовсе. Маркер, не исход: расширение по нему судит вкладку/фрейм (modules/page-left.js); прочим он честен и сам по себе.
+ */
+export interface RobustClickLeft {
+  ok: true;
+  pageLeft: true;
+  navigated: true;
+  /** Переход вероятен, исход самого клика НЕ подтверждён — verify-долг не снимается. */
+  uncertain: true;
+  note: string;
+}
+
 /** Клик/наведение по цели. §14: подпись цели (и кнопок формы при expectChange) узнана guard без одобрения — commit_confirm. */
-export function robustClickMain(params?: RobustClickParams): Promise<RobustClickDone | PageFail>;
+export function robustClickMain(params?: RobustClickParams): Promise<RobustClickDone | RobustClickLeft | PageFail>;

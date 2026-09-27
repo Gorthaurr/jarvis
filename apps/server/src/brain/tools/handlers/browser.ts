@@ -12,7 +12,7 @@ import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDecl
 import { navDnsRefusal } from "../nav-dns.js";
 import { assessWebCommit } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
-import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
+import { browserActParams, browserStepFields, intentMayMutate, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refApprovalLabel, refCommitLabels, rememberRefHints } from "./browser-refs.js";
 import { nonDomFailure, pageErrorBlock } from "./browser-failure.js";
@@ -479,6 +479,8 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
       // галочки после type/set/select, позиция плеера, достоверный переход); жест отправки (Enter/submit/type+enter/
       // key Enter, r.submitted) наблюдением поля долг не снимает — см. browser-act-outcome.ts.
       if (actObserved(intent, params, r)) out.observed = true;
+      // 27.09 (ревью р1): меняющее действие увело страницу, исход не подтверждён — сигнал «неизвестно» петле (стоп раунда, журнал).
+      if (navigatedTo(r) && r.uncertain === true && intentMayMutate(intent)) out.uncertain = true;
       return out;
     } catch (e) {
       // W1: ответа нет после отправки (B-4) → «исход неизвестен» без хатча; секретное поле (§0), закрытая вкладка,
