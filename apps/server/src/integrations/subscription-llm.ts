@@ -502,11 +502,12 @@ export class SubscriptionLlmProvider implements ILlmProvider {
     if (key) {
       const live = this.sessions.get(key);
       if (live) {
+        const outcomes = live.alive && live.fingerprint === fingerprint ? continuationOutcomes(req, live.pendingIds()) : undefined;
         // W3 (L-6): историю переписала петля (свёртка / вырезка скринов) — сессия CLI её не видит, продолжать нельзя.
-        const reset = rewriteResetReason(req, this.images.get(live) ?? 0);
-        const outcomes = !reset && live.alive && live.fingerprint === fingerprint ? continuationOutcomes(req, live.pendingIds()) : undefined;
-        if (outcomes) {
-          this.images.set(live, (this.images.get(live) ?? 0) + countOutcomeImages(outcomes));
+        const images = (this.images.get(live) ?? 0) + (outcomes ? countOutcomeImages(outcomes) : 0);
+        const reset = outcomes ? rewriteResetReason(req, images) : undefined;
+        if (outcomes && !reset) {
+          this.images.set(live, images);
           let turn: SessionTurn;
           try {
             turn = await live.continueWith(outcomes, onDelta);
