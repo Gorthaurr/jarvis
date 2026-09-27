@@ -51,31 +51,33 @@ export const TARGET_SCHEMA: Record<string, unknown> = {
 /** Регион экрана (§Волна2 2.3): координаты в кадре frame (W2), как клики by:'coords'. */
 export const SCREEN_RECT_SCHEMA: Record<string, unknown> = {
   type: "object",
-  description: "Регион экрана: x/y/w/h — в координатах полного screen_capture (как клики by:'coords').",
+  description: "Регион x/y/w/h в кадре screen_capture.",
   properties: { x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" }, frame: FRAME_PROP },
   required: ["x", "y", "w", "h"],
   additionalProperties: false,
 };
 
-/** Цель act: строка = видимый текст; объект — уточнение (та же форма у `to` для drag). */
-const ACT_TARGET_SCHEMA = {
-  anyOf: [
-    { type: "string" },
-    {
-      type: "object",
-      properties: {
-        text: { type: "string" },
-        role: { type: "string", description: "Роль UIA: Button, Edit, ListItem, TabItem, MenuItem, CheckBox, ComboBox, Hyperlink, TreeItem…" },
-        automationId: { type: "string" },
-        handle: { type: "string", description: "handle из look{what:'elements'} — точная адресация без поиска." },
-        x: { type: "number" },
-        y: { type: "number" },
-        frame: FRAME_PROP,
+/** Цель act: строка = видимый текст; объект — уточнение. `to` (drag) — та же форма без повторных описаний полей. */
+const targetShape = (described: boolean) =>
+  ({
+    anyOf: [
+      { type: "string" },
+      {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          role: { type: "string", ...(described ? { description: "Роль UIA: Button, Edit, ListItem, MenuItem, CheckBox, ComboBox…" } : {}) },
+          automationId: { type: "string" },
+          handle: { type: "string", ...(described ? { description: "handle из look{what:'elements'} — без поиска." } : {}) },
+          x: { type: "number" },
+          y: { type: "number" },
+          frame: described ? FRAME_PROP : { type: "string" },
+        },
+        additionalProperties: false,
       },
-      additionalProperties: false,
-    },
-  ],
-} as const;
+    ],
+  }) as const;
+const ACT_TARGET_SCHEMA = targetShape(true);
 
 /** Глаголы act (W2: +triple/middle/hover/drag/scroll). Список — общий для схемы и проверки шагов (act-steps). */
 export const ACT_VERBS = ["click", "double", "right", "type", "set", "toggle", "select", "expand", "key", "triple", "middle", "hover", "drag", "scroll"] as const;
@@ -86,12 +88,12 @@ export const ACT_STEPS_MAX = 12;
 export const ACT_TOOL: ToolSchema = {
   name: "act",
   description:
-    "ГЛАВНЫЙ инструмент рук в GUI: «нажми «Отправить» в Telegram», «напечатай X в поле «Поиск»» — ОДНИМ вызовом. Клиент САМ находит цель (handle → UIA-снапшот активного окна по тексту/роли → OCR окна app/переднего → элемент под точкой), действует БЕЗ курсора где можно (UIA invoke; физический клик — фолбэк, physical:true, а точка над крупным элементом вроде строки списка — ровно в точку) и СВЕРЯЕТ исход: дельта окна ДО/ПОСЛЕ + признак verify. Ответ: found{via,name,role}, did, verified: \"met\" (исход подтверждён) | \"failed\" (действие УШЛО, признак не наступил — НЕ повторяй вслепую, сверь: look{what:'elements'|'text'}) | \"unchecked\" (сверь сам); наблюдение-дельта. Не найдено или несколько равных → ошибка со списком видимого (уточни имя/role/automationId) — не «клик мимо с ok». target: строка = видимый текст; объект — {text, role, automationId, handle из look{what:'elements'}, x/y}. x/y — в кадре ПОСЛЕДНЕГО screen_capture задачи (кадр подставлю сам); по лупе (screen_capture{rect} — свежий снимок) кликай с её frame из ответа. app — сперва фокус окна по подстроке заголовка/процесса; окна нет → ошибка, ничего не нажато. do: click (дефолт) | double | right | triple (выделить строку) | middle | hover (тултип/ховер-меню) | scroll (колесо В цели: dy +вверх/−вниз, dx) | drag (target → to) | type (клик в поле + печать text; clear:true — очистить поле, enter:true — Enter после; БЕЗ target — в поле, где фокус УЖЕ стоит; перевод строки = Enter) | set (UIA setValue) | toggle | select | expand | key (combo, «Ctrl+S»). steps — серия до 12 шагов ОДНИМ вызовом (каждый шаг — act со всеми гейтами; {do:'capture'} — кадр в ответ, {do:'wait',ms}); стоп на первой ошибке → «выполнено k из n». ВСЕГДА задавай verify, когда знаешь признак успеха. §14: Enter/«Отправить»/«Оплатить»/«Печать» в мессенджере/банке/1С → вопрос владельцу ДО первой буквы; программа цели не определилась → честный отказ (укажи app). Игра/canvas: цель по тексту найдёт OCR; пиксельный геймплей не обещай.",
+    "ГЛАВНЫЙ инструмент рук в GUI: «нажми «Отправить» в Telegram», «напечатай X в поле «Поиск»» — ОДНИМ вызовом. Клиент САМ находит цель (handle → UIA-снапшот окна по тексту/роли → OCR окна app/переднего → элемент под точкой), действует без курсора где можно (UIA invoke; физический клик — фолбэк) и СВЕРЯЕТ исход (дельта окна + verify). verified: \"met\" — подтверждено | \"failed\" — действие УШЛО, признак не наступил: НЕ повторяй вслепую, сверь look | \"unchecked\" — сверь сам. Не найдено/неоднозначно → ошибка со списком видимого (уточни role/automationId), не «клик мимо с ok». x/y — в кадре ПОСЛЕДНЕГО screen_capture задачи; по лупе screen_capture{rect} — с её frame. app — сперва фокус окна (нет окна → ошибка, ничего не нажато). do: click (деф) | double | right | triple | middle | hover | scroll (dy +вверх/−вниз, dx) | drag (target → to) | type (клик в поле + text; clear, enter; без target — в текущий фокус; перевод строки = Enter) | set | toggle | select | expand | key (combo). steps — серия до 12 шагов (каждый — act со всеми гейтами; {do:'capture'}, {do:'wait',ms}); стоп на первой ошибке → «выполнено k из n». Знаешь признак успеха — задай verify. §14: Enter/«Отправить»/«Оплатить»/«Печать» в мессенджере/банке/1С → вопрос владельцу ДО первой буквы; программа цели не определилась → честный отказ (укажи app). Игра/canvas: текст найдёт OCR; пиксельный геймплей не обещай.",
   input_schema: {
     type: "object",
     properties: {
       target: {
-        description: "Строка — видимый текст элемента; ИЛИ объект {text?, role?, automationId?, handle?, x?, y?, frame?} (x/y — в кадре screen_capture).",
+        description: "Строка — видимый текст; или объект-уточнение (x/y — в кадре screen_capture).",
         ...ACT_TARGET_SCHEMA,
       },
       app: { type: "string", description: "Сначала сфокусировать окно (подстрока заголовка/процесса). Не найдено → ошибка, действие не выполняется." },
@@ -113,7 +115,7 @@ export const ACT_TOOL: ToolSchema = {
       physical: { type: "boolean", description: "Сразу физический клик SendInput (игра/canvas, где UIA заведомо слепа)." },
       clear: { type: "boolean", description: "type: очистить поле перед печатью." },
       enter: { type: "boolean", description: "type: нажать Enter после печати." },
-      to: { description: "drag: куда тащить (как target).", ...ACT_TARGET_SCHEMA },
+      to: { description: "drag: куда тащить (как target).", ...targetShape(false) },
       dx: { type: "integer", description: "scroll: тики колеса по горизонтали." },
       dy: { type: "integer", description: "scroll: тики колеса (+вверх/−вниз)." },
       observe: { type: "boolean", description: "false — без снимков до/после." },
