@@ -4016,10 +4016,11 @@ keeper 5, typecheck. Живьём не проверено: чек-листы W1 
 - Грабля на будущее: VPN/TUN с fake-IP в приватном диапазоне (100.64/10, 10/8) сделает «внутренними» ВСЕ сайты —
   `web_*` и `web.fetch` откажут поголовно; первым делом смотреть `dns.lookup` (на ПК владельца — настоящие адреса,
   v2rayN TUN без fake-IP; xray fakedns по умолчанию 198.18/15 — не приватный).
-Гейт на Windows: shared 199 (+5), сервер 3592 (+13), клиент 1044 (+7 chromium), typecheck; chromium-стенд 18/18
-(`jarvis-browser-dns` 7 — вкл. живой DNS `localtest.me`/`127.0.0.1.nip.io`, `jarvis-browser-ssrf` 5, e2e `web_act` 6);
-реверт-мутации 10/10 красные; гейт размеров ок (врезки: dispatch +1, handlers/browser +4, web +2, jarvis-browser +1,
-shared/index +1). Живой зонд: сервер из worktree (порт 8797, изолированные данные) через `/dev/bench/tool` —
-`web_open`/`web_login`/`browser_open`/`web_fetch` на `localtest.me`/`nip.io` → отказ, канарейка на 127.0.0.1 — 0 запросов;
-контроли `example.com`, `cbr.ru` (cp1251) через пиннинг-транспорт — ок. Живьём НЕ проверено: невидимый браузер с профилем
-владельца (Telegram) — код пути не менялся, кроме DNS-суда в перехвате навигации.
+Гейт на Windows (после слияния с main): shared 203 (+9), сервер 3635 (+22 этой ветки), клиент 1046 (+9 chromium),
+typecheck; chromium-стенд 20/20 (`jarvis-browser-dns` 9 — вкл. живой DNS `localtest.me`/`127.0.0.1.nip.io`,
+`jarvis-browser-ssrf` 5, e2e `web_act` 6); реверт-мутации 29/29 красные; гейт размеров ок (врезки: dispatch +2,
+handlers/browser +4, skills +5, watch +4, admission +3, web +2, jarvis-browser +2, shared/index +1). Живой зонд 14/14:
+сервер из worktree (порт 8797, изолированные данные) через `/dev/bench/tool` — `web_open`/`web_login`/`browser_open`/
+`web_fetch`/`input_batch`/`app_launch` на `localtest.me`/`nip.io` (и `http:host`, `http:\host`) → отказ, канарейка на
+127.0.0.1 — 0 запросов; контроли `example.com`, `cbr.ru` (cp1251) через пиннинг-транспорт — ок. Живьём НЕ проверено:
+невидимый браузер с профилем владельца (Telegram) — путь не менялся, кроме DNS-суда в перехвате навигации.
