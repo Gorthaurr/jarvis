@@ -949,7 +949,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
   const text = String(input.content ?? input.text ?? "").trim();
   if (!text) return err("memory_write: пустой content");
   if (ctx.devSession) return ok("Dev-сессия: в долговременную память владельца не записываю (запись пропущена).");
-  if (ctx.unaddressedTurn) return err(UNADDRESSED_MEMORY);
+  if (ctx.unaddressedTurn) return declined(UNADDRESSED_MEMORY); // остановка политикой, не капитуляция модели
   // Ревью памяти 2026-07-10 (А2/А9): единый писатель — семантический дедуп (стор июня: 5 дублей на
   // 13 фактов) + мост fact/preference в курируемый профиль (промпт+приветствие, живёт без pgvector).
   const outcome = await writeUserMemory(ctx.episodic, ctx.userId, normalizeEpisodeKind(input.kind), text, {
@@ -962,7 +962,7 @@ async function memoryWrite(ctx: ToolContext, input: Record<string, unknown>): Pr
 
 async function memoryForget(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolResult> {
   if (ctx.devSession) return ok("Dev-сессия: память владельца не трогаю (забывание пропущено).");
-  if (ctx.unaddressedTurn) return err(UNADDRESSED_MEMORY);
+  if (ctx.unaddressedTurn) return declined(UNADDRESSED_MEMORY);
   // Аудит контекста 2026-07-20: честное забывание. Схема объявляет `query`; принимаем content/text
   // для совместимости. Помечает stale близкие эпизоды (обратимо) + чистит совпадающий факт профиля.
   const q = String(input.query ?? input.content ?? input.text ?? "").trim();

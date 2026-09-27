@@ -144,6 +144,7 @@ export interface AgentDeps {
    * поставил его видео на паузу.
    */
   devSession?: boolean;
+  unaddressedUtterance?: boolean; // A1: последняя реплика владельца — без «Джарвис» (viaWake=false): долговременное не меняем
   /** W4.2: минуты фокуса по процессу с клиента (client.env.usage) — порядок реестра каналов и честное «у частой программы канала нет». */
   appUsage?: AppUsage[];
   /**

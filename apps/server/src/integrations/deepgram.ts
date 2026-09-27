@@ -773,6 +773,7 @@ class PersistentDeepgramConnection {
             this.sentSec += f.byteLength / (this.fmtSampleRate * 2);
           }
           if (this.turnState === "sealing") this.turnEndSec = this.sentSec; // весь буфер = этот ход
+          if (this.turnAudioBuffer.length > 0) this.audioSinceOpen = true; // реплей = звук хода на ЭТОМ сокете (бюджет — только живое)
         } else {
           // H14 (ревью 2026-07-02): reconnect В ПРОСТОЕ (сеть моргнула МЕЖДУ ходами, напр. 1006).
           // Таймлайн нового сокета у Deepgram тоже начинается с 0, а sentSec хранил секунды СТАРОГО

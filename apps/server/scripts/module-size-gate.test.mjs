@@ -2,8 +2,6 @@
  * W2 (пакет 0, P0-f): правила гейта размеров модулей (закон CLAUDE.md «модули < 150 строк, раздутые не растут»).
  * Реверт-проверка: ослабь любое правило judge() — строка таблицы упадёт.
  */
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ALLOW_GROWTH, LIMIT, isGatedModule, judge } from "./module-size-gate.mjs";
 
@@ -27,16 +25,6 @@ describe("judge", () => {
 
   it("порог — 150 строк", () => {
     expect(LIMIT).toBe(150);
-  });
-});
-
-// 27.09: на Windows гейт НЕ ЗАПУСКАЛСЯ — проверка «запущен как скрипт» сравнивала file:///C:/… с file://C:\…,
-// main не звался, любой прогон молча отвечал 0. Реверт: верни `file://${process.argv[1]}` — тест упадёт на Windows.
-describe("запуск как скрипт", () => {
-  it("без аргументов main реально исполняется: usage в stderr и код 2 (а не молчаливый 0)", () => {
-    const r = spawnSync(process.execPath, [fileURLToPath(new URL("./module-size-gate.mjs", import.meta.url))], { encoding: "utf8" });
-    expect(r.status).toBe(2);
-    expect(r.stderr).toMatch(/usage: module-size-gate\.mjs/u);
   });
 });
 

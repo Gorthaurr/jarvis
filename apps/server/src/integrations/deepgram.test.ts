@@ -264,47 +264,93 @@ describe("Deepgram ПЕРСИСТЕНТНЫЙ WS (§10, JARVIS_DEEPGRAM_PERSISTE
     expect(finals).toEqual(["привет как дела"]); // НЕ «привет привет как дела»
   });
 
-  // Прод 26.09 (C1): ход «слушаю» завис без аудио на 6 ч — Deepgram закрывал 1011 «did not receive audio»,
-  // мы переподключались, open обнулял бюджет и реплеил старый буфер → 1686 кругов в платный STT.
-  // Реверт: верни сброс reconnectAttempts на open и переподключение на 1011 без свежего аудио — тест упадёт.
-  it("ход без свежего аудио: 1011 по кругу НЕ переподключает бесконечно — ход закрыт, сокетов ≤ 2", async () => {
-    const provider = new DeepgramSttProvider("k");
-    const t = provider.open({ sampleRate: 16_000 });
-    let closed = false;
-    t.onClose(() => {
-      closed = true;
-    });
-    const ws1 = MockWS.instances[0]!;
-    ws1.fire("open");
-    t.pushAudio(new ArrayBuffer(640)); // в начале хода звук был
-    ws1.fire("close", { code: 1011, reason: "did not receive audio data" }); // дальше — тишина
-    for (let i = 0; i < 20; i++) {
+  // Прод 26.09 (C1): ход «слушаю» завис без аудио на 6 ч — Deepgram закрывал 1011 «did not receive audio», мы
+  // переподключались, open обнулял бюджет и реплеил старый буфер → 1686 кругов в платный STT. Каждое правило — своим
+  // тестом (адверс-ревью р1: один тест не падал при откате половины фикса):
+  //  R1 бюджет реконнектов обнуляет только ЖИВОЕ аудио, не open;  R2 1011 при ходе вообще без звука → стоп сразу;
+  //  R3 1011 при ИДУЩЕМ звуке (владелец говорит) — переподключаемся;  R4 реплей буфера = звук хода (короткая фраза
+  //  целиком в буфере до open не теряется на не-таймаутном 1011).
+  const cycle = async (code: number, n: number, withAudio: boolean, t: { pushAudio(b: ArrayBuffer): void }) => {
+    for (let i = 0; i < n; i++) {
+      const before = MockWS.instances.length;
       await vi.advanceTimersByTimeAsync(2100);
-      const ws = MockWS.instances[MockWS.instances.length - 1]!;
-      if (ws === ws1 || closed) break;
-      ws.fire("open"); // реплей старого буфера, нового аудио нет
-      ws.fire("close", { code: 1011, reason: "did not receive audio data" });
-    }
-    expect(MockWS.instances.length).toBeLessThanOrEqual(2);
-    expect(closed).toBe(true); // пайплайн узнал, что стрим закрыт (переоткроет на следующей речи)
-  });
-
-  it("обрыв 1006 посреди хода при ИДУЩЕМ звуке по-прежнему переподключается (бюджет сбрасывает свежее аудио)", async () => {
-    const provider = new DeepgramSttProvider("k");
-    const t = provider.open({ sampleRate: 16_000 });
-    let closed = false;
-    t.onClose(() => {
-      closed = true;
-    });
-    for (let i = 0; i < 8; i++) {
+      if (MockWS.instances.length === before) break; // нового сокета нет — стрим закрыт, мёртвый не дёргаем
       const ws = MockWS.instances[MockWS.instances.length - 1]!;
       ws.fire("open");
-      t.pushAudio(new ArrayBuffer(640)); // владелец продолжает говорить — прогресс есть
-      ws.fire("close", { code: 1006 });
-      await vi.advanceTimersByTimeAsync(2100);
+      if (withAudio) t.pushAudio(new ArrayBuffer(640));
+      ws.fire("close", { code });
     }
-    expect(closed).toBe(false); // 8 обрывов > MAX_RECONNECTS, но каждый раз шло свежее аудио
-    expect(MockWS.instances.length).toBe(9);
+  };
+  const watch = (t: { onClose(cb: () => void): void }) => {
+    const st = { closed: false };
+    t.onClose(() => (st.closed = true));
+    return st;
+  };
+
+  it("R1: шторм 1011 со старым буфером и БЕЗ живого звука ограничен бюджетом (≤ 6 сокетов), стрим закрыт", async () => {
+    const t = new DeepgramSttProvider("k").open({ sampleRate: 16_000 });
+    const st = watch(t);
+    MockWS.instances[0]!.fire("open");
+    t.pushAudio(new ArrayBuffer(640)); // в начале хода звук был → в буфере
+    MockWS.instances[0]!.fire("close", { code: 1011, reason: "did not receive audio data" });
+    await cycle(1011, 20, false, t);
+    expect(MockWS.instances.length).toBeLessThanOrEqual(6); // на старом коде — 21
+    expect(st.closed).toBe(true);
+  });
+
+  it("R1: обрыв 1006 без живого звука посреди хода тоже ограничен бюджетом (open его больше не обнуляет)", async () => {
+    const t = new DeepgramSttProvider("k").open({ sampleRate: 16_000 });
+    const st = watch(t);
+    MockWS.instances[0]!.fire("open");
+    t.pushAudio(new ArrayBuffer(640));
+    MockWS.instances[0]!.fire("close", { code: 1006 });
+    await cycle(1006, 20, false, t);
+    expect(MockWS.instances.length).toBeLessThanOrEqual(6);
+    expect(st.closed).toBe(true);
+  });
+
+  it("R2: ход вообще без звука + 1011 → стоп сразу, без реконнекта", async () => {
+    const t = new DeepgramSttProvider("k").open({ sampleRate: 16_000 });
+    const st = watch(t);
+    MockWS.instances[0]!.fire("open");
+    MockWS.instances[0]!.fire("close", { code: 1011, reason: "did not receive audio data" });
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(MockWS.instances.length).toBe(1);
+    expect(st.closed).toBe(true);
+  });
+
+  it("R3: 1011 при идущем звуке (владелец говорит) → переподключаемся, стрим НЕ закрыт; живой звук держит бюджет полным", async () => {
+    const t = new DeepgramSttProvider("k").open({ sampleRate: 16_000 });
+    const st = watch(t);
+    MockWS.instances[0]!.fire("open");
+    t.pushAudio(new ArrayBuffer(640));
+    MockWS.instances[0]!.fire("close", { code: 1011, reason: "internal" });
+    await cycle(1006, 8, true, t); // 8 обрывов > MAX_RECONNECTS, но после каждого open — живой звук
+    expect(st.closed).toBe(false);
+    expect(MockWS.instances.length).toBe(9); // 1 + 8 реконнектов, ни одного отказа по бюджету
+  });
+
+  it("R4: короткая фраза целиком в буфере ДО open, затем 1011 не по таймауту → финал не теряется", async () => {
+    const t = new DeepgramSttProvider("k").open({ sampleRate: 16_000 });
+    const finals: string[] = [];
+    t.onPartial((p) => {
+      if (p.final) finals.push(p.text);
+    });
+    const st = watch(t);
+    t.pushAudio(new ArrayBuffer(640)); // «стоп» ушёл в буфер, сокет ещё не открыт
+    const ws1 = MockWS.instances[0]!;
+    ws1.fire("open"); // реплей буфера
+    ws1.fire("close", { code: 1011, reason: "internal server error" });
+    await vi.advanceTimersByTimeAsync(2100);
+    const ws2 = MockWS.instances[1]!;
+    expect(ws2).toBeDefined(); // переподключились (реплей — звук хода)
+    ws2.fire("open");
+    const closing = t.close();
+    ws2.fire("message", results("стоп", true));
+    await vi.advanceTimersByTimeAsync(700);
+    await closing;
+    expect(finals).toEqual(["стоп"]);
+    expect(st.closed).toBe(false);
   });
 
   it("barge-in: beginTurn поверх незакрытого хода бросает старый (его close = no-op)", async () => {

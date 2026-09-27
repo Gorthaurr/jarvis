@@ -60,7 +60,7 @@ export function makeToolCtx(deps: AgentDeps, session: Session, opts: LoopOpts | 
     // §режим выделения: машинный реэнтри (watch-action) НЕ имеет права открывать оверлей поверх экрана —
     // просить владельца обвести можно только в ответ на его реплику.
     machineTurn: opts?.machine === true,
-    unaddressedTurn: opts?.viaWake === false, // A1: реплика без «Джарвис» — долговременную память не меняет
+    get unaddressedTurn() { return deps.unaddressedUtterance === true; }, // A1: судит последняя реплика (steer/«доделай» тоже)
 
     resolutionMemory: deps.resolutionMemory, // §: опытная память резолва (скорость)
     sessionId: session.sessionId,

@@ -340,7 +340,8 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   it("error_max_turns с пойманным вызовом инструмента — НЕ ошибка", async () => {
     const sdk = fakeSdk([
       { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "mcp__jarvis__app_launch", input: { args: { app: "x" } } }] } },
-      { type: "result", subtype: "error_max_turns", result: "Reached maximum number of turns (1)" },
+      // Реальная форма SDK (адверс-ревью р1): is_error:true, errors[], поля result нет.
+      { type: "result", subtype: "error_max_turns", is_error: true, errors: ["Reached maximum number of turns (1)"] },
     ]);
     const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
     expect(r.stopReason).toBe("tool_use");
@@ -350,6 +351,15 @@ describe("SubscriptionLlmProvider.complete (маппинг SDK)", () => {
   it("настоящая ошибка БЕЗ результата — по-прежнему исключение (стаб, а не пустой успех)", async () => {
     const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", result: "OAuth session expired" }]);
     await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+  });
+
+  // Адверс-ревью р1: у реального SDKResultError текст причины — в errors[], поля result нет. Раньше причина
+  // терялась («резервный канал не ответил: error_during_execution»), и владельцу нельзя было назвать её.
+  it("error_during_execution реальной формы (errors[]) → причина распознана (auth), а не «не ответил»", async () => {
+    _resetSubscriptionFailureForTest();
+    const sdk = fakeSdk([{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["OAuth session expired"] }]);
+    await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка/);
+    expect(lastSubscriptionFailure()?.kind).toBe("auth");
   });
 
   it("слишком длинное имя инструмента не отдаётся в резерв (лимит 64 с префиксом)", async () => {
@@ -516,6 +526,22 @@ describe("эхо ошибки канала не выдаём за ответ м�
     ]);
     await expect(new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE)).rejects.toThrow(/подписка:/);
     expect(lastSubscriptionFailure()).toBeDefined();
+  });
+
+  // Адверс-ревью р1 (C2): обрыв ПОСЛЕ готового ответа — CLI шлёт ответ, затем кадр-ошибку `error:"server_error"` и
+  // result{success, is_error:true}. Текст кадра-ошибки в ответ не идёт → настоящий ответ не выбрасывается как «эхо».
+  // Реверт: верни extractText без isApiErrorFrame в subscription-session.ts — тест упадёт.
+  it("ответ модели + хвостовой кадр «Connection lost» (is_error:true) → ответ сохранён, не ложный провал", async () => {
+    _resetSubscriptionFailureForTest();
+    const LOST = "API Error: Connection lost mid-response. The response above may be incomplete.";
+    const sdk = fakeSdk([
+      { type: "assistant", message: { content: [{ type: "text", text: "Открываю блокнот, сэр." }] } },
+      { type: "assistant", error: "server_error", message: { content: [{ type: "text", text: LOST }] } },
+      { type: "result", subtype: "success", is_error: true, result: LOST },
+    ]);
+    const r = await new SubscriptionLlmProvider({ loadSdk: async () => sdk }).complete(BASE);
+    expect(r.text).toBe("Открываю блокнот, сэр.");
+    expect(r.text).not.toMatch(/API Error/u);
   });
 
   it("НАСТОЯЩИЙ частичный ответ обрывом не выбрасывается (работу модели не теряем)", async () => {
