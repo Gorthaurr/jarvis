@@ -2,6 +2,8 @@
  * W2 (пакет 0, P0-f): ГЕЙТ РАЗМЕРОВ МОДУЛЕЙ — закон CLAUDE.md «модули < 150 строк, раздутые файлы не растут».
  * Без шебанга: модуль импортирует vitest, а на Windows-чекауте (CRLF) vite 5 не узнаёт `#!…\r\n` и вставляет
  * импорты ПЕРЕД ним → SyntaxError всего набора (27.09). Запуск — только `node …/module-size-gate.mjs`.
+ * Точка входа — сравнение URL через pathToFileURL: на Windows argv[1] = `C:\…`, а import.meta.url = `file:///C:/…`;
+ * склейка `file://${argv[1]}` не совпадала никогда → гейт молча отдавал 0 (27.09).
  *
  * Для каждого изменённого относительно BASE не-тестового `.ts` (по всему репозиторию, `git diff --numstat BASE`):
  *  - НОВЫЙ файл — не длиннее 150 строк;
@@ -15,6 +17,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export const LIMIT = 150;
 export const ALLOW_GROWTH = 5;
@@ -43,12 +46,12 @@ export function judge(path, base, head, allowed) {
 }
 
 function main(argv) {
-  const root = git(["rev-parse", "--show-toplevel"], process.cwd()).trim();
   const base = argv.find((a, i) => !a.startsWith("--") && argv[i - 1] !== "--allow");
   if (!base) {
     console.error("usage: module-size-gate.mjs <BASE> [--allow path]... [--json]");
     return 2;
   }
+  const root = git(["rev-parse", "--show-toplevel"], process.cwd()).trim();
   const allowed = new Set(argv.flatMap((a, i) => (argv[i - 1] === "--allow" ? [a] : [])));
   const changed = git(["diff", "--name-only", "--diff-filter=AMR", base], root)
     .split("\n")
@@ -76,4 +79,4 @@ function main(argv) {
   return bad.length ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) process.exit(main(process.argv.slice(2)));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exit(main(process.argv.slice(2)));

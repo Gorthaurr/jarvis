@@ -2,8 +2,25 @@
  * W2 (пакет 0, P0-f): правила гейта размеров модулей (закон CLAUDE.md «модули < 150 строк, раздутые не растут»).
  * Реверт-проверка: ослабь любое правило judge() — строка таблицы упадёт.
  */
+import { spawnSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ALLOW_GROWTH, LIMIT, isGatedModule, judge } from "./module-size-gate.mjs";
+
+const GATE = fileURLToPath(new URL("./module-size-gate.mjs", import.meta.url));
+
+describe("запуск как скрипт", () => {
+  // 27.09: гард «я — точка входа» сравнивал `file://${argv[1]}` с import.meta.url; на Windows argv[1] —
+  // `C:\…`, а url — `file:///C:/…` → main() не звался, гейт молча отдавал 0 на любом BASE.
+  it("гейт реально запускается как скрипт (Windows: argv[1] vs import.meta.url) — без BASE → usage и код 2", () => {
+    const r = spawnSync(process.execPath, [GATE], { cwd: dirname(GATE), encoding: "utf8", windowsHide: true, timeout: 20_000 });
+    expect(r.error).toBeUndefined();
+    expect(r.stderr).toMatch(/usage: module-size-gate\.mjs <BASE>/u);
+    expect(r.stdout).toBe("");
+    expect(r.status).toBe(2);
+  });
+});
 
 const none = new Set();
 
