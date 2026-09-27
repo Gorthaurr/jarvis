@@ -63,6 +63,13 @@ describe("G-12: OCR-ступень act в окне", () => {
     await expect(findTarget("Отправить", Date.now() + 30_000, { hwnd: 5 })).rejects.toThrow(/не найдена/u);
   });
 
+  it("окно app не в списке (без заголовка) → OCR монитора, но строка под окном Джарвиса всё равно отброшена", async () => {
+    words = [UNDER_OWN, VISIBLE];
+    const f = await findTarget("Отправить", Date.now() + 30_000, { hwnd: 77 }); // hwnd, которого нет в window.list
+    expect(sent[0]).toMatchObject({ w: 1920, h: 1080 }); // окна поиска не знаем — весь монитор
+    expect(f.point).toEqual({ x: 850, y: 965 }); // единственная НЕ своя строка, а не «2 строки — неоднозначно»
+  });
+
   it("две ВИДИМЫЕ строки в окне → честная неоднозначность со списком, ничего не выбрано", async () => {
     words = [VISIBLE, word(300, 600)];
     const p = findTarget("Отправить", Date.now() + 30_000, { hwnd: 5 });
