@@ -48,15 +48,16 @@ describe("commandFromInput через настоящий dispatchTool", () => {
 
   it("input_click: space в координатной цели срезан, лишнее вне схемы — тоже", async () => {
     const { ctx, sent } = ctxWithLog();
-    await dispatchTool("input_click", { target: { by: "coords", x: 10, y: 20, space: "screen" }, method: "physical", junk: 1, ...MODEL_SERVICE }, ctx);
-    expect(sent[0]).toEqual({ kind: "input.click", target: { by: "coords", x: 10, y: 20 }, method: "physical", origin: "user" });
+    // W2 П5: координаты без кадра сервер отклоняет до сборки команды — модель называет кадр (frame по схеме остаётся).
+    await dispatchTool("input_click", { target: { by: "coords", x: 10, y: 20, space: "screen", frame: "k7f1" }, method: "physical", junk: 1, ...MODEL_SERVICE }, ctx);
+    expect(sent[0]).toEqual({ kind: "input.click", target: { by: "coords", x: 10, y: 20, frame: "k7f1" }, method: "physical", origin: "user" });
     expect(JSON.stringify(sent[0])).not.toMatch(/approval|expectedForeground|space|junk/u);
   });
 
   it("wait_for: вложенный rect условия теряет space, свободных полей схемы не трогаем", async () => {
     const { ctx, sent } = ctxWithLog();
-    await dispatchTool("wait_for", { condition: { kind: "text", text: "Готово", rect: { x: 1, y: 2, w: 3, h: 4, space: "screen" } }, timeoutMs: 5000 }, ctx);
-    expect(sent[0]).toEqual({ kind: "wait.for", condition: { kind: "text", text: "Готово", rect: { x: 1, y: 2, w: 3, h: 4 } }, timeoutMs: 5000, origin: "user" });
+    await dispatchTool("wait_for", { condition: { kind: "text", text: "Готово", rect: { x: 1, y: 2, w: 3, h: 4, space: "screen", frame: "k7f1" } }, timeoutMs: 5000 }, ctx);
+    expect(sent[0]).toEqual({ kind: "wait.for", condition: { kind: "text", text: "Готово", rect: { x: 1, y: 2, w: 3, h: 4, frame: "k7f1" } }, timeoutMs: 5000, origin: "user" });
   });
 });
 

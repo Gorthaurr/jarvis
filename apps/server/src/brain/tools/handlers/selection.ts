@@ -29,11 +29,9 @@ interface SelectionViewData {
   selection?: ScreenSelection;
   ageMs?: number | null;
   changedSinceSelection?: boolean;
-  crop?: { originX: number; originY: number; scale: number };
+  /** W2 П5: s-кадр картинки выделения (клиент frames.ts). */
+  frameId?: string;
 }
-
-/** Два знака после запятой — координатная формула должна читаться, а не тонуть в мантиссе. */
-const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 interface SelectionStartData {
   started?: boolean;
@@ -190,14 +188,13 @@ export async function screenSelection(ctx: ToolContext, input: Record<string, un
       : data.changedSinceSelection === false
         ? " · грубая проба заметных перемен с момента выделения не нашла (мелкие правки текста она не различает)"
         : " · проба перемен не проводилась (лупа scale≠1 или отпечаток при выделении не снялся) — о переменах с момента выделения судить нельзя";
-  // 🔴 У кропа СВОЯ система координат (та же грабля, что чинили для «лупы» screen_capture): без формулы
-  // взгляд на выделение — тупик: увидеть дефект крупно можно, а ткнуть в него нельзя.
-  const c = data.crop;
-  const cropHint = c
+  // 🔴 У кропа СВОЯ система координат: без неё взгляд на выделение — тупик (дефект видно, ткнуть нельзя). W2 П5: вместо
+  // формулы с space:"screen" (модельный space срезает сборка команды) — s-кадр: клик по увиденному с явным frame.
+  const sid = String(data.frameId ?? "").replace(/[^a-z0-9]/giu, "").slice(0, 24);
+  const cropHint = sid
     ? `
-[Координаты НА ЭТОЙ картинке — не координаты экрана. Чтобы кликнуть по увиденному: ` +
-      `screenX = ${round2(c.originX)} + x / ${round2(c.scale)}, screenY = ${round2(c.originY)} + y / ${round2(c.scale)}, ` +
-      `затем act{target:{x: screenX, y: screenY, space:"screen"}}.]`
+[Координаты НА ЭТОЙ картинке — в её кадре ${sid}, не в полном кадре экрана. Чтобы кликнуть по увиденному: ` +
+      `act{target:{x, y, frame:"${sid}"}} — x/y прямо с этой картинки.]`
     : "";
   const text =
     formatSelectionViewMark(`${describeSelection(sel)} — ${humanAge(data.ageMs)}${changed}`) +

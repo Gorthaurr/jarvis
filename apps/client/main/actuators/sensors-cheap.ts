@@ -14,10 +14,10 @@ import type { WaitCondition } from "@jarvis/protocol";
 import { selectionStore } from "../selection/store.js";
 import { VISUAL_WAIT_KINDS } from "../selection/veil-policy.js";
 import { createLogger, sleep } from "@jarvis/shared";
-import { type CaptureRect, captureScreen } from "./screen.js";
+import type { CaptureRect } from "./screen.js";
+import { screenOcr } from "./screen-ocr.js";
 import { ground } from "./ground.js";
 import { listWindows } from "./windows.js";
-import { NotImplementedError } from "./input.js";
 import { sidecar } from "./sidecar-client.js";
 import * as system from "./system.js";
 import { raceWithCap } from "./race-cap.js";
@@ -25,57 +25,8 @@ import { checkFile, checkProcess, resetFileWait, validateFileCond, validateProce
 
 const log = createLogger("actuator:sensors");
 
-export interface OcrLine {
-  text: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-export interface OcrOutcome {
-  text: string;
-  lines: OcrLine[];
-  /** Размер распознанного изображения — bbox строк в ЕГО координатах. */
-  width: number;
-  height: number;
-  /**
-   * Маппинг image→screen-DIP кадра OCR (только для ПОЛНОГО снимка без rect; при rect строки уже
-   * сдвинуты в систему полного кадра и mapping не отдаём). Потребитель (jarvis SDK find→click)
-   * конвертирует центр строки в АБСОЛЮТНЫЕ экранные DIP: boundsX + x/scale → клик space:"screen",
-   * не завися от lastMapping. Без него координатный клик по OCR был бы мимо (ложный успех).
-   */
-  mapping?: { boundsX: number; boundsY: number; scale: number };
-}
-
-/** Локальный OCR экрана (полного или региона) через сайдкар. */
-export async function screenOcr(which?: string | number, rect?: CaptureRect, lang?: string): Promise<OcrOutcome> {
-  if (!sidecar().ready) throw new NotImplementedError("OCR-сайдкар не запущен");
-  // updateMapping:false — сенсорный захват не сдвигает систему координат кликов модели (ревью Волны 2).
-  const shot = await captureScreen(which, { rect, updateMapping: false });
-  const data = (await sidecar().request("ocr", { imageB64: shot.image, lang }, 20_000)) as {
-    text?: string;
-    lines?: OcrLine[];
-  };
-  let lines = Array.isArray(data?.lines) ? data.lines : [];
-  // Ревью Волны 2: bbox строк OCR — в координатах КРОПА; описание инструмента предлагает кликать
-  // по ним (координаты модели = последний ПОЛНЫЙ снимок). Для image-rect сдвигаем к системе
-  // полного снимка; для space:"screen"-rect система другая — честно оставляем как есть.
-  if (rect && rect.space !== "screen") {
-    lines = lines.map((l) => ({ ...l, x: l.x + rect.x, y: l.y + rect.y }));
-  }
-  // Маппинг image→screen-DIP отдаём ТОЛЬКО для полного кадра (без rect): тогда координаты строк —
-  // в системе thumbnail этого захвата, и потребитель может конвертировать их в абсолютные DIP.
-  // При rect строки уже сдвинуты в иную систему → mapping не соответствует, не отдаём (SDK не кликает).
-  const mapping = !rect && shot.mapping ? { boundsX: shot.mapping.boundsX, boundsY: shot.mapping.boundsY, scale: shot.mapping.scale } : undefined;
-  return {
-    text: String(data?.text ?? ""),
-    lines,
-    width: shot.width,
-    height: shot.height,
-    mapping,
-  };
-}
+// W2 П5: OCR — в screen-ocr.ts (натив, кадры, полосы); реэкспорт для прежних импортов и моков.
+export { type OcrLine, type OcrOutcome, screenOcr } from "./screen-ocr.js";
 
 export interface WaitOutcome {
   met: boolean;

@@ -50,7 +50,8 @@ describe("screen_capture — кап зрения задачи", () => {
   it("с visionCap команда несёт maxEdge/maxPixels; без него — прежняя форма", async () => {
     const a = ctx({ visionCap: VISION_CAPS.high });
     await dispatchTool("screen_capture", {}, a.c);
-    expect(a.sent[0]).toMatchObject({ kind: "screen.capture", maxEdge: 2576, maxPixels: 3_750_000 });
+    // W2 П5 (решение №2): полный кадр — 1080p-класса (frameEdge), до maxEdge (2576) добирает только зум — frame-memory.test.
+    expect(a.sent[0]).toMatchObject({ kind: "screen.capture", maxEdge: 1920, maxPixels: 3_750_000 });
     const b = ctx();
     await dispatchTool("screen_capture", {}, b.c);
     expect(b.sent[0]).not.toHaveProperty("maxEdge");

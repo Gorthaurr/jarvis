@@ -67,12 +67,8 @@ export interface SelectionViewResult {
   ageMs: number | null;
   /** Содержимое области отличается от того, что было при выделении (перцептивный хеш, только без scale). */
   changedSinceSelection?: boolean;
-  /**
-   * Система координат ЭТОГО кадра: screenX = originX + x/scale. Без неё взгляд был бы ТУПИКОМ — увидеть
-   * мелкий дефект крупно можно, а кликнуть по увиденному нельзя (клики считаются от последнего ПОЛНОГО
-   * снимка, а кроп его намеренно не сбивает). Та же грабля, что чинили для «лупы» screen_capture.
-   */
-  crop?: { originX: number; originY: number; scale: number };
+  /** W2 П5: s-кадр ЭТОЙ картинки — без своей системы координат по увиденному не кликнуть (act{target:{x,y,frame}}). */
+  frameId?: string;
 }
 
 /** Потолок ожидания владельца — совпадает со схемой инструмента (maximum: 120000); сервер ждёт waitMs+15 с. */
@@ -129,9 +125,11 @@ async function applyOutcome(o: { selection?: ScreenSelection; cancelled?: boolea
     // отпечаток не прикрепляем: честнее «проба не проводилась», чем ложные перемены.
     const veiledBefore = selectionOverlay.drawing;
     try {
+      // Датчиковый снимок (кадр не регистрируется) — тем же путём и масштабом, что view: хеши сравнимы.
       const shot = await captureScreen(o.selection.monitorIndex, {
         rect: { x: o.selection.x, y: o.selection.y, w: o.selection.w, h: o.selection.h, space: "screen" },
-        updateMapping: false,
+        kind: "s",
+        register: false,
       });
       const probe = await perceptualHash(shot.image, shot.width, shot.height);
       const same = selectionStore.get()?.createdAt === o.selection.createdAt;
@@ -210,7 +208,7 @@ export async function selectionView(scale?: number): Promise<SelectionViewResult
   const shot = await captureScreen(sel.monitorIndex, {
     rect: { x: sel.x, y: sel.y, w: sel.w, h: sel.h, space: "screen" },
     scale,
-    updateMapping: false,
+    kind: "s", // W2 П5: s-кадр — клик по увиденному на этой картинке идёт с frame, а не по формуле
   });
   const out: SelectionViewResult = {
     image: shot.image,
@@ -219,7 +217,7 @@ export async function selectionView(scale?: number): Promise<SelectionViewResult
     height: shot.height,
     selection: sel,
     ageMs: selectionStore.ageMs(Date.now()),
-    ...(shot.crop ? { crop: shot.crop } : {}),
+    ...(shot.frameId ? { frameId: shot.frameId } : {}),
   };
   // Отпечаток сравниваем ТОЛЬКО с кадром того же масштаба, что эталон (лупа ресемплирует и переворачивает
   // биты у порога — «изменилось» на неизменном экране было бы враньём).

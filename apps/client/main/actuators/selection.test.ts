@@ -8,12 +8,12 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const captureScreen = vi.fn(async () => ({
+const captureScreen = vi.fn(async (_which?: unknown, _opts?: unknown) => ({
   image: "UE5H",
   mediaType: "image/png" as const,
   width: 640,
   height: 360,
-  crop: { originX: 1200, originY: 400, scale: 1 },
+  frameId: "k1as7" as string | undefined,
 }));
 const perceptualHash = vi.fn(async () => ({ hash: "ffff", mean: 10, width: 8, height: 8 }));
 vi.mock("./screen.js", () => ({ captureScreen, perceptualHash }));
@@ -39,7 +39,7 @@ beforeEach(() => {
   overlay.drawing = false;
   selectionStore.clear();
   selectionStore.setDrawing(false);
-  captureScreen.mockResolvedValue({ image: "UE5H", mediaType: "image/png", width: 640, height: 360, crop: { originX: 1200, originY: 400, scale: 1 } });
+  captureScreen.mockResolvedValue({ image: "UE5H", mediaType: "image/png", width: 640, height: 360, frameId: "k1as7" });
   perceptualHash.mockResolvedValue({ hash: "ffff", mean: 10, width: 8, height: 8 });
 });
 
@@ -79,7 +79,7 @@ describe("контроль-3: атрибуция отмены, вуаль при
     overlay.start.mockResolvedValue({ selection: SEL });
     captureScreen.mockImplementation(async () => {
       overlay.drawing = true; // повторный хоткей открыл вуаль, пока мы снимали кадр области
-      return { image: "UE5H", mediaType: "image/png", width: 640, height: 360, crop: { originX: 1200, originY: 400, scale: 1 } };
+      return { image: "UE5H", mediaType: "image/png", width: 640, height: 360, frameId: "k1as7" };
     });
     await selectionStart(5000);
     expect(selectionStore.get()?.hash).toBeUndefined();
@@ -87,7 +87,7 @@ describe("контроль-3: атрибуция отмены, вуаль при
     _resetSelectionActuatorForTest();
     overlay.drawing = false;
     selectionStore.clear();
-    captureScreen.mockResolvedValue({ image: "UE5H", mediaType: "image/png", width: 640, height: 360, crop: { originX: 1200, originY: 400, scale: 1 } });
+    captureScreen.mockResolvedValue({ image: "UE5H", mediaType: "image/png", width: 640, height: 360, frameId: "k1as7" });
     await selectionStart(5000);
     expect(selectionStore.get()?.hash).toBe("ffff");
   });
@@ -109,8 +109,9 @@ describe("selectionView", () => {
   it("снимает СВЕЖИЙ кадр области по экранным координатам и отдаёт систему координат кропа", async () => {
     selectionStore.set(SEL);
     const r = await selectionView();
-    expect(captureScreen).toHaveBeenCalledWith(1, expect.objectContaining({ rect: { x: 1200, y: 400, w: 640, h: 360, space: "screen" }, updateMapping: false }));
-    expect(r.crop).toEqual({ originX: 1200, originY: 400, scale: 1 }); // без этого клик по увиденному невозможен
+    expect(captureScreen).toHaveBeenCalledWith(1, expect.objectContaining({ rect: { x: 1200, y: 400, w: 640, h: 360, space: "screen" }, kind: "s" }));
+    expect(captureScreen.mock.calls[0]?.[1]).not.toHaveProperty("register"); // W2 П5: взгляд модели — зарегистрированный s-кадр
+    expect(r.frameId).toBe("k1as7"); // без своего кадра клик по увиденному невозможен
     expect(r.selection).toMatchObject({ w: 640, monitorIndex: 1 });
     expect(r.ageMs).not.toBeNull();
   });
@@ -165,6 +166,9 @@ describe("selectionStart", () => {
     expect(r.selection).toMatchObject({ w: 640 });
     expect(overlay.showFrame).toHaveBeenCalledWith(SEL);
     expect(selectionStore.get()?.hash).toBe("ffff");
+    // W2 П5: отпечаток — датчиковый снимок (кадр не регистрируется), тем же путём и масштабом, что view (хеши сравнимы).
+    expect(captureScreen).toHaveBeenCalledWith(1, expect.objectContaining({ kind: "s", register: false, rect: expect.objectContaining({ space: "screen" }) }));
+    expect(captureScreen.mock.calls[0]?.[1]).not.toHaveProperty("scale");
   });
 
   it("владелец передумал (Esc) — прежнее выделение СНИМАЕТСЯ: это его решение выйти из режима", async () => {
@@ -219,7 +223,7 @@ describe("selectionStart", () => {
     vi.useFakeTimers();
     overlay.drawing = true;
     overlay.start.mockImplementation(() => new Promise((r) => setTimeout(() => r({ selection: SEL }), 990)));
-    captureScreen.mockImplementation(() => new Promise((r) => setTimeout(() => r({ image: "UE5H", mediaType: "image/png", width: 640, height: 360, crop: { originX: 1200, originY: 400, scale: 1 } }), 60)));
+    captureScreen.mockImplementation(() => new Promise((r) => setTimeout(() => r({ image: "UE5H", mediaType: "image/png", width: 640, height: 360, frameId: "k1as7" }), 60)));
     const p = selectionStart(1000);
     await vi.advanceTimersByTimeAsync(1200);
     const r = await p;

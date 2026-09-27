@@ -1,282 +1,65 @@
 /**
- * Захват экрана (§ зрение): снять монитор и вернуть base64 PNG для vision-модели.
- * Через Electron desktopCapturer (без нативного кода/сайдкара).
+ * Захват экрана (§ зрение): снять монитор и вернуть base64 PNG для vision-модели — через Electron desktopCapturer.
  *
- * §6B/игры: РАНЬШЕ всегда снимал «рабочий монитор Джарвиса» (вторичный) → если игра/нужное окно на
- * ДРУГОМ мониторе, Джарвис «смотрел не туда». Мультимонитор-фикс 2026-07-14 (эпизод «вруби демку в
- * дискорде»): по умолчанию (и "active") снимаем монитор ПЕРЕДНЕГО (foreground) окна — то, с которым
- * работают СЕЙЧАС (игра fullscreen-foreground; только-что-сфокусированное окно). Явно: "cursor" (под
- * курсором) | "primary" | "jarvis" | <индекс монитора числом/строкой>. SCREEN-space rect снимается с
- * монитора, СОДЕРЖАЩЕГО регион (не foreground). Выключатель JARVIS_CAPTURE_FOREGROUND=0 → дефолт=курсор.
- *
- * Длинная сторона капится ~1568px (Anthropic всё равно даунскейлит; токены ≈ w*h/750). При захвате
- * ЗАПОМИНАЕМ маппинг (смещение монитора в DIP + scale), чтобы input.click по vision-координатам попадал
- * в реальную точку (image-координаты → логические virtual-desktop). media_type — image/png.
+ * W2 П5 (кадры вместо lastMapping, G-4/G-6):
+ *  - захват в НАТИВНОМ разрешении (screen-native.ts), копия для модели — под кап её зрения (`maxEdge`/`maxPixels` из
+ *    команды: сервер шлёт кадр 1080p-класса на high-res моделях, решение владельца №2; без капа — стандартное зрение);
+ *  - каждый показанный модели снимок — КАДР (frames.ts) с id: полный — f, зум (rect) — z, выделение — s. Координаты
+ *    модели относятся к кадру, в котором она их видела; глобального «последнего снимка» больше нет;
+ *  - зум — НОВЫЙ захват: кроп натива по rect в системе кадра (не увеличенная миниатюра), z-кадр со своей системой.
+ * Выбор монитора — screen-display.ts; регион и геометрия — screen-grab.ts; проба — screen-probe.ts.
  */
-import { type Display, desktopCapturer, screen } from "electron";
-import { createLogger } from "@jarvis/shared";
-import { monitors } from "../monitors.js";
-// W2 (пакет 0): rect модели (кадр / последний снимок / space:"screen") → DIP — единый перевод coords.ts.
-import { rectToDip } from "./coords.js";
+import { VISION_CAPS, createLogger } from "@jarvis/shared";
+import { registerFrame } from "./frames.js";
+import { type CaptureRect, type Grab, grabImage } from "./screen-grab.js";
+
+export { type CaptureRect } from "./screen-grab.js";
+export { type ScreenProbe, perceptualHash, probeScreen } from "./screen-probe.js";
 
 const log = createLogger("actuator:screen");
-const MAX_EDGE = 1568;
 
 export interface ScreenShot {
   image: string; // base64 PNG
   mediaType: "image/png";
   width: number;
   height: number;
-  /**
-   * Маппинг image→screen-DIP ЭТОГО кадра (полный снимок без rect). Возвращается ВСЕГДА, независимо от
-   * updateMapping — чтобы потребитель (напр. OCR в jarvis SDK) мог сам конвертировать image-координаты
-   * в АБСОЛЮТНЫЕ экранные DIP (boundsX + x/scale) и кликнуть space:"screen", не завися от lastMapping.
-   */
-  mapping?: CaptureMapping;
-  /**
-   * ЗУМ-стадия: система координат КРОПА (возвращается только при rect). Экранные DIP считаются как
-   * `originX + x / scale`, где x — координата на этой картинке. Без этого лупа была тупиком: увидеть
-   * мелкий элемент крупно можно было, а кликнуть по увиденному — нет (lastMapping кроп не трогает).
-   */
-  crop?: { originX: number; originY: number; scale: number };
-}
-
-/** Маппинг последнего захвата: image-координаты → логические (DIP) virtual-desktop координаты для клика. */
-export interface CaptureMapping {
-  /** Смещение монитора в логических (DIP) координатах виртуального десктопа. */
-  boundsX: number;
-  boundsY: number;
-  /** thumbnail_px / monitor_dip (image-координату делим на scale → DIP внутри монитора). */
-  scale: number;
-  /** Дисплей последнего ПОЛНОГО снимка — кроп по image-координатам должен сниматься с НЕГО же
-   *  (ревью Волны 2: «active» под курсором мог смениться → кроп молча резал не тот монитор). */
-  displayId?: number;
-}
-let lastMapping: CaptureMapping | null = null;
-/** Маппинг последнего screen.capture — input.click по coords переводит vision-координаты в экранные. */
-export function getLastCaptureMapping(): CaptureMapping | null {
-  return lastMapping;
-}
-
-/** Монитор под курсором (fallback / явный which="cursor"). */
-function cursorDisplay(): Display {
-  try {
-    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-  } catch {
-    return screen.getPrimaryDisplay();
-  }
-}
-
-/**
- * Монитор FOREGROUND-окна (мультимонитор-фикс 2026-07-14): дефолт захвата. Живой эпизод «вруби демку в
- * дискорде»: после window_focus Дискорда на M1 screen_capture по КУРСОРУ снимал M2 (браузер) → ложное
- * «свёрнут за хромом». Монитор активного (переднего) окна — правильный дефолт: для игры это сама игра
- * (fullscreen-foreground), для focus→capture — только что сфокусированное окно. Сайдкар недоступен/нет
- * foreground → курсор (прежнее поведение). Выключатель JARVIS_CAPTURE_FOREGROUND=0 → всегда курсор.
- */
-async function foregroundDisplay(): Promise<Display> {
-  if (process.env.JARVIS_CAPTURE_FOREGROUND === "0") return cursorDisplay();
-  try {
-    const { sidecar } = await import("./sidecar-client.js");
-    if (!sidecar().ready) return cursorDisplay();
-    const { listWindows } = await import("./windows.js");
-    const wins = await listWindows();
-    const fg = wins.find((w) => w.foreground && !w.minimized);
-    if (fg && fg.monitorIndex >= 0 && fg.monitorIndex < screen.getAllDisplays().length) {
-      return screen.getAllDisplays()[fg.monitorIndex]!;
-    }
-  } catch {
-    /* сайдкар лёг/таймаут — курсорный фолбэк */
-  }
-  return cursorDisplay();
-}
-
-/** Выбрать монитор: индекс | "primary" | "jarvis" | "cursor"(под курсором) | "active"/деф(foreground-окно). */
-async function pickDisplay(which?: string | number): Promise<Display> {
-  const all = screen.getAllDisplays();
-  // Индекс монитора — number ИЛИ ЧИСЛОВАЯ СТРОКА (ревью #4/#6, HIGH): tool-путь всегда шлёт monitor
-  // строкой (схема type:"string" «индекс числом»), и «0»/«1» раньше не парсились → молча снимался
-  // монитор переднего окна вместо запрошенного (та же мультимониторная слепота, что и чинили).
-  const idx = typeof which === "number" ? which : typeof which === "string" && /^\d+$/.test(which.trim()) ? Number(which.trim()) : NaN;
-  if (Number.isInteger(idx) && idx >= 0 && idx < all.length) return all[idx]!;
-  if (which === "primary") return screen.getPrimaryDisplay();
-  if (which === "jarvis") return monitors.jarvisDisplay();
-  if (which === "cursor") return cursorDisplay();
-  // "active" и дефолт → монитор переднего окна (не курсора): чинит focus→capture на мультимониторе.
-  return foregroundDisplay();
-}
-
-/** Явно ли задан монитор (число/строка-индекс/primary/jarvis/cursor) — тогда screen-rect его не переопределяет. */
-function isExplicitMonitor(which?: string | number): boolean {
-  if (typeof which === "number") return true;
-  if (typeof which !== "string") return false;
-  return which === "primary" || which === "jarvis" || which === "cursor" || /^\d+$/.test(which.trim());
-}
-
-/** Регион для кропа (§Волна2 2.3): по умолчанию — координаты ПОСЛЕДНЕГО полного снимка; space="screen" — DIP. */
-export interface CaptureRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  space?: "screen";
-  frame?: string;
+  /** Кадр этой картинки (протокол CaptureData.frameId); нет у датчикового захвата (register:false). */
+  frameId?: string;
+  /** Зум: кадр, в системе которого задан rect. */
+  zoomOf?: string;
 }
 
 export interface CaptureOpts {
-  /** Кроп региона (§Волна2 2.3) — сверка кнопки за ~50-200 токенов вместо полного 2K-кадра. */
+  /** Кроп региона — зум (новый захват натива), в кадре frame или space:"screen". */
   rect?: CaptureRect;
-  /** Доп. масштаб кропа (0.25..2; >1 — «лупа» для мелкого текста). */
+  /** Множитель к нативу для региона (0.25..2); не задан — ×2 у зума из неужатого кадра, иначе натив. */
   scale?: number;
-  /**
-   * Ревью Волны 2: обновлять ли lastMapping этим захватом. true (деф) — ТОЛЬКО для кадров,
-   * которые модель реально ВИДИТ (screen.capture). Внутренние сенсорные захваты (OCR/probe/
-   * observe/wait_for) ставят false — иначе они молча сдвигали систему координат кликов модели.
-   */
-  updateMapping?: boolean;
+  /** Кап копии для модели (команда screen.capture). Не задан — стандартное зрение (1568 / 1,15 Мп). */
+  maxEdge?: number;
+  maxPixels?: number;
+  /** Вид кадра региона: z (зум, деф) | s (выделение: без умолчального ×2). */
+  kind?: "z" | "s";
+  /** false — датчиковый снимок (отпечаток): кадр не регистрируется, координат модели по нему не будет. */
+  register?: boolean;
 }
 
-
-export async function captureScreen(which?: string | number, opts?: CaptureOpts): Promise<ScreenShot> {
-  // Выбор монитора для кропа — ПО РЕГИОНУ, не по foreground/курсору (ревью #1/#2):
-  //  (а) SCREEN-space rect (абсолютные DIP) без явного монитора → дисплей, СОДЕРЖАЩИЙ регион (клик-точка
-  //      fused-observe может быть на ДРУГОМ мониторе, чем переднее окно — иначе кроп клампился в 1px);
-  //  (б) IMAGE-space rect (координаты ПРОШЛОГО снимка) → тот же дисплей lastMapping (без сетевого вызова
-  //      foreground — раньше он делался и тут же выбрасывался);
-  //  (в) иначе (полный кадр / явный монитор) → pickDisplay (foreground-дефолт).
-  let display: Display;
-  if (opts?.rect?.space === "screen" && !isExplicitMonitor(which)) {
-    const cx = opts.rect.x + opts.rect.w / 2;
-    const cy = opts.rect.y + opts.rect.h / 2;
-    try {
-      display = screen.getDisplayNearestPoint({ x: Math.round(cx), y: Math.round(cy) });
-    } catch {
-      display = await pickDisplay(which);
-    }
-  } else if (opts?.rect && opts.rect.space !== "screen" && which === undefined && lastMapping?.displayId !== undefined) {
-    display = screen.getAllDisplays().find((d) => d.id === lastMapping!.displayId) ?? (await pickDisplay(which));
-  } else {
-    display = await pickDisplay(which);
-  }
-  const { width, height } = display.size;
-  const scale = Math.min(1, MAX_EDGE / Math.max(width, height));
-  const thumbnailSize = { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
-
-  const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize });
-  if (sources.length === 0) throw new Error("нет источников экрана для захвата");
-  // Сопоставляем источник выбранному монитору по display_id; иначе — первый доступный.
-  const src = sources.find((s) => s.display_id === String(display.id)) ?? sources[0]!;
-
-  // §Волна2 (2.3): кроп региона. Маппинг НЕ обновляем (клики по vision-координатам продолжают
-  // считаться от последнего ПОЛНОГО снимка — кроп не сбивает систему координат модели).
-  if (opts?.rect) {
-    const dip = rectToDip(opts.rect);
-    const ix = Math.round((dip.x - display.bounds.x) * scale);
-    const iy = Math.round((dip.y - display.bounds.y) * scale);
-    const iw = Math.round(dip.w * scale);
-    const ih = Math.round(dip.h * scale);
-    const cx = Math.max(0, Math.min(thumbnailSize.width - 1, ix));
-    const cy = Math.max(0, Math.min(thumbnailSize.height - 1, iy));
-    const cw = Math.max(1, Math.min(thumbnailSize.width - cx, iw));
-    const ch = Math.max(1, Math.min(thumbnailSize.height - cy, ih));
-    let img = src.thumbnail.crop({ x: cx, y: cy, width: cw, height: ch });
-    // Кламп увеличения: картинка, вышедшая за MAX_EDGE, будет молча уменьшена на стороне модели —
-    // и заявленный масштаб перестанет описывать то, что она видит (адверс-ревью). Держим в пределах.
-    const extraRaw = opts.scale !== undefined ? Math.max(0.25, Math.min(2, opts.scale)) : 1;
-    const extra = Math.min(extraRaw, MAX_EDGE / Math.max(cw, ch));
-    if (extra !== 1) {
-      img = img.resize({ width: Math.max(1, Math.round(cw * extra)), height: Math.max(1, Math.round(ch * extra)) });
-    }
-    const png = img.toPNG();
-    if (png.length === 0) throw new Error("пустой кадр кропа экрана");
-    const size = img.getSize();
-    log.info("screen.capture (crop)", { display: display.id, w: size.width, h: size.height, bytes: png.length });
-    // 🔴 ЗУМ-СТАДИЯ (исследование грундинга 2026-09-01): сужение области поиска даёт ×2.5 к точности
-    // попадания (ScreenSpot-Pro: цель занимает 0.07% кадра). Но раньше кроп был ТУПИКОМ: lastMapping
-    // он осознанно не трогает, а своей системы координат не отдавал — по увиденному в лупе нельзя было
-    // кликнуть, и «посмотри крупнее» вело в никуда. Теперь возвращаем происхождение кропа и его
-    // масштаб: screenX = originX + x/scale (x — координата НА ЭТОЙ картинке).
-    // Масштаб выводим из ФАКТИЧЕСКОГО размера картинки, а не из задуманного увеличения: так формула
-    // пересчёта координат остаётся верной при любом клампе/округлении resize.
-    const cropScale = cw > 0 ? scale * (size.width / cw) : scale * extra;
-    return {
-      image: png.toString("base64"),
-      mediaType: "image/png",
-      width: size.width,
-      height: size.height,
-      crop: {
-        originX: display.bounds.x + cx / scale,
-        originY: display.bounds.y + cy / scale,
-        scale: cropScale,
-      },
-    };
-  }
-
-  const png = src.thumbnail.toPNG();
+/** Зарегистрировать снимок как кадр (f/z/s) и отдать данные протокола. */
+function toShot(g: Grab, kind: "f" | "z" | "s", register: boolean): ScreenShot {
+  const png = g.img.toPNG();
   if (png.length === 0) throw new Error("пустой кадр захвата экрана");
-  // Маппинг image→screen-DIP ЭТОГО кадра. Считаем ВСЕГДА и возвращаем (нужен OCR-потребителю для
-  // конверсии координат в абсолютные DIP). В lastMapping пишем ТОЛЬКО для кадров, которые видит
-  // модель (updateMapping !== false, ревью Волны 2) — сенсорный OCR систему координат кликов не сбивает.
-  const mapping: CaptureMapping = { boundsX: display.bounds.x, boundsY: display.bounds.y, scale, displayId: display.id };
-  if (opts?.updateMapping !== false) {
-    lastMapping = mapping;
-  }
-  log.info("screen.capture", {
-    display: display.id,
-    which: which ?? "active",
-    w: thumbnailSize.width,
-    h: thumbnailSize.height,
-    bytes: png.length,
-  });
-  return { image: png.toString("base64"), mediaType: "image/png", width: thumbnailSize.width, height: thumbnailSize.height, mapping };
+  const zoomOf = kind !== "f" && g.from ? g.from.id : undefined;
+  const f = register
+    ? registerFrame({ kind, displayId: g.display.id, boundsDIP: { ...g.display.bounds }, origin: g.origin, sx: g.sx, sy: g.sy, w: g.w, h: g.h, ...(zoomOf ? { zoomOf } : {}) })
+    : undefined;
+  log.info("screen.capture", { display: g.display.id, kind, frame: f?.id, w: g.w, h: g.h, bytes: png.length });
+  return { image: png.toString("base64"), mediaType: "image/png", width: g.w, height: g.h, ...(f ? { frameId: f.id } : {}), ...(zoomOf ? { zoomOf } : {}) };
 }
 
-// ─────────────────────────── §Волна2 (2.3): $0-проба региона ───────────────────────────
-
-export interface ScreenProbe {
-  /** 64-битный перцептивный хеш (average-hash 8×8) hex-строкой — сравнивать между вызовами. */
-  hash: string;
-  /** Средняя яркость региона 0..255 (грубый сигнал «тёмный/светлый»). */
-  mean: number;
-  width: number;
-  height: number;
+export async function captureScreen(which?: string | number, opts: CaptureOpts = {}): Promise<ScreenShot> {
+  const region = opts.rect !== undefined;
+  const std = VISION_CAPS.std;
+  const cap = { maxEdge: opts.maxEdge ?? (region ? std.maxEdge : std.frameEdge), maxPixels: opts.maxPixels ?? std.maxPixels };
+  const kind = region ? (opts.kind ?? "z") : "f";
+  const g = await grabImage(which, opts.rect, { ...(region && opts.scale !== undefined ? { scale: opts.scale } : {}), zoom: kind === "z", cap });
+  return toShot(g, kind, opts.register !== false);
 }
-
-/**
- * Перцептивная проба региона (§Волна2 2.3): «изменилось ли на экране» за $0 — 8×8 average-hash по
- * яркости. НЕ доказательство результата (закон честности: probe ≠ «готово») — только детектор перемен;
- * сверка исхода остаётся за snapshot/OCR/vision.
- */
-export async function probeScreen(which?: string | number, rect?: CaptureRect): Promise<ScreenProbe> {
-  // updateMapping:false — сенсорный захват не сдвигает систему координат кликов (ревью Волны 2).
-  const shot = await captureScreen(which, { rect, updateMapping: false });
-  return await perceptualHash(shot.image, shot.width, shot.height);
-}
-
-/**
- * Перцептивный хеш УЖЕ СНЯТОГО кадра (§выделение 2026-09-03 — чтобы не снимать экран дважды: взгляд на
- * выделенную область сам считает отпечаток из своего же кадра и честно говорит, изменилось ли там
- * что-то с момента, когда владелец на это показывал).
- */
-export async function perceptualHash(pngBase64: string, width = 0, height = 0): Promise<ScreenProbe> {
-  // import(), а не require: main собирается в CJS, но юнит-тесты гоняют ESM с vi.mock("electron").
-  const { nativeImage } = await import("electron");
-  const img = nativeImage.createFromBuffer(Buffer.from(pngBase64, "base64"));
-  const bitmap = img.resize({ width: 8, height: 8 }).toBitmap(); // BGRA 8×8
-  const luma: number[] = [];
-  for (let i = 0; i + 3 < bitmap.length && luma.length < 64; i += 4) {
-    const b = bitmap[i]!;
-    const g = bitmap[i + 1]!;
-    const r = bitmap[i + 2]!;
-    luma.push(0.299 * r + 0.587 * g + 0.114 * b);
-  }
-  if (luma.length === 0) throw new Error("screen.probe: пустой битмап региона");
-  const mean = luma.reduce((a, v) => a + v, 0) / luma.length;
-  let hash = 0n;
-  for (let i = 0; i < luma.length; i += 1) {
-    hash = (hash << 1n) | (luma[i]! >= mean ? 1n : 0n);
-  }
-  const size = width && height ? { width, height } : img.getSize();
-  return { hash: hash.toString(16).padStart(16, "0"), mean: Math.round(mean), width: size.width, height: size.height };
-}
-

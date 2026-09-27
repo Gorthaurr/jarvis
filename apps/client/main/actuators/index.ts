@@ -29,6 +29,7 @@ import { type CaptureRect, captureScreen, probeScreen } from "./screen.js";
 import { toDipPoint } from "./coords.js";
 import { actionErrorOf } from "./action-error.js";
 import { selectionClear, selectionStart, selectionView } from "./selection.js";
+import { snapshotInFrame } from "./snapshot-frame.js";
 import { selectionStore } from "../selection/store.js";
 import { OVERLAY_EXIT_CODE, focusStealsUnderVeil, isVeilGatedInput, overlayDrawingFromCodeRun, veilRelevant } from "../selection/veil-policy.js";
 import { act } from "./act.js";
@@ -410,7 +411,7 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
       case "ui.snapshot": {
         // §Волна2 (2.4): set-of-marks — интерактивные элементы окна одним дешёвым списком.
         const snap = await ground.uiSnapshot(cmd.pid, cmd.maxItems);
-        return okResult(commandId, startedAt, snap);
+        return okResult(commandId, startedAt, snapshotInFrame(snap, cmd.frame)); // W2 П5: bbox — в кадре задачи
       }
       case "window.list": {
         // §Волна2 (2.4): окна верхнего уровня on-demand («появилось ли окно» за миллисекунды).
@@ -628,11 +629,13 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
           await captureScreen(cmd.monitor, {
             rect: cmd.rect as CaptureRect | undefined,
             scale: cmd.scale,
+            maxEdge: cmd.maxEdge, // W2 П5: кап копии по зрению модели задачи
+            maxPixels: cmd.maxPixels,
           }),
         );
       case "screen.ocr": {
         // §Волна2 (2.3): локальный OCR (Windows.Media.Ocr в сайдкаре) — текст с экрана без vision-раунда.
-        const ocr = await screenOcr(cmd.monitor, cmd.rect as CaptureRect | undefined, cmd.lang);
+        const ocr = await screenOcr(cmd.monitor, cmd.rect as CaptureRect | undefined, cmd.lang, { frame: cmd.frame, register: true }); // W2 П5: строки — в кадре задачи
         return okResult(commandId, startedAt, ocr);
       }
       case "screen.probe": {

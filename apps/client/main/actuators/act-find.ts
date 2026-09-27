@@ -8,8 +8,8 @@
  *  3. снапшот UIA активного окна — совпадение по тексту (точное > префикс > подстрока > value), роли и
  *     automationId. Несколько РАВНЫХ кандидатов → ЧЕСТНАЯ ошибка со списком: «выбрать первый» — это клик
  *     не туда с ok, ровно тот ложный успех, который проект не прощает.
- *  4. OCR всего экрана — для UIA-слепых окон: строка с текстом → центр в АБСОЛЮТНЫХ экранных DIP (mapping
- *     кадра, как у jarvis SDK) → снова `ground.at` (бесшумный путь) или точка для физического клика.
+ *  4. OCR окна (G-12: rect окна app или переднего; строки своих и перекрывающих окон отброшены, act-find-ocr.ts) —
+ *     для UIA-слепых окон: центр строки в экранных DIP → снова `ground.at` (бесшумный путь) или точка.
  *
  * Координаты bbox снапшота — ФИЗИЧЕСКИЕ пиксели, по ним НЕ кликаем (тот же запрет, что в SDK): только
  * handle → invoke. Не найдено → ошибка перечисляет, что реально видно (модель перецеливается без скриншота).
@@ -20,7 +20,7 @@ import { createLogger } from "@jarvis/shared";
 import { groundAtPoint, type UiSnapshotItem, uiSnapshot } from "./ground.js";
 import { toDipPoint } from "./coords.js";
 import { looksLikeContainer } from "./point-policy.js";
-import { screenOcr } from "./sensors-cheap.js";
+import { findOcrLines } from "./act-find-ocr.js";
 // W2: политика «что под точкой» — point-policy.ts (общая с рубежом §14, П1); реэкспорт для прежних импортов.
 export { MAX_ACTIONABLE_H, MAX_ACTIONABLE_W, looksLikeContainer } from "./point-policy.js";
 
@@ -95,10 +95,12 @@ async function findAtPoint(p: { x: number; y: number }, via: "point" | "ocr", qu
     const g = await groundAtPoint(p.x, p.y);
     const name = g.name?.trim() ? g.name : query;
     const role = g.role?.replace(/^ControlType\./u, "");
+    // W2 П5: что РЕАЛЬНО под точкой — в note (модель видит, во что попала; политика — point-policy).
+    const under = `под точкой ${role ?? "элемент"} «${String(g.name ?? "").slice(0, 40)}»`;
     if (looksLikeContainer(g.bbox)) {
-      return { via, name, query, point: p, bbox: g.bbox, note: `под точкой контейнер ${g.bbox.w}×${g.bbox.h}, не кнопка: действие пойдёт физическим кликом в саму точку` };
+      return { via, name, query, point: p, bbox: g.bbox, note: `${under} — контейнер ${g.bbox.w}×${g.bbox.h}, не кнопка: действие пойдёт физическим кликом в саму точку` };
     }
-    return { via, handle: g.handle, name, query, ...(role ? { role } : {}), point: p, bbox: g.bbox };
+    return { via, handle: g.handle, name, query, ...(role ? { role } : {}), point: p, bbox: g.bbox, note: under };
   } catch (e) {
     log.debug("act-find: под точкой нет UIA-элемента — физический путь", e instanceof Error ? e.message : String(e));
     return { via, name: query, query, point: p, note: "под точкой нет UIA-элемента: действие пойдёт физическим кликом" };
@@ -129,33 +131,24 @@ async function findInSnapshot(q: Query): Promise<{ found: FoundTarget | null; se
   return { found: { via: "snapshot", handle: String(it.handle), name: it.name, query: q.text, role: it.role, bbox }, seen, truncated: snap.truncated };
 }
 
-/** Ступень OCR: строка с текстом → центр в экранных DIP (mapping полного кадра) → ground.at или точка. */
-async function findByOcr(text: string): Promise<FoundTarget | null> {
-  const ocr = await screenOcr();
-  const t = norm(text);
-  const hits = ocr.lines.filter((l) => norm(l.text).includes(t));
-  if (hits.length === 0) return null;
-  if (!ocr.mapping) throw new ActFindError("OCR нашёл текст, но кадр без маппинга координат — кликнуть по нему честно нельзя.");
-  const exact = hits.filter((l) => norm(l.text) === t);
-  const pick = exact.length ? exact : hits;
-  if (pick.length > 1) {
-    throw new ActFindError(
-      `На экране ${pick.length} строки с «${text}» — уточни role/x,y.`,
-      pick.slice(0, CANDIDATE_CAP).map((l) => `«${l.text.slice(0, 40)}» @${Math.round(l.x + l.w / 2)},${Math.round(l.y + l.h / 2)}`),
-    );
+/** Ступень OCR (G-12): строка с текстом в окне поиска → ground.at по её центру или точка. */
+async function findByOcr(text: string, hwnd?: number): Promise<FoundTarget | null> {
+  const { matches, scope, mapped } = await findOcrLines(text, hwnd);
+  if (!mapped) throw new ActFindError("OCR нашёл текст, но кадр без маппинга координат — кликнуть по нему честно нельзя.");
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    const seen = matches.slice(0, CANDIDATE_CAP).map((h) => `«${h.text.slice(0, 40)}» @${Math.round(h.point.x)},${Math.round(h.point.y)}`);
+    throw new ActFindError(`В ${scope} ${matches.length} строки с «${text}» — уточни role/x,y.`, seen);
   }
-  const l = pick[0]!;
-  const m = ocr.mapping;
-  const p = { x: m.boundsX + (l.x + l.w / 2) / m.scale, y: m.boundsY + (l.y + l.h / 2) / m.scale };
-  const f = await findAtPoint(p, "ocr", l.text);
-  return { ...f, note: `${f.note ? `${f.note}; ` : ""}найдено OCR (роль не проверена)` };
+  const f = await findAtPoint(matches[0]!.point, "ocr", matches[0]!.text);
+  return { ...f, note: `${f.note ? `${f.note}; ` : ""}найдено OCR в ${scope} (роль не проверена)` };
 }
 
 /**
  * Найти цель по лестнице. deadline — абсолютное время (Date.now()), после которого ступени не начинаем.
- * W2: `hwnd` — окно `app`, в котором ищем (сфокусировано act); П1/П5 сужают по нему снапшот и OCR (G-12).
+ * W2: `hwnd` — окно `app`, в котором ищем (сфокусировано act): OCR-ступень — в его rect (G-12, П5); снапшот — П1.
  */
-export async function findTarget(target: ActTarget, deadline: number, _opts: { hwnd?: number } = {}): Promise<FoundTarget> {
+export async function findTarget(target: ActTarget, deadline: number, opts: { hwnd?: number } = {}): Promise<FoundTarget> {
   const q: Query & { handle?: string; x?: number; y?: number; space?: "screen"; frame?: string } = typeof target === "string" ? { text: target } : target;
   if (q.handle) return { via: "handle", handle: String(q.handle), name: `handle ${q.handle}`, ...(q.text ? { query: q.text } : {}) };
   if (typeof q.x === "number" && typeof q.y === "number") return findAtPoint(toDipPoint(q.x, q.y, q), "point", q.text ?? `точка ${q.x},${q.y}`);
@@ -167,7 +160,7 @@ export async function findTarget(target: ActTarget, deadline: number, _opts: { h
   const capNote = snap.truncated ? ` Снапшот усечён (${SNAPSHOT_MAX_ITEMS} элементов) — цель могла быть за капом.` : "";
   if (q.text) {
     if (remaining() < NEED_OCR_MS) throw new ActFindError(`«${q.text}» в UIA-снапшоте нет, на OCR времени не осталось.${capNote}`, snap.seen);
-    const byOcr = await findByOcr(q.text);
+    const byOcr = await findByOcr(q.text, opts.hwnd);
     if (byOcr) return byOcr;
   }
   const what = q.text ? `«${q.text}»` : q.automationId ? `automationId «${q.automationId}»` : `роль «${q.role}»`;
