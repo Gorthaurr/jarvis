@@ -6,7 +6,8 @@
  * вердикта, а не по ответу резолвера → «слот до ответа» красный; нет дедупа/кеша → «одно имя — один резолв» красный;
  * ушедший клиент всё равно резолвится → «снят из очереди» красный; слотов больше одного → «по одному» красный;
  * слот не отпускается при ошибке резолвера → «резолвер бросил» красный (прокси умер бы на первом NXDOMAIN); кеш без
- * лимита → «лимит кеша» красный; IPv6-литерал принят за одноярусное имя → «литералы» красный.
+ * лимита → «лимит кеша» красный; IPv6-литерал принят за одноярусное имя → «литералы» красный; литерал через кеш/слот
+ * или адреса кеша без пересуда → «VPN подключился после суда» красные (адверс-ревью р1 своих адресов ПК).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostJudge } from "./jarvis-browser-proxy-judge.js";
@@ -122,6 +123,35 @@ describe("B-14: суд пиннинг-прокси бережёт пул рез�
     expect(await j.judge("2001:4860:4860::8888")).toEqual({ ok: true, addresses: ["2001:4860:4860::8888"] });
     expect(await j.judge("::1")).toMatchObject({ ok: false, reason: "private" });
     expect(m.asked).toEqual([]);
+  });
+
+  it("VPN подключился после суда: литерал его сети — приватен сразу (без кеша) и не ждёт слота за зависшим резолвом", async () => {
+    let vpn = false;
+    const interfaces = () => (vpn ? { "Radmin VPN": [{ address: "198.51.100.7", cidr: "198.51.100.7/24" }] } : {});
+    const m = manualLookup();
+    const j = new HostJudge({ lookup: m.lookup, interfaces });
+    const hung = j.judge("hung.test"); // единственный слот занят: резолвер молчит
+    await vi.waitFor(() => expect(m.asked).toEqual(["hung.test"]));
+    expect(await j.judge("198.51.100.9")).toEqual({ ok: true, addresses: ["198.51.100.9"] });
+    vpn = true;
+    expect(await j.judge("198.51.100.9")).toEqual({ ok: false, reason: "private", address: "198.51.100.9" });
+    expect(m.asked).toEqual(["hung.test"]);
+    m.answer(0);
+    await hung;
+  });
+
+  it("VPN подключился после суда: имя с публичным вердиктом в кеше → адрес пересужен, приватен сразу, DNS не спрошен", async () => {
+    let vpn = false;
+    const interfaces = () => (vpn ? { "Radmin VPN": [{ address: "198.51.100.7", cidr: "198.51.100.7/24" }] } : {});
+    const asked: string[] = [];
+    const j = new HostJudge({ lookup: async (h) => (asked.push(h), ["198.51.100.200"]), interfaces });
+    expect(await j.judge("peer.test")).toEqual({ ok: true, addresses: ["198.51.100.200"] });
+    vpn = true;
+    expect(await j.judge("peer.test")).toEqual({ ok: false, reason: "private", address: "198.51.100.200" });
+    expect(asked).toEqual(["peer.test"]);
+    vpn = false;
+    expect(await j.judge("peer.test")).toMatchObject({ ok: true }); // отказ из кеша не живёт: спросили заново
+    expect(asked).toEqual(["peer.test", "peer.test"]);
   });
 
   it("лимит кеша: 300 имён — самое старое вытеснено и спрашивается заново, свежее — из кеша", async () => {
