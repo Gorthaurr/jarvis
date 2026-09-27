@@ -24,7 +24,7 @@ export type OcrLine = TileLine;
 export interface OcrOutcome {
   text: string;
   lines: OcrLine[];
-  /** Размер o-кадра (натив региона). */
+  /** Размер системы строк: кадра задачи (frame) или o-кадра (натив региона). */
   width: number;
   height: number;
   /** o-кадр (только при register). */
@@ -59,8 +59,9 @@ export async function screenOcr(which?: string | number, rect?: CaptureRect, lan
   return {
     text: read.text,
     lines,
-    width: g.w,
-    height: g.h,
+    // Размер СИСТЕМЫ строк (кадр задачи или o-кадр) — модель сверяет координаты с ним, а не с нативом.
+    width: inTask ? inTask.w : g.w,
+    height: inTask ? inTask.h : g.h,
     ...(o ? { frameId: o.id } : {}),
     ...(inTask ? { frame: inTask.id } : {}),
     mapping: mappingOf(inTask ?? g),

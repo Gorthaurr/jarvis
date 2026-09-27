@@ -48,7 +48,7 @@ describe("кадры через настоящий dispatch", () => {
     expect((snap.items as unknown[])[0]).toMatchObject({ handle: 41, x: 1500, y: 750, w: 60, h: 30 });
 
     const ocr = await run({ kind: "screen.ocr", monitor: "0", frame: "d2pf1" });
-    expect(ocr).toMatchObject({ frame: "d2pf1", frameId: "d2po2" });
+    expect(ocr).toMatchObject({ frame: "d2pf1", frameId: "d2po2", width: 1920, height: 1080 }); // размер системы строк
     expect((ocr.lines as unknown[])[0]).toEqual({ text: "Играть", x: 1500, y: 750, w: 60, h: 30 });
 
     await run({ kind: "input.click", target: { by: "coords", x: 1530, y: 765, frame: "d2pf1" } });
