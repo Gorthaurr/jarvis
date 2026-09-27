@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isPrivateHost, isPrivateHttpUrl, isPrivateIp, urlHostname } from "./private-host.js";
+
+// Правило ДИАПАЗОНОВ — без интерфейсов этого ПК: иначе вердикт «публично» зависел бы от машины (адаптер fake-IP
+// 198.18.0.1, VPS с большим on-link префиксом). Свои сети — local-nets*.test.ts (адверс-ревью р1).
+vi.mock("node:os", async (orig) => ({ ...(await orig<typeof import("node:os")>()), networkInterfaces: () => ({}) }));
 
 describe("B-14: одно правило «приватный хост»", () => {
   it("приватно: loopback, RFC1918, link-local/метаданные, CGNAT, 0/8, mDNS/.internal/.localhost", () => {

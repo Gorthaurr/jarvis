@@ -9,6 +9,7 @@
  * стенды подставляют таблицу имён; по умолчанию — системный getaddrinfo (тот же, что у сокетов Node).
  */
 import { lookup as dnsLookup } from "node:dns/promises";
+import type { LocalInterfaces } from "./local-nets.js";
 import { isPrivateHost, isPrivateIp } from "./private-host.js";
 
 /** Имя → все адреса ответа (без скобок). Бросает, если имя не разрешилось. */
@@ -36,13 +37,14 @@ const isIpLiteral = (h: string): boolean => h.includes(":") || /^\d{1,3}(?:\.\d{
 
 /**
  * Суд над хостом по имени И по ответу DNS. IP-литерал судится сам (без резолва); имя из правила по имени
- * (`localhost`, `*.local`…) — отказ без сети; иначе резолв с таймаутом и отказ, если приватен ЛЮБОЙ адрес.
+ * (`localhost`, `*.local`…) — отказ без сети; иначе резолв с таймаутом и отказ, если приватен ЛЮБОЙ адрес (в т.ч.
+ * адрес своего интерфейса или его сети — `local-nets.ts`; `interfaces` — DI стенда, нет → системный список).
  */
-export async function checkHostPublic(host: string, opts: { lookup?: HostLookup; timeoutMs?: number } = {}): Promise<HostVerdict> {
+export async function checkHostPublic(host: string, opts: { lookup?: HostLookup; timeoutMs?: number; interfaces?: LocalInterfaces } = {}): Promise<HostVerdict> {
   const h = String(host ?? "").trim().replace(/^\[|\]$/gu, "").replace(/\.$/u, "").toLowerCase();
   if (!h) return { ok: false, reason: "unresolved", detail: "пустое имя хоста" };
-  if (isIpLiteral(h)) return isPrivateIp(h) ? { ok: false, reason: "private", address: h } : { ok: true, addresses: [h] };
-  if (isPrivateHost(h)) return { ok: false, reason: "private", address: h };
+  if (isIpLiteral(h)) return isPrivateIp(h, opts.interfaces) ? { ok: false, reason: "private", address: h } : { ok: true, addresses: [h] };
+  if (isPrivateHost(h, opts.interfaces)) return { ok: false, reason: "private", address: h };
   let addresses: string[];
   try {
     addresses = await withTimeout((opts.lookup ?? systemLookup)(h), opts.timeoutMs ?? LOOKUP_TIMEOUT_MS);
@@ -51,7 +53,7 @@ export async function checkHostPublic(host: string, opts: { lookup?: HostLookup;
     return { ok: false, reason: "unresolved", detail: typeof code === "string" ? code : e instanceof Error ? e.message : String(e) };
   }
   if (!addresses.length) return { ok: false, reason: "unresolved", detail: "пустой ответ DNS" };
-  const bad = addresses.find((a) => isPrivateIp(a));
+  const bad = addresses.find((a) => isPrivateIp(a, opts.interfaces));
   return bad ? { ok: false, reason: "private", address: bad } : { ok: true, addresses };
 }
 

@@ -6,9 +6,12 @@
  * Реверт-проверки (из копии): сокет открывается по ИМЕНИ с резолвером (второй резолв) → «rebinding» красный (0x05 и
  * 2 вопроса DNS); суд пропущен → «имя → 127.0.0.1» красный (цель получила соединение); хост блока без канонической
  * записи (`urlHostname`) → «имя → 127.0.0.1» и «литералы» красные: запись прокси не совпала бы с ключом гарда
- * (`EVIL.Test.` ≠ `evil.test`, `[0:0:…:1]` ≠ `::1`), и честной ошибки перехода не было бы.
+ * (`EVIL.Test.` ≠ `evil.test`, `[0:0:…:1]` ≠ `::1`), и честной ошибки перехода не было бы; общее правило без своих
+ * сетей ПК (`local-nets.ts`) или суд без `interfaces` → «свой интерфейс» красный (и живой — на ПК с Radmin VPN).
  */
 import { type Server, type Socket, connect, createServer } from "node:net";
+import { networkInterfaces } from "node:os";
+import { isPrivateIp } from "@jarvis/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { type PinProxy, type ProxyBlock, startPinProxy } from "./jarvis-browser-proxy.js";
 
@@ -162,6 +165,30 @@ describe("B-14: SOCKS5-прокси пиннинга — суд над адре�
     expect(blocks.map((b) => b.host)).toEqual(["127.0.0.1", "127.0.0.1", "::1", "::ffff:7f00:1"]);
   });
 
+  it("имя → адрес СВОЕГО интерфейса (Radmin VPN) или соседа по его сети, литерал такого адреса → 0x02, цель без соединений", async () => {
+    // TEST-NET-2 в роли 26.106.17.249/8 (не задевает TEST_NET остальных кейсов); без суда подмена увела бы на цель.
+    const own = await startPinProxy({
+      lookup: async (h) => {
+        const a = ({ "radmin.test": ["198.51.100.7"], "peer.test": ["198.51.100.200"] } as Record<string, string[]>)[h];
+        if (!a) throw Object.assign(new Error("nx"), { code: "ENOTFOUND" });
+        return a;
+      },
+      interfaces: () => ({ "Radmin VPN": [{ address: "198.51.100.7", cidr: "198.51.100.7/24" }] }),
+      mapAddress: (ip) => (ip.startsWith("198.51.100.") ? "127.0.0.1" : ip),
+    });
+    try {
+      for (const req of [byName("radmin.test", targetPort), byName("peer.test", targetPort), Buffer.concat([Buffer.from([5, 1, 0, 1, 198, 51, 100, 7]), port16(targetPort)])]) {
+        const { rep, c } = await connectVia(own.port, req);
+        expect(rep, req.toString("hex")).toBe(2);
+        c.sock.destroy();
+      }
+      expect(accepted).toBe(0);
+      expect(own.blocked.map((b) => `${b.host}:${b.reason}`)).toEqual(["radmin.test:private", "peer.test:private", "198.51.100.7:private"]);
+    } finally {
+      own.close();
+    }
+  });
+
   it("имя не разрешилось → 0x04 (unresolved), цель без соединений", async () => {
     const { rep, c } = await connectVia(proxy.port, byName("nx.test", targetPort));
     expect(rep).toBe(4);
@@ -179,5 +206,34 @@ describe("B-14: SOCKS5-прокси пиннинга — суд над адре�
     expect([...(await c.read(2))]).toEqual([5, 0xff]);
     await c.read(1);
     expect(c.closed()).toBe(true);
+  });
+});
+
+// Живой факт адверс-ревью 27.09 в той форме, в какой он был: слушатель на 0.0.0.0 (как PostgreSQL 5432, preview 4599),
+// имя → НАСТОЯЩИЙ адрес интерфейса этого ПК вне диапазонов RFC1918 (на ПК владельца — Radmin VPN 26.106.17.249), суд —
+// по системному списку интерфейсов (без DI). Раньше: REP 0x00 и соединение у слушателя. Нет такого адреса — пропуск.
+const ownOutsideRanges = Object.values(networkInterfaces())
+  .flatMap((l) => l ?? [])
+  .filter((a) => a.family === "IPv4" && !isPrivateIp(a.address, () => ({})))
+  .map((a) => a.address);
+
+describe.skipIf(!ownOutsideRanges.length)("B-14: живой — свой адрес ПК вне RFC1918 (Radmin VPN), слушатель на 0.0.0.0", () => {
+  it("имя → свой адрес: 0x02, слушатель на 0.0.0.0 соединения не получил", async () => {
+    let got = 0;
+    const listener = createServer((s) => ((got += 1), s.destroy()));
+    await new Promise<void>((r) => listener.listen(0, "0.0.0.0", () => r()));
+    const a = listener.address();
+    const port = typeof a === "object" && a ? a.port : 0;
+    const proxy = await startPinProxy({ lookup: async () => ownOutsideRanges.slice(0, 1) });
+    try {
+      const { rep, c } = await connectVia(proxy.port, byName("radmin-live.test", port));
+      expect(rep).toBe(2);
+      c.sock.destroy();
+      await new Promise((r) => setTimeout(r, 100));
+      expect(got).toBe(0);
+    } finally {
+      proxy.close();
+      await new Promise((r) => listener.close(() => r(undefined)));
+    }
   });
 });
