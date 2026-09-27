@@ -13,6 +13,7 @@ import { createLogger } from "@jarvis/shared";
 import { monitors } from "../monitors.js";
 import { NotImplementedError } from "./input.js";
 import { sidecar } from "./sidecar-client.js";
+import { noteFocusChange } from "./secret-memory.js";
 import { assertNoDrawingOverlay, assertNoOverlayDuring } from "../selection/overlay-error.js";
 import { selectionStore } from "../selection/store.js";
 
@@ -136,6 +137,7 @@ export async function focusWindow(opts: { hwnd?: number; query?: string }): Prom
     h?: number;
   };
   assertNoOverlayDuring(tFocus, "Смена фокуса окна");
+  if (data?.focused) noteFocusChange(Number(data.hwnd ?? 0)); // П2 (§0): ДРУГОЕ окно — новая эпоха набранного
   const m = monitorOf({ x: data?.x ?? 0, y: data?.y ?? 0, w: data?.w ?? 0, h: data?.h ?? 0 });
   return {
     focused: Boolean(data?.focused),

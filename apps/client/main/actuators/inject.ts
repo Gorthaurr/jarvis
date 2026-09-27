@@ -10,12 +10,14 @@
  */
 import type { InjectOp } from "@jarvis/shared";
 import { guardInjection } from "./injection-guard.js";
+import { noteInjected } from "./injection-journal.js";
 import { sidecar } from "./sidecar-client.js";
 
 export type { InjectOp };
 
 export async function injectRpc(op: InjectOp, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
   await guardInjection(op, params);
+  noteInjected(op, params); // П2: набранное/память клика — только по прошедшему ВСЕХ судей (отказ ничего не меняет)
   // Сигнатура запроса — ровно прежняя (без лишнего undefined-таймаута): тесты и сайдкар видят то же, что до рубежа.
   return timeoutMs === undefined ? sidecar().request(op, params) : sidecar().request(op, params, timeoutMs);
 }

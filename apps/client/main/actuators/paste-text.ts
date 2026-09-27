@@ -10,6 +10,7 @@
  * (текст, HTML, RTF, картинка); буфер с чем-то ещё (скопированные файлы и т.п.) не трогаем — печатаем посимвольно.
  */
 import { clipboard, type NativeImage } from "electron";
+import { preflightText } from "./injection-guard.js";
 import { pressKey, typeText } from "./input.js";
 
 /** С какой длины текст вставляется, а не печатается (короткий — печатаем: так ведут себя поля с автодополнением). */
@@ -60,6 +61,9 @@ function restoreClipboard(s: ClipSnapshot): void {
  * (медленнее, но ничего чужого не теряем). Возвращает, каким путём ушёл текст.
  */
 export async function pasteText(text: string): Promise<"paste" | "type" | "paste-clipboard-lost"> {
+  // W2 П2 (G-15, §0/§14): весь текст судится ДО записи в буфер обмена — отказ оставляет буфер владельца нетронутым
+  // (иначе карта/пароль легли бы в буфер, а Ctrl+V с ним — отказ уже после подмены).
+  await preflightText(text);
   const prev = snapshotClipboard();
   if (!prev && text.length <= TYPE_INSTEAD_MAX_CHARS) {
     await typeText(text);
