@@ -7,7 +7,8 @@ import { countFamilyCall } from "./family-count.js";
 import { armUncertainDebt } from "./send-gesture.js";
 import { toolNeedsInput } from "../../tools/input-kinds.js";
 import type { LlmContentBlock, LlmResponse } from "../../../integrations/llm.js";
-import { isBlindMutate, toolCallEffect } from "../error-voice.js";
+import { toolCallEffect } from "../error-voice.js";
+import { isBlindMutateCall, loopCodeResolver } from "../blind-call.js";
 import { canonicalToolCall } from "@jarvis/tools";
 import { type RoundResult, newRound } from "./round-result.js";
 import { noteRoundStop, skipAfterStop } from "./round-stop.js";
@@ -82,9 +83,9 @@ export function prefetchReadonly(ctx: LoopCtx, resp: LlmResponse) {
 export async function acquireForTool(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], round: RoundResult): Promise<"break" | "continue" | "ok"> {
   const { st, task, ensureInput } = ctx;
   const { INPUT_WAIT_MS, STALE_INPUT_WAIT_MS } = ctx.cfg;
-  // GUI-команда (клик/печать/фокус/окно/скилл) → берём аренду ввода ДО исполнения,
+  // GUI-команда (клик/печать/фокус/окно/скилл, W3 G-14: и скрипт с `import jarvis`) → аренда ввода ДО исполнения,
   // чтобы не столкнуться с параллельной задачей за курсор (§20). Держим до конца задачи.
-  if (toolNeedsInput(tu.name)) {
+  if (toolNeedsInput(tu.name, tu.input, loopCodeResolver(ctx.deps))) {
     const got = await ensureInput();
     // Отменили, пока ждали аренду — НЕ шлём GUI-команду (аренду ensureInput уже отдал).
     if (task.cancel.cancelled) return "break";
@@ -105,12 +106,11 @@ export async function acquireForTool(ctx: LoopCtx, tu: LlmResponse["toolUses"][n
       });
       return "continue";
     }
-    // Волна 1, гард протухшего клика: аренду ждали долго → экран мог измениться за это время
-    // (живой случай: клик выстрелил после 236с очереди по давно ушедшему состоянию). Слепые
-    // действия блокируются, пока модель не сверится глазами (verify снимает гард), но не больше
-    // 2 блоков (анти-deadloop, ревью B+C: упорный «клик без сверки» дальше добьют anti-runaway
-    // и verify-петля, а не вечный круг ошибок).
-    if (st.budget.lastAcquireWaitMs > STALE_INPUT_WAIT_MS && isBlindMutate(tu.name) && toolCallEffect(tu.name, tu.input) === "mutate") {
+    // Волна 1, гард протухшего клика: аренду ждали долго → экран мог измениться (живой случай: клик выстрелил после
+    // 236с очереди по давно ушедшему состоянию). Слепые действия (W3: и SDK-скрипт) блокируются, пока модель не
+    // сверится глазами (verify снимает гард), но не больше 2 блоков (анти-deadloop, ревью B+C: упорный «клик без
+    // сверки» дальше добьют anti-runaway и verify-петля, а не вечный круг ошибок).
+    if (st.budget.lastAcquireWaitMs > STALE_INPUT_WAIT_MS && isBlindMutateCall(tu.name, tu.input, loopCodeResolver(ctx.deps)) && toolCallEffect(tu.name, tu.input) === "mutate") {
       const waitedSec = Math.round(st.budget.lastAcquireWaitMs / 1000);
       st.budget.staleGuardBlocks += 1;
       if (st.budget.staleGuardBlocks >= 2) st.budget.lastAcquireWaitMs = 0;
@@ -119,8 +119,8 @@ export async function acquireForTool(ctx: LoopCtx, tu: LlmResponse["toolUses"][n
         type: "tool_result",
         tool_use_id: tu.id,
         content:
-          `Ввод освободился только после ${waitedSec}с ожидания — экран мог измениться. ` +
-          `СНАЧАЛА сверь актуальное состояние (screen_capture / browser_read), потом действуй по свежему кадру.`,
+          `Ввод освободился только после ${waitedSec}с ожидания — экран мог измениться. СНАЧАЛА сверь актуальное состояние ` +
+          `дешёвым сенсором: look{what:'elements'} (окно) → browser_read / web_read (веб) → screen_capture последним; потом действуй по свежему виду.`,
         is_error: true,
       });
       return "continue";
@@ -196,7 +196,7 @@ export async function runToolRound(ctx: LoopCtx, resp: LlmResponse): Promise<Rou
       : await dispatchTool(tu.name, tu.input, toolCtx);
     const { effOfCall, reportOfThisTurn } = noteToolCall(ctx, tu, r, round);
     if (!r.isError) applySuccessEffects(ctx, tu, r, effOfCall, round);
-    else armUncertainDebt(st, tu, r, effOfCall); // W1-ревью LOOP-2/р2: исход неизвестен / берст исполнен частично — долг сверки
+    else armUncertainDebt(st, tu, r, effOfCall, loopCodeResolver(ctx.deps)); // W1-ревью LOOP-2/р2: исход неизвестен / берст исполнен частично — долг сверки
     applyRoundFlags(ctx, tu, r, effOfCall, reportOfThisTurn, round);
     countFamilyCall(ctx, tu, r, effOfCall, round); // W1 (L-1/L-12): семейный счёт — по каноническому вызову и его исходу
     noteRoundStop(round, tu, r, effOfCall); // W2 (G-8): провал/неизвестность/отказ мутации — дальше мутации раунда не идут

@@ -905,7 +905,7 @@ export function visionFallbackHint(kind: ActionKind, code: string, msg: string):
 async function runDynamicTool(ctx: ToolContext, name: string, input: Record<string, unknown>): Promise<ToolResult> {
   const r = ctx.dynamicTools!.render(ctx.userId, name, input);
   if (!r.ok || !r.lang || r.code === undefined) return err(r.error ?? "не удалось подготовить инструмент");
-  return executeGuardedCode(ctx, r.lang, r.code);
+  return executeGuardedCode(ctx, r.lang, r.code, { untrustedOutput: true }); // W3 (S-9): вывод скрипта — недоверенный
 }
 
 /**

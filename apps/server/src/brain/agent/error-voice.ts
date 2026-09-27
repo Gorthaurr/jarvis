@@ -74,9 +74,9 @@ export function maskedFailureReply(spokeAny: boolean): string {
 
 // VERIFY-ПЕТЛЯ (анти-конфабуляция). Сверка глазами — читает реальное состояние страницы/экрана.
 // Волна 2 (2.3/2.4): ui_snapshot (живое UIA-дерево окна) и screen_read_text (локальный OCR реальных
-// пикселей) — полноценные ДЕШЁВЫЕ сверки: читают фактическое состояние, а не доверяют «ok» действия.
+// пикселей) — ДЕШЁВЫЕ сверки. W3 (L-8): web_inspect — глаз невидимого браузера (элементы страницы после web_act).
 const VERIFY_TOOLS = new Set([
-  "browser_read", "browser_inspect", "screen_capture", "web_read", "context_read",
+  "browser_read", "browser_inspect", "screen_capture", "web_read", "web_inspect", "context_read",
   "ui_snapshot", "screen_read_text",
 ]);
 // Нейтральные — не меняют наблюдаемый результат на экране (поиск/память/навыки/служебные).
@@ -184,9 +184,9 @@ export const LAUNCH_ONLY_TOOLS: ReadonlySet<string> = new Set(["app_launch", "br
 // SendInput (input_*) не имеет обратной связи; browser_act/web_act/ui_invoke могут «нажать» в пустоту
 // (регион/нет элемента/потерян фокус) и вернуть ok; app_focus (AppActivate) хрупкий. После такого
 // действия перед «готово» ОБЯЗАТЕЛЬНА сверка глазами (browser_read/inspect/screen_capture).
-// Прочие mutate (code_run → stdout/exit, fs_* → запись, office_* → COM-результат, system_volume →
-// readback, app_launch → см. ниже, *_open → открытая вкладка) САМОПОДТВЕРЖДАЮТСЯ своим
-// tool_result — внешняя визуальная сверка им не нужна (иначе спамим экран-чтением на каждый код-ран).
+// Прочие mutate (code_run без SDK → stdout/exit, fs_*, office_* → COM, system_volume → readback, app_launch → ниже,
+// *_open → вкладка) САМОПОДТВЕРЖДАЮТСЯ своим tool_result. W3 (L-2): code_run с `import jarvis` кликает через мост —
+// слепой ПО ВЫЗОВУ (blind-call.ts isBlindMutateCall), здесь не значится: список — по имени.
 // 🔴 app_launch (пересмотрено 2026-09-01, дефект «steam://rungameid/<мусор> всегда Готово»): он ОСТАЁТСЯ
 // самоподтверждающимся, потому что клиентский резолвер теперь сверяет исход РЕАЛЬНО — живой процесс
 // (exe) либо процесс игры/RunningAppID Steam (URI), иначе честная ошибка. Единственная ветка без

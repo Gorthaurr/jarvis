@@ -8,7 +8,9 @@
 import type { HonestyState } from "./state.js";
 import type { ToolResult } from "../../tools/dispatch.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
-import { LAUNCH_ONLY_TOOLS, isBlindMutate } from "../error-voice.js";
+import { LAUNCH_ONLY_TOOLS } from "../error-voice.js";
+import { isBlindMutateCall } from "../blind-call.js";
+import type { ResolveCode } from "../../tools/code-input.js";
 
 /** Слова запуска/открытия в любом месте финала («запущена», «открыл», «поднялся»). */
 const LAUNCH_CLAIM = /(?<![\p{L}])(запущен|запустил|поднялс|стартовал|открыл)\p{L}*/iu;
@@ -35,7 +37,15 @@ export function launchOnlyClaim(text: string, h: HonestyState): boolean {
  * — сверен сразу; без наблюдения — ждёт реального взгляда. Коммит отправки своим снимком себя не сверяет (снимок =
  * факт нажатия). Запуск/фокус ПОСЛЕ дела — новая подготовка: прежнее дело к финалу о запуске не относится (р2).
  */
-export function noteRealAction(h: HonestyState, tu: LlmResponse["toolUses"][number], r: ToolResult, eff: "verify" | "mutate" | "neutral", realVerify: boolean, selfObserved: boolean): void {
+export function noteRealAction(
+  h: HonestyState,
+  tu: LlmResponse["toolUses"][number],
+  r: ToolResult,
+  eff: "verify" | "mutate" | "neutral",
+  realVerify: boolean,
+  selfObserved: boolean,
+  resolveCode?: ResolveCode,
+): void {
   if (realVerify && h.realActionUnverified) {
     h.verifiedRealAction = true;
     h.realActionUnverified = false;
@@ -46,9 +56,9 @@ export function noteRealAction(h: HonestyState, tu: LlmResponse["toolUses"][numb
     h.realActionUnverified = false;
     return;
   }
-  // Только РУКИ (слепые mutate: act/browser_act/input_*…): самоподтверждающийся mutate (громкость, код, файл) себя уже
-  // подтвердил, и взгляд после него не делает «Запустил Доту» сверенным делом (app_launch → system_volume → скрин).
-  if (!isBlindMutate(tu.name)) return;
+  // Только РУКИ (слепые mutate: act/browser_act/input_*…, W3: и SDK-скрипт): самоподтверждающийся mutate (громкость,
+  // код без SDK, файл) себя уже подтвердил, и взгляд после него не делает «Запустил Доту» сверенным делом.
+  if (!isBlindMutateCall(tu.name, tu.input, resolveCode)) return;
   if (selfObserved) h.verifiedRealAction = true;
   else h.realActionUnverified = true;
 }
