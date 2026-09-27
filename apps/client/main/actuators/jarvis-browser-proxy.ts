@@ -6,15 +6,16 @@
  * страницу. Теперь Chrome ходит ТОЛЬКО через этот прокси (`pinProxyArgs`: SOCKS5 у Chrome резолвит на стороне прокси,
  * `<-loopback>` снимает неявный обход 127.0.0.1/localhost): суд `checkHostPublic` — один раз на соединение, и сокет
  * открывается ровно к ПРОВЕРЕННЫМ адресам (синтетический lookup, второго резолва нет — тот же приём, что серверный
- * pinned-fetch). Приватный адрес → ответ 0x02 (запрещено правилами), не разрешилось → 0x04; `onBlock` — синхронно ДО
+ * pinned-fetch). Суд с защитой пула резолвера главного процесса — jarvis-browser-proxy-judge.ts. Приватный адрес → ответ 0x02 (запрещено правилами), не разрешилось → 0x04; `onBlock` — синхронно ДО
  * ответа, чтобы гард сопоставил блок с отпущенным переходом раньше, чем навигация вернёт ошибку. Заодно режутся
  * ПОДРЕСУРСЫ (fetch/XHR/img/wss) к внутренним адресам — их перехват навигации не видит.
  *
  * Провод SOCKS5 (no-auth CONNECT — Chrome большего не шлёт) — jarvis-browser-socks5.ts. UDP нет: QUIC через SOCKS-прокси
- * Chrome не пускает.
+ * Chrome не пускает, а WebRTC-UDP идёт мимо прокси — остаток, docs/SECURITY.md «SSRF по DNS».
  */
 import { type LookupFunction, type Socket, connect, createServer, isIPv6 } from "node:net";
-import { type HostLookup, checkHostPublic, createLogger, urlHostname } from "@jarvis/shared";
+import { type HostLookup, createLogger, urlHostname } from "@jarvis/shared";
+import { HostJudge } from "./jarvis-browser-proxy-judge.js";
 import { REP, readConnectTarget, reply } from "./jarvis-browser-socks5.js";
 
 const log = createLogger("actuator:jarvis-browser:proxy");
@@ -58,12 +59,13 @@ const pinnedLookup = (addrs: string[]): LookupFunction => (_host, o, cb) => {
   else cb(null, all[0]!.address, all[0]!.family);
 };
 
-async function serve(sock: Socket, opts: PinProxyOpts, blocked: ProxyBlock[]): Promise<void> {
+async function serve(sock: Socket, opts: PinProxyOpts, judge: HostJudge, blocked: ProxyBlock[]): Promise<void> {
   const target = await readConnectTarget(sock);
   if (!target) return;
   sock.setTimeout(0);
   const host = urlHostname(target.raw); // как у гарда: имя из URL в той же канонической записи (IPv6 — сжатая)
-  const v = await checkHostPublic(host, { lookup: opts.lookup });
+  const v = await judge.judge(host, () => !sock.destroyed);
+  if (sock.destroyed) return; // Chrome бросил запрос, пока шёл суд
   if (!v.ok) {
     const b: ProxyBlock = { host: host || target.raw.slice(0, 80), port: target.port, reason: v.reason };
     blocked.push(b);
@@ -76,9 +78,9 @@ async function serve(sock: Socket, opts: PinProxyOpts, blocked: ProxyBlock[]): P
     }
     return void sock.end(reply(v.reason === "private" ? REP.ruleset : REP.unreachable));
   }
-  if (sock.destroyed) return; // Chrome бросил запрос, пока шёл суд
   const addrs = v.addresses.map((a) => opts.mapAddress?.(a) ?? a);
-  const up = connect({ host: PINNED, port: target.port, lookup: pinnedLookup(addrs), autoSelectFamily: true });
+  // Попытка на адрес 1,5 с (не 250 мс по умолчанию: живой, но далёкий первый адрес не бросаем); keepalive — как у Chrome.
+  const up = connect({ host: PINNED, port: target.port, lookup: pinnedLookup(addrs), autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 1500, keepAlive: true, keepAliveInitialDelay: 45_000 });
   let live = false;
   up.setTimeout(CONNECT_MS, () => up.destroy(new Error("socks: таймаут подключения")));
   up.on("error", () => (live ? sock.destroy() : sock.end(reply(REP.refused))));
@@ -97,13 +99,14 @@ async function serve(sock: Socket, opts: PinProxyOpts, blocked: ProxyBlock[]): P
 /** Поднять прокси на 127.0.0.1:<свободный>. Ошибка старта — бросок (браузер без пиннинга не запускаем). */
 export function startPinProxy(opts: PinProxyOpts = {}): Promise<PinProxy> {
   const blocked: ProxyBlock[] = [];
+  const judge = new HostJudge({ lookup: opts.lookup });
   const socks = new Set<Socket>();
   const srv = createServer((sock) => {
     socks.add(sock);
     sock.on("close", () => socks.delete(sock));
     sock.on("error", () => sock.destroy()); // необработанный error сокета — крах главного процесса Electron
     sock.setTimeout(HANDSHAKE_MS, () => sock.destroy());
-    serve(sock, opts, blocked).catch(() => sock.destroy());
+    serve(sock, opts, judge, blocked).catch(() => sock.destroy());
   });
   return new Promise<PinProxy>((resolve, reject) => {
     srv.once("error", reject);

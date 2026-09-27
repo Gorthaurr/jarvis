@@ -122,7 +122,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   §14: место — по живой вкладке (`web-place.ts`), LMS — по пути; гард страницы на ЛЮБОМ сайте (Enter/Space на
   кнопко-подобных, set, все submit формы); одобрение — `approvedRef` или видимая подпись (один вопрос); клавиши —
   `shared/key-combo.ts` = `parseCombo` расширения (стык: `extension/test/fixtures/key-combos.json`); цель вкладки — по задаче.
-- **Пиннинг невидимого Chrome (B-14)**: весь трафик — через SOCKS5 клиента (`jarvis-browser-proxy.ts`), DNS-суд при подключении.
+- **Пиннинг невидимого Chrome (B-14)**: все TCP-соединения — через SOCKS5 клиента (`jarvis-browser-proxy.ts`), DNS-суд при подключении.
 - **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается
   (`gate-closer.ts`); mute посреди фразы → `speech_cancel`; PTT — Ctrl+Alt+J; микрофон повторяется 1→30 с.
 

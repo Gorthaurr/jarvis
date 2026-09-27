@@ -64,10 +64,10 @@ describe("B-14: блок пиннинг-прокси → запись журна
     expect(guard.since(0)).toEqual([]);
   });
 
-  it("устаревший (дольше 15 с назад) документ не сопоставляется", async () => {
+  it("устаревший (дольше 35 с назад — таймаут SOCKS Chrome + вердикт) документ не сопоставляется", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const { guard } = await released([["http://shop.test/", "F1"]]);
-    vi.setSystemTime(Date.now() + 16_000);
+    vi.setSystemTime(Date.now() + 36_000);
     expect(guard.proxyBlocked({ host: "shop.test", port: 80, reason: "private" })).toBe(false);
   });
 });
