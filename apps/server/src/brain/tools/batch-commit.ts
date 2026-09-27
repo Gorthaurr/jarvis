@@ -82,8 +82,8 @@ export async function batchGate(ctx: ToolContext, steps: readonly SkillStep[], l
   const ask = intents.filter((i) => i.where.category !== "web" || !place?.safe);
   if (ask.length === 0) return { approval };
   const what = ask.map((i) => `шаг ${i.step + 1} — ${describeSignature(i.signature, i.where.category, i.display)}${i.count > 1 ? ` ×${i.count}` : ""}`);
-  const places = [...new Set(ask.map((i) => (i.where.category === "web" && place ? browserWhere(place) : `${i.where.display} (${i.where.human})`)))];
-  const where = `${label}: ${places.join(", ")}`;
+  const places = [...new Set(ask.map((i) => (i.where.category === "web" && place ? browserWhere(place) : `программе ${i.where.display} (${i.where.human})`)))];
+  const where = `${places.join(" и ")}, ${label}`;
   if (!ctx.confirm) return { denied: err(`${label}: ${what.join("; ")} — нужно подтверждение владельца (§14), а канал недоступен. Ничего не сделано.`) };
   const typed = steps.filter((s) => s.action === "input.type" && typeof s.params?.text === "string").map((s) => String(s.params!.text));
   const gate = await ctx.confirm(approvalQuestion({ where, what, typed }), "irreversible");

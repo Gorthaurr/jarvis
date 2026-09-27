@@ -83,7 +83,8 @@ export function serverIntents(tool: string, input: Record<string, unknown>, wher
 /** Человеко-описание подписи для вопроса владельцу (подпись строит shared: имя уже сложено и ≤ 60). */
 export function describeSignature(signature: string, category: GuiCategory | null | string, display?: string): string {
   if (signature === "key:enter") return category === "messenger" ? "Enter — отправка сообщения" : "Enter — подтверждение/отправка";
-  if (signature.startsWith("key:")) return `клавиши ${signature.slice(4)}`;
-  if (signature.startsWith("click:?")) return `нажатие безымянного элемента (${signature.slice(7)})`;
-  return `клик «${cleanUntrusted(display, 60) || signature.slice(6)}»`;
+  if (signature.startsWith("key:")) return `клавиши ${cleanUntrusted(signature.slice(4), 30)}`;
+  // Подпись от клиента несёт имя элемента С ЭКРАНА (M11): в текст — только очищенным (без кавычек и угловых скобок).
+  if (signature.startsWith("click:?")) return `нажатие безымянного элемента (${cleanUntrusted(signature.slice(7), 30)})`;
+  return `клик «${cleanUntrusted(display, 60) || cleanUntrusted(signature.slice(6), 60)}»`;
 }

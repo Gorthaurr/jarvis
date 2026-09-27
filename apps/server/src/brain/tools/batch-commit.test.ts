@@ -31,7 +31,7 @@ describe("input_batch — один вопрос с перечнем, грант�
     expect(r.isError).toBe(false);
     expect(s.confirm).toHaveBeenCalledTimes(1);
     const q = String(s.confirm.mock.calls[0]![0]);
-    expect(q).toMatch(/шаг 2 — клик «Отправить»/u);
+    expect(q).toMatch(/^Необратимое действие в программе Telegram \(мессенджер\), берст: шаг 2 — клик «Отправить»\./u);
     expect(q).toMatch(/Текст: привет/u);
     expect(s.runs()).toHaveLength(1);
     expect(s.runs()[0]!.approval?.grants).toEqual([{ signature: "click:отправить", process: "telegram", count: 1 }]);
