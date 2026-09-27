@@ -22,7 +22,7 @@ const FINISH = { name: "Отправить всё и завершить тест
 const SEND = { name: "Отправить", ref: "e3_1", role: "button", selector: "button.submit", state: {}, tag: "button", idx: 1 };
 
 function wire(url: string, element: Record<string, unknown>) {
-  const tabAct = vi.fn(async () => ({ ok: true, changed: true }));
+  const tabAct = vi.fn(async (_url?: string, _intent?: string, _params?: Record<string, unknown>, _tabId?: number) => ({ ok: true, changed: true }));
   const tabBatch = vi.fn(async () => ({ ok: true, done: 1, total: 1 }));
   const ext: Ext = {
     connected: true,
@@ -50,7 +50,7 @@ describe("W1-D6: навигация теста Moodle по ref — без воп
     const r = await w.click();
     expect(r.isError, String(r.content)).toBe(false);
     expect(w.confirm).not.toHaveBeenCalled();
-    const params = w.tabAct.mock.calls[0]?.[2] as Record<string, unknown>;
+    const params = w.tabAct.mock.calls[0]?.[2] ?? {};
     expect(typeof params.guard).toBe("string"); // подпись реального элемента всё равно судит страница
     expect(params.guardApproved).toBeUndefined();
   });
