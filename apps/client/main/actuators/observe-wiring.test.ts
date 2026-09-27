@@ -46,7 +46,7 @@ const observedWith = () => observeAfterAction.mock.calls[0]?.[0] as { before?: u
 
 describe("снимок ДО доезжает до наблюдения", () => {
   it("input.click: наблюдение получает ИМЕННО снимок, снятый до действия", async () => {
-    await dispatch("c1", { kind: "input.click", target: { by: "coords", x: 10, y: 20 } } as ActionCommand);
+    await dispatch("c1", { kind: "input.click", target: { by: "coords", x: 10, y: 20, space: "screen" } } as ActionCommand);
     expect(captureUiFingerprint).toHaveBeenCalledTimes(1);
     expect(observedWith()?.before).toBe(FP);
   });
@@ -70,7 +70,7 @@ describe("за снимок не платим там, где наблюдени�
   });
 
   it("input.mouse op=move — снимка нет", async () => {
-    await dispatch("c5", { kind: "input.mouse", op: "move", x: 5, y: 5 } as ActionCommand);
+    await dispatch("c5", { kind: "input.mouse", op: "move", x: 5, y: 5, space: "screen" } as ActionCommand);
     expect(captureUiFingerprint).not.toHaveBeenCalled();
   });
 

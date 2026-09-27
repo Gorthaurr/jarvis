@@ -5,18 +5,17 @@ import type { RoundSnapshot } from "./round-snapshot.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { claimsObservedResult, looksLikeGiveUp } from "../error-voice.js";
 import { launchOnlyClaim } from "./launch-claim.js";
+import { verifyNudgeText } from "./verify-hint.js";
 
-export function continueAfterMaxTokens(ctx: LoopCtx, step: number, resp: LlmResponse): boolean {
-  const { sink, opts, st, convo, pushSystemNote } = ctx;
+export function continueAfterMaxTokens(ctx: LoopCtx, _step: number, resp: LlmResponse): boolean {
+  const { st, convo, pushSystemNote } = ctx;
   const { MAX_CONTINUATIONS } = ctx.cfg;
   // Докрутка обрыва по лимиту вывода: модель упёрлась в max_tokens, не закончив. Продолжаем
-  // ровно с места обрыва, а не отдаём огрызок. ТОЛЬКО для не-стримленного хода: голосовой
-  // step0 уже произнесён в sink (повтор/двойной голос недопустим) — там берём как есть.
-  // Ревью sync-first: под suppressStepStream step-0 НЕ стримился (ничего не произнесено) →
-  // ход НЕ-стримленный → докрутку НАДО делать (иначе action-ответ обрезался бы огрызком, как
-  // на фоновом пути её и делали). Без этого гарда флаг был ложно-истинным (sink есть, но нем).
-  const streamedThisStep = Boolean(sink) && step === 0 && !opts?.suppressStepStream;
-  if (resp.stopReason === "max_tokens" && !streamedThisStep && st.nudge.continuations < MAX_CONTINUATIONS) {
+  // ровно с места обрыва, а не отдаём огрызок. ТОЛЬКО для не-стримленного хода: уже произнесённое
+  // в sink (повтор/двойной голос недопустим) берём как есть. W3 (V-4): признак — что РЕАЛЬНО ушло в
+  // голос из этого вызова (streamedThisRound), а не «шаг 0»: стримится и финал разговорного хода, а
+  // под suppressStepStream или при заглушённой капитуляции не звучало ничего — докрутку НАДО делать.
+  if (resp.stopReason === "max_tokens" && !st.progress.streamedThisRound && st.nudge.continuations < MAX_CONTINUATIONS) {
     st.nudge.continuations += 1;
     convo.push({ role: "assistant", content: resp.text });
     pushSystemNote("Продолжай ровно с места обрыва — без повторов, без преамбул и без финальных фраз, пока не закончишь.");
@@ -46,7 +45,7 @@ export function antiCapitulation(ctx: LoopCtx, resp: LlmResponse, snap: RoundSna
   if (
     resp.stopReason === "end_turn" &&
     st.nudge.retryNudges < MAX_RETRY_NUDGES &&
-    looksLikeGiveUp(resp.text) &&
+    looksLikeGiveUp(resp.text) && !st.progress.streamedThisRound && // W3 (V-4): ответ уже звучит (начат по делу) — переспрос дал бы второй голос
     !gateStoppedPrevRound && // §14-гейт остановил действие в прошлом раунде — это не капитуляция модели
     !st.honesty.anyMutateSucceeded // P0.1: успешный НЕЙТРАЛЬНЫЙ инструмент (поиск/память) не считается «сделал» —
     // «погуглил → сдался словами» теперь форсит попытку. !anyMutateSucceeded включает и traj===0.
@@ -118,11 +117,7 @@ export function verifyNudge(ctx: LoopCtx, resp: LlmResponse): boolean {
     if (st.nudge.verifyNudges >= 2) escalateForQuality("повторный промах сверки исхода");
     const claimed = claimsObservedResult(resp.text);
     convo.push({ role: "assistant", content: resp.text.trim() || "…" }); // аудит [2]: пустой content → Anthropic 400 (как sibling ниже)
-    pushSystemNote(
-      claimed
-        ? "Стоп. Ты заявил результат, но НЕ сверил его глазами после последнего действия — мог выдумать. СВЕРЬ ФАКТОМ, дешёвое прежде дорогого (лестница §Волна3): look{what:'elements'} (нативное окно) / browser_read / browser_inspect (веб) / look{what:'text'} (текст с canvas/игры) / screen_capture (последний резерв) — и убедись, что цель РЕАЛЬНО достигнута. Достигнута → подтверди тем, что реально увидел. НЕ достигнута → зайди другим способом и доведи. Содержимое не сочиняй."
-        : "Стоп. Ты сделал действие, но НЕ проверил исход — клик/ввод/команда могли не сработать (регион, нет элемента, потерян фокус). Прежде чем сказать «готово», СВЕРЬ РЕАЛЬНЫЙ результат дешёвым сенсором (лестница §Волна3): look{what:'elements'} (нативное окно) / browser_read / browser_inspect (веб) / look{what:'text'} (canvas/игра) / screen_capture (последний резерв). Цель достигнута → подтверди фактом, что увидел. НЕ достигнута → зайди другим способом и доведи, не сдавайся.",
-    );
+    pushSystemNote(verifyNudgeText(claimed, st.progress.toolTrajectory)); // W3 (L-8): лестница — по последней слепой руке
     log.info("verify-петля: нудж на сверку результата глазами", { verifyNudges: st.nudge.verifyNudges, claimed });
     st.tier.nudgeBoostNextRound = true; // §2.7: следующий раунд — переосмысление, думаем полноценно
     st.progress.finalText = "";

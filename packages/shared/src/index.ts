@@ -7,8 +7,11 @@ export * from "./name-match.js";
 // Робастный матч кликабельного элемента по тексту (общий browser_act, §6 Фаза 5): без ложных подстрок.
 export * from "./ui-match.js";
 export * from "./commit-risk.js";
+// W2 (пакет 0): класс клавиши, подпись/намерения коммита, коммит по элементу, признаки секретов, кап зрения моделей.
+export * from "./gui-guards.js";
 // Разбор combo клавиш — один на §14-гейт, петлю и (зеркалом) расширение; стык — key-combos.json.
 export * from "./key-combo.js";
+export * from "./private-host.js"; // B-14: одно правило «приватный хост» для всех SSRF-гардов (сервер и клиент)
 // Каталог моделей мозга (точные id, цены, роли) + наложение выбора пользователя на лестницу тиров.
 export * from "./models.js";
 
@@ -119,10 +122,7 @@ export function envOptional(name: string): string | undefined {
   return v === undefined || v === "" ? undefined : v;
 }
 
-/**
- * Булев флаг из env. true ← "1"|"true"|"yes"|"on" (регистр игнор), иначе fallback.
- * `source` — для тестируемости (можно передать подменённый env вместо process.env).
- */
+/** Булев флаг из env: true ← "1"|"true"|"yes"|"on" (регистр игнор), иначе fallback; `source` — подменённый env для тестов. */
 export function envBool(name: string, fallback = false, source: NodeJS.ProcessEnv = process.env): boolean {
   const v = source[name];
   if (v === undefined || v === "") return fallback;

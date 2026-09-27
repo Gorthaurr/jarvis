@@ -1500,7 +1500,7 @@ describe("Б4 (г/д): channel_down в петле — ждём reconnect, не �
       return Promise.resolve({ commandId: "c", ok: true, durationMs: 1, data: { image: "QUFB", mediaType: "image/png" } });
     });
     const session = { sessionId: "s1", userId: "u1", sendAction, send: vi.fn(), channelUp: () => !down } as unknown as Session;
-    const click = { toolUses: [{ id: "t1", name: "input_click", input: { target: { by: "coords", x: 10, y: 20, space: "screen" } } }] };
+    const click = { toolUses: [{ id: "t1", name: "input_click", input: { target: { by: "coords", x: 10, y: 20, frame: "k1af1" } } }] };
     const llm = new MockLlmProvider([
       click, // раунд 1: канал мёртв → channel_down → петля ждёт reconnect и повторяет
       click, // раунд 2: канал восстановлен → клик прошёл (mutate success)

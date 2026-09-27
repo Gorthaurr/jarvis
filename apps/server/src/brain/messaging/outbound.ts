@@ -39,14 +39,18 @@ export interface OutboundDeps {
   /** Идемпотентность (§14): уже отправляли такой ключ? */
   isAlreadySent: (key: string) => boolean;
   markSent: (key: string) => void;
-  /** Фактическая отправка (клиентский userbot, §12). */
-  send: (channel: MessageChannel, recipient: string, body: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * Фактическая отправка (клиентский userbot, §12). `uncertain` — команда УШЛА, а ответа нет (таймаут/разрыв сессии,
+   * W2 S-7): сообщение могло дойти — это не «не ушло».
+   */
+  send: (channel: MessageChannel, recipient: string, body: string) => Promise<{ ok: boolean; error?: string; uncertain?: boolean }>;
   maxRevisions?: number;
   /** Задержка перед отправкой (§14 человеческий конверт). Инъекция для тестов; деф — реальный sleep. */
   sleep?: (ms: number) => Promise<void>;
 }
 
-export type OutboundStatus = "sent" | "blocked" | "denied" | "duplicate" | "error";
+/** Три исхода отправки (закон 1): sent — ушло; error/denied/blocked/duplicate — не ушло; uncertain — неизвестно. */
+export type OutboundStatus = "sent" | "blocked" | "denied" | "duplicate" | "error" | "uncertain";
 
 export interface OutboundResult {
   status: OutboundStatus;
@@ -117,6 +121,12 @@ export async function sendOutbound(params: OutboundParams, deps: OutboundDeps): 
 
   // 5) Отправка через userbot (§12).
   const sent = await deps.send(params.channel, params.recipient, body);
+  // W2 S-7: исход неизвестен — ключ идемпотентности НЕ ставим (повтор решает владелец, а не молчаливый дедуп и не
+  // молчаливый дубль), частоту учитываем (возможная отправка — тоже отправка для анти-бана).
+  if (!sent.ok && sent.uncertain) {
+    deps.cadence.record(params.userId, params.channel, params.recipient);
+    return { status: "uncertain", body, reason: sent.error ?? "ответа нет", messageKey: key };
+  }
   if (!sent.ok) return { status: "error", body, reason: sent.error ?? "ошибка отправки", messageKey: key };
 
   deps.markSent(key);

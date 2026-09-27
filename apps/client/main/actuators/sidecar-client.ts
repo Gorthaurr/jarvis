@@ -1,13 +1,11 @@
 /**
- * IPC-клиент к win-сайдкару (§6, §18): UIA-грундинг + SendInput в одном нативном
- * процессе. Протокол — newline-delimited JSON по stdio:
+ * IPC-клиент к win-сайдкару (§6, §18): UIA-грундинг + SendInput в одном нативном процессе. Протокол — NDJSON по stdio:
  *   запрос:  {"id":"1","op":"ground","args":{...}}\n
  *   ответ:   {"id":"1","ok":true,"data":{...}}\n  |  {"id":"1","ok":false,"error":"..."}\n
- *
- * Ядро JsonLineRpc отделено от child_process (тестируется без запуска процесса).
- * SidecarClient поднимает реальный exe (extraResources, §3); при отсутствии —
- * ready=false, и актуаторы честно деградируют (dispatch вернёт runtime-ошибку).
+ * Ядро JsonLineRpc отделено от child_process (тестируется без процесса). SidecarClient поднимает реальный exe
+ * (extraResources, §3); при отсутствии — ready=false, и актуаторы честно деградируют (runtime-ошибка).
  */
+import { AsyncResource } from "node:async_hooks";
 import { type ChildProcess, spawn } from "node:child_process";
 import { createLogger } from "@jarvis/shared";
 
@@ -111,10 +109,12 @@ export class JsonLineRpc {
   }
 }
 
-/** §Волна2 (2.4): бэкофф авто-рестарта сайдкара — 1с → ×2 → потолок 30с; сбрасывается аптаймом. */
+/** W2 П1: контекст ЗАГРУЗКИ (статический импорт — до любой команды): рестарт и его подписчики — в нём, не в ALS команды. */
+const BOOT = new AsyncResource("SidecarBoot");
+
+/** §Волна2 (2.4): бэкофф авто-рестарта 1с → ×2 → потолок 30с; прожил HEALTHY_UPTIME — бэкофф сбрасывается. */
 const RESTART_BASE_MS = 1_000;
 const RESTART_MAX_MS = 30_000;
-/** Прожил дольше — считаем запуск здоровым, бэкофф сбрасывается (не копится от давних падений). */
 const HEALTHY_UPTIME_MS = 60_000;
 
 /** Управляет процессом сайдкара и предоставляет RPC. */
@@ -123,10 +123,11 @@ export class SidecarClient {
   private rpc: JsonLineRpc | null = null;
   private _ready = false;
   private pushHandler: PushHandler | null = null;
-  /** §Волна2 (2.4): колбэк после АВТО-рестарта — восстановить подписки (raw-input.subscribe и т.п.). */
-  private restartHandler: (() => void) | null = null;
-  // §Волна2 (2.4): авто-рестарт при падении процесса (раньше падение = «оглох навсегда» до
-  // перезапуска клиента). stop() — намеренная остановка, рестарт не планирует.
+  /** §Волна2 (2.4): подписчики АВТО-рестарта — восстановить подписки (raw-input.subscribe); W2: их несколько (П1). */
+  private readonly restartHandlers: Array<() => void> = [];
+  /** W2: поколение процесса (+1 на старт): handle UIA живут внутри поколения; моки без него — читать `generation ?? 0`. */
+  private _generation = 0;
+  // §Волна2 (2.4): авто-рестарт при падении (раньше — «оглох навсегда»); stop() — намеренная, рестарта нет.
   private exePath: string | null = null;
   private restartDelayMs = RESTART_BASE_MS;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -136,15 +137,19 @@ export class SidecarClient {
   get ready(): boolean {
     return this._ready;
   }
+  get generation(): number {
+    return this._generation;
+  }
 
   /** Подписаться на push-сообщения сайдкара (демо-события записи навыка, §8). */
   onPush(cb: PushHandler): void {
     this.pushHandler = cb;
   }
 
-  /** §Волна2 (2.4): после авто-рестарта восстановить состояние нового процесса (подписки/хуки). */
+  /** §Волна2 (2.4): после авто-рестарта восстановить подписки нового процесса. W2: подписчиков несколько; П1 — в
+   *  контексте ПОДПИСКИ (загрузка), а не того, кто уронил сайдкар: область одобрения (ALS) не протекает в подписки. */
   onRestarted(cb: () => void): void {
-    this.restartHandler = cb;
+    this.restartHandlers.push(BOOT.bind(cb));
   }
 
   /** Поднять сайдкар по пути к exe. Безопасно: при сбое ready=false (+ авто-ретрай с бэкоффом). */
@@ -159,16 +164,12 @@ export class SidecarClient {
       const child = spawn(exePath, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       this.child = child;
       this.startedAt = Date.now();
-      this.rpc = new JsonLineRpc(
-        (line) => child.stdin?.write(line),
-        (msg) => this.pushHandler?.(msg),
-      );
+      this.rpc = new JsonLineRpc((line) => child.stdin?.write(line), (msg) => this.pushHandler?.(msg));
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (d: string) => this.rpc?.feed(d));
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (d: string) => log.debug(`sidecar stderr: ${d.trim()}`));
-      // Гард поколения (ревью Волны 2): exit/error СТАРОГО процесса не должны гасить ЗДОРОВЫЙ
-      // новый инстанс после рестарта (поздний exit прилетал бы уже чужому поколению).
+      // Гард поколения (ревью Волны 2): поздний exit/error СТАРОГО процесса не гасит здоровый новый инстанс.
       const self = child;
       child.on("error", (e) => {
         if (this.child !== self) return;
@@ -185,6 +186,7 @@ export class SidecarClient {
         this.scheduleRestart();
       });
       this._ready = true;
+      this._generation += 1;
       log.info(`sidecar запущен: ${exePath}`);
     } catch (e) {
       log.warn(`не удалось запустить sidecar: ${e instanceof Error ? e.message : String(e)}`);
@@ -201,13 +203,14 @@ export class SidecarClient {
     const delay = this.restartDelayMs;
     this.restartDelayMs = Math.min(RESTART_MAX_MS, this.restartDelayMs * 2);
     log.info(`sidecar: авто-рестарт через ${Math.round(delay / 1000)}с`);
-    this.restartTimer = setTimeout(() => {
+    const tick = (): void => {
       this.restartTimer = null;
       if (this.stopped || !this.exePath) return;
       this.start(this.exePath);
       // Новый процесс не помнит подписок старого (raw-input.subscribe/LL-хуки) — восстанавливаем.
-      if (this._ready) this.restartHandler?.();
-    }, delay);
+      if (this._ready) for (const cb of this.restartHandlers) cb();
+    };
+    this.restartTimer = setTimeout(BOOT.bind(tick), delay);
     this.restartTimer.unref?.();
   }
 
@@ -222,14 +225,9 @@ export class SidecarClient {
     return this.request("demo.record", { op: "start" }, 5000);
   }
 
-  /**
-   * Остановить запись — вернуть авторитетный батч пойманных событий (§8).
-   * data: { events: Array<{role,name?,action,ts}> }.
-   */
+  /** Остановить запись — вернуть авторитетный батч пойманных событий (§8): { events: Array<{role,name?,action,ts}> }. */
   stopDemo(): Promise<{ events?: Array<Record<string, unknown>> }> {
-    return this.request("demo.record", { op: "stop" }, 5000) as Promise<{
-      events?: Array<Record<string, unknown>>;
-    }>;
+    return this.request("demo.record", { op: "stop" }, 5000) as Promise<{ events?: Array<Record<string, unknown>> }>;
   }
 
   stop(): void {

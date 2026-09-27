@@ -74,9 +74,9 @@ export function maskedFailureReply(spokeAny: boolean): string {
 
 // VERIFY-ПЕТЛЯ (анти-конфабуляция). Сверка глазами — читает реальное состояние страницы/экрана.
 // Волна 2 (2.3/2.4): ui_snapshot (живое UIA-дерево окна) и screen_read_text (локальный OCR реальных
-// пикселей) — полноценные ДЕШЁВЫЕ сверки: читают фактическое состояние, а не доверяют «ok» действия.
+// пикселей) — ДЕШЁВЫЕ сверки. W3 (L-8): web_inspect — глаз невидимого браузера (элементы страницы после web_act).
 const VERIFY_TOOLS = new Set([
-  "browser_read", "browser_inspect", "screen_capture", "web_read", "context_read",
+  "browser_read", "browser_inspect", "screen_capture", "web_read", "web_inspect", "context_read",
   "ui_snapshot", "screen_read_text",
 ]);
 // Нейтральные — не меняют наблюдаемый результат на экране (поиск/память/навыки/служебные).
@@ -154,14 +154,15 @@ export function toolEffect(name: string): "verify" | "mutate" | "neutral" {
   return "mutate"; // browser_open/act, web_open/act, input_*, app_*, fs_write/edit, office_*, system_*, code_run…
 }
 
-/** W1 «браузерные руки»: интенты browser_act, которые страницу НЕ меняют — навести курсор, прокрутить к элементу. */
+/** W1/W2: жесты, которые ничего НЕ меняют — навести курсор, прокрутить: browser_act{hover|scroll_to}, act{hover|scroll}. */
 const NEUTRAL_BROWSER_INTENTS = new Set(["hover", "scroll_to"]);
+const NEUTRAL_ACT_VERBS = new Set(["hover", "scroll"]);
 
 /**
  * Эффект КОНКРЕТНОГО вызова: у части инструментов под одним именем операции разной природы. Единая точка для петли
  * и журнала — разойдись они, журнал звал бы «сделанным» то, что петля считала взглядом (и наоборот).
  *  - screen_selection: `view` — свежий кадр области (сверка), start/clear — нейтральны;
- *  - browser_act{hover|scroll_to} — нейтральны: ни дела, ни verify-долга (наведение/прокрутка ничего не отправляют).
+ *  - browser_act{hover|scroll_to}, act{hover|scroll} (не серия) — нейтральны: ни дела, ни verify-долга; act{steps} — mutate.
  * Вызов — КАНОНИЧЕСКИЙ (петля и журнал канонизируют до этого): browser_tabs{op:"close"} приходит как browser_close
  * (facades.ts) и по имени — mutate. Без входа (потребители по одному имени) — эффект по имени, как раньше.
  */
@@ -169,6 +170,7 @@ export function toolCallEffect(name: string, input?: unknown): "verify" | "mutat
   const i = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   if (name === "screen_selection") return String(i.op ?? "view") === "view" ? "verify" : "neutral";
   if (name === "browser_act" && NEUTRAL_BROWSER_INTENTS.has(String(i.intent ?? ""))) return "neutral";
+  if (name === "act" && i.steps === undefined && NEUTRAL_ACT_VERBS.has(String(i.do ?? ""))) return "neutral";
   return toolEffect(name);
 }
 
@@ -182,9 +184,9 @@ export const LAUNCH_ONLY_TOOLS: ReadonlySet<string> = new Set(["app_launch", "br
 // SendInput (input_*) не имеет обратной связи; browser_act/web_act/ui_invoke могут «нажать» в пустоту
 // (регион/нет элемента/потерян фокус) и вернуть ok; app_focus (AppActivate) хрупкий. После такого
 // действия перед «готово» ОБЯЗАТЕЛЬНА сверка глазами (browser_read/inspect/screen_capture).
-// Прочие mutate (code_run → stdout/exit, fs_* → запись, office_* → COM-результат, system_volume →
-// readback, app_launch → см. ниже, *_open → открытая вкладка) САМОПОДТВЕРЖДАЮТСЯ своим
-// tool_result — внешняя визуальная сверка им не нужна (иначе спамим экран-чтением на каждый код-ран).
+// Прочие mutate (code_run без SDK → stdout/exit, fs_*, office_* → COM, system_volume → readback, app_launch → ниже,
+// *_open → вкладка) САМОПОДТВЕРЖДАЮТСЯ своим tool_result. W3 (L-2): code_run с `import jarvis` кликает через мост —
+// слепой ПО ВЫЗОВУ (blind-call.ts isBlindMutateCall), здесь не значится: список — по имени.
 // 🔴 app_launch (пересмотрено 2026-09-01, дефект «steam://rungameid/<мусор> всегда Готово»): он ОСТАЁТСЯ
 // самоподтверждающимся, потому что клиентский резолвер теперь сверяет исход РЕАЛЬНО — живой процесс
 // (exe) либо процесс игры/RunningAppID Steam (URI), иначе честная ошибка. Единственная ветка без
@@ -208,9 +210,7 @@ const BLIND_MUTATE_TOOLS = new Set([
 ]);
 
 /** Слепое ли это меняющее действие — то, чей успех надо подтвердить наблюдением, не доверяя «ok». */
-export function isBlindMutate(name: string): boolean {
-  return BLIND_MUTATE_TOOLS.has(name);
-}
+export const isBlindMutate = (name: string): boolean => BLIND_MUTATE_TOOLS.has(name);
 
 // Заявление о НАБЛЮДАЕМОМ содержимом/результате (его надо было сверить глазами перед «готово»). НЕ
 // триггерит простое «открыл/запустил/готово» (там успех действия = цель). Триггерит «результаты/первый/
@@ -257,7 +257,6 @@ export const DURABLE_NEUTRAL_TOOLS = new Set([
   "set_reminder", "cancel_reminder", "watch_create", "watch_cancel",
   "consent_revoke", "obligation_add", "obligation_remove",
 ]);
-
 
 /** Грубая классификация по тексту ошибки (для будущих специализированных фраз/телеметрии). */
 export function classifyFailure(detail?: string): FailureClass {

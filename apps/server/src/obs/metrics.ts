@@ -366,22 +366,22 @@ export class MetricsCollector {
   }
 
   /**
-   * Realtime инкремент 0: mouth-to-ear («конец речи пользователя → первый звук РЕАЛЬНО сыгран у клиента»,
-   * мс) — durable JSONL-строкой (type:"mouth_to_ear"). Это ГЛАВНАЯ метрика §10; baseline P50/P95 «до уха»
-   * считается офлайн-разбором этих строк (переживают деплой). В ОЗУ-окно per-task агрегатов НЕ попадает
-   * (иной масштаб события). Пишется ТОЛЬКО для собственного ответа пользовательского хода (проводка в
-   * gateway; проактив/фон не тегаются — см. pipeline.onAudioPlayed). Fail-safe: сбой ФС не критичен.
+   * Realtime инкремент 0: mouth-to-ear («конец речи → первый звук РЕАЛЬНО сыгран у клиента», мс) — durable JSONL
+   * (type:"mouth_to_ear"), только для собственного звука пользовательского хода (проактив/фон не тегаются).
+   * W3 V-1: firstSound — ЧЕМ был этот звук (answer / ack «Берусь» / filler): m2e по ack — не скорость ответа.
    */
-  recordMouthToEar(ms: number, turnSeq: number, userId?: string): void {
-    this.appendJsonl({ ts: new Date().toISOString(), type: "mouth_to_ear", ms, turnSeq, ...(userId ? { userId } : {}) });
+  recordMouthToEar(ms: number, turnSeq: number, userId?: string, firstSound?: string): void {
+    this.appendJsonl({ ts: new Date().toISOString(), type: "mouth_to_ear", ms, turnSeq, ...(userId ? { userId } : {}), ...(firstSound ? { firstSound } : {}) });
+  }
+
+  /** W3 V-1: turn_end → ОТПРАВКА первого чанка СОДЕРЖАТЕЛЬНОГО ответа хода (path: sync — этим ходом, promoted — итог фона). */
+  recordFirstAnswer(ms: number, turnSeq: number, path: "sync" | "promoted", userId?: string): void {
+    this.appendJsonl({ ts: new Date().toISOString(), type: "first_answer", ms, turnSeq, path, ...(userId ? { userId } : {}) });
   }
 
   /**
-   * Скрытая ДЕГРАДАЦИЯ качества (пункт-6, наблюдаемость): read-инструмент отработал БЕЗ ошибки, но не дал
-   * пользы — пустой web_search=[], knowledge_consult без совпадения раздела и т.п. Раньше это было невидимо
-   * (ok=true, ошибки нет) → «почему недоработал» находилось археологией по логам. Durable JSONL-строка
-   * type:"degradation" (в ОЗУ-окно per-task агрегатов НЕ попадает — иной масштаб). Fail-safe: сбой ФС не
-   * критичен (общий appendJsonl). `kind` — короткий машинный слаг; `meta` — контекст (query/domain), без PII-лавины.
+   * Скрытая ДЕГРАДАЦИЯ (пункт-6): read-инструмент отработал без ошибки, но без пользы (пустой web_search, knowledge
+   * без раздела) — раньше невидимо. Durable JSONL type:"degradation"; `kind` — машинный слаг, `meta` — контекст без PII.
    */
   recordDegradation(kind: string, meta?: Record<string, unknown>): void {
     this.appendJsonl({ ts: new Date().toISOString(), type: "degradation", kind, ...(meta ?? {}) });

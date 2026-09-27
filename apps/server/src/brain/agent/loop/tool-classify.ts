@@ -5,7 +5,8 @@ import type { RoundResult } from "./tool-round.js";
 import type { ToolResult } from "../../tools/dispatch.js";
 import type { LlmResponse } from "../../../integrations/llm.js";
 import { describeIrreversible } from "../../tasks/misfire.js";
-import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, isBlindMutate, toolCallEffect } from "../error-voice.js";
+import { OUTBOUND_SEND_TOOLS, DURABLE_NEUTRAL_TOOLS, toolCallEffect } from "../error-voice.js";
+import { isBlindMutateCall, loopCodeResolver } from "../blind-call.js";
 import { armSendDebt, sendGestureOf } from "./send-gesture.js";
 import { noteRealAction } from "./launch-claim.js";
 import { actionTitle, stepLabelFor } from "../../tasks/task.js";
@@ -125,9 +126,8 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
   // ОДНА подсказка. Не запрет: на UIA-слепом окне (игра/canvas) картинка — единственный путь, и
   // ui_snapshot честно вернёт пустоту с пометкой. Цена ошибки подсказки — один дешёвый вызов;
   // цена молчания — «смотрю на компьютер как на картинку», что и показала форензика.
-  // ⚠️ ВРЕЗКУ ЗДЕСЬ ДЕЛАТЬ НЕЛЬЗЯ (адверс-ревью 2026-09-01, HIGH): мы внутри цикла по tool_use,
-  // и appendUserNote вставил бы user-сообщение МЕЖДУ assistant(tool_use) и tool_result —
-  // Anthropic отвечает 400 на первом же скриншоте. Копим флаг, впрыск после resultBlocks.
+  // ⚠️ ВРЕЗКУ ЗДЕСЬ ДЕЛАТЬ НЕЛЬЗЯ (адверс-ревью 2026-09-01, HIGH): мы внутри цикла по tool_use, и appendUserNote вставил
+  // бы user-сообщение МЕЖДУ assistant(tool_use) и tool_result — 400 на первом же скриншоте. Флаг, впрыск после resultBlocks.
   if (tu.name === "screen_capture" && !st.nudge.sawStructuralLook && !st.nudge.browserish && !st.nudge.ladderHinted) {
     st.nudge.ladderHinted = true;
     st.nudge.ladderHintPending = true;
@@ -192,11 +192,11 @@ export function applySuccessEffects(ctx: LoopCtx, tu: LlmResponse["toolUses"][nu
       // и об этом нужно сказать прямо, а не рапортовать «остановил», будто ничего не случилось.
       deps.tasks?.noteIrreversible(taskId, describeIrreversible(tu.name, tu.input));
     }
-    // W1-ревью LOOP-8: отказ §14 (declined) — НИЧЕГО не нажато и не набрано: ни долга сверки (честное «не отправил»
-    // не должно получать verify-нудж), ни сброса набора (повтор после «да» — снова отправка, её исход сверяется).
-    if (r.declined !== true) armSendDebt(st, gesture, isBlindMutate(tu.name) && !observed);
+    // W1-ревью LOOP-8: отказ §14 (declined) — НИЧЕГО не нажато и не набрано: ни долга сверки (честное «не отправил» не
+    // получает verify-нудж), ни сброса набора (повтор после «да» — снова отправка). W3 (L-2): SDK-скрипт — тоже рука.
+    if (r.declined !== true) armSendDebt(st, gesture, isBlindMutateCall(tu.name, tu.input, loopCodeResolver(deps)) && !observed);
   }
-  noteRealAction(st.honesty, tu, r, eff, realVerify, observed && !sendCommit); // W1 (L-3): сверено ли ДЕЛО (launch-claim.ts)
+  noteRealAction(st.honesty, tu, r, eff, realVerify, observed && !sendCommit, loopCodeResolver(deps)); // W1 (L-3): сверено ли ДЕЛО
 }
 
 export function applyRoundFlags(ctx: LoopCtx, tu: LlmResponse["toolUses"][number], r: ToolResult, effOfCall: "verify" | "mutate" | "neutral", reportOfThisTurn: boolean, round: RoundResult): void {

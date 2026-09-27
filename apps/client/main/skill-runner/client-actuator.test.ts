@@ -22,10 +22,6 @@ vi.mock("../actuators/apps.js", () => ({
   launchApp: (app: unknown) => launchApp(app),
   focusApp: vi.fn(async () => undefined),
 }));
-let fgProc: string | null = null; // контроль-2 №3: процесс на переднем плане для §14-гейта реплея
-vi.mock("../actuators/windows.js", () => ({
-  listWindows: async () => (fgProc ? [{ foreground: true, process: fgProc }] : []),
-}));
 vi.mock("../actuators/ground.js", () => ({
   invoke: vi.fn(async () => undefined),
   ground: vi.fn(async () => undefined),
@@ -37,18 +33,21 @@ function step(action: string, extra: Partial<SkillStep> = {}): SkillStep {
   return { action, ...extra };
 }
 
-// Контроль-2 №3: шаг input.type с переводом строки в мессенджере = Enter мимо §14. Реверт: убери
-// assertReplayTypeAllowed в client-actuator — typeText будет вызван.
-describe("createClientActuator — перевод строки в реплее", () => {
-  it("input.type «ок\\n» при Telegram спереди → отказ, печати нет; без перевода — печатает", async () => {
-    typeText.mockClear();
-    fgProc = "Telegram";
+// W2 П1 (безопасность №17): §14/§0 шагов (Enter, «\n», «Отправить») судит рубеж инжекции — сквозные тесты в
+// actuators/rubezh-replay.test.ts. Здесь — то, что шаг делает САМ: запуск по строке навыка. «skype:?call», «tg:…»,
+// «mailto:…» — это действие в программе мимо §14, а не «открыть». Реверт: убери assertLaunchAllowed в client-actuator.
+describe("createClientActuator — allowlist запуска (имя программы или http/https)", () => {
+  it("app.launch «skype:?call» / browser.open «tg://…» — отказ denied, launchApp не зовётся; «notepad», https — запускаются", async () => {
+    launchApp.mockClear();
     const act = createClientActuator({ isProactive: false, userActiveNow: () => false });
-    await expect(act.executeStep(step("input.type", { params: { text: "ок\n" } }))).rejects.toThrow(/§14/u);
-    expect(typeText).not.toHaveBeenCalled();
-    await act.executeStep(step("input.type", { params: { text: "ок" } }));
-    expect(typeText).toHaveBeenCalledTimes(1);
-    fgProc = null;
+    await expect(act.executeStep(step("app.launch", { params: { app: "skype:?call" } }))).rejects.toMatchObject({ actionCode: "denied" });
+    await expect(act.executeStep(step("app.launch", { params: { app: "mailto:boss@x.ru?body=hi" } }))).rejects.toThrow(/схема «mailto:»/u);
+    await expect(act.executeStep(step("browser.open", { params: { url: "tg://resolve?domain=x" } }))).rejects.toThrow(/только http\/https/u);
+    expect(launchApp).not.toHaveBeenCalled();
+    await act.executeStep(step("app.launch", { params: { app: "notepad" } }));
+    await act.executeStep(step("app.launch", { params: { app: "C:\\Program Files\\App\\app.exe" } }));
+    await act.executeStep(step("browser.open", { params: { url: "https://ya.ru" } }));
+    expect(launchApp).toHaveBeenCalledTimes(3);
   });
 });
 

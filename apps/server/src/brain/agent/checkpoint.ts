@@ -126,11 +126,11 @@ export interface DigestOptions {
    */
   uncertainCalls?: ReadonlySet<string>;
   /**
-   * Контроль-6 (C5R-4): вызовы навыка/берста, остановленные вуалью ПОСЛЕ k исполненных шагов и/или с ушедшим
-   * действием шага k+1. Формально ошибка, по смыслу — частично сделано: «ОШИБКА» в «СДЕЛАНО» читалось бы
-   * продолжением как «не сделано» и повторяло бы напечатанное и Enter.
+   * Контроль-6 (C5R-4): вызовы навыка/берста, остановленные вуалью ПОСЛЕ k исполненных шагов и/или с ушедшим действием
+   * шага k+1. По смыслу — частично сделано: «ОШИБКА» в «СДЕЛАНО» повторяла бы напечатанное и Enter.
    */
   partialCalls?: ReadonlyMap<string, { k: number; injected: boolean }>;
+  skippedCalls?: ReadonlySet<string>; // W2 (G-8): сняты стопом раунда (round-stop.ts) — «НЕ ИСПОЛНЯЛСЯ», не «ОШИБКА»
 }
 
 /** Дефолтный потолок журнала (символов) — общий для сборки и для склейки цепочки продолжений. */
@@ -288,14 +288,11 @@ type Entry =
  * секции «СДЕЛАНО» — продолжение по правилу «не повторяй сделанное» пропускало отправку и рапортовало
  * успех. Теперь без подтверждения пишем прямо: отправка НЕ подтверждена, сверь.
  */
-function outcomeMark(
-  e: { id: string; tool: string; ok?: boolean },
-  confirmedSends?: ReadonlySet<string>,
-  declinedCalls?: ReadonlySet<string>,
-  uncertainCalls?: ReadonlySet<string>,
-  partialCalls?: ReadonlyMap<string, { k: number; injected: boolean }>,
-): string {
+function outcomeMark(e: { id: string; tool: string; ok?: boolean }, o: DigestOptions): string {
+  const { confirmedSends, declinedCalls, uncertainCalls, partialCalls } = o;
   if (e.ok === undefined) return "без результата (оборвалось)";
+  // W2 (G-8): вызов снят стопом раунда (предыдущая мутация не удалась) — он НЕ исполнялся; «ОШИБКА» звала бы к повтору как попытку.
+  if (o.skippedCalls?.has(e.id)) return "НЕ ИСПОЛНЯЛСЯ — раунд остановлен после провала предыдущего шага; ничего не сделано, сделай после сверки, если нужно";
   // Контроль-6 (C5R-4): частично исполненный реплей/берст — ДО ветки ошибки (иначе «ОШИБКА» = «повтори всё»).
   const part = partialCalls?.get(e.id);
   if (part) {
@@ -464,7 +461,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     else {
       const cap = i >= detailFrom ? detailCap : briefCap;
       const res = e.result ? ` → ${squeeze(e.result, cap)}` : "";
-      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls, opts.partialCalls)}${res}`);
+      lines.push(`Вызвал ${e.tool}(${e.input}) — ${outcomeMark(e, opts)}${res}`);
     }
   }
 
@@ -499,7 +496,7 @@ export function buildResumeDigest(convo: readonly LlmMessage[], opts: DigestOpti
     // в первой же строке журнала ЗАКРЫВАЛ нашу обёртку, и весь остаток (дампы страниц прошлого захода
     // + подставленная директива) читался моделью как ДОВЕРЕННЫЙ текст.
     const safeInput = neutralizeWrapperTags(squeeze(e.input, 90));
-    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts.confirmedSends, opts.declinedCalls, opts.uncertainCalls, opts.partialCalls)}`;
+    const line = `- ${e.tool}(${safeInput}) — ${outcomeMark(e, opts)}`;
     if (!done.includes(line)) done.push(line);
   }
   const doneCapped = capDoneLines(done);

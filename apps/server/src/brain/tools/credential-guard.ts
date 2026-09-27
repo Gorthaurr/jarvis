@@ -19,8 +19,13 @@
  * Карточную эвристику НЕ переизобретаем — зовём `assertNoCardData` (Луна + нормализация разделителей):
  * разойдись две копии, «номер карты» значил бы РАЗНОЕ на разных путях.
  */
-import { CardDataError, assertNoCardData } from "../orders/order-guard.js";
+// W2 (пакет 0): регэкспы полей и Луна — в @jarvis/shared/credential-risk (одна эвристика с клиентским рубежом §0).
+import { CARD_FIELD_RE, OTP_FIELD_RE, PASSWORD_FIELD_RE, carriesCardNumber } from "@jarvis/shared";
 import { browserActParams, browserStepFields } from "./browser-params.js";
+import { type FocusFacts, type HandleHintResolver, type TypedField, field, nativeStepFields, pasteField, targetField } from "./credential-fields.js";
+
+export { carriesCardNumber };
+export type { FocusFacts, HandleHintResolver };
 
 /** Единая формулировка отказа: расходящиеся тексты = расходящаяся политика. */
 export const CREDENTIAL_REFUSAL = "Пароли и коды подтверждения не ввожу, введите сами";
@@ -32,15 +37,6 @@ export interface CredentialVerdict {
   note?: string;
 }
 
-/** Одно место ввода: ЧТО печатаем и что известно про САМО поле (селектор/лейбл/имя элемента). */
-interface TypedField {
-  text: string;
-  /** Пусто = на этом пути про поле не известно НИЧЕГО → блокировать нечем (только предупреждение). */
-  hints: string[];
-  /** W1 (B-3): снимок страницы пометил поле секретным (type=password, autocomplete current-password/one-time-code/cc-*). */
-  secret?: boolean;
-}
-
 /**
  * Что за поле за ref (browser_act{ref} / browser_batch) — это знает ТОЛЬКО browser_inspect, поэтому резолвер приходит
  * снаружи (dispatch отдаёт `refFieldInfo`). Без него ref остаётся немым, и берст логин-формы гардом не разбирается.
@@ -48,20 +44,6 @@ interface TypedField {
  * Строка — прежняя форма (только подпись).
  */
 export type RefHintResolver = (ref: string) => string | { hint?: string; secret?: boolean } | undefined;
-/** Подпись UIA-элемента по handle из последнего look{elements}/ui_snapshot — handle сам по себе немой. */
-export type HandleHintResolver = (handle: unknown) => string | undefined;
-
-// Поле пароля. Пишем целыми словами: «pass» отдельно матчит passenger/passport, а урок денилистов
-// проекта — либо точная форма, либо сломанная легитимная работа. `type="password"` ловится тем же.
-const PASSWORD_FIELD_RE = /парол|password|passwd|passphrase|\bpwd\b|passcode/iu;
-// Поле одноразового кода/второго фактора. «code» отдельно НЕ берём — это промокод, почтовый индекс
-// и редактор кода; берём только квалифицированные формы.
-const OTP_FIELD_RE =
-  /\botp\b|one[-_ ]?time|\btotp\b|\b2fa\b|\bmfa\b|sms[-_ ]?code|verification[-_ ]?code|confirmation[-_ ]?code|auth[-_ ]?code|security[-_ ]?code|\bpin[-_ ]?code\b|код\s*из\s*(смс|sms)|смс[-\s]?код|код\s*подтвержден|одноразов\p{L}*\s*(код|парол)|пин[-\s]?код/iu;
-// Поле платёжных реквизитов. Голое `card` НЕ берём: класс `.card` из Bootstrap стоит на половине
-// сайтов — селектор формы внутри карточки блокировал бы любую печать (ровно тот ложный отказ,
-// от которого предостерегает задача). Луна по значению закрывает остальное.
-const CARD_FIELD_RE = /card[-_ ]?(number|num|no)\b|cardnumber|\bcvv2?\b|\bcvc2?\b|номер\s*карты|card[-_ ]?holder/iu;
 
 /** Ключи параметров, которые описывают ПОЛЕ (а не печатаемый текст). `ref`/`handle` сюда не входят:
  *  «e3_5» не несёт смысла, и принимать его за признак поля значило бы глушить предупреждение. */
@@ -106,99 +88,57 @@ function browserTyped(intent: string, p: Record<string, unknown>, refHint?: RefH
   return [];
 }
 
-/** Признак поля у UIA-адресации: by:"role" несёт имя/роль элемента («Пароль»); by:"handle"/"coords" — ничего. */
-function hintsFromTarget(target: unknown): string[] {
-  const t = asRecord(target);
-  if (!t) return [];
-  return [t.name, t.role].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
-}
-
-/**
- * Ревью 2026-09-24: `act` — ГЛАВНЫЙ путь печати в GUI с W4, а в гарде его не было: «act{do:"type",
- * target:"Пароль", text:…}» печатал пароль мимо красной линии §0 (тот самый забытый sibling call-site, о котором
- * предупреждает шапка dispatchTool). Цель act — строка (видимый текст элемента) или объект {text, role,
- * automationId, handle}; всё это — признаки поля. Без target act печатает в поле с фокусом → признаков нет.
- */
-function hintsFromActTarget(target: unknown, handleHint?: HandleHintResolver): string[] {
-  if (typeof target === "string") return target.trim() ? [target] : [];
-  const t = asRecord(target);
-  if (!t) return [];
-  const out = [t.text, t.name, t.role, t.automationId].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
-  if (t.handle !== undefined && handleHint) {
-    const h = handleHint(t.handle);
-    if (h) out.push(h);
-  }
-  return out;
-}
-
-/**
- * Контроль-2 №2: цель последнего act сессии. Горячий путь «act{target:"Пароль"} (клик) → act{do:"type"} без цели»
- * печатал в поле пароля без единого признака поля — гард только предупреждал. Печать без цели наследует подпись
- * поля из прошлого act (фокус там и остался).
- */
-const lastActTargets = new WeakMap<object, unknown>();
-export function rememberActTarget(session: object | undefined, target: unknown): void {
-  if (session && target !== undefined) lastActTargets.set(session, target);
-}
-export function lastActTarget(session: object | undefined): unknown {
-  return session ? lastActTargets.get(session) : undefined;
-}
-
-/**
- * Р2 srv-bypass-3: судим ровно то, что НАПЕЧАТАЕТСЯ. Аргументы SDK — z.record(unknown), а расширение печатает
- * `String(P.text)`: номер карты или код числом (4111111111111111, 123456) раньше проходил мимо Луны и признака поля.
- */
-function field(text: unknown, hints: string[], secret = false): TypedField[] {
-  const s = text === undefined || text === null ? "" : String(text);
-  return s.length > 0 ? [{ text: s, hints, ...(secret ? { secret } : {}) }] : [];
-}
-
-/** Шаги берста: браузерный ({intent,ref,params}) и нативный SkillStep ({action,target,params}). */
-function stepFields(raw: unknown, shape: "browser" | "native", refHint?: RefHintResolver): TypedField[] {
+/** Шаги браузерного берста ({intent,ref,params}): поля шага — с верха и из params, как их видит хендлер берста. */
+function browserSteps(raw: unknown, refHint?: RefHintResolver): TypedField[] {
   if (!Array.isArray(raw)) return [];
-  const out: TypedField[] = [];
-  for (const s of raw) {
+  return raw.flatMap((s) => {
     const step = asRecord(s);
-    if (!step) continue;
-    const p = asRecord(step.params);
-    if (shape === "browser") {
-      // Поля шага — с верха и из params (ровно так, как их видит хендлер берста): ref бывает на шаге, text — в params.
-      const { intent, fields } = browserStepFields(step);
-      out.push(...browserTyped(intent, fields, refHint));
-      continue;
-    }
-    const action = String(step.action ?? "");
-    if (action === "input.type") out.push(...field(p?.text, hintsFromTarget(step.target)));
-    // В SkillStep паттерн и значение ui.invoke лежат в params (см. replayUnsafe) — форма другая, путь тот же.
-    else if (action === "ui.invoke" && String(p?.pattern ?? "") === "setValue") out.push(...field(p?.value, hintsFromTarget(step.target)));
-  }
-  return out;
+    if (!step) return [];
+    const { intent, fields } = browserStepFields(step);
+    return browserTyped(intent, fields, refHint);
+  });
 }
 
-/** Все места ввода текста этого вызова. Экспорт — для юнит-тестов формы аргументов. */
+/** Поле цели UIA/act (строка, {text,name,role,automationId}, handle → память снимка) — признаки и секрет. */
+function uiField(text: unknown, target: unknown, handleHint?: HandleHintResolver): TypedField[] {
+  const f = targetField(target, handleHint);
+  return field(text, f.hints, f.secret);
+}
+
+/**
+ * Все места ввода текста этого вызова. Экспорт — для юнит-тестов формы аргументов. `focus` — наведённая цель сессии
+ * и буфер обмена (W2 S-6): печать без цели (input_type, act type/set без target) и вставка наследуют поле фокуса.
+ */
 export function collectTypedFields(
   tool: string,
   input: Record<string, unknown>,
   refHint?: RefHintResolver,
   handleHint?: HandleHintResolver,
+  focus?: FocusFacts,
 ): TypedField[] {
   // web_act допускает и плоскую форму (params отсутствует) — берём то же, что берёт его хендлер.
   const params = asRecord(input.params) ?? input;
   switch (tool) {
-    case "input_type":
-      return field(input.text, []); // синтетический ввод «в активный элемент» — про поле НЕ известно ничего
+    case "input_type": // синтетический ввод «в активный элемент» — про поле известна только наведённая цель
+      return field(input.text, focus?.hints ?? [], focus?.secret);
+    case "input_key":
+      return input.mode === "up" ? [] : pasteField(input.combo, focus);
     case "system_clipboard":
       return String(input.op ?? "") === "write" ? field(input.text, []) : [];
-    case "ui_invoke":
-      return String(input.pattern ?? "") === "setValue" ? field(input.value, hintsFromTarget(input.target)) : [];
+    case "ui_invoke": // S-5: по голому handle поле видно из памяти снимка (подпись и «•••»)
+      return String(input.pattern ?? "") === "setValue" ? uiField(input.value, input.target, handleHint) : [];
     // Контроль-2 №2: значения слотов навыка печатаются в поля реплея — имя слота («password») и есть признак поля.
     case "skill_execute": {
       const params = asRecord(input.params);
       return params ? Object.entries(params).flatMap(([k, v]) => field(v, [k])) : [];
     }
+    // Ревью 2026-09-24: act — ГЛАВНЫЙ путь печати в GUI; цель — строка или {text, role, automationId, handle}.
+    // Без target act печатает в поле с фокусом — признаки берём у наведённой цели (контроль-2 №2, W2 S-6).
     case "act": {
       const verb = String(input.do ?? "click");
-      return verb === "type" || verb === "set" ? field(input.text, hintsFromActTarget(input.target, handleHint)) : [];
+      if (verb === "key") return pasteField(input.combo, focus);
+      if (verb !== "type" && verb !== "set") return [];
+      return input.target === undefined ? field(input.text, focus?.hints ?? [], focus?.secret) : uiField(input.text, input.target, handleHint);
     }
     // W1: browser_act — те же поля, что возьмёт хендлер (плоские + params, browserActParams), и form_input (set).
     case "browser_act":
@@ -206,40 +146,12 @@ export function collectTypedFields(
     case "web_act":
       return String(input.intent ?? "") === "type" ? field(params.text, hintsFromParams(params, refHint).hints) : [];
     case "browser_batch":
-      return stepFields(input.steps, "browser", refHint);
-    case "input_batch":
-      return stepFields(input.steps, "native");
+      return browserSteps(input.steps, refHint);
+    case "input_batch": // W2 G-3(4): цепочка «клик → печать» по шагам, старт — наведённая цель сессии
+      return nativeStepFields(input.steps, handleHint, focus);
     default:
       return [];
   }
-}
-
-/**
- * Кандидат в номер карты: 13-19 цифр, разделённых максимум ОДНИМ типовым разделителем, и не
- * приклеенных к другим цифрам (та же граница `(?<!\d)…(?!\d)`, что у order-guard — иначе кусок
- * 25-значного идентификатора считался бы картой там, где заказ её не видит).
- */
-const CARD_CANDIDATE_RE = /(?<!\d)\d(?:[ \t\-.,/ ]?\d){12,18}(?!\d)/g;
-
-/**
- * Номер карты в печатаемом тексте. Вердикт выносит ТА ЖЕ `assertNoCardData` (Луна + нормализация
- * разделителей) — второй эвристики не заводим.
- *
- * 🔴 Но скармливаем ей КАНДИДАТА, а не всю строку. Живой ложный отказ, пойманный собственным
- * тестом: order-guard считает разделителем ЛЮБОЙ не-латинский символ, поэтому в свободном тексте
- * кириллица стирается и цифры разных слов СКЛЕИВАЮТСЯ — «const timeout = 120000; // 2026 год,
- * версия 1.2.3» превращалось в 13-значный «номер», проходивший Луна, и владельцу отказывали
- * печатать собственный код. В заказе поля структурные, там это не всплывало.
- */
-export function carriesCardNumber(text: string): boolean {
-  for (const m of text.matchAll(CARD_CANDIDATE_RE)) {
-    try {
-      assertNoCardData({ text: m[0] });
-    } catch (e) {
-      if (e instanceof CardDataError) return true;
-    }
-  }
-  return false;
 }
 
 /** Голый одноразовый код: 4-8 цифр и ничего кроме них (пробел/дефис — разбивка «123 456»). */
@@ -265,9 +177,10 @@ export function checkCredentialInput(
   input: Record<string, unknown>,
   refHint?: RefHintResolver,
   handleHint?: HandleHintResolver,
+  focus?: FocusFacts,
 ): CredentialVerdict {
   let note: string | undefined;
-  for (const f of collectTypedFields(tool, input, refHint, handleHint)) {
+  for (const f of collectTypedFields(tool, input, refHint, handleHint, focus)) {
     const hint = f.hints.join(" ");
     if (carriesCardNumber(f.text) || CARD_FIELD_RE.test(hint)) {
       return {
@@ -280,7 +193,7 @@ export function checkCredentialInput(
     if (f.secret || PASSWORD_FIELD_RE.test(hint) || OTP_FIELD_RE.test(hint)) {
       return {
         block:
-          `${tool}: поле «${sani(hint)}» — пароль или код подтверждения. ${CREDENTIAL_REFUSAL}. ` +
+          `${tool}: поле ${hint.trim() ? `«${sani(hint)}»` : "(помечено секретным)"} — пароль или код подтверждения. ${CREDENTIAL_REFUSAL}. ` +
           `Открой нужное окно/страницу, попроси владельца ввести руками и продолжай ПОСЛЕ этого — не подставляй значение сам.`,
       };
     }

@@ -479,16 +479,15 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
     }
   });
 
+  const lastLiveCtx = (): SessionContext | undefined => registry.all().map((s) => liveCtxs.get(s.sessionId)).filter((c) => c !== undefined).pop();
   // DEV: ПОЛНЫЙ цикл как при голосе — инъекция текста в сессию ЖИВОГО клиента: команда идёт через
   // агента, а action.command'ы исполняются НАСТОЯЩИМИ актуаторами клиента (не фейк текст-драйвера).
-  // Берёт последнюю клиентскую сессию. Ответы агента → в лог (server.out.log «Джарвис →») + клиенту.
+  // Берёт последнюю ЖИВУЮ клиентскую сессию (lastLiveCtx, общий с /dev/vad). Ответы агента → server.out.log + клиенту.
   app.post("/dev/say", { preHandler: devPre }, async (req) => {
     const body = (req.body ?? {}) as { text?: string };
     const text = String(body.text ?? "").trim();
     if (!text) return { ok: false, error: "нужен text" };
-    const ids = registry.all().map((s) => s.sessionId);
-    let ctx: SessionContext | undefined;
-    for (let i = ids.length - 1; i >= 0; i -= 1) { const c = liveCtxs.get(ids[i]!); if (c) { ctx = c; break; } }
+    const ctx = lastLiveCtx();
     if (!ctx) return { ok: false, error: "нет живой клиентской сессии (Electron-клиент не запущен?)" };
     void onDevText(ctx, { text }).catch((e) => log.error("/dev/say onDevText", e instanceof Error ? e.message : String(e)));
     return { ok: true, sessionId: ctx.session.sessionId, note: "ответ агента в server.out.log и у клиента" };
@@ -499,15 +498,12 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   app.post("/dev/vad", { preHandler: devPre }, async (req) => {
     const state = String((req.body as { state?: string })?.state ?? "").trim();
     if (!["barge_in", "speech_start", "speech_end", "speech_cancel"].includes(state)) return { ok: false, error: "state: barge_in|speech_start|speech_end|speech_cancel" };
-    const ids = registry.all().map((s) => s.sessionId);
-    let ctx: SessionContext | undefined;
-    for (let i = ids.length - 1; i >= 0; i -= 1) { const c = liveCtxs.get(ids[i]!); if (c) { ctx = c; break; } }
+    const ctx = lastLiveCtx();
     if (!ctx) return { ok: false, error: "нет живой клиентской сессии" };
     ctx.voice.onVadEvent(state as "barge_in" | "speech_start" | "speech_end" | "speech_cancel");
     return { ok: true, sessionId: ctx.session.sessionId, injected: state };
   });
-
-  // Стенд (infra/bench): /dev/bench/{tool,say,state,reset} — bench-сессия, §14-ответы по политике вызова, сценарный мозг.
+  // Стенд (infra/bench): /dev/bench/{tool,say,state,reset} — bench-сессия, §14 по политике вызова, сценарный мозг.
   registerBenchRoutes(app, { preHandler: devPre, registry, providers, brain, log: log.child("bench") });
   } // end if (devHttpOn) — §sec gate for DEV/EXT HTTP routes
 

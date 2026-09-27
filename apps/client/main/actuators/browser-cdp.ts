@@ -15,7 +15,7 @@ import { mkdtemp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createLogger } from "@jarvis/shared";
+import { createLogger, isPrivateHost } from "@jarvis/shared";
 import { resolveAutomationBrowser } from "../sensors/system-profiler.js";
 import { monitors } from "../monitors.js";
 import { type WsLike, cdpCommand, parseCdpReply, resolveWebSocketCtor, unwrapEvalResult } from "./cdp-core.js";
@@ -57,6 +57,8 @@ export function safeBrowserUrl(url: string): string {
   if (scheme !== "http" && scheme !== "https") {
     throw new Error(`небезопасная схема «${scheme}:» — открываю только http(s)`);
   }
+  // B-14: внутренняя сеть/loopback/метаданные — то же правило, что у сервера и перехвата навигации (@jarvis/shared).
+  if (isPrivateHost(u)) throw new Error("внутренний адрес (локальная сеть/loopback/метаданные) — в браузере Джарвиса не открываю");
   return u;
 }
 

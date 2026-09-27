@@ -10,13 +10,15 @@ vi.mock("./sidecar-client.js", () => ({
   sidecar: () => ({
     ready: true,
     request: async (method: string, params: Record<string, unknown>) => {
+      // W2 П1: факт рубежа (окна под точкой) — реальная форма, в журнал действий не пишется.
+      if (method === "window.list") return { windows: [{ hwnd: 5, pid: 4242, process: "notepad", title: "Блокнот", foreground: true, minimized: false, x: 0, y: 0, w: 4000, h: 3000 }] };
       sidecarState.calls.push({ method, params });
       return {};
     },
   }),
 }));
-vi.mock("./screen.js", () => ({ getLastCaptureMapping: () => null }));
-vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 } }));
+vi.mock("./screen.js", () => ({})); // захват экрана сценарию не нужен (W2 П5: lastMapping удалён — кадры)
+vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 }, screen: {} })); // screen: перевод физика→DIP рубежа (на Linux без Windows-API — как есть)
 
 import { mouse, releaseHeldPointer } from "./input.js";
 import { selectionStore } from "../selection/store.js";

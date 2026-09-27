@@ -641,9 +641,10 @@ describe("VoicePipeline — окно разговора (wake word, §3)", () =>
     // знать, что реплика принята БЕЗ явного обращения, и не давать ей слепые жесты.
     const { onUserTurn, say } = setup(10_000);
     await say("Джарвис, закрой приложение");
-    expect(onUserTurn).toHaveBeenLastCalledWith("закрой приложение", { viaWake: true });
+    // W3 V-1: в meta ещё turnSeq хода (адрес итога промоушена) — здесь судим только viaWake.
+    expect(onUserTurn).toHaveBeenLastCalledWith("закрой приложение", expect.objectContaining({ viaWake: true }));
     await say("а теперь сверни окно"); // принято ОКНОМ без «Джарвис»
-    expect(onUserTurn).toHaveBeenLastCalledWith("а теперь сверни окно", { viaWake: false });
+    expect(onUserTurn).toHaveBeenLastCalledWith("а теперь сверни окно", expect.objectContaining({ viaWake: false }));
   });
 
   it("акустика (ревью р2): зона гистерезиса — частичный распад до n=2 (между exit=1 и enter=3) ДЕРЖИТ строгий режим", async () => {

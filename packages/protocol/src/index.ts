@@ -7,6 +7,7 @@
 export * from "./constants.js";
 export * from "./actions.js";
 export * from "./messages.js";
+export * from "./gui.js";
 
 import { PROTOCOL_VERSION } from "./constants.js";
 import type { Envelope, MessageType } from "./messages.js";

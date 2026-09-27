@@ -13,8 +13,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ActionCommand, ActionResult } from "@jarvis/protocol";
+// W2 П1: find() идёт локальным видом моста ui.find (лестница act по снапшоту) — снапшот отдаёт фейковый сайдкар.
+vi.mock("electron", async () => (await import("../test-support/electron-mock.js")).electronModule);
+vi.mock("./sidecar-client.js", async () => (await import("../test-support/fake-sidecar.js")).fakeSidecarModule());
+import { useFakeSidecar } from "../test-support/fake-sidecar.js";
+import { selectionStore } from "../selection/store.js";
 import { type ActBridge, startActBridge } from "./act-bridge.js";
 import { JARVIS_SDK_PY } from "./jarvis-sdk-source.js";
 
@@ -93,6 +98,8 @@ function py(lines: string[]): Promise<Run> {
 
 describe.skipIf(!hasPython)("jarvis SDK × вуаль (настоящий python + настоящий мост)", () => {
   beforeAll(async () => {
+    const fake = useFakeSidecar();
+    fake.snapshot = { window: "Приложение", pid: 4242, items: [{ handle: 1, role: "button", name: "OK", x: 10, y: 10, w: 80, h: 30 }], truncated: false };
     sdkDir = mkdtempSync(join(tmpdir(), "jarvis-sdk-veil-"));
     writeFileSync(join(sdkDir, "jarvis.py"), JARVIS_SDK_PY, "utf8");
     bridge = await startActBridge(dispatch);
@@ -104,10 +111,15 @@ describe.skipIf(!hasPython)("jarvis SDK × вуаль (настоящий python
 
   it("ACT-3: find() под вуалью БРОСАЕТ (снапшот/OCR показывают оверлей — искать нечего), скрипт выходит кодом 77", async () => {
     veil = true;
-    const r = await py(["import jarvis", "print(bool(jarvis.find('OK')))"]);
-    expect(r.status).toBe(77); // до фикса: пустой Element → «не нашёл» → exit 0 и ложная причина модели
-    expect(r.stderr).toMatch(/\[overlay_drawing\]/u);
-    expect(r.stdout).not.toMatch(/True|False/u);
+    selectionStore.setDrawing(true); // W2 П1: ui.find судит вуаль сам (активное окно — оверлей)
+    try {
+      const r = await py(["import jarvis", "print(bool(jarvis.find('OK')))"]);
+      expect(r.status).toBe(77); // до фикса: пустой Element → «не нашёл» → exit 0 и ложная причина модели
+      expect(r.stderr).toMatch(/\[overlay_drawing\]/u);
+      expect(r.stdout).not.toMatch(/True|False/u);
+    } finally {
+      selectionStore.setDrawing(false);
+    }
   });
 
   it("ACT-4: отказ вуали на клике завершает скрипт кодом 77 (структурный сигнал для code.run), маркер с done= — в stderr", async () => {

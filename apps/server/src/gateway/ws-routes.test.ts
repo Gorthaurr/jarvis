@@ -14,6 +14,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import { createLogger } from "@jarvis/shared";
 import { isAllowedWsOrigin, registerWsRoutes, type RawWsLike } from "./ws-routes.js";
+import { JARVIS_WEB_HANDS_EXT_ID } from "./ext-id.js";
 
 const log = createLogger("test:ws-routes");
 
@@ -112,11 +113,11 @@ describe("гард происхождения WS (CSWSH)", () => {
     expect(spy.extAttached).toBe(0);
   });
 
-  it("расширение Chrome получает свой канал", async () => {
+  it("расширение Chrome (наш ID из `key` манифеста) получает свой канал", async () => {
     const { app, port, spy } = await bootGateway();
     running = app;
 
-    await handshake(port, "/ext", "chrome-extension://abcdefghijklmnop");
+    await handshake(port, "/ext", `chrome-extension://${JARVIS_WEB_HANDS_EXT_ID}`);
     await new Promise((r) => setTimeout(r, 30));
 
     expect(spy.extAttached).toBe(1);
@@ -134,14 +135,15 @@ describe("гард происхождения WS (CSWSH)", () => {
 });
 
 describe("isAllowedWsOrigin", () => {
-  it("пустой Origin = нативный клиент → пускаем в оба канала", () => {
+  it("пустой Origin: нативный клиент на /ws — да; на /ext — НЕТ (Chrome Origin шлёт всегда, S-12)", () => {
     expect(isAllowedWsOrigin("", "client")).toBe(true);
-    expect(isAllowedWsOrigin(undefined, "ext")).toBe(true);
+    expect(isAllowedWsOrigin(undefined, "ext")).toBe(false);
+    expect(isAllowedWsOrigin("   ", "ext", "abc")).toBe(false);
   });
 
   it("регистр и пробелы не обходят гард", () => {
     expect(isAllowedWsOrigin("  HTTPS://Evil.Example  ", "client")).toBe(false);
-    expect(isAllowedWsOrigin("  CHROME-EXTENSION://ABC  ", "ext")).toBe(true);
+    expect(isAllowedWsOrigin(`  CHROME-EXTENSION://${JARVIS_WEB_HANDS_EXT_ID.toUpperCase()}  `, "ext")).toBe(true);
   });
 
   it("любой браузерный Origin на клиентском канале запрещён", () => {
@@ -157,15 +159,19 @@ describe("isAllowedWsOrigin", () => {
   });
 });
 
-describe("W0 (2026-09-09): пиннинг ID расширения на /ext", () => {
-  it("isAllowedWsOrigin: с JARVIS_EXT_ID пускает ТОЛЬКО это расширение; без — любое chrome-extension (как раньше)", () => {
+describe("W0 → S-12: пиннинг ID расширения на /ext всегда", () => {
+  it("isAllowedWsOrigin: с JARVIS_EXT_ID — ТОЛЬКО оно; без — ТОЛЬКО ID нашего ключа (режима «любое» нет)", () => {
     const mine = "chrome-extension://iejhkmcmpbjlajkoecaoolegicbnkfhj";
     const other = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ours = `chrome-extension://${JARVIS_WEB_HANDS_EXT_ID}`;
     expect(isAllowedWsOrigin(mine, "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(true);
     expect(isAllowedWsOrigin(mine.toUpperCase(), "ext", "IEJHKMCMPBJLAJKOECAOOLEGICBNKFHJ")).toBe(true);
     expect(isAllowedWsOrigin(other, "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(false);
-    expect(isAllowedWsOrigin(other, "ext")).toBe(true); // не пиннено — прежнее правило
-    expect(isAllowedWsOrigin(other, "ext", "   ")).toBe(true); // пустой пин = не пиннено
-    expect(isAllowedWsOrigin("", "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(true); // нативный клиент без Origin
+    expect(isAllowedWsOrigin(ours, "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(false); // переопределение вытесняет дефолт
+    expect(isAllowedWsOrigin(other, "ext")).toBe(false); // не задан → пин по ключу манифеста
+    expect(isAllowedWsOrigin(other, "ext", "   ")).toBe(false); // пустой пин = дефолт, не «любое»
+    expect(isAllowedWsOrigin(ours, "ext")).toBe(true);
+    expect(isAllowedWsOrigin(ours, "ext", "   ")).toBe(true);
+    expect(isAllowedWsOrigin("", "ext", "iejhkmcmpbjlajkoecaoolegicbnkfhj")).toBe(false); // нет Origin — не Chrome
   });
 });

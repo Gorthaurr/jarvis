@@ -151,14 +151,18 @@ def key(combo, mode=None, scancode=False):
 
 
 def write(text):
-    "Напечатать текст в активное (сфокусированное) поле."
+    "Напечатать текст в активное поле. Рубеж клиента: пароль/карта (§0) — отказ; перевод строки в мессенджере/банке = Enter-отправка (§14) — отказ (мост не спрашивает владельца: отправку делай штатным act/input_key); своё окно Джарвиса — отказ."
     return _ok("input.type", text=text)
 
 
-def click(x, y, button=None, count=None, space="screen"):
-    "Клик по координатам. По умолчанию space='screen' — АБСОЛЮТНЫЕ экранные DIP: ровно в этой системе координаты возвращают ocr() и find() (единая система координат SDK). Передай space=None ТОЛЬКО если координаты из последнего screen_capture (vision). button='left'/'right'/'middle', count=2 — двойной."
+def click(x, y, button=None, count=None, space="screen", frame=None):
+    "Клик по координатам: space='screen' (дефолт) — АБСОЛЮТНЫЕ экранные DIP, в них координаты отдают ocr() и find(); frame='<id>' — координаты в кадре задачи. Без обоих — ошибка (система координат неизвестна). button='left'/'right'/'middle', count=2 — двойной. Коммит (Отправить/Оплатить/Удалить) в мессенджере/банке/браузере и своё окно — отказ рубежа (§14)."
+    if not space and not frame:
+        raise JarvisError("click: нужен space='screen' (экранные DIP из ocr()/find()) или frame='<id кадра>' — ничего не нажато")
     tgt = {"by": "coords", "x": int(round(x)), "y": int(round(y))}
-    if space:
+    if frame:
+        tgt["frame"] = frame
+    else:
         tgt["space"] = space
     f = {"target": tgt}
     if button:
@@ -194,7 +198,7 @@ def snapshot(pid=None, max_items=200):
         raise _overlay_error("ui.snapshot")
     # bbox элементов приходят в ФИЗИЧЕСКИХ пикселях UIA, НЕ в screen-DIP системе SDK — прямой click по ним
     # (дефолт space="screen") промахнулся бы на масштабированном дисплее и вернул ok = ЛОЖНЫЙ УСПЕХ.
-    # Действие по элементу идёт через handle→invoke, поэтому координаты не отдаём (как rect-ветка ocr()).
+    # Действие по элементу идёт через handle→invoke, поэтому координаты не отдаём (кликать — find().click()).
     for it in data.get("items", []):
         for k in ("x", "y", "w", "h", "bbox"):
             it.pop(k, None)
@@ -202,7 +206,7 @@ def snapshot(pid=None, max_items=200):
 
 
 def ocr(monitor=None, rect=None, lang=None):
-    "Локальный OCR экрана: {text, lines:[...], space}. Для окон без UIA-дерева (игры/canvas). Для ПОЛНОГО кадра (без rect) строки несут x,y,w,h в АБСОЛЮТНЫХ экранных DIP (space=='screen') — можно кликать click(x,y) напрямую. Для rect координаты НЕ отдаются (только text): они неклик­абельны в единой системе — кликать по региону через find() или полноэкранный ocr()."
+    "Локальный OCR экрана: {text, lines:[...], space}. Для окон без UIA-дерева (игры/canvas). Строки (и полного кадра, и региона rect — rect в экранных DIP) несут x,y,w,h в АБСОЛЮТНЫХ экранных DIP (space=='screen') — можно кликать click(x,y) напрямую. Нет пересчёта (старый клиент) — координаты убираются, остаётся text: клик по ним был бы мимо."
     f = {}
     if monitor is not None:
         f["monitor"] = monitor
@@ -231,7 +235,7 @@ def ocr(monitor=None, rect=None, lang=None):
                 ln["h"] = ln["h"] / s
         data["space"] = "screen"
     else:
-        # Нет mapping (rect / space:"screen"-rect): координаты в неоднозначной, НЕ screen-DIP системе.
+        # Нет mapping (W2 П5: клиент отдаёт его всегда, и для rect — это старый клиент/сбой): система координат неизвестна.
         # Убираем x/y/w/h (текст оставляем) — иначе click(ln["x"],ln["y"]) с дефолтом space="screen"
         # ушёл бы мимо и вернул ok = ЛОЖНЫЙ УСПЕХ. Теперь попытка взять ln["x"] честно упадёт ошибкой.
         for ln in data.get("lines", []):
@@ -273,15 +277,16 @@ def sleep(seconds):
 
 # ── высокоуровневый поиск + действие (перцепция + действие в одном) ─
 class Element(object):
-    def __init__(self, handle=None, x=None, y=None, name=None, space=None):
+    def __init__(self, handle=None, x=None, y=None, name=None, space="screen", role=None):
         self.handle = handle
-        self.x = x           # координаты клика (если нет handle); в системе self.space
+        self.x = x           # координаты клика (если нет handle) — абсолютные экранные DIP
         self.y = y
-        self.name = name
-        self.space = space   # None → система последнего снимка (маппинг); "screen" → абсолютные DIP
+        self.name = name     # РЕАЛЬНОЕ имя найденного элемента (не текст запроса)
+        self.role = role
+        self.space = space
 
     def click(self):
-        "Кликнуть: по handle через UIA-invoke (НАДЁЖНЫЙ путь, без курсора/координат), иначе по координатам (OCR-фолбэк, уже в screen-DIP)."
+        "Кликнуть: по handle — UIA-invoke (без курсора), иначе по точке (OCR, экранные DIP). Коммит (Отправить/Оплатить) в мессенджере/банке/браузере и своё окно — отказ рубежа §14."
         if self.handle is not None:
             return invoke(self.handle, "invoke")
         if self.x is not None and self.y is not None:
@@ -300,36 +305,19 @@ class Element(object):
     __nonzero__ = __bool__
 
 
-def _center(o):
-    "Центр bbox из ПЛОСКИХ полей x,y,w,h (реальный формат ui.snapshot/screen.ocr). None если координат нет."
-    x, y, w, h = o.get("x"), o.get("y"), o.get("w"), o.get("h")
-    if x is None or y is None or w is None or h is None:
-        return None
-    return (x + w / 2.0, y + h / 2.0)
-
-
-def find(text):
-    "Найти элемент/текст по подстроке. Сначала UIA-снапшот (handle→надёжный invoke, независим от DPI/монитора), затем OCR (для UIA-слепых окон). Falsy Element, если не нашли — проверяй 'if el:'. Под вуалью режима выделения снапшот/OCR завершают скрипт кодом 77 (JarvisVeilExit: в кадре оверлей — искать нечего), а не молчат пустым Element."
-    tl = text.lower()
-    # Под вуалью snapshot()/ocr() поднимают JarvisVeilExit (SystemExit) — сюда он не ловится и уходит наверх (ACT-3):
-    # пустой Element читался бы как «не нашёл» — ложная причина.
-    snap = snapshot() or {}
-    for it in snap.get("items", []):
-        nm = ((it.get("name") or "") + " " + (it.get("value") or "")).lower()
-        if tl in nm:
-            # НАДЁЖНЫЙ путь — invoke по handle (без координат). handle у снапшота есть всегда.
-            return Element(handle=it.get("handle"), name=it.get("name"))
-    o = ocr() or {}
-    # ocr() уже вернул координаты в АБСОЛЮТНЫХ screen-DIP (space=='screen') для полного кадра.
-    # Если space нет (rect / нет mapping) — координаты неклик­абельны → честно не матчим под клик.
-    dip = o.get("space") == "screen"
-    for ln in o.get("lines", []):
-        if tl in (ln.get("text") or "").lower():
-            c = _center(ln)
-            if c is None:
-                continue  # нет координат — не матчим (иначе клик в 0,0)
-            if not dip:
-                continue  # координаты не в screen-DIP → клик ушёл бы мимо = ложный успех
-            return Element(x=c[0], y=c[1], name=ln.get("text"), space="screen")
+def find(text=None, role=None, automation_id=None):
+    "Найти элемент лестницей act (клиент, ui.find): UIA-снапшот активного окна — точное имя > префикс > подстрока; затем OCR. Не найден — falsy Element (проверяй 'if el:'); два РАВНЫХ кандидата — JarvisError со списком (уточни text/role). Своё окно Джарвиса целью не бывает. Действие по результату (click/write) судит рубеж §0/§14. Под вуалью режима выделения — выход кодом 77."
+    f = {}
+    if text is not None:
+        f["text"] = text
+    if role is not None:
+        f["role"] = role
+    if automation_id is not None:
+        f["automationId"] = automation_id
+    d = _ok("ui.find", **f) or {}
+    if d.get("handle") is not None:
+        return Element(handle=d.get("handle"), name=d.get("name"), role=d.get("role"))
+    if d.get("x") is not None and d.get("y") is not None:
+        return Element(x=d["x"], y=d["y"], name=d.get("name"), role=d.get("role"))
     return Element()
 `;

@@ -77,8 +77,15 @@ vi.mock("./ground.js", () => ({
 }));
 vi.mock("./screen.js", () => ({
   captureScreen: () => st.capture(),
-  getLastCaptureMapping: () => null,
   probeScreen: async () => ({ hash: "0" }),
+}));
+// W2 П5: OCR снимает натив через screen-grab (не captureScreen) — тот же управляемый захват st.capture (зависание — тоже).
+vi.mock("./screen-grab.js", () => ({
+  grabImage: async () => {
+    await st.capture();
+    const img = { toPNG: () => Buffer.from("png"), getSize: () => ({ width: 100, height: 100 }), resize: () => img, crop: () => img };
+    return { img, w: 100, h: 100, display: { id: 1, bounds: { x: 0, y: 0, width: 100, height: 100 } }, origin: { x: 0, y: 0 }, sx: 1, sy: 1, nativeSx: 1 };
+  },
 }));
 // §3.9 зрение на файл: лист мокается — проверяем ПРОВОДКУ dispatch (успех отдаёт данные как есть, провал → ошибка).
 vi.mock("./file-view.js", () => ({ viewFile: (p: string, o: unknown) => st.view(p, o) }));
@@ -87,8 +94,11 @@ vi.mock("./selection.js", () => ({
   selectionView: (s: unknown) => st.selView(s),
   selectionClear: (o: unknown) => st.selClear(o),
 }));
+// W2 П1: рубеж инжекции спрашивает окна (window.list) — отвечаем реальной формой: Блокнот на весь экран, не рискованный.
+// Остальные операции — управляемый st.sidecarRequest (вуаль посреди RPC действия, а не посреди факта рубежа).
+const NOTEPAD = { hwnd: 5, pid: 4242, process: "notepad", title: "Блокнот", foreground: true, minimized: false, x: 0, y: 0, w: 4000, h: 3000 };
 vi.mock("./sidecar-client.js", () => ({
-  sidecar: () => ({ ready: st.sidecarReady, request: () => st.sidecarRequest() }),
+  sidecar: () => ({ ready: st.sidecarReady, request: (op: string) => (op === "window.list" ? Promise.resolve({ windows: [NOTEPAD] }) : st.sidecarRequest()) }),
 }));
 // Наблюдение после действия (fused observe) в этих сценариях не участвует — глушим, чтобы не лезло в UIA.
 vi.mock("./observe.js", () => ({ observeAfterAction: () => st.observe(), captureUiFingerprint: async () => undefined }));
@@ -108,6 +118,7 @@ vi.mock("./browser-cdp.js", async (orig) => ({
 
 import type { ActionCommand } from "@jarvis/protocol";
 import { dispatch } from "./index.js";
+import { noteGround } from "./handle-mirror.js";
 import { DrawingOverlayError } from "./input.js";
 import { selectionStore } from "../selection/store.js";
 import { type WaitOutcome, waitFor } from "./sensors-cheap.js";
@@ -131,6 +142,8 @@ beforeEach(() => {
   st.invoke = async () => undefined;
   st.observe = async () => undefined;
   selectionStore.setDrawing(false);
+  // W2 П1: handle, по которым кликают сценарии, рубеж знает из зеркала (в бою его наполняют снапшот/ground; здесь ground замокан).
+  for (const handle of ["7", "42"]) noteGround({ handle, bbox: { x: 10, y: 10, w: 80, h: 30 }, name: "OK", role: "ControlType.Button" }, 0, Date.now(), NOTEPAD.pid);
 });
 
 describe("§режим выделения — контроль-4: пометка вуали по окну команды и по наблюдению", () => {
@@ -451,8 +464,8 @@ describe("§режим выделения — проводка dispatch() (ко�
     const cmds = [
       { kind: "input.key", combo: "Enter" },
       { kind: "input.type", text: "x" },
-      { kind: "input.mouse", op: "move", x: 1, y: 1 },
-      { kind: "input.click", target: { by: "coords", x: 1, y: 1 } },
+      { kind: "input.mouse", op: "move", x: 1, y: 1, space: "screen" },
+      { kind: "input.click", target: { by: "coords", x: 1, y: 1, space: "screen" } },
     ] as unknown as ActionCommand[];
     for (const cmd of cmds) {
       const r = await run(cmd);

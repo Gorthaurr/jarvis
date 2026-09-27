@@ -18,8 +18,9 @@ export const DEFAULT_ACTION_TIMEOUT_MS = 15_000;
  * Серверный потолок ожидания ЛЮБОГО skill.execute (реплей навыка, авто-макрос, input_batch).
  * ИНВАРИАНТ «нет двух писателей в GUI» (ревью Волны 3 #2, ревью фиксов #12): клиентский runSkill
  * сам укладывается в бюджет (JARVIS_SKILL_REPLAY_BUDGET_MS, деф/кламп ≤80с) с хвостовым перебегом
- * ≤ ~26с (executeStep ≤25с: hard-таймаут лаунчера app.launch / 2×UIA по 12с; ИЛИ короткий шаг +
- * один expect-опрос ≤20с OCR; + sleep ретрая ≤1.2с) → сервер обязан ждать СТРОГО дольше (130с),
+ * ≤ ~33с (executeStep ≤25с: hard-таймаут лаунчера app.launch / 2×UIA по 12с; ИЛИ короткий шаг +
+ * один expect-опрос ≤20с OCR; + sleep ретрая ≤1.2с; W2: + рубеж инжекции — факты ≤4с на инжекцию и точка
+ * клика по handle в рискованной программе ≤4с) → сервер обязан ждать СТРОГО дольше (130с),
  * иначе синтетический timeout запускает LLM-петлю (клики моделью) ПАРАЛЛЕЛЬНО ещё идущему реплею.
  * Кирпичи инварианта: кламп бюджета (apps/client/main/actuators/index.ts), skip expect-опроса при
  * исчерпанном бюджете и кламп retries (skill-runner/index.ts), кап текста REPLAY_TYPE_MAX_CHARS.
@@ -58,7 +59,7 @@ export function actionTimeoutMs(kind: string): number {
     case "skill.execute":
       return SKILL_EXECUTE_SERVER_TIMEOUT_MS; // ревью фиксов Волны 3 (#12): строго выше клиентского бюджета реплея
     case "app.launch":
-      return 30_000; // холодный резолв + Start-Sleep + поллинг steam/uri; перекрывает hard-25с лаунчера +запас
+      return 36_000; // холодный резолв + поллинг steam/uri (hard-25с лаунчера) + W2 G-20: ожидание окна ≤5с + запас
     case "app.close":
     case "app.focus":
     case "browser.open":

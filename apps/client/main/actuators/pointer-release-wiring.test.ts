@@ -12,15 +12,17 @@ vi.mock("./sidecar-client.js", () => ({
   sidecar: () => ({
     ready: true,
     request: async (method: string, params: Record<string, unknown>) => {
+      // W2 П1: факт рубежа (окна под точкой) — реальная форма, в журнал действий не пишется.
+      if (method === "window.list") return { windows: [{ hwnd: 5, pid: 4242, process: "notepad", title: "Блокнот", foreground: true, minimized: false, x: 0, y: 0, w: 4000, h: 3000 }] };
       sidecarState.calls.push({ method, params });
       return {};
     },
   }),
 }));
 // Листья, которые тянет actuators/selection.ts: Electron-захват экрана и окна оверлея нам не нужны.
-vi.mock("./screen.js", () => ({ getLastCaptureMapping: () => null, captureScreen: async () => ({ image: "", width: 0, height: 0 }), perceptualHash: async () => "0" }));
+vi.mock("./screen.js", () => ({ captureScreen: async () => ({ image: "", width: 0, height: 0 }), perceptualHash: async () => "0" }));
 vi.mock("../selection/overlay.js", () => ({ selectionOverlay: { start: async () => ({}), showFrame: () => undefined, hideAll: () => undefined, submit: () => undefined, drawing: false } }));
-vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 } }));
+vi.mock("electron", () => ({ powerMonitor: { getSystemIdleTime: () => 999 }, screen: {} })); // screen: перевод физика→DIP рубежа (на Linux без Windows-API — как есть)
 
 import "./selection.js"; // ← ИМЕННО проводка: импорт вешает подписку на смену фазы
 import { mouse } from "./input.js";

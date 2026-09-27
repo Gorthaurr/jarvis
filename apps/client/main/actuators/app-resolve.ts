@@ -229,7 +229,7 @@ if($env:JARVIS_DRYRUN -eq '1'){
 }
 $waitMs=[int]($env:JARVIS_WAIT_MS); if($waitMs -le 0){ $waitMs=1500 }
 # Ожидание игры: Steam ещё поднимает бутстрап -> процесс/RunningAppID появляются НЕ мгновенно. Потолок
-# ограничен сверху hard-таймаутом лаунчера (25с в TS) и серверным окном app.launch (30с).
+# ограничен сверху hard-таймаутом лаунчера (25с в TS) и серверным окном app.launch (36с).
 $steamWaitMs=[int]($env:JARVIS_STEAM_WAIT_MS); if($steamWaitMs -le 0){ $steamWaitMs=12000 }
 try {
   if($best.kind -eq 'exe'){

@@ -19,6 +19,7 @@ import { DEFAULT_ACTION_TIMEOUT_MS } from "@jarvis/protocol";
 import { createLogger, sleep as defaultSleep } from "@jarvis/shared";
 import { selectionStore } from "../selection/store.js";
 import { stepGatedUnderVeil, stepInjectsIntoGui } from "../selection/veil-policy.js";
+import { injectionDenial, stepRetries } from "./step-policy.js";
 
 const log = createLogger("skill-runner");
 
@@ -67,18 +68,15 @@ export interface RunSkillOptions {
   /** Инъекция паузы (тесты — мгновенная). */
   sleep?: (ms: number) => Promise<void>;
   /**
-   * §Волна3 ревью (#2): общий БЮДЖЕТ времени на весь реплей (мс от старта). Реплей САМ честно
-   * останавливается по исчерпании — до того, как серверный sendAction-таймаут сдастся и запустит
-   * LLM-петлю ПАРАЛЛЕЛЬНО ещё идущему реплею («два писателя в GUI»). Проверяется перед каждым шагом
-   * и ограничивает auto-wait постусловия остатком бюджета. Без него — как раньше (без границы).
+   * §Волна3 ревью (#2): общий БЮДЖЕТ реплея (мс от старта): реплей САМ честно останавливается ДО серверного таймаута
+   * (иначе LLM-петля пошла бы ПАРАЛЛЕЛЬНО реплею — «два писателя в GUI»); ограничивает и auto-wait постусловия.
    */
   deadlineMs?: number;
   /** Инъекция часов (тесты). */
   now?: () => number;
   /**
-   * Контроль-5: «поверх экрана вуаль» ДО предусловия/ретрая/сверки постусловия (по умолчанию — selectionStore).
-   * Без этого предусловие грундилось в окне оверлея («экран изменился»), ретрай инжектировал шаг ВТОРОЙ раз,
-   * а visual-expect читал OCR вуали — всё кодом runtime, то есть «провалом модели» для сервера.
+   * Контроль-5: «поверх экрана вуаль» ДО предусловия/ретрая/сверки постусловия (по умолчанию — selectionStore): иначе
+   * предусловие грундилось в оверлее, ретрай инжектировал шаг ВТОРОЙ раз, visual-expect читал OCR вуали.
    */
   overlayBlockReason?: () => string | null;
   /**
@@ -94,21 +92,17 @@ export interface SkillRunOutcome {
   message?: string;
   /** Шаг лёг об вуаль режима выделения — состояние системы, не провал навыка (сервер: overlayDenied). */
   overlayDrawing?: boolean;
-  /**
-   * Контроль-5 (S1): действие шага failedStepIndex УЖЕ УШЛО в GUI (вуаль поймала ретрай или сверку постусловия) —
-   * исход шага неизвестен; «повтори шаг» дало бы дубль напечатанного/отправленного.
-   */
+  /** Контроль-5 (S1): действие шага УЖЕ УШЛО в GUI — исход неизвестен; «повтори шаг» = дубль напечатанного/отправленного. */
   actionInjected?: boolean;
+  /** W2 П1: отказ рубежа инжекции (своё окно/§0/§14) — без ретраев; data — {needsApproval} для вопроса владельцу. */
+  denied?: { data?: unknown };
 }
 
 const POLL_MS = 100;
 
 /**
- * Auto-wait постусловия (§8): поллим checkExpect до наступления или таймаута.
- * Ревью фиксов Волны 3 (#1): граница — WALL-CLOCK, не число поллов. Один checkExpect на UIA-слепом
- * окне может занимать до 12с (сайдкар-таймаут): счётчик «timeoutMs/100мс» поллов растягивал ожидание
- * в десятки раз за бюджет реплея. Минимум один опрос делаем всегда (успевший исполниться шаг честно
- * подтверждается), дальше — только пока не вышло время; перебег ≤ длительности одного checkExpect.
+ * Auto-wait постусловия (§8): поллим checkExpect до наступления или таймаута. Ревью Волны 3 (#1): граница — WALL-CLOCK,
+ * не число поллов (checkExpect на UIA-слепом окне — до 12 с). Минимум один опрос всегда, дальше — пока не вышло время.
  */
 async function waitForExpect(
   actuator: SkillActuator,
@@ -190,9 +184,8 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
       }
     }
 
-    // Ревью фиксов, 2-й проход (R3): retries из контента навыка клампим — без капа sleep(200·attempt)
-    // между попытками раздувал хвостовой перебег за серверный потолок 130с.
-    const retries = Math.max(0, Math.min(5, step.retries ?? 2));
+    // R3: retries из контента клампим (кап 5); W2 П1: шаг «коммит или неизвестно» — без повторов (step-policy).
+    const retries = stepRetries(step);
     let attempt = 0;
     let stepOk = false;
     /** Текст последней ошибки попытки — итоговое сообщение обязано называть ПРИЧИНУ, а не «не подтвердил expect». */
@@ -254,6 +247,11 @@ export async function runSkill(opts: RunSkillOptions): Promise<SkillRunOutcome> 
           const inj = injected || (e as { injected?: boolean }).injected === true;
           return { ok: false, failedStepIndex: i, message: `шаг ${i + 1} (${step.action}): ${lastError}`, overlayDrawing: true, ...(inj ? { actionInjected: true } : {}) };
         }
+        const denial = injectionDenial(e); // W2 П1: отказ рубежа не ретраится — вопрос владельцу, а не повтор
+        if (denial) {
+          const inj = injected || denial.injected;
+          return { ok: false, failedStepIndex: i, message: `шаг ${i + 1} (${step.action}): ${lastError}`, denied: { data: denial.data }, ...(inj ? { actionInjected: true } : {}) };
+        }
       }
       if (stepOk) break;
       attempt += 1;
@@ -289,8 +287,9 @@ export function outcomeToActionResult(
   return {
     commandId,
     ok: false,
-    // Контроль-3: вуаль оверлея едет своим кодом — иначе сервер считал раунд провалом модели.
-    error: { code: outcome.overlayDrawing ? "overlay_drawing" : "runtime", message: outcome.message ?? "skill failed" },
+    // Контроль-3: вуаль — своим кодом; W2 П1: отказ рубежа — denied с данными вопроса (сервер: needsApproval, шаг k).
+    error: { code: outcome.overlayDrawing ? "overlay_drawing" : outcome.denied ? "denied" : "runtime", message: outcome.message ?? "skill failed" },
+    ...(outcome.denied?.data !== undefined ? { data: outcome.denied.data } : {}),
     stepIndex: outcome.failedStepIndex,
     ...(outcome.actionInjected ? { stepActionInjected: true } : {}),
     durationMs,

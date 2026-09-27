@@ -28,7 +28,7 @@ describe("skill-runner × вуаль режима выделения (контр
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("input.click", { target: { by: "coords", x: 1, y: 1 } as never, retries: 2 })],
+      steps: [step("input.click", { target: { by: "coords", x: 1, y: 1, space: "screen" } as never, retries: 2 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ executeStep: execute }),
       sleep: noSleep,
@@ -51,7 +51,8 @@ describe("skill-runner × вуаль режима выделения (контр
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("input.key", { params: { combo: "Enter" }, retries: 1 })],
+      // W2 П1: безопасная клавиша (Tab) — у коммит-шагов (Enter) ретраев нет вовсе (step-policy.test).
+      steps: [step("input.key", { params: { combo: "Tab" }, retries: 1 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ executeStep: execute }),
       sleep: noSleep,
@@ -72,7 +73,7 @@ describe("skill-runner × контроль-5 (действие ушло / про
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("input.key", { expect: { role: "button", name: "Отправлено" }, timeoutMs: 1, retries: 1 })],
+      steps: [step("input.key", { params: { combo: "Tab" }, expect: { role: "button", name: "Отправлено" }, timeoutMs: 1, retries: 1 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ executeStep: execute, checkExpect: vi.fn(async () => false) }),
       sleep: noSleep,
@@ -265,7 +266,7 @@ describe("skill-runner × контроль-5 (действие ушло / про
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("input.key", { params: { combo: "Enter" }, expect: { kind: "a11y", role: "text", name: "Отправлено" }, timeoutMs: 1000, retries: 2 })],
+      steps: [step("input.key", { params: { combo: "Tab" }, expect: { kind: "a11y", role: "text", name: "Отправлено" }, timeoutMs: 1000, retries: 2 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ executeStep: execute, checkExpect }),
       sleep: noSleep,
@@ -402,7 +403,7 @@ describe("skill-runner (§8, §20)", () => {
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("ui.invoke", { expect: { role: "button" }, timeoutMs: 150, retries: 3 })],
+      steps: [step("ui.invoke", { params: { pattern: "expand" }, expect: { role: "button" }, timeoutMs: 150, retries: 3 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ checkExpect, executeStep: execute }),
       now,
@@ -600,7 +601,7 @@ describe("skill-runner (§8, §20)", () => {
     const r = await runSkill({
       skillId: "s",
       version: 1,
-      steps: [step("ui.invoke", { expect: { role: "button" }, timeoutMs: 60_000, retries: 5 })],
+      steps: [step("ui.invoke", { params: { pattern: "expand" }, expect: { role: "button" }, timeoutMs: 60_000, retries: 5 })],
       cancel: { cancelled: false },
       actuator: mockActuator({ executeStep: execute, checkExpect }),
       deadlineMs: 5000,

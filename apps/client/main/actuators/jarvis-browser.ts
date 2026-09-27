@@ -12,10 +12,6 @@
  * поля webK — ТОЛЬКО нативный CDP Input.insertText (+Enter); подтверждение — по реальному DOM.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { expandPath } from "./fs.js";
-import { assertReadable } from "./self-guard.js";
-import { promises as fsp } from "node:fs";
-import { basename } from "node:path";
 import { existsSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -23,7 +19,9 @@ import { join } from "node:path";
 import { screen } from "electron";
 import { AsyncMutex, type Candidate, createLogger, nameSearchVariants, pickRecipient } from "@jarvis/shared";
 import { chromeCandidates, safeBrowserUrl } from "./browser-cdp.js";
-import { type WsLike, cdpCommand, parseCdpReply, resolveWebSocketCtor, unwrapEvalResult } from "./cdp-core.js";
+import { CdpConn } from "./cdp-conn.js";
+import { webAct } from "./jarvis-browser-act.js";
+import { NavGuard, blockedNavText } from "./jarvis-browser-nav-guard.js";
 import { PAGE } from "./jarvis-browser-page.js";
 
 const log = createLogger("actuator:jarvis-browser");
@@ -107,55 +105,6 @@ function visibleArgs(): string[] {
   }
 }
 
-// ── Страничный скрипт (eval внутри страницы). window.__tg = общие хелперы + telegram-навыки. ──
-// ── persistent мини-CDP-клиент (общие примитивы — cdp-core.ts) ──
-class CdpConn {
-  private ws?: WsLike;
-  private id = 0;
-  private readonly pending = new Map<number, { res: (v: unknown) => void; rej: (e: Error) => void }>();
-  dead = false;
-
-  connect(wsUrl: string): Promise<void> {
-    const WS = resolveWebSocketCtor();
-    const ws = new WS(wsUrl);
-    this.ws = ws;
-    return new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("CDP: WS-таймаут")), 10000);
-      ws.addEventListener("open", () => { clearTimeout(t); resolve(); });
-      ws.addEventListener("error", () => { clearTimeout(t); this.dead = true; reject(new Error("CDP: ошибка WS")); });
-      ws.addEventListener("message", (ev) => this.onMsg(String(ev.data ?? "")));
-      ws.addEventListener("close", () => { this.dead = true; for (const p of this.pending.values()) p.rej(new Error("CDP закрыт")); this.pending.clear(); });
-    });
-  }
-
-  private onMsg(data: string): void {
-    const m = parseCdpReply(data);
-    if (!m) return;
-    const p = this.pending.get(m.id);
-    if (!p) return;
-    this.pending.delete(m.id);
-    if (m.error) p.rej(new Error(m.error.message ?? "CDP error"));
-    else p.res(m.result);
-  }
-
-  send(method: string, params?: Record<string, unknown>): Promise<unknown> {
-    const id = ++this.id;
-    return new Promise<unknown>((resolve, reject) => {
-      if (!this.ws || this.dead) return reject(new Error("CDP: нет соединения"));
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`CDP: таймаут ${method}`)); }, 30000);
-      this.pending.set(id, { res: (v) => { clearTimeout(timer); resolve(v); }, rej: (e) => { clearTimeout(timer); reject(e); } });
-      this.ws.send(JSON.stringify(cdpCommand(id, method, params)));
-    });
-  }
-
-  async evaluate<T = unknown>(expression: string): Promise<T> {
-    const raw = await this.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
-    return unwrapEvalResult<T>(raw, "webK eval");
-  }
-
-  close(): void { this.dead = true; try { this.ws?.close(); } catch { /* ignore */ } }
-}
-
 export interface PageContent { title: string; url: string; text: string; loginWall?: boolean }
 export interface TgMessage { dir: "in" | "out"; text: string }
 interface OpenResult { ok: boolean; step?: string; chatTitle?: string; peerId?: string; rect?: { x: number; y: number; w: number; h: number } }
@@ -176,12 +125,20 @@ export interface ImportCookie {
   expirationDate?: number;
 }
 
+/** DI для стенда (настоящий Chromium в тесте): путь, доп. флаги, профиль, стартовая страница, пауза после запуска. */
+export interface JarvisBrowserOpts { chromePath?: string; extraArgs?: string[]; profileDir?: string; startUrl?: string; settleMs?: number }
+
 /**
  * Браузер Джарвиса: ТЁПЛЫЙ невидимый Chrome со своим профилем, общий слой для веб-действий.
  * Один экземпляр на процесс; переиспользует соединение между вызовами (open→read→act компонуются).
  */
 export class JarvisBrowser {
+  constructor(private readonly opts: JarvisBrowserOpts = {}) {}
   private proc?: ChildProcess;
+  /** B-14: перехват навигации на соединении уровня браузера; без живого гарда браузер не используется. */
+  private guard?: NavGuard;
+  private mainFrameId = "";
+  private readMark = 0;
   private loginProc?: ChildProcess; // видимое окно входа (общий профиль) — трекаем, чтобы убить перед тёплым
   private cdp?: CdpConn;
   private port = 0;
@@ -207,7 +164,7 @@ export class JarvisBrowser {
 
   /** Живой тёплый браузер. БЕЗ лока — вызывается уже под this.lock. Перезапуск при мёртвом CDP. */
   private async ensureBrowser(): Promise<CdpConn> {
-    if (this.cdp && !this.cdp.dead) {
+    if (this.cdp && !this.cdp.dead && this.guard && !this.guard.dead) {
       try { await this.cdp.evaluate("1"); this.bumpIdle(); return this.cdp; } catch { /* мёртв → перезапуск */ }
     }
     await this.launchWarm();
@@ -218,12 +175,12 @@ export class JarvisBrowser {
 
   private async launchWarm(): Promise<void> {
     await this.close(); // закрыть прежний невидимый И видимый-вход — освободить общий профиль
-    const exe = resolveChrome();
+    const exe = this.opts.chromePath ?? resolveChrome();
     this.port = await getFreePort();
     const off = offscreenPos();
     const args = [
       `--remote-debugging-port=${this.port}`,
-      `--user-data-dir=${profileDir()}`,
+      `--user-data-dir=${this.opts.profileDir ?? profileDir()}`,
       // НЕ "*": тёплый браузер держит ЖИВЫЕ сессии (Telegram/Google) и слушает CDP на localhost.
       // "*" снимает проверку Origin → любая вкладка/локальный процесс мог бы подключиться к CDP и
       // действовать в твоих логинах. Точный origin оставляет доступ только нашему контролю.
@@ -234,7 +191,8 @@ export class JarvisBrowser {
       ...STEALTH_FLAGS,
       `--window-position=${off.x},${off.y}`,
       "--window-size=520,800",
-      WEBK_URL,
+      ...(this.opts.extraArgs ?? []),
+      this.opts.startUrl ?? WEBK_URL,
     ];
     log.info("браузер Джарвиса: запуск (невидимо)", { port: this.port, pos: off });
     const proc = spawn(exe, args, { windowsHide: true, stdio: "ignore", detached: false });
@@ -243,11 +201,30 @@ export class JarvisBrowser {
     proc.on("exit", () => { if (this.cdp) this.cdp.dead = true; if (this.proc === proc) this.proc = undefined; });
     proc.on("error", (e) => { log.warn("браузер Джарвиса: ошибка процесса", e instanceof Error ? e.message : String(e)); if (this.cdp) this.cdp.dead = true; });
     const wsUrl = await this.discoverWs(this.port);
+    // B-14: гард навигации — ДО первого действия; не поднялся → браузер не отдаём (ensureBrowser перезапустит).
+    const guardConn = new CdpConn();
+    await guardConn.connect(await this.discoverBrowserWs(this.port));
+    this.guard = new NavGuard(guardConn);
+    await this.guard.start();
     const cdp = new CdpConn();
     await cdp.connect(wsUrl);
     this.cdp = cdp;
+    this.mainFrameId = wsUrl.split("/").pop() ?? ""; // id главного фрейма вкладки = id её цели CDP
+    await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined); // окно за экраном — фокус как у видимого
     this.injected = false;
-    await sleep(2500); // дать странице подняться
+    await sleep(this.opts.settleMs ?? 2500); // дать странице подняться
+  }
+
+  private async discoverBrowserWs(port: number): Promise<string> {
+    const v = (await (await fetch(`http://127.0.0.1:${port}/json/version`)).json()) as { webSocketDebuggerUrl?: string };
+    if (!v.webSocketDebuggerUrl) throw new Error("CDP: нет соединения уровня браузера — гард навигации не поднять");
+    return v.webSocketDebuggerUrl;
+  }
+
+  /** B-14: главный фрейм ушёл на внутренний адрес после метки → честная ошибка вместо текста страницы ошибки Chrome. */
+  private assertNotBlocked(mark: number): void {
+    const hit = this.guard?.since(mark).filter((b) => b.frameId === this.mainFrameId) ?? [];
+    if (hit.length) throw new Error(blockedNavText(hit));
   }
 
   private async discoverWs(port: number): Promise<string> {
@@ -296,9 +273,12 @@ export class JarvisBrowser {
       // «-»-лидирующий url также отвергаем (флаг-инъекция при spawn окна входа тем же профилем).
       const safe = safeBrowserUrl(url);
       const cdp = await this.ensureBrowser();
+      const mark = this.guard?.mark() ?? 0;
       await cdp.send("Page.navigate", { url: safe });
       await this.waitLoad(cdp);
       await sleep(800);
+      this.assertNotBlocked(mark); // редирект во внутреннюю сеть — не «открыл», а честный отказ
+      this.readMark = this.guard?.mark() ?? 0;
       await this.ensureInjected(cdp);
       return cdp.evaluate<PageContent>("window.__tg.readPage()");
     });
@@ -307,6 +287,9 @@ export class JarvisBrowser {
   async read(): Promise<PageContent> {
     return this.lock.run(async () => {
       const cdp = await this.ensureBrowser();
+      const mark = this.readMark;
+      this.readMark = this.guard?.mark() ?? 0;
+      this.assertNotBlocked(mark); // клик/скрипт увёл вкладку во внутреннюю сеть с прошлого чтения
       await this.ensureInjected(cdp);
       return cdp.evaluate<PageContent>("window.__tg.readPage()");
     });
@@ -356,51 +339,14 @@ export class JarvisBrowser {
     });
   }
 
-  async act(intent: string, params: Record<string, unknown> = {}): Promise<string> {
+  /** web_act: те же page-функции, что у расширения (jarvis-browser-act.ts) — строгая цель, §0 и гард §14 на странице. */
+  async act(intent: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     return this.lock.run(async () => {
-    const cdp = await this.ensureBrowser();
-    await this.ensureInjected(cdp);
-    if (intent === "type") {
-      if (params.selector) await cdp.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(String(params.selector))}); if(e) e.focus();})()`);
-      await cdp.send("Input.insertText", { text: String(params.text ?? "") });
-      return "ok";
-    }
-    if (intent === "upload") {
-      // Файл с диска в <input type=file> через CDP (DOM.setFileInputFiles) — без DataTransfer и без лимита
-      // размера (причина №3 USER_SCENARIOS_2026-09-02: класса «загрузить файл» не было). Путь — от модели →
-      // секреты не отдаём (assertReadable), файл обязан существовать.
-      const path = String(params.path ?? "").trim();
-      if (!path) throw new Error("upload: нужен params.path (файл на диске)");
-      const abs = expandPath(path);
-      assertReadable(abs);
-      const st = await fsp.stat(abs).catch(() => null);
-      if (!st || !st.isFile()) throw new Error(`upload: файла «${abs}» нет или это не файл`);
-      const selector = String(params.selector ?? "input[type=file]");
-      const doc = (await cdp.send("DOM.getDocument", { depth: 1 })) as { root?: { nodeId?: number } };
-      const rootId = doc?.root?.nodeId;
-      if (!rootId) throw new Error("upload: не получил DOM-документ страницы");
-      const q = (await cdp.send("DOM.querySelector", { nodeId: rootId, selector })) as { nodeId?: number };
-      if (!q?.nodeId) throw new Error(`upload: элемент «${selector}» не найден на странице — сначала открой диалог/форму загрузки (web_inspect покажет input[type=file])`);
-      await cdp.send("DOM.setFileInputFiles", { nodeId: q.nodeId, files: [abs] });
-      return `ok:upload ${basename(abs)} (${Math.round(st.size / 1024)} КБ) в ${selector}`;
-    }
-    if (intent === "key") {
-      const key = String(params.key ?? "Enter");
-      const vk = key === "Enter" ? 13 : key === "Tab" ? 9 : key === "Escape" ? 27 : 0;
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
-      await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
-      return "ok";
-    }
-    // click / scroll — через страничный eval (текст/селектор), JSON-литералы (анти-инъекция)
-    const I = JSON.stringify(intent); const P = JSON.stringify(params);
-    return cdp.evaluate<string>(`(() => {
-      const I = ${I}, P = ${P};
-      const byText = (t) => [...document.querySelectorAll('a,button,[role=button],[role=link],[role=tab],[role=menuitem],input[type=submit]')]
-        .find(e => ((e.innerText||e.value||e.getAttribute('aria-label')||'')).trim().toLowerCase().includes(String(t).toLowerCase()));
-      if (I === 'scroll') { window.scrollBy(0, Number(P.dy)||600); return 'ok'; }
-      if (I === 'click') { const el = P.selector ? document.querySelector(String(P.selector)) : (P.text ? byText(P.text) : null); if(!el) throw new Error('элемент не найден'); for(const t of ['pointerdown','mousedown','pointerup','mouseup','click']) el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window})); return 'ok'; }
-      throw new Error('неизвестный intent: '+I);
-    })()`);
+      const cdp = await this.ensureBrowser();
+      const mark = this.guard?.mark() ?? 0;
+      const out = await webAct(cdp, this.mainFrameId, intent, params);
+      const blocked = this.guard?.since(mark) ?? []; // B-14: действие увело во внутреннюю сеть — переход сорван, говорим
+      return blocked.length ? { ...out, blockedNav: blockedNavText(blocked) } : out;
     });
   }
 
@@ -543,6 +489,8 @@ export class JarvisBrowser {
   async close(): Promise<void> {
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = undefined; }
     try { this.cdp?.close(); } catch { /* ignore */ }
+    try { this.guard?.close(); } catch { /* ignore */ }
+    this.guard = undefined;
     try { this.proc?.kill(); } catch { /* ignore */ }
     try { this.loginProc?.kill(); } catch { /* ignore */ } // закрыть видимое окно входа (тот же профиль)
     this.cdp = undefined;

@@ -25,6 +25,7 @@ import { failurePhrase, successPhrase } from "../verbalize/action-phrases.js";
 import { promoteRace } from "./sync-promote.js";
 import { tier0FailureVoice, tier0FallbackNote } from "./tier0-failure.js";
 import { verbalize } from "../verbalize/index.js";
+import { TIER0_PROMOTE_ACK, promoteAck } from "./promote-acks.js";
 import { TaskManager } from "../tasks/manager.js";
 import { classifyTaskScope } from "../tasks/scope.js";
 import { type Task } from "../tasks/task.js";
@@ -57,7 +58,7 @@ export async function handleUserText(
   // НЕ речь владельца: обходит steer/дубль-гейты активной задачи (глагол правки в поручении уводил его
   // в ЧУЖУЮ задачу с ложным «Принял, поправляю» — поручение не исполнялось) и НЕ съедает висящее
   // уточнение консьержа (pendingClarify остаётся для НАСТОЯЩЕГО ответа владельца).
-  meta?: TurnMeta,
+  meta?: TurnMeta & { turnSeq?: number }, // W3 V-1: turnSeq — ход пайплайна (итог промоушена вернётся с ним)
 ): Promise<AgentReply> {
   // §10 realtime: если задан sink — реплика отдаётся пофразно. Короткие/детерминированные
   // пути (имя/режим/tier0/фоновый ack) стримить нечего — финализируем целиком через done()
@@ -68,7 +69,8 @@ export async function handleUserText(
     if (reply.voice.trim()) log.info("Джарвис →", { voice: reply.voice });
     if (sink) {
       if (reply.display) sink.display(reply.display);
-      sink.done(reply.voice);
+      if (reply.ack) sink.done(reply.voice, { ack: true }); // W3 V-1: ack tier0 — первый звук, не ответ
+      else sink.done(reply.voice);
     }
     return reply;
   };
@@ -121,7 +123,7 @@ export async function handleUserText(
       deps.pendingClarify = { key: decision.local.key };
       return finishReply({ voice: decision.local.question });
     }
-    const t0: Tier0Reply = await runTier0(session, decision.local, deps, sink, { goal: clean, freshContext, viaWake: meta?.viaWake, machine: machineTurn });
+    const t0: Tier0Reply = await runTier0(session, decision.local, deps, sink, { goal: clean, freshContext, viaWake: meta?.viaWake, machine: machineTurn, answerOf: meta?.turnSeq });
     if (!t0.fallbackToLlm) return finishReply(t0);
     priorFailure = t0.fallbackNote;
     // Приложение по имени не нашлось → модель решает, что это было («тесты», «стрим», «сервер») — как
@@ -170,7 +172,7 @@ export async function handleUserText(
     if (sink && process.env.JARVIS_SYNC_FIRST !== "0") {
       // ГОЛОСОВОЙ канал: sync-first с промоушеном в фон — текстовый ответ модели звучит СРАЗУ, а ход, ушедший
       // в инструменты, говорит «Берусь» и уходит в фон (микрофон свободен). Это и есть фикс «молча → скопом».
-      return await runActionSyncFirst(session, clean, tier, deps, sink, { freshContext, viaWake: meta?.viaWake, machine: machineTurn, priorFailure });
+      return await runActionSyncFirst(session, clean, tier, deps, sink, { freshContext, viaWake: meta?.viaWake, machine: machineTurn, priorFailure, answerOf: meta?.turnSeq });
     }
     // Без sink (dev.text/чат/тесты) ИЛИ откат JARVIS_SYNC_FIRST=0: прежнее — молча в фон, итог через
     // speakResult (в тексте нет аудио-очереди → скопом не сливается; сеанс не блокируется на длинной задаче).
@@ -237,6 +239,7 @@ function confirmationAware(decision: RouteDecision, memory: AgentDeps["memory"])
 /** Ход модели, если быстрый путь не закрыл реплику после промоушена: цель и признаки хода (контроль-2 №2). */
 export interface Tier0Followup {
   goal: string;
+  answerOf?: number; // W3 V-1: ход, чей итог (промоушен tier0)
   freshContext?: boolean;
   viaWake?: boolean;
   machine?: boolean;
@@ -286,15 +289,15 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
         // работал: владелец слышал «Не смог запустить», модель не звалась. Отдаём ход модели в фоне с причиной провала.
         if (reply.fallbackToLlm && followup && !deps.isClosed?.()) {
           log.info("tier0 после промоушена не закрыт детерминированно — передаю модели в фоне", { kind: local.kind });
-          const { goal, ...turn } = followup;
+          const { goal, answerOf, ...turn } = followup;
           const preTask = queuedPreTask(session, goal, deps);
           // Контроль-2 №2: признаки хода (viaWake/machine/freshContext) — как на обычном пути. Без них undefined читался
           // бы как «явное обращение», и реплике из окна разговора разрешался слепой реплей макроса (§P0).
-          startBackgroundTask(() => runAgentLoop(session, goal, "sonnet", deps, undefined, { ...turn, priorFailure: (reply as Tier0Reply).fallbackNote, preTask }), deps, { bounded: true, preTask });
+          startBackgroundTask(() => runAgentLoop(session, goal, "sonnet", deps, undefined, { ...turn, priorFailure: (reply as Tier0Reply).fallbackNote, preTask }), deps, { bounded: true, preTask, answerOf });
           return;
         }
         deps.memory.pushTurn("assistant", reply.voice);
-        if (reply.voice.trim() && !deps.isClosed?.()) deps.speakResult?.(reply);
+        if (reply.voice.trim() && !deps.isClosed?.()) deps.speakResult?.(reply, answerOpts(followup?.answerOf));
       })
       .catch((e) => {
         log.error("промотированное tier0-действие упало", { error: e instanceof Error ? e.message : String(e) });
@@ -302,7 +305,7 @@ async function runTier0(session: Session, local: LocalIntent, deps: AgentDeps, s
       });
     deps.bgTasks?.add(bg);
     void bg.finally(() => deps.bgTasks?.delete(bg));
-    return { voice: verbalize("Секунду, сэр.") };
+    return { voice: verbalize(TIER0_PROMOTE_ACK), ack: true };
   }
   if (deps.speakResult && !instant) {
     // Откат (JARVIS_SYNC_FIRST=0): прежнее поведение — молча в фон, итог через speakResult.
@@ -344,7 +347,7 @@ function queuedPreTask(session: Session, goal: string, deps: AgentDeps): Task | 
 function startBackgroundTask(
   run: () => Promise<AgentReply>,
   deps: AgentDeps,
-  opts: { bounded: boolean; preTask?: Task },
+  opts: { bounded: boolean; preTask?: Task; answerOf?: number },
 ): void {
   const sem = opts.bounded ? deps.concurrency : undefined;
   const task = (async () => {
@@ -359,7 +362,7 @@ function startBackgroundTask(
       deps.memory.pushTurn("assistant", reply.voice);
       if (reply.voice.trim() && !deps.isClosed?.()) {
         log.info("Джарвис → (фоновый итог)", { voice: reply.voice });
-        deps.speakResult?.(reply);
+        deps.speakResult?.(reply, answerOpts(opts.answerOf));
       }
     } catch (e) {
       log.error("фоновая задача упала", { error: e instanceof Error ? e.message : String(e) });
@@ -388,8 +391,9 @@ async function runActionSyncFirst(
   tier: Exclude<Tier, "tier0">,
   deps: AgentDeps,
   sink: ReplySink,
-  opts: { freshContext?: boolean; viaWake?: boolean; resumeFrom?: TaskCheckpoint; machine?: boolean; priorFailure?: string },
+  runOpts: { freshContext?: boolean; viaWake?: boolean; resumeFrom?: TaskCheckpoint; machine?: boolean; priorFailure?: string; answerOf?: number },
 ): Promise<AgentReply> {
+  const { answerOf, ...opts } = runOpts; // W3 V-1: answerOf — не опция петли, а адрес итога
   // Fix ревью (concurrency-bound): держим потолок MAX_PARALLEL_TASKS и для sync-first. Забираем слот
   // НЕблокирующе (tryAcquire) — интерактивный ход не тормозим. Слотов нет (все заняты промотированными
   // петлями) → эту команду в bounded-фон (встанет в очередь семафора), чтобы не плодить >MAX параллельных
@@ -399,7 +403,7 @@ async function runActionSyncFirst(
     log.info("sync-first: слоты параллельности заняты — команда в bounded-фон (не превышаем MAX_PARALLEL_TASKS)");
     deps.taskAccepted?.();
     const preTask = queuedPreTask(session, text, deps);
-    startBackgroundTask(() => runAgentLoop(session, text, tier, deps, undefined, { ...opts, preTask }), deps, { bounded: true, preTask });
+    startBackgroundTask(() => runAgentLoop(session, text, tier, deps, undefined, { ...opts, preTask }), deps, { bounded: true, preTask, answerOf });
     sink.done(""); // тихий финал (как прежний фон-путь)
     return { voice: "" };
   }
@@ -461,13 +465,13 @@ async function runActionSyncFirst(
   // задача идёт в фоне, звук комнаты без «Джарвис» уходил бы в петлю как команда. Пайплайн читает второй
   // аргумент done (контракт ReplySink расширяет интегратор — см. notes ревью); без него поведение прежнее.
   log.info("sync-first: промоушен в фон", { why: outcome.why, capMs, floorMs });
-  sink.done(verbalize(promoteAck()), { origin: "proactive" });
+  sink.done(promoteAck(), { origin: "proactive", ack: true });
   const bg = loopP
     .then((reply) => {
       deps.memory.pushTurn("assistant", reply.voice);
       if (reply.voice.trim() && !deps.isClosed?.()) {
         log.info("Джарвис → (промоушен-итог)", { voice: reply.voice });
-        deps.speakResult?.(reply);
+        deps.speakResult?.(reply, answerOpts(answerOf));
       }
     })
     .catch((e) => {
@@ -494,15 +498,8 @@ const SYNC_PROMOTE_DEFAULT_MS = 6_000;
 const PROMOTE_FLOOR_MS = 1_500;
 /** tier0 (без модели): «открой X» — прежний таймер 1,5 с, раунда модели тут нет. */
 const TIER0_PROMOTE_DEFAULT_MS = 1_500;
-/** T-F6: done с происхождением речи (контракт ReplySink в types.ts его пока не знает — см. notes ревью). */
-/** Короткие ack промоушена — ротация, чтобы не было заученной отбивки (персона: «variety is mandatory»). */
-const PROMOTE_ACKS = ["Берусь, сэр.", "Сию минуту.", "Занимаюсь.", "Сейчас сделаю.", "Принял, делаю.", "Есть, сэр."] as const;
-let promoteAckIdx = 0;
-function promoteAck(): string {
-  const ack = PROMOTE_ACKS[promoteAckIdx % PROMOTE_ACKS.length]!;
-  promoteAckIdx += 1;
-  return ack;
-}
+/** W3 V-1: второй аргумент speakResult — ход, чей это итог (first_answer по пути promoted). */
+const answerOpts = (answerOf?: number): { answerOf: number } | undefined => (answerOf === undefined ? undefined : { answerOf });
 
 /** Полный agent-loop с tool-use (§7, §8). sink (§10) — пофразный стрим финальной реплики. */
 async function runAgentLoop(

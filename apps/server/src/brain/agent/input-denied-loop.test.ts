@@ -61,7 +61,7 @@ describe("отказ аренды ввода = НЕ успех задачи", ()
   it("клик не сделан (ввод занят), модель честно доложила → задача помечена ПРОВАЛЕННОЙ", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 100, y: 200 } } }] },
+      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 100, y: 200, frame: "f1" } } }] },
       { text: "Задача не выполнена, сэр: ввод занят другой задачей." },
     ]);
     await handleUserText(session(), "нажми кнопку играть", deps(llm, tasks));
@@ -73,7 +73,7 @@ describe("отказ аренды ввода = НЕ успех задачи", ()
   it("отказ аренды пережили и добились СВОЕГО другим путём → это по-прежнему успех", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] },
+      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "f1" } } }] },
       // Мутирующее действие БЕЗ аренды ввода прошло (system.* мышь не занимает) — ход состоялся.
       { toolUses: [{ id: "v1", name: "system_volume", input: { op: "up" } }] },
       { text: "Открыл, сэр." },
@@ -140,7 +140,7 @@ describe("отказ аренды: границы признака", () => {
   it("владелец ПОПРАВИЛ цель на ходу → провал по отменённой цели не приписывается новой", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] },
+      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "f1" } } }] },
       { text: "В новостях сегодня спокойно, сэр." },
     ]);
     // Правку цели впрыскиваем ИЗ САМОГО отказа аренды — так она гарантированно сливается перед
@@ -164,7 +164,7 @@ describe("отказ аренды: границы признака", () => {
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] },
+      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "f1" } } }] },
       { text: "Готово, сэр — нажал «Играть», поиск игры запущен." }, // 6 слов: isHollowSuccess молчит
     ]);
     const sink = { sentence: (x: string) => said.push(x), display: () => undefined, done: () => undefined };
@@ -185,7 +185,7 @@ describe("отказ аренды: границы признака", () => {
       },
     } as unknown as AgentDeps["skills"];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] },
+      { toolUses: [{ id: "c1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "f1" } } }] },
       { text: "Не вышло, сэр." },
     ]);
     await handleUserText(session(), "нажми кнопку играть", deps(llm, tasks, { skills }));

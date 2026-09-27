@@ -88,9 +88,10 @@ describe("GUI — коммит в опасном процессе на пере�
     expect(sendAction).toHaveBeenCalledTimes(1);
   });
 
-  // Контроль-2 №4: признак «владелец одобрил» едет клиенту ТОЛЬКО после вопроса; аргумент модели перекрывается.
-  // Реверт: убери `commitApproved = true` после одобрения — первый ассерт упадёт; убери перекрытие — второй.
-  it("act: commitApproved=true только после «да» владельца; модель сама себе одобрить не может", async () => {
+  // Контроль-2 №4 (W2: флаг `commitApproved` заменён грантами `approval`): одобрение едет клиенту ТОЛЬКО после вопроса;
+  // самоодобрение модели (`approval`/`commitApproved` в аргументах) срезается. Реверт: не клади гранты после «да» —
+  // первый ассерт упадёт; верни `{kind, ...input}` — второй.
+  it("act: гранты §14 только после «да» владельца; модель сама себе одобрить не может", async () => {
     const sent: ActionCommand[] = [];
     const sendAction = vi.fn<Send>(async (cmd) => {
       sent.push(cmd);
@@ -98,9 +99,11 @@ describe("GUI — коммит в опасном процессе на пере�
     });
     const sess = { sendAction } as unknown as ToolContext["session"];
     await dispatchTool("act", { app: "Telegram", do: "key", combo: "Enter" }, makeCtx({ session: sess, approved: true }));
-    await dispatchTool("act", { app: "notepad", do: "key", combo: "Enter", commitApproved: true }, makeCtx({ session: sess }));
-    expect((sent[0] as { commitApproved?: boolean }).commitApproved).toBe(true);
-    expect((sent[1] as { commitApproved?: boolean }).commitApproved).toBe(false);
+    const self = { grants: [{ signature: "key:enter", process: "telegram", count: 9 }], expiresAt: 9e15 };
+    await dispatchTool("act", { app: "notepad", do: "key", combo: "Enter", commitApproved: true, approval: self }, makeCtx({ session: sess }));
+    expect(sent[0]!.approval?.grants).toEqual([{ signature: "key:enter", process: "telegram", count: 1 }]);
+    expect(sent[1]!.approval).toBeUndefined();
+    expect("commitApproved" in sent[1]!).toBe(false);
   });
 
   // Ревью 2026-09-24: перевод строки в печатаемом тексте = Enter; в мессенджере уходил человеку мимо вопроса.
@@ -123,20 +126,24 @@ describe("GUI — коммит в опасном процессе на пере�
     expect(sendAction).toHaveBeenCalledTimes(2);
   });
 
-  it("ui_invoke по handle «Провести» при 1cv8: подпись берётся из последнего ui_snapshot → спрашивает", async () => {
+  // W2 П3 (S-1): фикстура — в РЕАЛЬНОЙ форме: снимок отдаёт handle числом, схема ui_invoke — цель {by:"handle",
+  // handle:"41"} строкой (прежний `{handle: 42}` верхним полем схема не знает — гейт читал поле, которого нет).
+  it("ui_invoke по handle «Провести» при 1cv8: подпись берётся из последнего ui_snapshot → спрашивает; грант уходит в команде", async () => {
     const sendAction = vi.fn<Send>(async (cmd) =>
       cmd.kind === "ui.snapshot"
-        ? { commandId: "c", ok: true, data: { items: [{ handle: 41, role: "Button", name: "Провести и закрыть" }, { handle: 42, role: "Button", name: "Печать" }] }, durationMs: 1 }
+        ? { commandId: "c", ok: true, data: { items: [{ handle: 41, role: "Button", name: "Провести и закрыть" }, { handle: 42, role: "Button", name: "Закрыть" }] }, durationMs: 1 }
         : { commandId: "c", ok: true, durationMs: 1 },
     );
     const session = { sendAction } as unknown as ToolContext["session"];
     const c = makeCtx({ session, foreground: "1cv8", approved: true });
     await dispatchTool("ui_snapshot", {}, c);
-    await dispatchTool("ui_invoke", { handle: 42 }, c); // «Печать» — не коммит
+    await dispatchTool("ui_invoke", { target: { by: "handle", handle: "42" }, pattern: "invoke" }, c); // «Закрыть» — навигация
     expect(c.confirm).not.toHaveBeenCalled();
-    await dispatchTool("ui_invoke", { handle: 41 }, c); // «Провести и закрыть» — коммит
+    await dispatchTool("ui_invoke", { target: { by: "handle", handle: "41" }, pattern: "invoke" }, c); // «Провести и закрыть» — коммит
     expect(c.confirm).toHaveBeenCalledTimes(1);
     expect(String(c.confirm.mock.calls[0]?.[0])).toMatch(/Провести/u);
+    const invoke = sendAction.mock.calls.map((x) => x[0]).filter((x) => x.kind === "ui.invoke")[1] as ActionCommand & { approval?: { grants: unknown[] } };
+    expect(invoke.approval?.grants).toEqual([{ signature: "click:провести и закрыть", process: "1cv8", count: 1 }]);
   });
 });
 

@@ -292,7 +292,7 @@ function session(opts: {
           selection: SEL,
           ageMs: 42_000,
           changedSinceSelection: true,
-          crop: { originX: 1200, originY: 400, scale: 1 },
+          frameId: "k1as7", // W2 П5: s-кадр картинки выделения
         },
         durationMs: 1,
       });
@@ -366,6 +366,11 @@ function toolResultText(messages: LlmMessage[]): string {
 }
 
 const view = (id = "v1") => ({ id, name: "screen_selection", input: { op: "view" } });
+/**
+ * W3 (G-14): явный `import jarvis` ФОНОМ сервер отклоняет до запуска (code.ts). Фоновое задание, чей SDK серверу не
+ * виден (скрипт исполняет файл), клиент по-прежнему может остановить вуалью — job_status обязан доложить честно.
+ */
+const HIDDEN_SDK_JOB = "exec(open('steps.py').read())";
 
 describe("режим выделения в петле", () => {
   it("активное выделение попадает в системный хвост промпта — с возрастом и без untrusted-обёртки", async () => {
@@ -393,7 +398,9 @@ describe("режим выделения в петле", () => {
     const txt = toolResultText(llm.requests[1]!.messages);
     expect(txt).toContain("[выделенная область]");
     expect(txt).toContain("ИЗМЕНИЛОСЬ"); // честность: под рамкой уже другое
-    expect(txt).toContain("screenX = 1200"); // формула клика по увиденному (иначе взгляд — тупик)
+    // W2 П5: клик по увиденному — в s-кадре картинки (иначе взгляд — тупик); ни формулы, ни space (его срезает сервер).
+    expect(txt).toContain('act{target:{x, y, frame:"k1as7"}}');
+    expect(txt).not.toMatch(/space|screenX/u);
   });
 
   it("выделения нет → инструмент возвращает ОШИБКУ, а не пустой кадр", async () => {
@@ -455,7 +462,7 @@ describe("режим выделения в петле", () => {
 
   it("слепой клик + свежий взгляд на выделение = сверка: verify-нуджа нет (view — verify, start/clear — нет)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [view("v1")] },
       { text: "Готово, сэр: отступ поправлен, на кадре он ровный." },
     ]);
@@ -465,7 +472,7 @@ describe("режим выделения в петле", () => {
   });
 
   it("два раунда, отклонённые вуалью оверлея, НЕ эскалируют тир: это состояние системы, а не слабость модели", async () => {
-    const click = (id: string) => ({ id, name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } });
+    const click = (id: string) => ({ id, name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } });
     const llm = new MockLlmProvider([{ toolUses: [click("k1")] }, { toolUses: [click("k2")] }, { text: "Подожду, пока закроется оверлей, сэр." }]);
     await handleUserText(session({ hasSelection: true, veil: true }), "почини вот тут отступ", deps(llm, true));
     // Без флага overlayDenied второй провальный раунд подряд уводил бы задачу на fable (ESCALATE_AFTER=2).
@@ -485,7 +492,7 @@ describe("режим выделения в петле", () => {
   });
 
   it("честное «не могу кликнуть — открыт оверлей» после отказа вуали НЕ капитуляция: без нуджа «СДЕЛАЙ» и без fable (контроль-3)", async () => {
-    const click = { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } };
+    const click = { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } };
     const llm = new MockLlmProvider([{ toolUses: [click] }, { text: "Не могу кликнуть, сэр: поверх экрана открыт оверлей режима выделения — дождусь, пока вы закончите." }]);
     await handleUserText(session({ hasSelection: true, veil: true }), "почини вот тут отступ", deps(llm, true));
     expect(llm.requests.length).toBe(2); // третий запрос = нудж анти-капитуляции «запрещённый ответ»
@@ -494,7 +501,7 @@ describe("режим выделения в петле", () => {
 
   it("вуаль не дала кликнуть и ничего не сделано → задача в реестре ПРОВАЛЕНА, не done (контроль-3)", async () => {
     const tasks = new TaskManager();
-    const click = { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } };
+    const click = { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } };
     const llm = new MockLlmProvider([{ toolUses: [click] }, { text: "Дождусь, пока вы закончите обводить, сэр." }]);
     await handleUserText(session({ hasSelection: true, veil: true }), "почини вот тут отступ", deps(llm, true, tasks));
     const t = tasks.toJSON().tasks[0];
@@ -504,7 +511,7 @@ describe("режим выделения в петле", () => {
 
   it("сенсор ПОД ВУАЛЬЮ — не сверка: слепой клик + OCR вуали не гасят verify-долг, статус стоит СНАРУЖИ untrusted (контроль-3)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [{ id: "o1", name: "screen_read_text", input: {} }] },
       { text: "Готово, сэр — отступ поправлен." },
       { text: "Проверил ещё раз, сэр." },
@@ -528,7 +535,7 @@ describe("режим выделения в петле", () => {
   });
 
   it("шесть отказов вуали подряд — НЕ «топтание»: семейный anti-runaway молчит, fable не зовётся (контроль-3)", async () => {
-    const clicks = Array.from({ length: 6 }, (_, i) => ({ toolUses: [{ id: `k${i}`, name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] }));
+    const clicks = Array.from({ length: 6 }, (_, i) => ({ toolUses: [{ id: `k${i}`, name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] }));
     const llm = new MockLlmProvider([...clicks, { text: "Дождусь закрытия оверлея, сэр." }]);
     await handleUserText(session({ hasSelection: true, veil: true }), "почини вот тут отступ", deps(llm, true));
     // До фикса на 6-м отказе прилетал нудж «топтание на месте» + familyBoost на fable — состояние системы
@@ -555,7 +562,7 @@ describe("режим выделения в петле", () => {
   it("СМЕШАННЫЙ раунд (клик лёг об вуаль + fs_read ENOENT) — реальная ошибка НЕ маскируется вуалью: §7-эскалация идёт (контроль-4)", async () => {
     const pair = (i: number) => ({
       toolUses: [
-        { id: `k${i}`, name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } },
+        { id: `k${i}`, name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } },
         { id: `r${i}`, name: "fs_read", input: { path: "C:\\nope.txt" } },
       ],
     });
@@ -566,7 +573,7 @@ describe("режим выделения в петле", () => {
 
   it("раунд ОЖИДАНИЯ под вуалью продлевает «остановка вуалью ≠ капитуляция»: клик-вуаль → OCR под вуалью → «дождусь» без нуджа (контроль-4)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [{ id: "o1", name: "screen_read_text", input: {} }] },
       { text: "Не могу кликнуть, сэр: оверлей всё ещё открыт — дождусь, пока вы закончите." },
     ]);
@@ -594,7 +601,7 @@ describe("режим выделения в петле", () => {
 
   it("раунд ожидания = screen_capture под вуалью (0 ошибок) тоже продлевает «остановка вуалью ≠ капитуляция» (контроль-4)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [{ id: "c1", name: "screen_capture", input: {} }] },
       { text: "Не могу кликнуть, сэр: оверлей всё ещё открыт — дождусь, пока вы закончите." },
     ]);
@@ -606,7 +613,7 @@ describe("режим выделения в петле", () => {
 
   it("ПУСТОЙ OCR под вуалью — состояние системы: без приписки «окно UIA-слепое» и без деградации ocr_empty (контроль-4)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [{ id: "o1", name: "screen_read_text", input: {} }] },
       { text: "Оверлей ещё открыт, сэр — дождусь." },
     ]);
@@ -675,7 +682,7 @@ describe("режим выделения в петле", () => {
     const tasks = new TaskManager();
     const wait = (id: string) => ({ id, name: "wait_for", input: { condition: { kind: "window", titleContains: "Jarvis — выделение области", gone: true }, timeoutMs: 30000 } });
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [wait("w1")] },
       { toolUses: [wait("w2")] },
       { toolUses: [wait("w3")] },
@@ -693,7 +700,7 @@ describe("режим выделения в петле", () => {
   it("семь опросов под вуалью — не флуд семейства: без нуджа «топтание», без fable (контроль-5 V4-4b)", async () => {
     const wait = (id: string) => ({ id, name: "wait_for", input: { condition: { kind: "window", titleContains: "Jarvis — выделение области", gone: true }, timeoutMs: 30000 } });
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       ...Array.from({ length: 7 }, (_, i) => ({ toolUses: [wait(`w${i}`)] })),
       { text: "Оверлей всё ещё открыт, сэр — не могу продолжить, дождусь." },
     ]);
@@ -749,7 +756,7 @@ describe("режим выделения в петле", () => {
 
   it("screen_capture под вуалью — не сверка: слепой клик + кадр вуали не гасят verify-долг (контроль-4)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [{ id: "c1", name: "screen_capture", input: {} }] },
       { text: "Готово, сэр — отступ поправлен." },
       { text: "Проверил ещё раз, сэр." },
@@ -760,7 +767,7 @@ describe("режим выделения в петле", () => {
 
   it("context_read под вуалью — не сверка, статус снаружи untrusted (контроль-4)", async () => {
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [{ id: "x1", name: "context_read", input: {} }] },
       { text: "Готово, сэр — отступ поправлен." },
       { text: "Проверил ещё раз, сэр." },
@@ -775,7 +782,7 @@ describe("режим выделения в петле", () => {
   it("владелец ПОПРАВИЛ цель после отказа вуали → провал по отменённой цели не приписывается новой (контроль-4)", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { text: "В новостях сегодня спокойно, сэр." },
     ]);
     const s = session({
@@ -803,7 +810,7 @@ describe("режим выделения в петле", () => {
       },
     } as unknown as AgentDeps["skills"];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { text: "Не вышло, сэр: открыт оверлей." },
     ]);
     await handleUserText(session({ hasSelection: true, veil: true }), "нажми кнопку играть вот тут", { ...deps(llm, true), skills });
@@ -835,7 +842,7 @@ describe("режим выделения в петле — контроль-6", (
     const tasks = new TaskManager();
     const start = (id: string) => ({ id, name: "screen_selection", input: { op: "start", waitMs: 5000 } });
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { toolUses: [start("s1")] },
       { toolUses: [start("s2")] },
       { toolUses: [start("s3")] },
@@ -1006,7 +1013,7 @@ describe("режим выделения в петле — контроль-6", (
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "e1", name: "skill_execute", input: { skillId: "sk1" } }] },
       { toolUses: [{ id: "n1", name: "ui_snapshot", input: {} }] },
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } }] },
       { text: "Готово, сэр." },
       { text: "Готово, сэр." },
     ]);
@@ -1032,7 +1039,7 @@ describe("режим выделения в петле — контроль-6", (
   it("контроль-7 sdk-2: фоновое задание, легшее об вуаль, — job_status структурно overlayDenied; запуск скрипта не считается сделанным делом", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Не могу продолжить, сэр: скрипт остановился на третьем клике — открыт оверлей; два клика ушли, дождусь." },
     ]);
@@ -1090,7 +1097,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Готово, сэр." },
       { text: "Готово, сэр." },
@@ -1107,7 +1114,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const status = (id: string) => ({ id, name: "job_status", input: { jobId: "job-1" } });
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [status("j1")] },
       { toolUses: [status("j2")] },
       { text: "Не могу продолжить, сэр: оверлей всё ещё открыт — дождусь." },
@@ -1122,7 +1129,7 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Понял, сэр." },
       { text: "Понял, сэр." },
@@ -1178,7 +1185,7 @@ describe("режим выделения в петле — контроль-8", (
       { toolUses: [{ id: "e1", name: "skill_execute", input: { skillId: "sk1" } }] },
       {
         toolUses: [
-          { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500 } } },
+          { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1300, y: 500, frame: "k1af1" } } },
           { id: "n1", name: "ui_snapshot", input: {} },
         ],
       },
@@ -1193,9 +1200,9 @@ describe("режим выделения в петле — контроль-8", (
     const tasks = new TaskManager();
     const said: string[] = [];
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 10, y: 20 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 10, y: 20, frame: "k1af1" } } }] },
       { text: "Понял, сэр." },
       { text: "Понял, сэр." },
     ]);
@@ -1228,7 +1235,7 @@ describe("режим выделения в петле — контроль-8", (
       {
         toolUses: [
           { id: "m2", name: "memory_write", input: { content: "Владелец работает по ночам", kind: "fact" } },
-          { id: "k2", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } },
+          { id: "k2", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "k1af1" } } },
         ],
       },
       { text: "Готово, сэр." },
@@ -1327,7 +1334,7 @@ describe("режим выделения в петле — контроль-9", (
   it("job-veil-done0-not-failure: задание легло об вуаль на первом действии (done=0) — ход не «done»", async () => {
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
-      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: "import jarvis", background: true } }] },
+      { toolUses: [{ id: "c1", name: "code_run", input: { lang: "python", code: HIDDEN_SDK_JOB, background: true } }] },
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
       { text: "Скрипт остановился: открыт режим выделения — повторю, когда закроете рамку." },
       { text: "Скрипт остановился: открыт режим выделения — повторю, когда закроете рамку." },
@@ -1355,7 +1362,7 @@ describe("режим выделения в петле — контроль-9", (
       {
         toolUses: [
           { id: "j1", name: "job_status", input: { jobId: "job-1" } },
-          { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } },
+          { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "k1af1" } } },
         ],
       },
       { text: "Не получается, сэр, я не могу это сделать." },
@@ -1402,7 +1409,7 @@ describe("режим выделения в петле — контроль-9", (
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "e1", name: "skill_execute", input: { skillId: "sk1" } }] }, // действие ушло под вуалью
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] }, // отказ вуали, ничего не ушло
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "k1af1" } } }] }, // отказ вуали, ничего не ушло
       { toolUses: [{ id: "n1", name: "ui_snapshot", input: {} }] }, // вуаль закрыта: чистая сверка
       { text: "Сообщение ушло, сэр — вижу его в ленте." },
     ]);
@@ -1451,7 +1458,7 @@ describe("режим выделения в петле — контроль-10", 
     const said: string[] = [];
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "e1", name: "skill_execute", input: { skillId: "sk1" } }] }, // действие ушло под вуалью
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] }, // НОВЫЙ клик отвергнут вуалью
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "k1af1" } } }] }, // НОВЫЙ клик отвергнут вуалью
       { toolUses: [{ id: "n1", name: "ui_snapshot", input: {} }] }, // сверка СЛЕДУЮЩИМ раундом
       { text: "Готово, сэр." },
       { text: "Готово, сэр." },
@@ -1496,7 +1503,7 @@ describe("режим выделения в петле — контроль-10", 
       {
         toolUses: [
           { id: "j1", name: "job_status", input: { jobId: "job-1" } },
-          { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } },
+          { id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "k1af1" } } },
         ],
       },
       { text: "Готово, сэр." },
@@ -1511,7 +1518,7 @@ describe("режим выделения в петле — контроль-10", 
     const tasks = new TaskManager();
     const llm = new MockLlmProvider([
       { toolUses: [{ id: "j1", name: "job_status", input: { jobId: "job-1" } }] },
-      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2 } } }] },
+      { toolUses: [{ id: "k1", name: "input_click", input: { target: { by: "coords", x: 1, y: 2, frame: "k1af1" } } }] },
       { text: "Не смог, сэр — дождусь закрытия рамки." },
       { text: "Не смог, сэр — дождусь закрытия рамки." },
     ]);
@@ -1527,7 +1534,7 @@ describe("режим выделения в петле — контроль-10", 
     const round = (n: number) => ({
       toolUses: [
         { id: `j${n}`, name: "job_status", input: { jobId: "job-1" } },
-        { id: `k${n}`, name: "input_click", input: { target: { by: "coords", x: 10, y: 20 } } },
+        { id: `k${n}`, name: "input_click", input: { target: { by: "coords", x: 10, y: 20, frame: "k1af1" } } },
       ],
     });
     const llm = new MockLlmProvider([round(1), round(2), round(3), round(4), { text: "Готово, сэр." }, { text: "Готово, сэр." }]);

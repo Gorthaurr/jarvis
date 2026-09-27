@@ -87,6 +87,9 @@ import type { KnowledgeBase } from "../brain/knowledge/index.js";
 import { saveDemonstratedSkill } from "../brain/skills/record.js";
 import { type SkillProvider, hasGuardSteps, isLearnedMd, listSkills } from "../memory/skills.js";
 import { type ReplySink, type VoicePipeline, createVoicePipeline } from "../voice/index.js";
+import type { UserTurnMeta } from "../voice/pipeline.js";
+import { prewarmTts } from "../voice/tts-prewarm.js";
+import { ackPhrasesForTts } from "../brain/agent/promote-acks.js";
 import { TranscriptNormalizer } from "../voice/lexicon.js";
 import { routerLexicon } from "../brain/router/index.js";
 import { type FillerCache, synthesizeToBuffer } from "../voice/filler-cache.js";
@@ -665,10 +668,8 @@ export function makeSessionContext(
     ttsVoiceId: providers.voiceId,
     // Б5 second-chance (форензика 2026-07-10): near-miss обращения при живой задаче → «Вы мне, сэр?».
     hasActiveTask: () => brain.tasks.activeForUser(session.userId, undefined, isDev).length > 0,
-    // §10 realtime: прекеш-филлер «Секунду, сэр.» маскировал пол латентности Opus, НО на
-    // каждую реплику (включая болтовню) звучал как деферрал «погоди, занят» → Джарвис будто
-    // отделывается, а не разговаривает (фидбэк пользователя). С быстрым STT (deepgram) пауза
-    // Opus ~2с естественна и без заглушки. По умолчанию ВЫКЛ; включить: JARVIS_VOICE_FILLER=1.
+    // §10 realtime: прекеш-филлер «Секунду, сэр.» на КАЖДУЮ реплику (и болтовню) звучал как «погоди, занят» —
+    // Джарвис будто отделывается (фидбэк владельца); пауза ~2 с естественна и без него. Деф ВЫКЛ; JARVIS_VOICE_FILLER=1.
     ...(process.env.JARVIS_VOICE_FILLER === "1" ? { filler: providers.filler } : {}),
     // §11: голос активного режима-маски — берётся на каждый синтез из профиля, поэтому
     // «будь дерзким» меняет подачу мгновенно (без пересоздания пайплайна).
@@ -730,14 +731,13 @@ export function makeSessionContext(
     ...(process.env.JARVIS_VOICE_STREAMING === "0"
       ? {}
       : {
-          onUserTurnStream: (text: string, sink: ReplySink, meta?: { viaWake: boolean }): Promise<void> => {
+          onUserTurnStream: (text: string, sink: ReplySink, meta?: UserTurnMeta): Promise<void> => {
             if (ctxForBusy && handleControlUtterance(ctxForBusy, text, "voice")) {
               sink.done(""); // ack уже озвучен внутри handleTaskControl; ход закрывается тихо
               return Promise.resolve();
             }
             onOwnerPresent(); // доклад о ночных сбоях + сводка дня — при ПЕРВОЙ реплике владельца
-            // §P0: meta.viaWake гейтит слепой авто-реплей (жесты только по явному «Джарвис»).
-            return handleUserText(session, text, agentDeps, sink, meta).then(() => undefined);
+            return handleUserText(session, text, agentDeps, sink, meta).then(() => undefined); // §P0 viaWake; W3 V-1 turnSeq
           },
         }),
     // speak.chunk: аудио по WS — DEV-путь (в проде WebRTC, §5). Кодируем в base64.
@@ -751,9 +751,9 @@ export function makeSessionContext(
         // Realtime инкремент 0: клиент эхом вернёт gen в audio.played (mouth-to-ear того же хода).
         ...(c.gen !== undefined ? { gen: c.gen } : {}),
       }),
-    // Realtime инкремент 0 (a/б): mouth-to-ear в durable-метрики (metrics.jsonl), не только в лог —
-    // baseline P50/P95 «конец речи → первый звук у клиента» переживает деплой и доступен офлайн-разбору.
-    onMouthToEar: (ms, turnSeq) => metrics.recordMouthToEar(ms, turnSeq, session.userId),
+    // Realtime инкремент 0: mouth-to-ear (+ чем был первый звук) и W3 V-1 first_answer — в durable metrics.jsonl.
+    onMouthToEar: (ms, turnSeq, firstSound) => metrics.recordMouthToEar(ms, turnSeq, session.userId, firstSound),
+    onFirstAnswer: (ms, turnSeq, path) => metrics.recordFirstAnswer(ms, turnSeq, path, session.userId),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
     sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)
@@ -773,16 +773,15 @@ export function makeSessionContext(
     // Свободному владельцу — прежняя несрочная семантика (свежий вперёд + срок годности: шторм параллельных
     // задач не превращается в «скопом через минуты»). Проактив (поручение наблюдения) занятость уважает всегда.
     const origin = opts?.origin ?? "user-turn";
-    voice.speakQueued(reply.voice, origin === "user-turn" && ownerBusy(), { origin });
-    // §22: итог фоновой задачи — ТАКЖE в чат-историю (раньше уходил только голосом → в текст-канале
-    // результат web/MCP/задач не появлялся; печатающий/в mute пользователь его не видел).
+    voice.speakQueued(reply.voice, origin === "user-turn" && ownerBusy(), { origin, ...(opts?.answerOf !== undefined ? { answerOf: opts.answerOf } : {}) });
+    // §22: итог фоновой задачи — ТАКЖE в чат-историю (печатающий/в mute владелец иначе его не видел).
     if (reply.voice.trim()) session.send("chat", { role: "assistant", text: reply.voice });
     if (reply.display) session.send("ui.display", reply.display);
   };
-  // §9 проактивная речь: когда сработает таймер напоминания — фраза идёт в ТУ ЖЕ очередь озвучки
-  // (speakQueued произнесёт, когда канал свободен — не перебивая пользователя). Текст вербализуем
-  // (числа/латиница), как обычные реплики. Снимаем регистрацию на закрытии сессии.
-  // §9: напоминание — СРОЧНОЕ (будильник): озвучивается даже если пользователь занят (urgent=true).
+  // W3 V-5: ack промоушена — в кеш TTS заранее, той же подачей, что возьмёт пайплайн (первый «Берусь» без синтеза).
+  void prewarmTts(providers.tts, ackPhrasesForTts(), voice.voiceOpts());
+  // §9 проактивная речь (напоминание — СРОЧНОЕ, будильник): фраза идёт в ТУ ЖЕ очередь озвучки (speakQueued скажет,
+  // когда канал свободен), текст вербализуем; регистрацию снимаем на закрытии сессии.
   // DEV-СЕССИЯ НЕ ПОЛУЧАТЕЛЬ (контроль-4 волны D): у обоих сервисов есть `flushPending` — ночное
   // напоминание, сработавшее при закрытом клиенте, утренний прогон текст-драйвера произнёс бы в свой
   // сокет и пометил доставленным, и владелец не услышал бы его НИКОГДА. Тот же гейт уже стоит у
