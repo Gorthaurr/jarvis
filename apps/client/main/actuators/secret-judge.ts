@@ -9,7 +9,7 @@
  *    клика (без read.screen: цена UIA на каждую клавишу — игры жмут клавиши сериями); забой, оставляющий в поле карту.
  *  - invoke setValue: Луна по значению, поле по зеркалу handle (`•••`, подсказки).
  *  - click / invoke / mouse down: команда «Вставить» (paste-guard).
- * Состояние между инжекциями — secret-memory.ts (наполняет inject.ts после суда всех судей).
+ * Состояние между инжекциями — secret-memory.ts (наполняет injection-journal.ts из inject.ts после суда всех судей).
  */
 import { carriesCardNumber, createLogger } from "@jarvis/shared";
 import { fieldVerdict } from "./focused-field.js";
