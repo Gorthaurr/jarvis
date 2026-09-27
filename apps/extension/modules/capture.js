@@ -5,12 +5,36 @@
  * Провал не бросаем — {ok:false, code, error} данными: tab_not_visible | not_found | ref_stale | tab_closed |
  * capture_failed (ref во встроенном фрейме, область вне вьюпорта, отказ Chrome). Права: <all_urls> (уже в manifest).
  */
-import { parseRef } from "./utils.js";
+import { parseRef, sleep } from "./utils.js";
 import { readyTargetTab } from "./tab-find.js";
 import { pngSize, planCapture } from "./capture-math.js";
 import { renderCapture } from "./capture-render.js";
 
 const captureFail = (code, error) => ({ ok: false, code, error });
+
+/**
+ * W1-D5 (стенд): captureVisibleTab ограничен квотой Chrome — 2 вызова в секунду на расширение. Модель в одном раунде
+ * снимает полный кадр → зум → зум: третий снимок падал capture_failed. Очередь выдерживает квоту: между вызовами не
+ * меньше CAPTURE_GAP_MS, а отказ по квоте (джиттер часов Chrome) повторяется, пока не выйдет QUOTA_RETRY_MS.
+ */
+const CAPTURE_GAP_MS = 520;
+const QUOTA_RETRY_MS = 3000;
+const QUOTA_RE = /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/;
+let lastCaptureAt = 0;
+
+async function captureVisiblePaced(windowId) {
+  const giveUpAt = Date.now() + QUOTA_RETRY_MS;
+  for (;;) {
+    const wait = lastCaptureAt + CAPTURE_GAP_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastCaptureAt = Date.now();
+    try {
+      return await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+    } catch (e) {
+      if (!QUOTA_RE.test(String((e && e.message) || e)) || Date.now() + CAPTURE_GAP_MS > giveUpAt) throw e;
+    }
+  }
+}
 
 /**
  * W1-T4: снимки СЕРИАЛИЗОВАНЫ на весь SW. Две задачи, снимающие вкладки одновременно, перемежали «прокрутить ref в
@@ -55,7 +79,7 @@ async function captureOnce(url, tabId, opts, targetFn) {
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: targetFn, args: [localRef] });
     const vp = res && res.result;
     if (!vp || !vp.ok) return captureFail((vp && vp.code) || "capture_failed", (vp && vp.error) || "страница не ответила");
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    const dataUrl = await captureVisiblePaced(tab.windowId);
     const after = await chrome.tabs.get(tab.id);
     if (!after || !after.active || after.windowId !== tab.windowId) return captureFail("tab_not_visible", "вкладку сменили во время снимка — кадр не её");
     const size = pngSize(dataUrl);

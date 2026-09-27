@@ -13,7 +13,7 @@ import { assessWebCommit } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
 import { browserActParams, browserStepFields, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
-import { capInspectElements, clampInspectCap, refApprovalLabel, refFieldHint, rememberRefHints } from "./browser-refs.js";
+import { capInspectElements, clampInspectCap, refApprovalLabel, refCommitLabels, rememberRefHints } from "./browser-refs.js";
 import { nonDomFailure, pageErrorBlock } from "./browser-failure.js";
 import { type BatchReply, batchOutcome } from "./browser-batch-outcome.js";
 import { actObserved, historySeekMismatch, loadingNote, navigatedTo } from "./browser-act-outcome.js";
@@ -331,7 +331,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     const place = await resolvePlace(ctx, target);
     const actUrl = place.tabId !== undefined ? place.url : target.url;
     const actTab = place.tabId ?? target.tabId;
-    const label = typeof params.ref === "string" ? refFieldHint(ctx, params.ref) : undefined;
+    const label = refCommitLabels(ctx, params.ref); // W1-D6: только видимые подписи — не селектор/роль/тип
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params, label });
     // W1-2 + контракт approve: одобрение — видимое имя цели по ref (не склейка хинта) или text/name/title модели.
     const riskLabel = commitApprovalLabel(intent, params, refApprovalLabel(ctx, params.ref));
@@ -527,7 +527,7 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     // Поля шага — с верха и из params (ref/text/value бывают и там, и там), без служебных полей §14 (browser-params.ts).
     const { intent, fields: own } = browserStepFields(o);
     const ref = own.ref;
-    const label = typeof ref === "string" ? refFieldHint(ctx, ref) : undefined;
+    const label = refCommitLabels(ctx, ref); // W1-D6: видимые подписи, как у browser_act
     const risk = assessWebCommit({ host: place.host, url: place.url, unknownSite: place.unknown, intent, params: own, label });
     // W1-T3: одобрение — только с подписью (text/name/title шага или подпись ref), как у browser_act.
     const params = intentNeedsPageGuard(intent) ? { ...own, guard, ...(risk ? approvalFields(commitApprovalLabel(intent, own, refApprovalLabel(ctx, ref)), ref) : {}) } : own;

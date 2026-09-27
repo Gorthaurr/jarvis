@@ -14,6 +14,9 @@ import { codedError, hostOf, noTabError, sleep } from "./utils.js";
  */
 export async function findTargetTab(url, tabId) {
   const host = hostOf(url);
+  // W1-D3: сразу после browser_open навигация ещё не закоммичена — url вкладки about:blank/прежний, а адрес сайта лежит
+  // в pendingUrl. Поиск только по url отвечал «вкладка не открыта» на только что открытую вкладку.
+  const onHost = (t) => hostOf(t.url || "") === host || hostOf(t.pendingUrl || "") === host;
   if (tabId != null) {
     let t = null;
     try {
@@ -23,11 +26,11 @@ export async function findTargetTab(url, tabId) {
     }
     if (!t) throw codedError("tab_closed", "вкладка " + tabId + " закрыта — открой страницу заново (browser_open) или возьми tabId из browser_tabs");
     // Жива и (хост совпал ИЛИ ещё грузится about:blank ИЛИ хост вообще не задан) → это наша вкладка.
-    if (!host || hostOf(t.url || "") === host || !t.url || t.status !== "complete") return t;
+    if (!host || onHost(t) || !t.url || t.status !== "complete") return t;
   }
   if (host) {
     const tabs = await chrome.tabs.query({});
-    const matches = tabs.filter((t) => hostOf(t.url || "") === host);
+    const matches = tabs.filter(onHost);
     if (!matches.length) return null;
     return matches.find((t) => t.active) || matches[0];
   }

@@ -21,6 +21,7 @@ const harness = (await import(new URL("../../../../extension/test/cdp-harness.mj
 const TG = "https://web.telegram.org/a/";
 const BANK = "https://online.sberbank.ru/pay";
 const SHOP = "https://shop.example/cart";
+const QUIZ = "https://lms.vuz.example/mod/quiz/attempt.php?attempt=42&page=0";
 
 describe.skipIf(!harness.findChrome())("§14 сквозь стык: один вопрос владельцу на рискованный шаг по ref", () => {
   let page: Page;
@@ -64,6 +65,23 @@ describe.skipIf(!harness.findChrome())("§14 сквозь стык: один в�
     expect(r.isError, String(r.content)).toBeFalsy();
     expect(confirm).toHaveBeenCalledTimes(1);
     expect(await page.eval("window.__c.pay")).toBe(1);
+  });
+
+  // W1-D6 (стенд): подпись ref склеивалась с селектором/типом — «submit» из input[type=submit] судил навигацию теста сдачей.
+  it("Moodle: «Следующая страница» по ref (input type=submit) — без вопроса, форма попытки ушла", async () => {
+    const { ctx, confirm, ref } = await wire("moodle-attempt.html", QUIZ);
+    const r = await dispatchTool("browser_act", { url: QUIZ, tabId: 1, intent: "click", ref: ref("#mod_quiz-next-nav") }, ctx);
+    expect(r.isError, String(r.content)).toBeFalsy();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(await page.eval("window.__submits.length")).toBe(1);
+  });
+
+  it("вопрос владельцу — видимая подпись «Оплатить заказ», без CSS-селектора и роли", async () => {
+    const { ctx, confirm, ref } = await wire("approve.html", BANK);
+    await dispatchTool("browser_act", { url: BANK, tabId: 1, intent: "click", ref: ref("#pay") }, ctx);
+    const q = String(confirm.mock.calls[0]?.[0]);
+    expect(q).toMatch(/клик «Оплатить заказ» на online\.sberbank\.ru/u);
+    expect(q).not.toMatch(/#pay|button/u);
   });
 
   it("клик по ref «Оплатить заказ» на обычном сайте — вопрос от страницы, повтор проходит: 1 вопрос", async () => {

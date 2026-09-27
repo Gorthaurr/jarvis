@@ -7,6 +7,7 @@
  * - Страница отказалась печатать в секретное поле (`secret_field`, §0) — «вводит владелец», тоже без хатча:
  *   иначе следующим шагом был бы клик по полю пароля и input_type.
  * - Фрейм перезагрузился во время действия (`frame_gone`) — тоже «исход неизвестен» (W1-5); `no_effect` — элемент есть.
+ * - Страница сменила документ посреди действия и результата не вернула (`page_gone`, W1-D1) — «исход неизвестен».
  * - Закрытая вкладка (`tab_closed`/`tab_gone`) и несколько подходящих элементов (`ambiguous`) — элемента «нет» не значит, хатч
  *   к координатам не открываем.
  * - Текст ошибки расширения несёт текст СТРАНИЦЫ (подписи, варианты <option>, B-10) — только в <untrusted_content>;
@@ -52,7 +53,8 @@ export function nonDomFailure(what: string, intent: string, e: unknown): ToolRes
     if (!intentMayMutate(intent)) return err(`${what}: расширение не ответило (${msg}) — действие не подтверждено; можно повторить.`);
     return unknownOutcome(`${what}: расширение не ответило (${msg}). ${UNKNOWN_TAIL}`);
   }
-  const code = pageErrorCode(e);
+  // W1-D1: расширение до фикса слало «executeScript без результата» без кода — это тот же уход страницы (page_gone).
+  const code = pageErrorCode(e) ?? (/executeScript без результата/u.test(msg) ? "page_gone" : undefined);
   switch (code) {
     case "secret_field":
       return secretFieldRefusal(what);
@@ -65,6 +67,11 @@ export function nonDomFailure(what: string, intent: string, e: unknown): ToolRes
       // W1-5: фрейм перезагрузился ВО ВРЕМЯ действия — оно могло уже сработать. Не «не вышло» и не координаты.
       if (!intentMayMutate(intent)) return err(`${what}: целевой фрейм перезагрузился — действие не подтверждено; сделай browser_inspect и повтори.`);
       return unknownOutcome(`${what}: целевой фрейм перезагрузился во время действия. ${UNKNOWN_TAIL}`);
+    case "page_gone":
+      // W1-D1: документ страницы выгрузился посреди действия (клик увёл POST-форму «Оплатить»), вкладка на месте. Оплата
+      // могла пройти: «не вышло» + координаты = двойной клик. Чтение — просто повторить по свежей странице.
+      if (!intentMayMutate(intent)) return err(`${what}: страница перезагрузилась во время действия — результата нет. Повтори по свежей странице (browser_inspect / browser_read).`);
+      return unknownOutcome(`${what}: страница сменилась во время действия и результата не вернула. ${UNKNOWN_TAIL}`);
     case "frame_missing":
       // Р2 srv-regress-4: фрейм пропал ДО действия (инъекция не состоялась / штамп ref) — точно не выполняли.
       return err(`${what}: целевой фрейм пропал ДО действия — ничего не выполнял. Сделай browser_inspect и повтори по свежему снимку (не по координатам).`);
@@ -92,7 +99,7 @@ export function batchStopped(r: { error?: string; code?: string; stoppedAt?: num
   if (code === "secret_field") return secretFieldRefusal(`${head} — следующий шаг`);
   if (code === "tab_closed" || code === "tab_gone") return err(`${head} — вкладка закрыта; в другую не бил. Возьми tabId из browser_tabs.`);
   // W1-7/EXT-6/W1-5: шаг ушёл, а страница перешла или фрейм перезагрузился — исход шага неизвестен, остаток не делали.
-  if (code === "uncertain" || code === "frame_gone") return unknownOutcome(`${head}: исход последнего шага неизвестен (страница перешла/фрейм перезагрузился). ${UNKNOWN_TAIL}`);
+  if (code === "uncertain" || code === "frame_gone" || code === "page_gone") return unknownOutcome(`${head}: исход последнего шага неизвестен (страница перешла/фрейм перезагрузился). ${UNKNOWN_TAIL}`);
   // NEW-2 / submit-nav: шаг k ВЫПОЛНЕН (исход известен), но страница перешла или форма ушла — остаток бил бы по новой.
   if (code === "navigated") return err(`${head}: шаг ${k} выполнен, страница перешла на другой адрес; остальные шаги НЕ делал — пересними (browser_inspect) и продолжи.`);
   if (code === "submitted") return err(`${head}: на шаге ${k} форма отправлена; остальные шаги НЕ делал (страница могла смениться) — пересними (browser_inspect) и продолжи.`);

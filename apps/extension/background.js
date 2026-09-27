@@ -15,6 +15,7 @@ import { replyFor } from "./modules/reply.js";
 import { historyNav } from "./modules/history-nav.js";
 import { parseBatchSteps, batchStepStop } from "./modules/batch-plan.js";
 import { contextDied, contextLost } from "./modules/frame-gone.js";
+import { pageLeftOutcome } from "./modules/page-left.js";
 import { cookiesExport } from "./modules/cookies.js";
 import { startKeepAlive } from "./modules/keep-alive.js";
 
@@ -707,13 +708,16 @@ async function tabAct(url, intent, params, tabId) {
    *  • top-фрейм + клик + вкладка реально ушла (url сменился/грузится) → {ok:true, navigated, uncertain:true}
    *    — переход ВЕРОЯТЕН, но исход клика НЕ подтверждён (uncertain → сервер НЕ снимает verify-долг, ревью #1/#8).
    *  • иначе (не клик, или вкладка НЕ ушла) → исходная ошибка пробрасывается (провал, модель сверит/повторит).
+   * executeScript БЕЗ результата (исключения нет, документ выгрузился посреди функции) — modules/page-left.js.
    */
   const runInPage = async (world, func, args, frameId, before = false) => {
     const inj = { target: frameId !== undefined ? { tabId: tab.id, frameIds: [frameId] } : { tabId: tab.id }, func, args };
     if (world) inj.world = world;
     try {
       const [res] = await chrome.scripting.executeScript(inj);
-      return (res && res.result) || { ok: false, error: "executeScript без результата" };
+      if (res && res.result) return res.result;
+      // Без результата: документ выгрузился посреди функции (клик увёл POST-форму) — исход по месту и интенту (W1-D1).
+      return await pageLeftOutcome(tab.id, frameId, before, intent, urlBefore);
     } catch (e) {
       const msg = String((e && e.message) || e);
       const died = contextDied(msg);
@@ -753,7 +757,8 @@ async function tabAct(url, intent, params, tabId) {
     // состояние СОВПАЛО с намерением (play→playing, pause→paused); не совпало (autoplay-гейт / клик по не-той
     // кнопке) → честный провал, как mediaControlMain (иначе observed снял бы долг на «не заигравшем» play).
     // Нет медиаэлемента (MSE-плеер → st.playing undefined) — rc.playing НЕ ставим: не врём «играет» без ground-truth.
-    if (intent === "play" || intent === "pause") {
+    // Клик увёл страницу (uncertain) — плеер новой страницы о нём ничего не скажет: исход отдаём как есть.
+    if ((intent === "play" || intent === "pause") && !rc.uncertain) {
       let st = null;
       try { st = await runInPage(null, readMediaStateIsolated, [], explicitFrame); } catch { /* ignore */ }
       if (st && st.playing !== undefined) {

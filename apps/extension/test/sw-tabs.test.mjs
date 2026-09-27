@@ -70,6 +70,35 @@ describe("B-9: закрытая явная вкладка → tab_closed, а н�
   });
 });
 
+// W1-D3 (стенд): browser_inspect{url} сразу после browser_open медленной страницы — навигация не закоммичена, у вкладки
+// url = about:blank, адрес сайта — в pendingUrl. Поиск по хосту смотрел только url → «вкладка … не открыта».
+describe("W1-D3: вкладка, чья навигация ещё не закоммичена, находится по хосту (pendingUrl)", () => {
+  const racing = () => {
+    let n = 0;
+    const pending = { id: 8, windowId: 1, url: "about:blank", pendingUrl: "https://news.example.com/slow?ms=1500", status: "loading", active: false };
+    // Первое чтение — навигация в полёте; дальше страница догрузилась (waitForTabReady дождётся complete).
+    return { ...pending, get() { n += 1; return n > 1 ? { ...pending, url: pending.pendingUrl, pendingUrl: undefined, status: "complete" } : { ...pending }; } };
+  };
+
+  for (const [name, run] of [
+    ["tab.inspect", (env) => env.tabInspect("news.example.com", "", 80)],
+    ["tab.act click", (env) => env.tabAct("news.example.com", "click", { selector: "#more" })],
+  ]) {
+    it(`${name} по хосту бьёт в грузящуюся вкладку, не «не открыта» и не во вкладку владельца`, async () => {
+      const { env, calls } = swWith([{ ...OWNER_TAB }, racing()]);
+      await run(env);
+      assert.ok(calls.length > 0, "в страницу не пошли");
+      assert.ok(calls.every((c) => c.target.tabId === 8), JSON.stringify(calls.map((c) => c.target)));
+    });
+  }
+
+  it("pendingUrl ЧУЖОГО хоста — не наша вкладка: честное tab_gone", async () => {
+    const { env, calls } = swWith([{ ...OWNER_TAB }, { id: 8, url: "about:blank", pendingUrl: "https://other.example/", status: "loading" }]);
+    await assert.rejects(env.tabInspect("news.example.com", "", 80), (e) => e.code === "tab_gone");
+    assert.equal(calls.length, 0);
+  });
+});
+
 describe("B-15: browser_open не уводит вкладку владельца", () => {
   function openEnv(tabs) {
     const updates = [];

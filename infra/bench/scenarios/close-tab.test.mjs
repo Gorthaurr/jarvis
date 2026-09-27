@@ -1,6 +1,6 @@
 // Сценарий: вкладку закрыли ПОСРЕДИ работы инструмента (страница грузится 10 с, browser_inspect ждёт загрузки) →
 // честная ошибка «вкладка закрылась», никакого «сделано»; сервер фикстур страницу так и не отдал. Плюс гонка
-// «inspect{url} сразу после open» (ждёт фикса W1).
+// «inspect{url} сразу после open» (сторож фикса W1-D3).
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { begin, cdp, newRun, sleep, tool, traces, waitFacts } from "../lib.mjs";
