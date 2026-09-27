@@ -73,6 +73,7 @@ async function earlyKeyCheck(cmd: ActCommand): Promise<void> {
   const verb = cmd.do ?? "click";
   if (verb === "key" && cmd.combo) await preflightKeys([cmd.combo]);
   if (verb === "type" && cmd.text && cmd.text.length < PASTE_FROM_CHARS && /[\r\n]/u.test(cmd.text)) await preflightText(cmd.text);
+  if (cmd.enter === true) await preflightKeys(["Enter"]); // П4: Enter после печати — тот же рубеж, но до первой буквы
 }
 
 export async function act(cmd: ActCommand, opts: { restoreCursor: boolean }): Promise<ActOutcome> {
