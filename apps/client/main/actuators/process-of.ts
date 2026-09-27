@@ -77,6 +77,9 @@ export async function handleOf(f: InjectionFacts, e: MirrorEntry): Promise<ProcF
 
 const PID_SCAN_MAX = 6;
 const PID_GROUND_MS = 3_000;
+/** Весь поиск укладывается в прежний потолок одного ground (12 с): активное окно — до 6 с, каждый pid — до 3 с. */
+const GROUND_BUDGET_MS = 12_000;
+const ACTIVE_GROUND_MS = 6_000;
 
 /**
  * Мутирующий ground по role/name (клик/invoke по роли): активное окно, затем ≤ 6 верхних окон по z-order (свои и
@@ -84,12 +87,13 @@ const PID_GROUND_MS = 3_000;
  * Прежний ground без scope искал по всему столу: «Отправить» находилась в Telegram ПОД Chrome, а судился Chrome.
  */
 export async function groundForAction(q: { role: string; name?: string }): Promise<GroundResult & { pid?: number }> {
+  const until = Date.now() + GROUND_BUDGET_MS;
   const f = createInjectionFacts();
   const wins = (await f.rawWindows()) ?? [];
   const fg = wins.find((w) => w.foreground);
   let first: unknown;
   try {
-    const g = await ground({ ...q, scope: "active" });
+    const g = await ground({ ...q, scope: "active" }, ACTIVE_GROUND_MS);
     const pid = fg?.pid ?? (await f.snapshotPid()) ?? undefined;
     if (pid !== undefined) attachPid(g.handle, pid);
     return { ...g, ...(pid !== undefined ? { pid } : {}) };
@@ -99,12 +103,13 @@ export async function groundForAction(q: { role: string; name?: string }): Promi
   const tried = new Set<number>([process.pid, ...(fg ? [fg.pid] : [])]);
   let scanned = 0;
   for (const w of wins) {
-    if (scanned >= PID_SCAN_MAX) break;
+    const left = until - Date.now();
+    if (scanned >= PID_SCAN_MAX || left < 500) break;
     if (w.minimized || tried.has(w.pid)) continue;
     tried.add(w.pid);
     scanned += 1;
     try {
-      const g = await ground({ ...q, scope: String(w.pid) }, PID_GROUND_MS);
+      const g = await ground({ ...q, scope: String(w.pid) }, Math.min(PID_GROUND_MS, left));
       attachPid(g.handle, w.pid);
       return { ...g, pid: w.pid };
     } catch {
