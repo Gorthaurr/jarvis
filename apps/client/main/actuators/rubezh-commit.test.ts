@@ -139,6 +139,25 @@ describe("подпись — по найденному элементу; гра�
   });
 });
 
+describe("№11: физический клик по handle в рискованной программе — в точку, которую судим", () => {
+  it("Telegram: handle 12 «Сообщение» (поле), а поверх его центра — «Отправить» → click{x,y} в центр не уходит: вопрос «click:отправить»", async () => {
+    await run({ kind: "ui.snapshot" });
+    fake.at = () => ({ handle: 41, role: "Button", name: "Отправить", x: 200, y: 890, w: 90, h: 40 }); // всплывашка поверх поля
+    const r = await run({ kind: "input.click", target: { by: "handle", handle: "12" }, method: "physical" });
+    expect(r.error?.code).toBe("denied");
+    expect(needs(r)?.signature).toBe("click:отправить");
+    expect(fake.mutations()).toEqual([]);
+  });
+
+  it("в обычной программе — клик по handle как прежде (сайдкар сам берёт точку элемента)", async () => {
+    fake.windows = front(NOTEPAD);
+    fake.snapshot = { window: NOTEPAD.title, pid: NOTEPAD.pid, items: [el(12, "Сохранить")], truncated: false };
+    await run({ kind: "ui.snapshot" });
+    expect((await run({ kind: "input.click", target: { by: "handle", handle: "12" }, method: "physical" })).ok).toBe(true);
+    expect(fake.mutations().map((c) => c.args.handle)).toEqual(["12"]);
+  });
+});
+
 describe("G-10: точка — invoke только малого элемента", () => {
   it("ListItem 400×64 под точкой → физический click{x,y} ровно в точку (не invoke строки); в отчёте — «ListItem «Катя»»", async () => {
     fake.at = () => ({ handle: 60, role: "ListItem", name: "Катя", x: 0, y: 300, w: 400, h: 64 });
