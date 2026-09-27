@@ -14,7 +14,7 @@
  * Chrome не пускает, а WebRTC-UDP идёт мимо прокси — остаток, docs/SECURITY.md «SSRF по DNS».
  */
 import { type LookupFunction, type Socket, connect, createServer, isIPv6 } from "node:net";
-import { type HostLookup, createLogger, urlHostname } from "@jarvis/shared";
+import { type HostLookup, type LocalInterfaces, createLogger, urlHostname } from "@jarvis/shared";
 import { HostJudge } from "./jarvis-browser-proxy-judge.js";
 import { REP, readConnectTarget, reply } from "./jarvis-browser-socks5.js";
 
@@ -30,6 +30,8 @@ export interface ProxyBlock {
 export interface PinProxyOpts {
   /** Резолвер суда (DI стенда); нет → системный getaddrinfo. */
   lookup?: HostLookup;
+  /** Свои интерфейсы ПК для суда (DI стенда); нет → системный список. */
+  interfaces?: LocalInterfaces;
   /** ТОЛЬКО стенд: проверенный адрес → куда реально звонить (TEST-NET → 127.0.0.1). Суд — до подмены. */
   mapAddress?: (address: string) => string;
   onBlock?: (b: ProxyBlock) => void;
@@ -102,7 +104,7 @@ async function serve(sock: Socket, opts: PinProxyOpts, judge: HostJudge, blocked
 /** Поднять прокси на 127.0.0.1:<свободный>. Ошибка старта — бросок (браузер без пиннинга не запускаем). */
 export function startPinProxy(opts: PinProxyOpts = {}): Promise<PinProxy> {
   const blocked: ProxyBlock[] = [];
-  const judge = new HostJudge({ lookup: opts.lookup });
+  const judge = new HostJudge({ lookup: opts.lookup, interfaces: opts.interfaces });
   const socks = new Set<Socket>();
   const srv = createServer((sock) => {
     socks.add(sock);

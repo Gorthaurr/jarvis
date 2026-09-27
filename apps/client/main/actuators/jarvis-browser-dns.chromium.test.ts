@@ -8,8 +8,13 @@
  * Реверт-проверка (из копии): гард судит только имя (без checkHostPublic) → «роутер» получает запросы → красный;
  * «не разрешилось» пропускается → nx доходит до «роутера» → красный. Rebinding здесь — с предподключением Chrome, как в
  * бою (порядок «гард/прокси» плавает); детерминированный разбор суда прокси — jarvis-browser-pin.chromium.test.ts.
+ * Свой адрес ПК вне RFC1918 (Radmin VPN 26.x; адверс-ревью прокси 27.09): общее правило без `local-nets.ts` → Chrome
+ * доходит до слушателя на 0.0.0.0 → красный (на ПК без такого адреса кейс пропускается).
  */
 import { lookup as dnsLookup } from "node:dns/promises";
+import { createServer } from "node:http";
+import { networkInterfaces } from "node:os";
+import { isPrivateIp } from "@jarvis/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("electron", () => ({ screen: { getAllDisplays: () => [], getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1280, height: 800 } }) } }));
@@ -20,6 +25,11 @@ import type { JarvisBrowser } from "./jarvis-browser.js";
 const chrome = findChrome();
 const liveLoopback = async (name: string) => dnsLookup(name).then((a) => a.address === "127.0.0.1", () => false);
 const live = { localtest: await liveLoopback("localtest.me"), nip: await liveLoopback("127.0.0.1.nip.io") };
+/** Настоящие адреса интерфейсов этого ПК, которые правило диапазонов (без своих сетей) сочло бы публичными. */
+const ownOutsideRanges = Object.values(networkInterfaces())
+  .flatMap((l) => l ?? [])
+  .filter((a) => a.family === "IPv4" && !isPrivateIp(a.address, () => ({})))
+  .map((a) => a.address);
 
 describe.skipIf(!chrome)("B-14 (DNS): имя, указывающее внутрь, не уводит невидимый браузер в локальную сеть", () => {
   let router: Fixture;
@@ -124,5 +134,22 @@ describe.skipIf(!chrome)("B-14 (DNS): имя, указывающее внутр�
   it.skipIf(!live.nip)("живьём: http://127.0.0.1.nip.io:<порт>/ → честная ошибка, «роутер» без запросов", async () => {
     expect(await openErr(at("127.0.0.1.nip.io"))).toMatch(/^ERR .*внутренний адрес/u);
     expect(router.hits).toHaveLength(0);
+  }, 30_000);
+
+  // Живой факт адверс-ревью 27.09: сервис на 0.0.0.0 (PostgreSQL 5432, preview 4599) по адресу Radmin VPN ПК.
+  it.skipIf(!ownOutsideRanges.length)("живьём: свой адрес ПК вне RFC1918 (Radmin VPN) → честная ошибка, слушатель на 0.0.0.0 без запросов", async () => {
+    const got: string[] = [];
+    const lan = createServer((q, r) => void (got.push(q.url ?? "/"), r.end("<h1>LAN-SECRET</h1>")));
+    await new Promise<void>((r) => lan.listen(0, "0.0.0.0", () => r()));
+    const a = lan.address();
+    const port = typeof a === "object" && a ? a.port : 0;
+    try {
+      const r = await openErr(`http://${ownOutsideRanges[0]}:${port}/secret`);
+      expect(r).toMatch(/^ERR .*внутренний адрес/u);
+      expect(r).not.toContain("LAN-SECRET");
+      expect(got).toEqual([]);
+    } finally {
+      await new Promise((r) => lan.close(() => r(undefined)));
+    }
   }, 30_000);
 });
