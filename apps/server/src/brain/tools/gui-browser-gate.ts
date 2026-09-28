@@ -19,6 +19,8 @@ export interface BrowserPlace {
   /** Хост вкладки, по которой судили (для гранта и текста вопроса). */
   host?: string;
   category?: RiskCategory;
+  /** Адрес вкладки, по которой судили (грант «поручение = разрешение» сверяет его по пути, task-grant.ts). */
+  url?: string;
 }
 
 interface ListedTab {
@@ -64,10 +66,11 @@ export async function browserPlace(ctx: ToolContext, q: { process: string | null
     const url = typeof t.url === "string" ? t.url : "";
     const host = hostOfUrl(url);
     const category: RiskCategory | null = !host ? "unknown" : (riskyHostCategory(host) ?? (isLmsPage(url) ? "edu" : null));
-    return { host: host.replace(/^www\./u, ""), category };
+    return { host: host.replace(/^www\./u, ""), category, url };
   });
-  const risky = judged.find((j) => j.category !== null);
-  if (risky) return { safe: false, host: risky.host || undefined, category: risky.category ?? "unknown" };
+  // Два совпавших окна (edu и банк): берём самую строгую категорию, учебная — последней (ревью 28.09, L6).
+  const risky = judged.find((j) => j.category !== null && j.category !== "edu") ?? judged.find((j) => j.category !== null);
+  if (risky) return { safe: false, host: risky.host || undefined, category: risky.category ?? "unknown", url: risky.url };
   const hosts = [...new Set(judged.map((j) => j.host))];
   return { safe: true, ...(hosts.length === 1 ? { host: hosts[0] } : {}) };
 }

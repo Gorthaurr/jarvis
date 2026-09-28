@@ -380,7 +380,7 @@ export class MetricsCollector {
   }
 
   /** Подстраховка «Джарвис» (28.09): вердикт по фрагменту, на котором локальный детектор промолчал (accepted = спасённое пробуждение). */
-  recordWakeRescue(verdict: "accepted" | "rejected" | "skipped", ms: number | undefined, userId?: string): void {
+  recordWakeRescue(verdict: "accepted" | "window" | "rejected" | "skipped", ms: number | undefined, userId?: string): void {
     this.appendJsonl({ ts: new Date().toISOString(), type: "wake_rescue", verdict, ...(ms !== undefined ? { ms } : {}), ...(userId ? { userId } : {}) });
   }
 

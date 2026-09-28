@@ -179,7 +179,7 @@ export function interceptNotForMe(t: TurnCtx): AgentReply | null {
  */
 export function interceptPresence(t: TurnCtx): AgentReply | null {
   const { deps, clean, finishReply } = t;
-  if (t.machineTurn || t.meta?.viaWake === false) return null;
+  if (t.machineTurn || t.meta?.viaWake === false || deps.pendingClarify) return null; // висит вопрос консьержа — «тут/да» это ответ на него
   const kind = matchPresence(clean);
   if (!kind || (kind === "time" && deps.productMode)) return null; // часы сервера — часы владельца, не арендатора
   log.info("проверка связи/время — отвечаю без модели", { kind });

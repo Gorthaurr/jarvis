@@ -4,6 +4,7 @@
  * отчёт клиенту, user-takeover (no-op по концепции). `SessionContext` импортируется type-only →
  * рантайм-цикла с router-ws нет (router-ws тянет эти хендлеры как значения, обратно — только тип).
  */
+import { revokeOnControl, revokeTaskGrant } from "../brain/tools/task-grant.js";
 import type { TaskControl, TaskStatus } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
@@ -84,12 +85,16 @@ function ackControl(ctx: SessionContext, text: string, source: ControlSource): v
  * (ack только в чат, без голоса — §22). По умолчанию "voice" (обратная совместимость).
  */
 export function handleControlUtterance(ctx: SessionContext, text: string, source: ControlSource = "voice"): boolean {
+  // «Поручение = разрешение» (task-grant.ts): «стоп/отмени/вырубись» перехватываются ЗДЕСЬ и до handleUserText не
+  // доходят — отзыв гранта обязан быть тут, иначе он не срабатывал бы ровно тогда, когда учебная задача идёт.
+  revokeOnControl(ctx.session.userId, text);
   if (!ctx.agentDeps.tasks) return false;
   // ── KILLSWITCH автономии (волна E) — ПЕРЕД классификатором задач: «полный стоп» не должен
   // падать в обычное «стоп» (stop_tts). Позитивный anchored-матч, нормализация как у роутера
   // (та же грабля, что у resume-гарда: своя копия нормализации разошлась бы).
   const killswitch = matchAutonomyCommand(stripWakeAndFiller(text));
   if (killswitch === "freeze") {
+    revokeTaskGrant(ctx.session.userId);
     const cancelled = ctx.agentDeps.tasks.cancelUser(ctx.session.userId, ctx.agentDeps.devSession === true);
     const durable = autonomyFreeze().freeze(`команда владельца («${text.trim().slice(0, 60)}»)`);
     // Ack честный по составу: что остановлено, что НЕ остановлено (напоминания — заказаны на время),
@@ -278,6 +283,7 @@ export function handleTaskControl(
   // «отмени» без явного taskId → снять ВСЕ задачи ПОЛЬЗОВАТЕЛЯ (Б4а: по userId — переживает
   // reconnect со сменой sessionId). С явным taskId (кнопка в UI) — гранулярная отмена ниже.
   if (action === "cancel" && !taskId) {
+    revokeTaskGrant(ctx.session.userId);
     const cancelled = tasks.cancelUser(ctx.session.userId, ctx.agentDeps.devSession === true);
     ctx.voice.clearPendingSpeech(); // отменил всё → отложенные фоновые итоги тоже не нужны (ack — ПОСЛЕ сброса)
     for (const t of cancelled) emitTaskStatus(ctx.session, t);

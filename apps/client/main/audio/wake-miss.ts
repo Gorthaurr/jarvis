@@ -43,7 +43,9 @@ export interface WakeMissOptions {
 
 export class WakeMissMonitor {
   /** Потолок «вечной речи» выключен: сплошной фон просто уйдёт за maxSpeechMs и не станет кандидатом. */
-  private readonly vad = new EnergyVad({ threshold: 700, hangoverFrames: 12, onsetFrames: 3, maxSpeechFrames: 0 });
+  // hangover 25 кадров (500 мс, ревью 28.09 B4): пауза между «Джарвис» и командой (~0,3–0,4 с) не режет реплику на два
+  // отрезка — иначе первый (голое «Джарвис») уходил бы отдельным фрагментом, а команда терялась.
+  private readonly vad = new EnergyVad({ threshold: 700, hangoverFrames: 25, onsetFrames: 3, maxSpeechFrames: 0 });
   private readonly log: Logger;
   private readonly now: () => number;
   private readonly throttleMs: number;

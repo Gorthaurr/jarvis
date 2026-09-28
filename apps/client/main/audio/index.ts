@@ -137,6 +137,8 @@ const CAPTURE_ALIVE_MS = 2_000;
  * Джарвиса, в облако не шлём. Ход владельца после ответа всё равно идёт окном разговора (гейт открыт).
  */
 const RESCUE_ECHO_TAIL_MS = 1_500;
+/** Окно, в котором mute отменяет уже отправленный фрагмент подстраховки (разбор в облаке ≤ ~4 с + запас). */
+const RESCUE_CANCEL_WINDOW_MS = 6_000;
 
 export class AudioCoordinator {
   private wakeword: IWakeWord;
@@ -184,6 +186,8 @@ export class AudioCoordinator {
   private readonly wakeMiss: WakeMissMonitor;
   /** Когда динамик последний раз замолчал (0 — не играл): эхо-хвост для подстраховки. */
   private playbackEndedAt = 0;
+  /** Когда ушёл последний фрагмент подстраховки (0 — не уходил): mute вслед отменяет его исполнение на сервере. */
+  private lastRescueSentAt = 0;
 
   constructor(private readonly deps: AudioCoordinatorDeps) {
     this.wakeword = deps.wakeword ?? new MockWakeWord();
@@ -367,6 +371,14 @@ export class AudioCoordinator {
     this.muted = true;
     this.holdOpen = false;
     this.preroll = [];
+    // Ревью 28.09 (B1): при закрытом гейте closeGate ниже выходит раньше, и запись подстраховки (VAD, кольцо, отрезок) жила
+    // сквозь mute — фраза «до mute» уходила в облако после unmute. Сбрасываем явно; фрагмент, уже отправленный серверу,
+    // отменяем speech_cancel (сервер не запустит по нему ход).
+    this.wakeMiss.reset();
+    if (this.lastRescueSentAt > 0 && this.now() - this.lastRescueSentAt < RESCUE_CANCEL_WINDOW_MS && !this.speechOpen) {
+      this.deps.sendVad("speech_cancel");
+      this.lastRescueSentAt = 0;
+    }
     this.playbackActive = false; // звук гасится вместе с mute → снимаем barge-окно
     this.resetBargeSustain(); // окно закрыто — счётчик устойчивости не должен пережить разрыв (ревью #close)
     // Контроль-1 №8 (ревью 2026-09-24): выключили посреди фразы — это ОТМЕНА реплики, а не её конец. speech_end (его
@@ -419,14 +431,23 @@ export class AudioCoordinator {
     if (this.lastServerState !== "idle" || this.bargeWindowActive()) return;
     if (this.playbackEndedAt > 0 && this.now() - this.playbackEndedAt < RESCUE_ECHO_TAIL_MS) return;
     const sent = this.deps.sendRescue(seg.pcm, { ms: seg.ms, peak: seg.peak });
+    if (sent) this.lastRescueSentAt = this.now();
     this.log.info("wake-rescue: фрагмент отправлен на проверку облачным STT", { ms: seg.ms, peak: seg.peak, sent });
   }
 
   /** Сервер нашёл обращение во фрагменте и принял ход: открываем гейт под продолжение — как после обычного «Джарвис». */
-  onWakeRescued(): void {
+  onWakeRescued(bare = false): void {
     if (this.muted || this.gateOpen || !this.localWakeAvailable()) return;
     this.openGate("wake-rescue");
-    this.log.info("wake-rescue: обращение спасено облачным STT — гейт открыт под продолжение");
+    // bare: во фрагменте было только «Джарвис» (ход не запущен, у сервера окно адресации) — владелец договаривает; начало
+    // команды лежит в пре-ролле, проигрываем его в открывшийся поток. НЕ bare: ход по фрагменту уже идёт — пре-ролл повторять
+    // нельзя (дубль команды).
+    if (bare) {
+      const frames = this.preroll;
+      this.preroll = [];
+      for (const f of frames) this.streamFrame(f);
+    }
+    this.log.info("wake-rescue: обращение спасено облачным STT — гейт открыт под продолжение", { bare });
   }
 
   // ── внутреннее ─────────────────────────────────────────────

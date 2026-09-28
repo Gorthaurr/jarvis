@@ -91,7 +91,7 @@ function rememberApproval(ctx: ToolContext, place: WebPlace, label: string): voi
  */
 export async function confirmWebCommit(ctx: ToolContext, place: WebPlace, risk: Pick<CommitRisk, "summary" | "what" | "where">, label: string): Promise<true | ToolResult> {
   if (takeApproval(ctx, place, label)) return true;
-  if (eduGrantedAt(ctx.userId, place)) return true; // владелец сам поручил учебное дело — LMS-коммиты без вопроса (task-grant.ts)
+  if (eduGrantedAt(ctx, place, label)) return true; // владелец сам поручил учебное дело: LMS-коммит (по подписи) на LMS-странице — без вопроса (task-grant.ts)
   if (!ctx.confirm) return err(`${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
   const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
   if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} на ${risk.where}`), gate.outcome);

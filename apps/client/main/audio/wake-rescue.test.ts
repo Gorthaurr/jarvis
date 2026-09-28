@@ -35,7 +35,7 @@ function setup(opts: { sendRescue?: boolean } = {}) {
   /** Отрезок речи: n громких кадров + тишина до конца отрезка VAD (hangover 12 кадров). */
   const utter = (frames: number, level = LOUD): void => {
     for (let i = 0; i < frames; i += 1) ac.ingest(frame(level));
-    for (let i = 0; i < 20; i += 1) ac.ingest(frame(10));
+    for (let i = 0; i < 30; i += 1) ac.ingest(frame(10)); // > hangover WakeMissMonitor (25 кадров = 500 мс)
   };
   return { ac, sendRescue, sendFrame, sendVad, onMicState, advance, utter };
 }
@@ -52,6 +52,16 @@ describe("отбор отрезков для подстраховки", () => {
     expect(pcm.length).toBeLessThanOrEqual((50 + 12 + 25) * 320); // + hangover + пре-ролл, не весь поток
     expect(Math.max(...pcm)).toBe(LOUD); // это реальный звук, а не нули
     expect(sendFrame).not.toHaveBeenCalled(); // стрим по-прежнему закрыт — уходит только отрезок
+  });
+
+  it("B4: «Джарвис» — пауза 0,3 с — команда = ОДИН отрезок, а не два (голое «Джарвис» отдельно и потерянная команда)", () => {
+    const { ac, sendRescue } = setup();
+    for (let i = 0; i < 30; i += 1) ac.ingest(frame(LOUD)); // «Джарвис» 0,6 с
+    for (let i = 0; i < 15; i += 1) ac.ingest(frame(10)); // пауза 0,3 с
+    for (let i = 0; i < 40; i += 1) ac.ingest(frame(LOUD)); // «включи музыку» 0,8 с
+    for (let i = 0; i < 30; i += 1) ac.ingest(frame(10));
+    expect(sendRescue).toHaveBeenCalledTimes(1);
+    expect(sendRescue.mock.calls[0]![1].ms).toBeGreaterThan(1_400);
   });
 
   it.each([
@@ -96,6 +106,32 @@ describe("отбор отрезков для подстраховки", () => {
     expect(sendRescue).not.toHaveBeenCalled();
   });
 
+  it("B1: mute ПОСРЕДИ фразы при закрытом гейте → после unmute «до-mute» звук в облако не уходит и не склеивается с новой речью", () => {
+    const { ac, sendRescue, advance } = setup();
+    for (let i = 0; i < 40; i += 1) ac.ingest(frame(LOUD)); // громкая речь, mute не дожидаясь конца
+    ac.mute();
+    advance(3_600_000);
+    ac.activate(); // владелец снял mute и молчит
+    for (let i = 0; i < 30; i += 1) ac.ingest(frame(10));
+    expect(sendRescue).not.toHaveBeenCalled();
+  });
+
+  it("B1: mute сразу после отправки фрагмента → серверу speech_cancel (разбор в облаке не должен запустить ход)", () => {
+    const { ac, utter, sendRescue, sendVad } = setup();
+    utter(50);
+    expect(sendRescue).toHaveBeenCalledTimes(1);
+    ac.mute();
+    expect(sendVad).toHaveBeenCalledWith("speech_cancel");
+  });
+
+  it("mute спустя долгое время после отправки — speech_cancel не шлётся (фрагмент давно разобран)", () => {
+    const { ac, utter, sendVad, advance } = setup();
+    utter(50);
+    advance(30_000);
+    ac.mute();
+    expect(sendVad).not.toHaveBeenCalledWith("speech_cancel");
+  });
+
   it("гейт открыт (обычный wake сработал) → подстраховка не нужна, отрезок не режется", () => {
     const { ac, utter, sendRescue } = setup();
     ac.pushToTalk("hotkey");
@@ -126,6 +162,18 @@ describe("вердикт сервера", () => {
     expect(onMicState).toHaveBeenLastCalledWith(true);
     ac.ingest(frame(LOUD));
     expect(sendFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it("bare («Джарвис» без команды): пре-ролл проигрывается в открывшийся поток — там начало команды; НЕ bare — пре-ролл не повторяется (дубль)", () => {
+    const a = setup();
+    for (let i = 0; i < 10; i += 1) a.ac.ingest(frame(LOUD)); // копится пре-ролл закрытого гейта
+    a.ac.onWakeRescued(true);
+    expect(a.sendFrame).toHaveBeenCalledTimes(10);
+    const b = setup();
+    for (let i = 0; i < 10; i += 1) b.ac.ingest(frame(LOUD));
+    b.ac.onWakeRescued(false);
+    expect(b.ac.streaming).toBe(true);
+    expect(b.sendFrame).not.toHaveBeenCalled();
   });
 
   it("при mute вердикт гейт НЕ открывает: красная кнопка не врёт", () => {

@@ -6,14 +6,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { ISttProvider, ITtsProvider, SttStream, TtsChunk, TtsStream } from "../integrations/voice-providers.js";
 import { VoicePipeline } from "./pipeline.js";
 import type { VoiceState } from "./state.js";
-import { RESCUE_MAX_BYTES, RESCUE_MAX_PER_HOUR, RESCUE_MIN_BYTES, RESCUE_MIN_GAP_MS, WakeRescue } from "./wake-rescue.js";
+import { RESCUE_BACKOFF_MS, RESCUE_MAX_BYTES, RESCUE_MAX_PER_HOUR, RESCUE_MIN_BYTES, RESCUE_MIN_GAP_MS, RESCUE_NOISE_REJECTS, WakeRescue } from "./wake-rescue.js";
 
 const PCM = new ArrayBuffer(48_000); // 1,5 с при 16 кГц s16le
 const silentLog = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 function judge(over: Partial<ConstructorParameters<typeof WakeRescue>[0]> = {}) {
   const clock = { t: 1_000_000 };
-  const accept = vi.fn(() => true);
+  const accept = vi.fn((_t: string): "turn" | "window" | false => "turn");
   const transcribe = vi.fn(async () => "Джарвис, ты меня слышишь?");
   const log = { ...silentLog, info: vi.fn(), warn: vi.fn(), debug: vi.fn() };
   const r = new WakeRescue({ transcribe, isIdle: () => true, accept, now: () => clock.t, log: log as never, ...over });
@@ -99,23 +99,104 @@ describe("WakeRescue: судья фрагмента", () => {
   });
 
   it("потолок в час: после RESCUE_MAX_PER_HOUR разборов подстраховка молчит; через час снова работает", async () => {
-    const { r, clock, transcribe } = judge({ transcribe: vi.fn(async () => "фон") });
+    const { r, clock, transcribe } = judge({ transcribe: vi.fn(async () => "Джарвис") });
     for (let i = 0; i < RESCUE_MAX_PER_HOUR; i += 1) {
       clock.t += RESCUE_MIN_GAP_MS + 1;
-      expect(await r.judge(PCM, 16_000)).toBe("rejected");
+      expect(await r.judge(PCM, 16_000)).toBe("accepted");
     }
     clock.t += RESCUE_MIN_GAP_MS + 1;
     expect(await r.judge(PCM, 16_000)).toBe("skipped");
     expect(transcribe).toHaveBeenCalledTimes(RESCUE_MAX_PER_HOUR);
     clock.t += 3_600_001;
+    expect(await r.judge(PCM, 16_000)).toBe("accepted");
+  });
+});
+
+describe("WakeRescue: ревью 28.09 (B2/B3/B5/B7)", () => {
+  it.each(["Эй, Джарвис, включи музыку", "Джарвис", "Джарвис, ты слышишь?", "Жорвит, включи"])("строгое обращение «%s» — принято", async (t) => {
+    const { r, accept } = judge({ transcribe: vi.fn(async () => t) });
+    expect(await r.judge(PCM, 16_000)).toBe("accepted");
+    expect(accept).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "я вчера сказал Джарвису открыть ютуб", // склонение и третье лицо
+    "Железный человек: Джарвис, запусти протокол", // обращение из фильма не в начале
+    "Гарик, подай мне ключ", // чужое имя (fuzzy мог принять)
+    "смотри как Джавид играет",
+    "jars of clay",
+  ])("«%s» — не будит подстраховку (решает один текст, без акустики)", async (t) => {
+    const { r, accept } = judge({ transcribe: vi.fn(async () => t) });
     expect(await r.judge(PCM, 16_000)).toBe("rejected");
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("B2: нормализатор лексики (он пишет входной текст в лог) отвергнутому фрагменту НЕ показывается; принятому — показывается", async () => {
+    const normalize = vi.fn((t: string) => t);
+    const rej = judge({ transcribe: vi.fn(async () => "вчера играли в Dota с Мишей"), normalize });
+    expect(await rej.r.judge(PCM, 16_000)).toBe("rejected");
+    expect(normalize).not.toHaveBeenCalled();
+    const acc = judge({ transcribe: vi.fn(async () => "Джарвис, открой Dota"), normalize });
+    await acc.r.judge(PCM, 16_000);
+    expect(normalize).toHaveBeenCalledTimes(1);
+  });
+
+  it("B5: микрофон выключили/сессия сброшена (эпоха) за время разбора → фрагмент устарел, ход не запускается", async () => {
+    let epoch = 0;
+    const { r, accept } = judge({
+      epoch: () => epoch,
+      transcribe: vi.fn(async () => {
+        epoch += 1;
+        return "Джарвис, отправь Кате что я опаздываю";
+      }),
+    });
+    expect(await r.judge(PCM, 16_000)).toBe("skipped");
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it("B7: подряд RESCUE_NOISE_REJECTS фрагментов без обращения (голосовой чат/ТВ) → пауза; «Джарвис» в паузу не разбирается, после — снова", async () => {
+    let said = "ну и что он тебе ответил";
+    const { r, clock, transcribe } = judge({ transcribe: vi.fn(async () => said) });
+    for (let i = 0; i < RESCUE_NOISE_REJECTS; i += 1) {
+      clock.t += RESCUE_MIN_GAP_MS + 1;
+      expect(await r.judge(PCM, 16_000)).toBe("rejected");
+    }
+    said = "Джарвис, привет";
+    clock.t += RESCUE_MIN_GAP_MS + 1;
+    expect(await r.judge(PCM, 16_000)).toBe("skipped"); // пауза: в облако не идёт
+    expect(transcribe).toHaveBeenCalledTimes(RESCUE_NOISE_REJECTS);
+    clock.t += RESCUE_BACKOFF_MS + 1;
+    expect(await r.judge(PCM, 16_000)).toBe("accepted");
+  });
+
+  it("принятое обращение обнуляет счётчик фона", async () => {
+    let said = "болтовня";
+    const { r, clock } = judge({ transcribe: vi.fn(async () => said) });
+    for (let i = 0; i < RESCUE_NOISE_REJECTS - 1; i += 1) {
+      clock.t += RESCUE_MIN_GAP_MS + 1;
+      await r.judge(PCM, 16_000);
+    }
+    said = "Джарвис";
+    clock.t += RESCUE_MIN_GAP_MS + 1;
+    expect(await r.judge(PCM, 16_000)).toBe("accepted");
+    said = "болтовня";
+    for (let i = 0; i < RESCUE_NOISE_REJECTS - 1; i += 1) {
+      clock.t += RESCUE_MIN_GAP_MS + 1;
+      expect(await r.judge(PCM, 16_000)).toBe("rejected"); // паузы нет: счёт начался заново
+    }
   });
 });
 
 // ---------- настоящий VoicePipeline ----------
 class NullStt implements SttStream {
   readonly live = false;
-  onPartial() {}
+  private cb?: (p: { text: string; final: boolean }) => void;
+  onPartial(cb: (p: { text: string; final: boolean }) => void) {
+    this.cb = cb;
+  }
+  emit(p: { text: string; final: boolean }) {
+    this.cb?.(p);
+  }
   onError() {}
   onClose() {}
   pushAudio() {}
@@ -123,9 +204,11 @@ class NullStt implements SttStream {
 }
 class RescueStt implements ISttProvider {
   readonly live = false;
+  lastStream: NullStt | null = null;
   transcribeOnce = vi.fn(async (_pcm: ArrayBuffer, _sr: number) => "Джарвис, ты меня слышишь?");
   open(): SttStream {
-    return new NullStt();
+    this.lastStream = new NullStt();
+    return this.lastStream;
   }
 }
 class NullTts implements ITtsProvider {
@@ -166,13 +249,22 @@ describe("VoicePipeline.rescueWake: настоящий конвейер", () => 
     expect(onWakeRescue).toHaveBeenCalledWith("accepted", 1500);
   });
 
-  it("голое «Джарвис» — тоже ход (модель/перехват ответит «Слушаю»)", async () => {
+  it("B4: голое «Джарвис» — ход НЕ запускается («Слушаю, сэр» на половине фразы), открыто окно адресации; следующая реплика без слова принимается", async () => {
     const stt = new RescueStt();
     stt.transcribeOnce.mockResolvedValue("Джарвис.");
-    const { pipe, onUserTurn } = pipeline(stt);
-    expect(await pipe.rescueWake(PCM, 16_000)).toBe("accepted");
+    const onWakeRescue = vi.fn();
+    const { pipe, onUserTurn } = pipeline(stt, { onWakeRescue });
+    expect(await pipe.rescueWake(PCM, 16_000)).toBe("window");
+    await settle();
+    expect(onUserTurn).not.toHaveBeenCalled();
+    expect(pipe.state).toBe("idle");
+    expect(onWakeRescue).toHaveBeenCalledWith("window", undefined);
+    // окно адресации (как после локального wake): продолжение без слова «Джарвис» в тексте — команда
+    pipe.onAudioFrame(new ArrayBuffer(640)); // кадр из клиента (гейт открыт) будит цикл
+    stt.lastStream!.emit({ text: "включи музыку", final: true });
     await settle();
     expect(onUserTurn).toHaveBeenCalledTimes(1);
+    expect(String((onUserTurn.mock.calls[0] as unknown[])[0])).toMatch(/включи музыку/u);
   });
 
   it("фрагмент без обращения → rejected, агент не разбужен, конвейер в покое", async () => {
@@ -193,6 +285,32 @@ describe("VoicePipeline.rescueWake: настоящий конвейер", () => 
     pipe.onWake(); // listening — как после обычного «Джарвис»
     expect(await pipe.rescueWake(PCM, 16_000)).toBe("skipped");
     expect(stt.transcribeOnce).not.toHaveBeenCalled();
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("B5: dispose() во время разбора → ход в мёртвом конвейере НЕ запускается (пайплайн умер вместе с сессией)", async () => {
+    const stt = new RescueStt();
+    let release: (t: string) => void = () => {};
+    stt.transcribeOnce.mockImplementation(() => new Promise<string>((res) => { release = res; }));
+    const { pipe, onUserTurn } = pipeline(stt);
+    const p = pipe.rescueWake(PCM, 16_000);
+    pipe.dispose();
+    release("Джарвис, отправь Кате что я опаздываю");
+    expect(await p).toBe("skipped");
+    await settle();
+    expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it("B1: speech_cancel (mute клиента) во время разбора → ход не запускается", async () => {
+    const stt = new RescueStt();
+    let release: (t: string) => void = () => {};
+    stt.transcribeOnce.mockImplementation(() => new Promise<string>((res) => { release = res; }));
+    const { pipe, onUserTurn } = pipeline(stt);
+    const p = pipe.rescueWake(PCM, 16_000);
+    pipe.onVadEvent("speech_cancel");
+    release("Джарвис, включи музыку");
+    expect(await p).toBe("skipped");
+    await settle();
     expect(onUserTurn).not.toHaveBeenCalled();
   });
 

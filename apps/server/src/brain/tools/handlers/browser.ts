@@ -10,9 +10,9 @@ import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
 import { navDnsRefusal } from "../nav-dns.js";
-import { assessWebCommit } from "../commit-gate.js";
+import { assessWebCommit, webCommitLabelParts } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
-import { eduGrantedAt } from "../task-grant.js";
+import { eduLabelOk, eduPlaceGranted } from "../task-grant.js";
 import { browserActParams, browserStepFields, intentMayMutate, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refApprovalLabel, refCommitLabels, rememberRefHints } from "./browser-refs.js";
@@ -546,12 +546,13 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     // иначе расширение взяло бы другой), все поля в params; ref на верху = судимый (расширение берёт s.ref раньше
     // params.ref — {ref:"пароль", params:{ref:"поиск"}} судился бы по полю поиска, а печатал в поле пароля).
     const judgedRef = typeof ref === "string" ? { ref } : {};
-    return { intent, step: { intent, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null };
+    // Грант «поручение = разрешение» снимает вопрос только с шага, чья видимая подпись — LMS-коммит (task-grant.ts).
+    return { intent, step: { intent, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null, lmsOk: risk !== null && eduLabelOk(webCommitLabelParts(intent, own, label)) };
   });
   const noIntent = judged.findIndex((j) => !j.intent);
   if (noIntent >= 0) return err(`browser_batch: у шага ${noIntent + 1} нет intent — ничего не делал. Укажи intent каждому шагу.`);
   const risky = judged.map((j) => j.risk).filter((x): x is string => x !== null);
-  if (risky.length > 0 && !eduGrantedAt(ctx.userId, place)) {
+  if (risky.length > 0 && !(eduPlaceGranted(ctx, place) && judged.every((j) => j.risk === null || j.lmsOk))) {
     if (!ctx.confirm) return err(`browser_batch: шаги ${risky.join("; ")} на ${where} — необратимые, нужно подтверждение владельца (§14), а канал недоступен.`);
     const gate = await ctx.confirm(`Необратимые шаги берста на ${where}: ${risky.join("; ")}.\nПодтвердить?`, "irreversible");
     if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `берст на ${where}`), gate.outcome);

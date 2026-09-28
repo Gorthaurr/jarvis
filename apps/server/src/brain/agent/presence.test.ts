@@ -49,6 +49,15 @@ describe("matchPresence: точные формы", () => {
     "сколько времени осталось до конца теста",
     "приём таблеток по расписанию",
     "тут кнопка не работает",
+    // L1 (ревью 28.09): голые «тут/здесь/там» — ответ на вопрос модели, не проверка связи
+    "тут",
+    "давай здесь",
+    "ну там",
+    "слушай, тут",
+    "Джарвис, на втором мониторе",
+    // L2: приветствие — не «Слушаю, сэр»
+    "Джарвис, привет",
+    "Джарвис, здравствуй",
     "",
   ])("«%s» → не проверка связи", (text) => {
     expect(matchPresence(text)).toBeNull();
@@ -94,6 +103,14 @@ describe("петлёй (handleUserText): без модели и без фоно�
     expect(reply.voice).toBe(voice);
     expect(llm.requests).toHaveLength(0);
     expect(d.tasks?.activeForUser("u1", undefined, false) ?? []).toHaveLength(0);
+  });
+
+  it("L3: висит уточнение консьержа («Рекомендации или конкретное видео?») — «Джарвис, ты тут?» не перехватывается", async () => {
+    const llm = new MockLlmProvider([{ text: "Да, сэр." }]);
+    const d = deps(llm);
+    d.pendingClarify = { key: "youtube" };
+    const reply = await handleUserText(session(), "Джарвис, ты тут?", d);
+    expect(reply.voice).not.toBe("Тут, сэр.");
   });
 
   it("ответ идёт в рабочую память диалога", async () => {

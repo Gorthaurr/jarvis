@@ -39,6 +39,26 @@ describe("audio.wake_rescue через роутер", () => {
     });
   });
 
+  it("B4: во фрагменте только «Джарвис» → клиенту accepted+bare (проиграть пре-ролл), ход не запущен", async () => {
+    await withEnv(ENV, async () => {
+      const r = rig("Джарвис.");
+      await dispatch(r.ctx, env(rescueMsg));
+      await vi.waitFor(() => expect(r.sends).toHaveBeenCalledWith("wake.rescue.result", { accepted: true, bare: true }), { timeout: 2_000, interval: 10 });
+      expect(r.chunks).toHaveLength(0);
+      expect(r.rec).toHaveBeenCalledWith("window", 1500, "u1");
+    });
+  });
+
+  it("B10: фрагмент, простоявший в буфере рукопожатия (старше 6 с), не исполняется", async () => {
+    await withEnv(ENV, async () => {
+      const r = rig("Джарвис, сколько будет два плюс два?");
+      await dispatch(r.ctx, { ...env(rescueMsg), ts: Date.now() - 20_000 });
+      await new Promise((res) => setTimeout(res, 30));
+      expect(r.transcribeOnce).not.toHaveBeenCalled();
+      expect(r.chunks).toHaveLength(0);
+    });
+  });
+
   it("обращения нет → ход НЕ запущен, результат клиенту не шлётся, метрика rejected, звука нет", async () => {
     await withEnv(ENV, async () => {
       const r = rig("да я вчера ему то же самое сказал");
