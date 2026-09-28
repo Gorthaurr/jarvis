@@ -113,7 +113,7 @@ describe("WakeRescue: судья фрагмента", () => {
 });
 
 describe("WakeRescue: ревью 28.09 (B2/B3/B5/B7)", () => {
-  it.each(["Эй, Джарвис, включи музыку", "Джарвис", "Джарвис, ты слышишь?", "Жорвит, включи"])("строгое обращение «%s» — принято", async (t) => {
+  it.each(["Эй, Джарвис, включи музыку", "Джарвис", "Джарвис, ты слышишь?", "Жорвит, включи", "Э-э, Джарвис, открой", "Ну вот, Джарвис, открой", "Ну давай, Джарвис, включи"])("строгое обращение «%s» — принято", async (t) => {
     const { r, accept } = judge({ transcribe: vi.fn(async () => t) });
     expect(await r.judge(PCM, 16_000)).toBe("accepted");
     expect(accept).toHaveBeenCalledTimes(1);
@@ -125,6 +125,11 @@ describe("WakeRescue: ревью 28.09 (B2/B3/B5/B7)", () => {
     "Гарик, подай мне ключ", // чужое имя (fuzzy мог принять)
     "смотри как Джавид играет",
     "jars of clay",
+    // раунд 2 (#5): фамилии и омонимы из общего CORE — в строгий список не входят
+    "Камала Гаррис заявила, что выборы",
+    "Гаррис заявила о выборах",
+    "Jarry is coming",
+    "Ярвис пришёл вчера",
   ])("«%s» — не будит подстраховку (решает один текст, без акустики)", async (t) => {
     const { r, accept } = judge({ transcribe: vi.fn(async () => t) });
     expect(await r.judge(PCM, 16_000)).toBe("rejected");
@@ -312,6 +317,27 @@ describe("VoicePipeline.rescueWake: настоящий конвейер", () => 
     expect(await p).toBe("skipped");
     await settle();
     expect(onUserTurn).not.toHaveBeenCalled();
+  });
+
+  it.each(["Эй, Джарвис.", "Слушай, Джарвис.", "Ну, Джарвис…", "Привет, Джарвис", "Окей, Джарвис", "Хорошо, Джарвис.", "Так, Джарвис."])(
+    "раунд 2 (#6): «%s» — тоже голое обращение (окно, а не ход на обрывке «Эй»)",
+    async (text) => {
+      const stt = new RescueStt();
+      stt.transcribeOnce.mockResolvedValue(text);
+      const { pipe, onUserTurn } = pipeline(stt);
+      expect(await pipe.rescueWake(PCM, 16_000)).toBe("window");
+      await settle();
+      expect(onUserTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("раунд 2 (#6) контроль: «Эй, Джарвис, включи музыку» — обычный ход с командой", async () => {
+    const stt = new RescueStt();
+    stt.transcribeOnce.mockResolvedValue("Эй, Джарвис, включи музыку");
+    const { pipe, onUserTurn } = pipeline(stt);
+    expect(await pipe.rescueWake(PCM, 16_000)).toBe("accepted");
+    await settle();
+    expect(String((onUserTurn.mock.calls[0] as unknown[])[0])).toMatch(/включи музыку/u);
   });
 
   it("провайдер без разового распознавания (mock/whisper) → skipped, без исключения", async () => {

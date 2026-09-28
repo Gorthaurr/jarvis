@@ -38,7 +38,8 @@ import {
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
 import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWakeDetailed, wakeNearMissScore } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
-import { type RescueVerdict, WakeRescue } from "./wake-rescue.js";
+import { PipelineRescue } from "./pipeline-rescue.js";
+import type { RescueVerdict } from "./wake-rescue.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
 import type { ISpeakerVerifier, VoiceProfile } from "./speaker/verifier.js";
@@ -598,47 +599,26 @@ export class VoicePipeline {
     this.dispatch({ type: "wake" });
   }
 
-  /** Подстраховка слова «Джарвис» (28.09, wake-rescue.ts): судим фрагмент разовым STT; есть обращение — ход принят. */
-  private rescue?: WakeRescue;
-  /** Эпоха сброса подстраховки: mute / speech_cancel / dispose увеличивают — фрагмент, разбираемый в этот момент, устарел. */
-  private rescueEpoch = 0;
-  private disposed = false;
-  async rescueWake(pcm: ArrayBuffer, sampleRate: number, meta: { ms?: number; peak?: number } = {}): Promise<RescueVerdict> {
-    const once = this.deps.stt.transcribeOnce?.bind(this.deps.stt);
-    if (!once || this.disposed) return "skipped"; // провайдер без разового распознавания (mock/whisper) или сессия мертва
-    // Строгий диктор (JARVIS_SPEAKER_GATE_MODE=strict): у подстраховки нет аудио-отпечатка хода — «чужого» не отличить, не будим.
-    if (this.speakerGateActive() && process.env.JARVIS_SPEAKER_GATE_MODE === "strict") return "skipped";
-    this.rescue ??= new WakeRescue({
-      transcribe: (b, sr) => once(b, sr),
-      normalize: this.deps.normalizeTranscript,
-      isIdle: () => !this.disposed && this.ctx.state === "idle",
-      epoch: () => this.rescueEpoch,
-      accept: (text) => this.acceptRescued(text),
-      now: this.now,
-      log: this.log,
-    });
-    const verdict = await this.rescue.judge(pcm, sampleRate, meta);
-    this.deps.onWakeRescue?.(verdict, meta.ms);
-    return verdict;
-  }
-
-  /**
-   * Принять спасённую фразу как обращённую. С командой — тот же путь, что у «Джарвис» из стрима (gateWake → wake →
-   * transcript_final). ТОЛЬКО «Джарвис» (владелец договаривает следом) — как локальный wake: окно адресации, ход не запускаем,
-   * продолжение придёт потоком (ревью 28.09, B4: иначе «Слушаю, сэр» на половине фразы и потерянный хвост команды).
-   */
-  private acceptRescued(text: string): "turn" | "window" | false {
-    if (this.ctx.state !== "idle" || this.disposed) return false;
-    this.speakerRejected = false; // флаг прошлого хода не должен резать этот (B6): сбрасывает его обычно ensureStt
-    if (!stripWakeDetailed(text).command.trim()) {
-      this.onVadEvent("wake_local");
-      return "window";
-    }
-    const cmd = this.gateWake(text);
-    if (!cmd) return false;
-    this.onWake();
-    this.dispatch({ type: "transcript_final", text: cmd });
-    return "turn";
+  /** Подстраховка слова «Джарвис» (28.09): судья и эпоха сброса — pipeline-rescue.ts; здесь только шов к внутренностям. */
+  private readonly rescue = new PipelineRescue({
+    stt: () => this.deps.stt,
+    normalize: (raw) => this.deps.normalizeTranscript?.(raw) ?? raw,
+    now: () => this.now(),
+    idle: () => this.ctx.state === "idle",
+    speakerStrict: () => this.speakerGateActive() && process.env.JARVIS_SPEAKER_GATE_MODE === "strict",
+    clearSpeakerFlag: () => {
+      this.speakerRejected = false;
+    },
+    gate: (text) => this.gateWake(text),
+    openWindow: () => this.onVadEvent("wake_local"),
+    startTurn: (cmd) => {
+      this.onWake();
+      this.dispatch({ type: "transcript_final", text: cmd });
+    },
+    onVerdict: (verdict, ms) => this.deps.onWakeRescue?.(verdict, ms),
+  });
+  rescueWake(pcm: ArrayBuffer, sampleRate: number, meta: { ms?: number; peak?: number } = {}): Promise<RescueVerdict> {
+    return this.rescue.run(pcm, sampleRate, meta);
   }
 
   /**
@@ -932,7 +912,7 @@ export class VoicePipeline {
   /** VAD-событие от клиента. */
   onVadEvent(state: "speech_start" | "speech_end" | "barge_in" | "wake_local" | "speech_cancel"): void {
     if (state === "speech_cancel") {
-      this.rescueEpoch += 1; // клиент выключил микрофон: и фрагмент подстраховки в разборе не исполняем
+      this.rescue.bump();
       // Контроль-1 №8 (ревью 2026-09-24): микрофон выключен посреди реплики — недоговорённое не исполняем.
       // Речь кончилась (userSpeaking не залипает — B-F3), накопленный interim выбрасываем; ход в прослушивании
       // закрываем без эндпоинта (close_stt, поздний финал в idle игнорируется). Идущий ход (thinking/speaking)
@@ -1027,7 +1007,7 @@ export class VoicePipeline {
 
   /** Честный mute (§0.6) — стоп захвата, в idle. */
   mute(): void {
-    this.rescueEpoch += 1; // фрагмент, разбираемый в облаке в этот момент, уже не исполняем
+    this.rescue.bump();
     this.dispatch({ type: "mute" });
     this.silenceSalvage();
   }
@@ -1043,8 +1023,7 @@ export class VoicePipeline {
 
   /** Освободить ресурсы (закрытие сессии). */
   dispose(): void {
-    this.disposed = true; // фрагмент подстраховки, ещё разбираемый в облаке, в мёртвом конвейере хода не запустит (B5)
-    this.rescueEpoch += 1;
+    this.rescue.kill();
     this.clearFollowup();
     this.clearSilenceTimer();
     this.clearThinkEarcon();

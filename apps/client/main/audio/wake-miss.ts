@@ -21,12 +21,15 @@ import { SegmentRecorder } from "./segment-recorder.js";
 /** Частота кадров слуха: 16 кГц mono (см. renderer/audio-worklet.js). */
 const SAMPLE_RATE = 16_000;
 
+/** Хвост VAD (hangoverFrames 25 × 20 мс) входит в длительность отрезка — из «речи» его вычитаем. */
+const HANGOVER_MS = 500;
+
 export interface WakeMissOptions {
   log: Logger;
   now?: () => number;
   /** Не чаще одного лога за это окно (мс). */
   throttleMs?: number;
-  /** Отрезок речи короче — щелчок/шорох, не реплика (включает хвост hangover ~240 мс). */
+  /** Отрезок речи короче — щелчок/шорох, не реплика (включает хвост hangover 500 мс). */
   minSpeechMs?: number;
   /** Отрезок длиннее — фон (ТВ/игра), а не обращение. */
   maxSpeechMs?: number;
@@ -35,7 +38,7 @@ export interface WakeMissOptions {
    * для залогированных): реплико-подобная длина и достаточно громко — тихое бормотание/шорох в облако не идёт.
    */
   onCandidate?: (seg: { pcm: Int16Array; ms: number; peak: number }) => void;
-  /** Короче — слово «Джарвис» с хвостом VAD не уместится (деф 700 мс). */
+  /** Речь короче (БЕЗ хвоста VAD 500 мс) — слово «Джарвис» не уместится: хлопок/кашель (деф 450 мс). */
   rescueMinMs?: number;
   /** Тише — не голос у микрофона (деф пик rms 6000: промахи 28.09 были 10–16K, обычная речь ~4K+). */
   rescueMinPeak?: number;
@@ -68,7 +71,7 @@ export class WakeMissMonitor {
     this.minMs = opts.minSpeechMs ?? 500;
     this.maxMs = opts.maxSpeechMs ?? 4_000;
     this.onCandidate = opts.onCandidate;
-    this.rescueMinMs = opts.rescueMinMs ?? 700;
+    this.rescueMinMs = opts.rescueMinMs ?? 450;
     this.rescueMinPeak = opts.rescueMinPeak ?? 6_000;
   }
 
@@ -104,7 +107,7 @@ export class WakeMissMonitor {
     this.segPeak = 0;
     const audio = this.onCandidate ? this.recorder.take() : null;
     if (ms < this.minMs || ms > this.maxMs) return;
-    if (audio && ms >= this.rescueMinMs && peak >= this.rescueMinPeak) this.onCandidate?.({ pcm: audio, ms: Math.round(ms), peak: Math.round(peak) });
+    if (audio && ms - HANGOVER_MS >= this.rescueMinMs && peak >= this.rescueMinPeak) this.onCandidate?.({ pcm: audio, ms: Math.round(ms), peak: Math.round(peak) });
     this.missed += 1;
     const t = this.now();
     if (t - this.lastLogAt < this.throttleMs) return;

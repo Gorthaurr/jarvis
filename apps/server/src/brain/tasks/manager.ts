@@ -13,6 +13,7 @@
  * Часы инъецируются (now: () => number, unix ms) — чтобы тесты прогресса/sweep/
  * сортировки были детерминированы и не зависели от системного времени.
  */
+import { revokeTaskGrant } from "../tools/task-grant.js";
 import { newId } from "@jarvis/protocol";
 import type { PersistedTask, Task, TaskState } from "./task.js";
 import { deriveTaskTitle, isActiveState, isSubstantiveTask, isTerminalState } from "./task.js";
@@ -210,6 +211,7 @@ export class TaskManager {
    * делаешь» = все его задачи, из какой бы сессии они ни стартовали.
    */
   cancelUser(userId: string, dev?: boolean): Task[] {
+    revokeTaskGrant(userId); // отмена задач владельца = отзыв гранта «поручение = разрешение» (task-grant.ts)
     const cancelled: Task[] = [];
     for (const task of this.tasks.values()) {
       if (task.userId !== userId || isTerminalState(task.state) || !sameScope(task, dev)) continue;

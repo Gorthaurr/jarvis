@@ -89,9 +89,10 @@ function rememberApproval(ctx: ToolContext, place: WebPlace, label: string): voi
  * Спросить владельца про коммит (или пропустить, если та же связка сдачи одобрена только что). true — можно жать;
  * ToolResult — отказ/нет канала (вернуть модели как есть).
  */
-export async function confirmWebCommit(ctx: ToolContext, place: WebPlace, risk: Pick<CommitRisk, "summary" | "what" | "where">, label: string): Promise<true | ToolResult> {
+export async function confirmWebCommit(ctx: ToolContext, place: WebPlace, risk: Pick<CommitRisk, "summary" | "what" | "where">, label: string, grantLabels?: readonly string[]): Promise<true | ToolResult> {
   if (takeApproval(ctx, place, label)) return true;
-  if (eduGrantedAt(ctx, place, label)) return true; // владелец сам поручил учебное дело: LMS-коммит (по подписи) на LMS-странице — без вопроса (task-grant.ts)
+  // grantLabels: ВСЕ видимые подписи цели (снимок + модель); ref без снимка → [] → грант не применяется (ревью 28.09, #1/#8).
+  if (eduGrantedAt(ctx, place, grantLabels ?? label)) return true; // владелец сам поручил учебное дело: LMS-коммит (по подписи) на LMS-странице — без вопроса (task-grant.ts)
   if (!ctx.confirm) return err(`${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
   const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
   if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} на ${risk.where}`), gate.outcome);

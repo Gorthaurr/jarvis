@@ -50,6 +50,14 @@ describe("выдача гранта: только реплика владель�
     "пройди все тесты и не надо каждый раз спрашивать",
     "Пройди тест а потом стоп",
     "пройди тест и отмени напоминание про кофе",
+    // раунд 2 (#4): «не спрашивай» — в ДРУГОЙ клаузе; именно жалоба владельца
+    "Джарвис, не спрашивай разрешения, пройди все тесты",
+    "не спрашивай меня, просто пройди тесты",
+    "без лишних вопросов пройди все тесты",
+    "Ничего не спрашивай, пройди тест",
+    "Я не могу, пройди тесты вместо меня",
+    "Джарвис я сейчас не могу, пройди все тесты в ЭИОС",
+    "Не забудь пройти все тесты",
   ])("«%s» — выдаёт", (t) => {
     say(t);
     expect(eduGrantActive(U)).toBe(true);
@@ -110,10 +118,16 @@ describe("выдача гранта: только реплика владель�
     expect(eduGrantActive(U, 1_000 + EDU_GRANT_MS + 5)).toBe(false);
   });
 
-  it.each(["стоп", "Джарвис, хватит", "отмена", "отмени всё", "Джарвис, отмени", "не сдавай пока", "стоп, не сдавай тест", "вырубись"])("«%s» — снимает грант", (t) => {
+  it.each(["отмена", "отмени всё", "Джарвис, отмени", "не сдавай пока", "стоп, не сдавай тест", "вырубись", "прекрати"])("«%s» — снимает грант", (t) => {
     say("пройди все тесты");
     say(t);
     expect(eduGrantActive(U)).toBe(false);
+  });
+
+  it.each(["стоп", "стой", "хватит", "Джарвис, хватит", "заткнись"])("раунд 2 (#3): «%s» = «замолчи», учебная задача идёт — грант ЖИВ", (t) => {
+    say("пройди все тесты");
+    say(t);
+    expect(eduGrantActive(U)).toBe(true);
   });
 
   it("M2: «отмени напоминание про кофе» и «не надо каждый раз спрашивать» грант НЕ снимают", () => {
@@ -146,7 +160,11 @@ describe("где действует (H1): строгий адрес, извес�
   it("подпись: старт попытки / проверка / сдача — да; «Оплатить», «Удалить ответ», «Отправить», пусто — нет", () => {
     for (const ok of ["Пройти тест", "Начать попытку", "Проверить", "Отправить всё и завершить тест", "Отправить на проверку", "Сохранить изменения"]) expect(eduLabelOk(ok)).toBe(true);
     for (const no of ["Оплатить заказ", "Удалить ответ", "Отправить", "Опубликовать", "", "  "]) expect(eduLabelOk(no)).toBe(false);
-    expect(eduLabelOk(["Удалить", "Пройти тест"])).toBe(true); // любая из видимых подписей цели
+    // раунд 2 (#7): регэксп LMS неякорный — подпись из ДВУХ действий (оплата + старт) не LMS-коммит
+    for (const mix of ["Оплатить и пройти тест", "Удалить все попытки и начать попытку", "Отправить платёж и отправить на проверку", "Delete account / attempt quiz now", "Начать попытку и открыть чужой кабинет", "Пройти тест или что-то ещё"]) expect(eduLabelOk(mix)).toBe(false);
+    for (const real of ["Пройти тест (сейчас)", "Attempt quiz now", "Re-attempt quiz", "Начать попытку", "Отправить всё и завершить тест", "Проверить", "Сохранить"]) expect(eduLabelOk(real)).toBe(true);
+    expect(eduLabelOk(["Удалить", "Пройти тест"])).toBe(false); // раунд 2: одна из видимых подписей цели — коммит вне LMS → нет
+    expect(eduLabelOk(["Пройти тест", "Пройти тест (сейчас)"])).toBe(true);
   });
 
   it("место × подпись: только LMS-путь И LMS-подпись; неизвестная вкладка, опасный хост, машинный ход — нет", () => {
@@ -306,12 +324,68 @@ describe("проводка через dispatchTool", () => {
     expect(c.confirm).toHaveBeenCalledTimes(1);
   });
 
-  it("грант снят («стоп») — вопрос возвращается", async () => {
+  it("грант снят («отмена») — вопрос возвращается", async () => {
     say("пройди все тесты");
-    say("стоп");
+    say("отмена");
     const c = makeCtx(ext(VIEW), false);
     await act(c, { tabId: 4, intent: "click", params: { text: "Пройти тест" } });
     expect(c.confirm).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("раунд 2: подпись гранта = подпись СНИМКА, а не слова модели (#1, #8)", () => {
+  function snapExt(tab: Tab, ref: string, name: string) {
+    const e = ext(tab);
+    e.tabInspect = vi.fn(async () => ({ url: tab.url, title: "t", count: 1, elements: [{ ref, tag: "button", role: "button", name }] }));
+    return e;
+  }
+
+  it("browser_batch: снимок e1=«Удалить работу», модель называет шаг «Отправить на проверку» → ВОПРОС, в расширение не ушло", async () => {
+    say("пройди все тесты");
+    const e = snapExt(ASSIGN, "e1", "Удалить работу");
+    const c = makeCtx(e, false);
+    await dispatchTool("browser_inspect", { url: ASSIGN.url, tabId: 4 }, c);
+    await dispatchTool("browser_batch", { tabId: 4, steps: [{ intent: "click", ref: "e1", params: { text: "Отправить на проверку" } }] }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(e.tabBatch).not.toHaveBeenCalled();
+  });
+
+  it("browser_batch: снимок e1=«Оплатить курс», имя от модели «Пройти тест» → ВОПРОС", async () => {
+    say("пройди все тесты");
+    const e = snapExt(ASSIGN, "e1", "Оплатить курс");
+    const c = makeCtx(e, false);
+    await dispatchTool("browser_inspect", { url: ASSIGN.url, tabId: 4 }, c);
+    await dispatchTool("browser_batch", { tabId: 4, steps: [{ intent: "click", ref: "e1", params: { name: "Пройти тест" } }] }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(e.tabBatch).not.toHaveBeenCalled();
+  });
+
+  it("контроль: снимок e1=«Отправить на проверку» и то же имя от модели → без вопроса (грант работает по правде)", async () => {
+    say("пройди все тесты");
+    const e = snapExt(ASSIGN, "e1", "Отправить на проверку");
+    const c = makeCtx(e, false);
+    await dispatchTool("browser_inspect", { url: ASSIGN.url, tabId: 4 }, c);
+    await dispatchTool("browser_batch", { tabId: 4, steps: [{ intent: "click", ref: "e1", params: { text: "Отправить на проверку" } }] }, c);
+    expect(c.confirm).not.toHaveBeenCalled();
+    expect(e.tabBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("#8 (батч): ref, которого нет в снимках сессии, + подпись модели «Отправить на проверку» → грант НЕ применяется, вопрос", async () => {
+    say("пройди все тесты");
+    const e = ext(ASSIGN);
+    const c = makeCtx(e, false);
+    await dispatchTool("browser_batch", { tabId: 4, steps: [{ intent: "click", ref: "e9", params: { text: "Отправить на проверку" } }] }, c);
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(e.tabBatch).not.toHaveBeenCalled();
+  });
+
+  it("#8: ref, которого нет в снимках сессии (реконнект/вытеснение), + подпись модели «Пройти тест» → грант НЕ применяется, вопрос", async () => {
+    say("пройди все тесты");
+    const e = ext(VIEW);
+    const c = makeCtx(e, false);
+    await act(c, { tabId: 4, intent: "click", ref: "e9", params: { text: "Пройти тест" } });
+    expect(c.confirm).toHaveBeenCalledTimes(1);
+    expect(e.tabAct).not.toHaveBeenCalled();
   });
 });
 
@@ -332,6 +406,23 @@ describe("H2: «отмени/вырубись/стоп» перехватыва�
     say("пройди все тесты");
     handleControlUtterance(controlCtx(), t, "voice");
     expect(eduGrantActive(U)).toBe(false);
+  });
+
+  it.each(["тишина", "Джарвис, выключись", "отстань", "это не призыв к действию был", "брось это"])("раунд 2 (#2): «%s» отменяет/глушит задачи → грант снят (по ФАКТУ отмены, не по тексту)", (t) => {
+    say("пройди все тесты");
+    const ctx = controlCtx();
+    const hadTask = (ctx.agentDeps.tasks as TaskManager).activeForUser(U, undefined, false).length > 0;
+    handleControlUtterance(ctx, t, "voice");
+    const stillActive = (ctx.agentDeps.tasks as TaskManager).activeForUser(U, undefined, false).length > 0;
+    if (hadTask && !stillActive) expect(eduGrantActive(U)).toBe(false); // задачи отменены — грант ушёл вместе с ними
+  });
+
+  it.each(["стоп", "стой", "хватит", "заткнись"])("раунд 2 (#3): «%s» при идущей учебной задаче = замолчать; задача жива → грант жив", (t) => {
+    say("пройди все тесты");
+    const ctx = controlCtx();
+    handleControlUtterance(ctx, t, "voice");
+    const stillActive = (ctx.agentDeps.tasks as TaskManager).activeForUser(U, undefined, false).length > 0;
+    if (stillActive) expect(eduGrantActive(U)).toBe(true);
   });
 
   it("кнопка «стоп» (cancel) в UI снимает грант", () => {

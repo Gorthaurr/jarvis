@@ -344,7 +344,7 @@ function startTransport(): void {
     linkOnline = true;
     win?.webContents.send(IPC.link, { online: true });
     setState("idle");
-    audio?.setServerState("idle"); // (ре)коннект = сессия сервера новая и в покое; без этого lastServerState стейл и подстраховка молчит
+    audio?.syncServerIdle(); // (ре)коннект = сессия сервера новая и в покое; без этого lastServerState стейл и подстраховка молчит
     if (sensors) transport?.sendContext(sensors.snapshot()); // §9: свежий контекст занятости на (ре)коннекте
     void sendEnvProfile(); // §9: отдать агенту авто-профиль окружения (браузер/приложения)
     void sendAmbient(); // §контекст: живой снимок «что открыто и где» сразу на (ре)коннекте

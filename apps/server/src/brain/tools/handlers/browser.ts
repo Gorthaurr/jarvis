@@ -10,8 +10,9 @@ import { normalizeHost, siteRecipes } from "../../../memory/site-recipes.js";
 import type { ToolContext, ToolResult } from "../dispatch.js";
 import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDeclined, ok, overlayDeniedResult, untrusted } from "../dispatch-util.js";
 import { navDnsRefusal } from "../nav-dns.js";
-import { assessWebCommit, webCommitLabelParts } from "../commit-gate.js";
+import { assessWebCommit } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
+import { grantLabelsFor } from "../grant-labels.js";
 import { eduLabelOk, eduPlaceGranted } from "../task-grant.js";
 import { browserActParams, browserStepFields, intentMayMutate, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
@@ -344,7 +345,7 @@ export async function browserAct(ctx: ToolContext, input: Record<string, unknown
     // W1-2 + контракт approve: одобрение — видимое имя цели по ref (не склейка хинта) или text/name/title модели.
     const riskLabel = commitApprovalLabel(intent, params, refApprovalLabel(ctx, params.ref));
     if (risk) {
-      const decision = await confirmWebCommit(ctx, place, risk, riskLabel);
+      const decision = await confirmWebCommit(ctx, place, risk, riskLabel, grantLabelsFor(ctx, intent, params, label));
       if (decision !== true) return decision;
     }
     // guard — на ЛЮБОМ сайте (W1, B-5) для интентов, которые жмут цель (клик, next/prev, set галочки/списка, key/enter);
@@ -546,8 +547,8 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
     // иначе расширение взяло бы другой), все поля в params; ref на верху = судимый (расширение берёт s.ref раньше
     // params.ref — {ref:"пароль", params:{ref:"поиск"}} судился бы по полю поиска, а печатал в поле пароля).
     const judgedRef = typeof ref === "string" ? { ref } : {};
-    // Грант «поручение = разрешение» снимает вопрос только с шага, чья видимая подпись — LMS-коммит (task-grant.ts).
-    return { intent, step: { intent, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null, lmsOk: risk !== null && eduLabelOk(webCommitLabelParts(intent, own, label)) };
+    // Грант «поручение = разрешение» (task-grant.ts) снимает вопрос лишь с шага, чьи ВСЕ подписи (снимок + модель) — LMS-коммит.
+    return { intent, step: { intent, ...judgedRef, params }, risk: risk ? `${i + 1}: ${risk.what}` : null, lmsOk: risk !== null && eduLabelOk(grantLabelsFor(ctx, intent, own, label)) };
   });
   const noIntent = judged.findIndex((j) => !j.intent);
   if (noIntent >= 0) return err(`browser_batch: у шага ${noIntent + 1} нет intent — ничего не делал. Укажи intent каждому шагу.`);

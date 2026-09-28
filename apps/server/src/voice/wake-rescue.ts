@@ -11,7 +11,7 @@
  * Чистая логика с внедрёнными зависимостями — пайплайн подаёт свои методы (voice/pipeline.ts `rescueWake`).
  */
 import type { Logger } from "@jarvis/shared";
-import { isWakeAddressedStrict } from "./wake.js";
+import { isWakeAddressedStrict } from "./wake-strict.js";
 
 /** accepted — ход запущен по фрагменту; window — во фрагменте только «Джарвис»: окно адресации открыто, ход не запущен. */
 export type RescueVerdict = "accepted" | "window" | "rejected" | "skipped";

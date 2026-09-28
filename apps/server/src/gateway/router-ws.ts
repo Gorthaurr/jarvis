@@ -12,10 +12,10 @@
  *
  * Router держит per-session состояние (рабочая память) в SessionContext.
  */
+import { routeWakeRescue } from "./wake-rescue-route.js";
 import {
   type ActionResult,
   type AudioFrame,
-  type WakeRescue,
   type AudioPlayed,
   type PlaybackState,
   type ClientContext,
@@ -930,9 +930,6 @@ export function makeSessionContext(
  * Обработать одно входящее сообщение. Возвращает Promise — вызывающий
  * (gateway) может не ждать, но мы await'им для упорядоченной обработки текста.
  */
-/** Фрагмент подстраховки старше этого (мс) отбрасывается: пришёл из буфера рукопожатия/очереди, а не «сейчас». */
-const RESCUE_MAX_AGE_MS = 6_000;
-
 export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void> {
   const type = env.type as MessageType;
   switch (type) {
@@ -1120,21 +1117,9 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "audio.vad":
       ctx.voice.onVadEvent((env.payload as VadEvent).state);
       break;
-    case "audio.wake_rescue": {
-      // Подстраховка «Джарвис» (28.09): фрагмент, на котором локальный детектор промолчал. Запись отпечатка идёт своим
-      // потоком — не мешаем; вердикт клиенту нужен, чтобы открыть гейт под продолжение разговора.
-      const r = env.payload as WakeRescue;
-      if (ctx.enroll || typeof r?.pcm !== "string") break;
-      // Фрагмент, простоявший в буфере рукопожатия (pre-handshake) или в очереди дольше нескольких секунд, — уже не «сейчас».
-      if (Number.isFinite(env.ts) && Date.now() - env.ts > RESCUE_MAX_AGE_MS) break;
-      void ctx.voice
-        .rescueWake(toArrayBuffer(r.pcm), Number(r.sampleRate), { ms: Number(r.ms) || undefined, peak: Number(r.peak) || undefined })
-        .then((v) => {
-          if (v === "accepted" || v === "window") ctx.session.send("wake.rescue.result", { accepted: true, ...(v === "window" ? { bare: true } : {}) });
-        })
-        .catch((e) => log.warn("wake-rescue: сбой обработки фрагмента", e instanceof Error ? e.message : String(e)));
+    case "audio.wake_rescue":
+      routeWakeRescue(ctx, env);
       break;
-    }
     case "audio.played": {
       // Realtime инкремент 0: рендерер начал воспроизведение первого чанка хода → mouth-to-ear метрика.
       const p = env.payload as AudioPlayed;

@@ -16,6 +16,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import { type IWakeWord, MockWakeWord } from "../wakeword/index.js";
 import { EnergyVad, type IVad, type VadSignal, rms } from "../vad/index.js";
 import { type GateCloseKind, GateCloser } from "./gate-closer.js";
+import { RescueLink, type RescuePort, type RescueSegment } from "./rescue-link.js";
 import { WakeMissMonitor } from "./wake-miss.js";
 
 export interface AudioCoordinatorDeps {
@@ -29,10 +30,7 @@ export interface AudioCoordinatorDeps {
   onMicState?: (open: boolean) => void;
   /** Сигнал renderer мгновенно заглушить плеер TTS (barge-in §10). */
   onBargeIn?: () => void;
-  /**
-   * Подстраховка «Джарвис» (28.09): отправить серверу фрагмент, на котором локальный детектор промолчал (audio.wake_rescue).
-   * false — не ушло (нет связи). Не задан → подстраховки нет (тесты, заглушки).
-   */
+  /** Подстраховка «Джарвис»: отправить промахнувшийся фрагмент (audio.wake_rescue); false — нет связи; не задан — подстраховки нет. */
   sendRescue?: (pcm: Int16Array, meta: { ms: number; peak: number }) => boolean;
   /** Часы (инъекция для тестов anti-echo grace §10); по умолчанию Date.now. */
   now?: () => number;
@@ -132,13 +130,6 @@ const LISTEN_HOLD_CAP_MS = LISTEN_IDLE_CLOSE_MS * 3;
 const PTT_OPEN_MS = 8_000;
 /** Кадр был недавно — захват в renderer жив (для честных логов «слух включён»). */
 const CAPTURE_ALIVE_MS = 2_000;
-/**
- * Подстраховка: после конца воспроизведения TTS эхо/хвост ещё может звучать — фрагмент, пойманный сразу за речью
- * Джарвиса, в облако не шлём. Ход владельца после ответа всё равно идёт окном разговора (гейт открыт).
- */
-const RESCUE_ECHO_TAIL_MS = 1_500;
-/** Окно, в котором mute отменяет уже отправленный фрагмент подстраховки (разбор в облаке ≤ ~4 с + запас). */
-const RESCUE_CANCEL_WINDOW_MS = 6_000;
 
 export class AudioCoordinator {
   private wakeword: IWakeWord;
@@ -184,10 +175,7 @@ export class AudioCoordinator {
   private readonly closer: GateCloser;
   /** B-F8: телеметрия «говорили при закрытом гейте, wake промолчал». */
   private readonly wakeMiss: WakeMissMonitor;
-  /** Когда динамик последний раз замолчал (0 — не играл): эхо-хвост для подстраховки. */
-  private playbackEndedAt = 0;
-  /** Когда ушёл последний фрагмент подстраховки (0 — не уходил): mute вслед отменяет его исполнение на сервере. */
-  private lastRescueSentAt = 0;
+  private readonly rescueLink?: RescueLink;
 
   constructor(private readonly deps: AudioCoordinatorDeps) {
     this.wakeword = deps.wakeword ?? new MockWakeWord();
@@ -195,11 +183,8 @@ export class AudioCoordinator {
     this.log = deps.log ?? createLogger("audio");
     this.now = deps.now ?? (() => Date.now());
     this.closer = new GateCloser((kind) => this.onCloserFire(kind));
-    this.wakeMiss = new WakeMissMonitor({
-      log: this.log,
-      now: this.now,
-      ...(deps.sendRescue ? { onCandidate: (seg: { pcm: Int16Array; ms: number; peak: number }) => this.tryRescue(seg) } : {}),
-    });
+    this.rescueLink = deps.sendRescue && new RescueLink({ now: this.now, log: this.log, send: deps.sendRescue, sendVad: deps.sendVad, port: this.rescuePort() });
+    this.wakeMiss = new WakeMissMonitor({ log: this.log, now: this.now, ...(this.rescueLink ? { onCandidate: (seg: RescueSegment) => this.rescueLink?.offer(seg) } : {}) });
   }
 
   get streaming(): boolean {
@@ -314,6 +299,12 @@ export class AudioCoordinator {
     this.streamFrame(pcm);
   }
 
+  /** (Ре)коннект: сессия сервера новая и в покое — состояние синхронизируем, ГЕЙТ не трогаем (PTT/запись отпечатка). */
+  syncServerIdle(): void {
+    this.lastServerState = "idle";
+    this.serverSpeaking = false;
+  }
+
   /** Сервер сообщил своё состояние (client.state): отслеживаем speaking. */
   setServerState(state: ClientState): void {
     this.lastServerState = state;
@@ -371,14 +362,9 @@ export class AudioCoordinator {
     this.muted = true;
     this.holdOpen = false;
     this.preroll = [];
-    // Ревью 28.09 (B1): при закрытом гейте closeGate ниже выходит раньше, и запись подстраховки (VAD, кольцо, отрезок) жила
-    // сквозь mute — фраза «до mute» уходила в облако после unmute. Сбрасываем явно; фрагмент, уже отправленный серверу,
-    // отменяем speech_cancel (сервер не запустит по нему ход).
+    // closeGate при закрытом гейте выходит раньше: сбрасываем запись подстраховки явно; ушедший фрагмент отменяем (B1).
     this.wakeMiss.reset();
-    if (this.lastRescueSentAt > 0 && this.now() - this.lastRescueSentAt < RESCUE_CANCEL_WINDOW_MS && !this.speechOpen) {
-      this.deps.sendVad("speech_cancel");
-      this.lastRescueSentAt = 0;
-    }
+    this.rescueLink?.onMute(this.speechOpen);
     this.playbackActive = false; // звук гасится вместе с mute → снимаем barge-окно
     this.resetBargeSustain(); // окно закрыто — счётчик устойчивости не должен пережить разрыв (ревью #close)
     // Контроль-1 №8 (ревью 2026-09-24): выключили посреди фразы — это ОТМЕНА реплики, а не её конец. speech_end (его
@@ -407,7 +393,7 @@ export class AudioCoordinator {
    * этом окне barge был выключен (serverSpeaking=false) и Джарвиса нельзя было заткнуть голосом.
    */
   setPlaybackActive(active: boolean): void {
-    if (this.playbackActive && !active) this.playbackEndedAt = this.now();
+    if (this.playbackActive && !active) this.rescueLink?.playbackStopped();
     this.playbackActive = active;
     if (active) this.playbackActiveSince = this.now();
     // Окно перебивания только что закрылось (звук доиграл) → обнуляем отсчёт устойчивости, чтобы он не
@@ -421,33 +407,19 @@ export class AudioCoordinator {
     return this.playbackActive && this.now() - this.playbackActiveSince < MAX_PLAYBACK_TAIL_MS;
   }
 
-  /**
-   * Подстраховка «Джарвис» (28.09): отрезок речи при закрытом гейте, на котором локальный детектор промолчал.
-   * Шлём ТОЛЬКО когда это правда покой: гейт закрыт, не mute, слух локальный, сервер idle, Джарвис не говорит и не
-   * договорил только что (эхо). Сервер судит облачным STT и вернёт accepted — тогда onWakeRescued() откроет гейт.
-   */
-  private tryRescue(seg: { pcm: Int16Array; ms: number; peak: number }): void {
-    if (this.gateOpen || this.muted || !this.localWakeAvailable() || !this.deps.sendRescue) return;
-    if (this.lastServerState !== "idle" || this.bargeWindowActive()) return;
-    if (this.playbackEndedAt > 0 && this.now() - this.playbackEndedAt < RESCUE_ECHO_TAIL_MS) return;
-    const sent = this.deps.sendRescue(seg.pcm, { ms: seg.ms, peak: seg.peak });
-    if (sent) this.lastRescueSentAt = this.now();
-    this.log.info("wake-rescue: фрагмент отправлен на проверку облачным STT", { ms: seg.ms, peak: seg.peak, sent });
+  /** Подстраховка «Джарвис» (28.09): вердикт сервера «обращение найдено» — rescue-link.ts откроет гейт. */
+  onWakeRescued(bare = false): void {
+    this.rescueLink?.onRescued(bare);
   }
 
-  /** Сервер нашёл обращение во фрагменте и принял ход: открываем гейт под продолжение — как после обычного «Джарвис». */
-  onWakeRescued(bare = false): void {
-    if (this.muted || this.gateOpen || !this.localWakeAvailable()) return;
-    this.openGate("wake-rescue");
-    // bare: во фрагменте было только «Джарвис» (ход не запущен, у сервера окно адресации) — владелец договаривает; начало
-    // команды лежит в пре-ролле, проигрываем его в открывшийся поток. НЕ bare: ход по фрагменту уже идёт — пре-ролл повторять
-    // нельзя (дубль команды).
-    if (bare) {
-      const frames = this.preroll;
-      this.preroll = [];
-      for (const f of frames) this.streamFrame(f);
-    }
-    this.log.info("wake-rescue: обращение спасено облачным STT — гейт открыт под продолжение", { bare });
+  private rescuePort(): RescuePort {
+    return {
+      calm: () => !this.gateOpen && !this.muted && this.localWakeAvailable() && this.lastServerState === "idle" && !this.bargeWindowActive(),
+      canOpen: () => !this.muted && !this.gateOpen && this.localWakeAvailable(),
+      open: () => this.openGate("wake-rescue"),
+      takePreroll: () => this.preroll.splice(0),
+      stream: (f) => this.streamFrame(f),
+    };
   }
 
   // ── внутреннее ─────────────────────────────────────────────

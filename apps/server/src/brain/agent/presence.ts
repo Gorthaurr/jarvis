@@ -8,6 +8,9 @@
  */
 import { stripWakeAndFiller } from "../router/index.js";
 import { verbalize } from "../verbalize/index.js";
+import { log } from "./loop/util.js";
+import type { TurnCtx } from "./turn-intercepts.js";
+import type { AgentReply } from "./types.js";
 
 export type PresenceKind = "listening" | "hear" | "here" | "radio" | "time";
 
@@ -55,4 +58,20 @@ export function presenceVoice(kind: PresenceKind, now: Date = new Date()): strin
       return verbalize(`Сейчас ${hh}:${mm}, сэр.`);
     }
   }
+}
+
+/**
+ * Проверка связи («ты меня слышишь?», голое «Джарвис.», «приём») и время — мгновенно, без модели (presence.ts).
+ * Раньше это шло в Opus (4–6 с на «Слышу, сэр») или заводило фоновую задачу, которую владелец отменял руками.
+ * Реплика без обращения (окно приняло звук фильма) и машинный реэнтри — прежним путём.
+ */
+export function interceptPresence(t: TurnCtx): AgentReply | null {
+  const { deps, clean, finishReply } = t;
+  if (t.machineTurn || t.meta?.viaWake === false || deps.pendingClarify) return null; // висит вопрос консьержа — «тут/да» это ответ на него
+  const kind = matchPresence(clean);
+  if (!kind || (kind === "time" && deps.productMode)) return null; // часы сервера — часы владельца, не арендатора
+  log.info("проверка связи/время — отвечаю без модели", { kind });
+  const reply: AgentReply = { voice: presenceVoice(kind) };
+  deps.memory.pushTurn("assistant", reply.voice);
+  return finishReply(reply);
 }

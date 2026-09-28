@@ -6,6 +6,7 @@
  * через subprotocol ["token", <key>] (поддерживается Deepgram). Без ключа —
  * MockSttStream (стаб). RU-качество — bake-off на M1 (§18), провайдер заменяем (§1).
  */
+import { deepgramTranscribeOnce } from "./deepgram-once.js";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { STALLED_TURN_LOG, isStalledTurnClose } from "./deepgram-stall.js";
 import {
@@ -39,9 +40,6 @@ function getWebSocket(): WsCtor | undefined {
 }
 
 const DEEPGRAM_WS = "wss://api.deepgram.com/v1/listen";
-const DEEPGRAM_REST = "https://api.deepgram.com/v1/listen";
-/** Разовое распознавание фрагмента: дольше — уже не «подстраховка» (владелец повторит «Джарвис» быстрее). */
-const RESCUE_TIMEOUT_MS = 4_000;
 
 /** Кэп буфера недосланных кадров (~5с при кадре ~32мс) — против неогранич. роста на зависшем WS. */
 const MAX_QUEUED_FRAMES = 160;
@@ -1018,28 +1016,7 @@ export class DeepgramSttProvider implements ISttProvider {
     this.conn = null;
   }
 
-  /**
-   * Разовое распознавание фрагмента (REST /v1/listen, сырой PCM16): подстраховка слова «Джарвис». Те же модель и язык,
-   * что у стрима; keyterm не шлём (см. buildDeepgramUrl). Таймаут короткий — фраза ждёт ответа, а не наоборот.
-   */
-  async transcribeOnce(pcm: ArrayBuffer, sampleRate: number, signal?: AbortSignal): Promise<string> {
-    if (!this.apiKey) throw new Error("DEEPGRAM_API_KEY не задан");
-    const p = new URLSearchParams({
-      model: process.env.DEEPGRAM_MODEL || "nova-3",
-      language: "ru",
-      encoding: "linear16",
-      sample_rate: String(sampleRate),
-      channels: "1",
-      smart_format: "true",
-    });
-    const res = await fetch(`${DEEPGRAM_REST}?${p.toString()}`, {
-      method: "POST",
-      headers: { Authorization: `Token ${this.apiKey}`, "Content-Type": "application/octet-stream" },
-      body: pcm,
-      signal: signal ?? AbortSignal.timeout(RESCUE_TIMEOUT_MS),
-    });
-    if (!res.ok) throw new Error(`deepgram REST ${res.status}`);
-    const j = (await res.json()) as { results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> } };
-    return (j.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "").trim();
+  transcribeOnce(pcm: ArrayBuffer, sampleRate: number, signal?: AbortSignal): Promise<string> {
+    return deepgramTranscribeOnce(this.apiKey, pcm, sampleRate, signal);
   }
 }

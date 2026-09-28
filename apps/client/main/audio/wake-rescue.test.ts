@@ -64,6 +64,27 @@ describe("отбор отрезков для подстраховки", () => {
     expect(sendRescue.mock.calls[0]![1].ms).toBeGreaterThan(1_400);
   });
 
+  it("раунд 2 (#9): хлопок/кашель 0,3 с (+хвост VAD 0,5 с) кандидатом не считается; реальная речь 0,6 с — считается", () => {
+    const a = setup();
+    a.utter(15); // 300 мс громко
+    expect(a.sendRescue).not.toHaveBeenCalled();
+    const b = setup();
+    b.utter(30); // 600 мс
+    expect(b.sendRescue).toHaveBeenCalledTimes(1);
+  });
+
+  it("раунд 2 (LOW): реконнект (syncServerIdle) обновляет состояние сервера, но НЕ закрывает гейт кнопки микрофона", () => {
+    const { ac, sendRescue, utter } = setup();
+    ac.setServerState("thinking");
+    ac.syncServerIdle();
+    utter(50);
+    expect(sendRescue).toHaveBeenCalledTimes(1); // состояние стало idle
+    const p = setup();
+    p.ac.pushToTalk("button", { address: false });
+    p.ac.syncServerIdle();
+    expect(p.ac.streaming).toBe(true);
+  });
+
   it.each([
     ["тихая речь (пик 3000)", 50, 3_000],
     ["слишком короткая (0,3 с)", 8, LOUD],
