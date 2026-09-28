@@ -13,6 +13,7 @@ import type { ToolContext, ToolResult } from "./dispatch.js";
 import { confirmDeclineText, err, gateDeclined } from "./dispatch-util.js";
 import { type CommitRisk, riskyHostCategory, webCommitLabelParts } from "./commit-gate.js";
 import { LMS_COMMIT_RE, LMS_TWO_STEP_RE, isLmsPage } from "./commit-lms.js";
+import { eduGrantedAt } from "./task-grant.js";
 import type { WebPlace } from "./web-place.js";
 
 export { resolvePlace, type WebPlace } from "./web-place.js";
@@ -90,6 +91,7 @@ function rememberApproval(ctx: ToolContext, place: WebPlace, label: string): voi
  */
 export async function confirmWebCommit(ctx: ToolContext, place: WebPlace, risk: Pick<CommitRisk, "summary" | "what" | "where">, label: string): Promise<true | ToolResult> {
   if (takeApproval(ctx, place, label)) return true;
+  if (eduGrantedAt(ctx.userId, place)) return true; // владелец сам поручил учебное дело — LMS-коммиты без вопроса (task-grant.ts)
   if (!ctx.confirm) return err(`${risk.summary} Нужно подтверждение владельца (§14), а канал недоступен.`);
   const gate = await ctx.confirm(`${risk.summary}\nПодтвердить?`, "irreversible");
   if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `${risk.what} на ${risk.where}`), gate.outcome);

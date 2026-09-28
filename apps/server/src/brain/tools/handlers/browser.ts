@@ -12,6 +12,7 @@ import { browserUrlBlocked, channelDownResult, confirmDeclineText, err, gateDecl
 import { navDnsRefusal } from "../nav-dns.js";
 import { assessWebCommit } from "../commit-gate.js";
 import { approvalFields, commitApprovalLabel, commitConfirmLabel, confirmWebCommit, pageCommitRisk, pageGuardFor, resolvePlace } from "../web-commit-guard.js";
+import { eduGrantedAt } from "../task-grant.js";
 import { browserActParams, browserStepFields, intentMayMutate, intentNeedsPageGuard } from "../browser-params.js";
 import { errText, pageErrorCode } from "../ext-errors.js";
 import { capInspectElements, clampInspectCap, refApprovalLabel, refCommitLabels, rememberRefHints } from "./browser-refs.js";
@@ -550,7 +551,7 @@ export async function browserBatch(ctx: ToolContext, input: Record<string, unkno
   const noIntent = judged.findIndex((j) => !j.intent);
   if (noIntent >= 0) return err(`browser_batch: у шага ${noIntent + 1} нет intent — ничего не делал. Укажи intent каждому шагу.`);
   const risky = judged.map((j) => j.risk).filter((x): x is string => x !== null);
-  if (risky.length > 0) {
+  if (risky.length > 0 && !eduGrantedAt(ctx.userId, place)) {
     if (!ctx.confirm) return err(`browser_batch: шаги ${risky.join("; ")} на ${where} — необратимые, нужно подтверждение владельца (§14), а канал недоступен.`);
     const gate = await ctx.confirm(`Необратимые шаги берста на ${where}: ${risky.join("; ")}.\nПодтвердить?`, "irreversible");
     if (!gate.approved) return gateDeclined(confirmDeclineText(gate.outcome, `берст на ${where}`), gate.outcome);

@@ -38,6 +38,7 @@ import { buildLoopContext } from "./loop/context.js";
 import { armAckTimer } from "./loop/ack-timer.js";
 import { runAdmission } from "./loop/admission.js";
 import { runStep } from "./loop/step.js";
+import { noteOwnerTurn } from "../tools/task-grant.js";
 import { computeOutcome } from "./loop/outcome.js";
 import { finalizeTask } from "./loop/finalize.js";
 import { selectTerminal } from "./loop/terminal.js";
@@ -79,6 +80,9 @@ export async function handleUserText(
   // (фраза была одной хезитацией) — оставляем оригинал, не теряем ход.
   const clean = cleanDisfluency(text.trim()) || text.trim();
   deps.memory.pushTurn("user", clean, meta?.viaWake === false);
+  // «Поручение = разрешение» (28.09): реплика владельца «пройди тест/курс» выдаёт грант на LMS-коммиты (task-grant.ts).
+  // Фон без «Джарвис» (viaWake=false), машинный реэнтри и dev-сессия грантов не выдают и не продлевают.
+  noteOwnerTurn(deps.userId, clean, { addressed: meta?.viaWake !== false && meta?.origin !== "watch-action" && deps.devSession !== true });
 
   // ПАМЯТЬ — ОСОЗНАННАЯ, не свалка транскриптов. Раньше СЮДА писалась КАЖДАЯ реплика как «event»
   // (включая STT-мусор, команды, обрывки) → потом всплывала в приветствии/контексте как «странные
