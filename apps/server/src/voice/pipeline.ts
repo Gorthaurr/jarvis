@@ -38,6 +38,7 @@ import {
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
 import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWakeDetailed, wakeNearMissScore } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
+import { type RescueVerdict, WakeRescue } from "./wake-rescue.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
 import type { ISpeakerVerifier, VoiceProfile } from "./speaker/verifier.js";
@@ -172,6 +173,8 @@ export interface VoicePipelineDeps {
   onMouthToEar?: (ms: number, turnSeq: number, firstSound?: FirstSound) => void;
   /** W3 V-1: turn_end → ОТПРАВКА первого чанка СОДЕРЖАТЕЛЬНОГО ответа (не ack/филлер), мс; path — sync/promoted. */
   onFirstAnswer?: (ms: number, turnSeq: number, path: AnswerPath) => void;
+  /** Подстраховка «Джарвис» (28.09): вердикт по фрагменту, на котором локальный детектор промолчал (метрика). */
+  onWakeRescue?: (verdict: RescueVerdict, ms: number | undefined) => void;
   /** Уведомление клиента о состоянии (орб idle/listening/thinking/speaking). */
   sendClientState: (s: VoiceState) => void;
   /** Транскрипт для UI/логов (§5). */
@@ -593,6 +596,34 @@ export class VoicePipeline {
   /** Wake word детектирован клиентом — активируем цикл. */
   onWake(): void {
     this.dispatch({ type: "wake" });
+  }
+
+  /** Подстраховка слова «Джарвис» (28.09, wake-rescue.ts): судим фрагмент разовым STT; есть обращение — ход принят. */
+  private rescue?: WakeRescue;
+  async rescueWake(pcm: ArrayBuffer, sampleRate: number, meta: { ms?: number; peak?: number } = {}): Promise<RescueVerdict> {
+    const once = this.deps.stt.transcribeOnce?.bind(this.deps.stt);
+    if (!once) return "skipped"; // провайдер без разового распознавания (mock/whisper) — подстраховки нет
+    this.rescue ??= new WakeRescue({
+      transcribe: (b, sr) => once(b, sr),
+      normalize: this.deps.normalizeTranscript,
+      isIdle: () => this.ctx.state === "idle",
+      accept: (text) => this.acceptRescued(text),
+      now: this.now,
+      log: this.log,
+    });
+    const verdict = await this.rescue.judge(pcm, sampleRate, meta);
+    this.deps.onWakeRescue?.(verdict, meta.ms);
+    return verdict;
+  }
+
+  /** Принять спасённую фразу как обращённую: тот же путь, что у «Джарвис» из стрима (gateWake → wake → transcript_final). */
+  private acceptRescued(text: string): boolean {
+    if (this.ctx.state !== "idle") return false;
+    const cmd = this.gateWake(text);
+    if (!cmd) return false;
+    this.onWake();
+    this.dispatch({ type: "transcript_final", text: cmd });
+    return true;
   }
 
   /**

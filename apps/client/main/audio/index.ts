@@ -29,6 +29,11 @@ export interface AudioCoordinatorDeps {
   onMicState?: (open: boolean) => void;
   /** Сигнал renderer мгновенно заглушить плеер TTS (barge-in §10). */
   onBargeIn?: () => void;
+  /**
+   * Подстраховка «Джарвис» (28.09): отправить серверу фрагмент, на котором локальный детектор промолчал (audio.wake_rescue).
+   * false — не ушло (нет связи). Не задан → подстраховки нет (тесты, заглушки).
+   */
+  sendRescue?: (pcm: Int16Array, meta: { ms: number; peak: number }) => boolean;
   /** Часы (инъекция для тестов anti-echo grace §10); по умолчанию Date.now. */
   now?: () => number;
   log?: Logger;
@@ -127,6 +132,11 @@ const LISTEN_HOLD_CAP_MS = LISTEN_IDLE_CLOSE_MS * 3;
 const PTT_OPEN_MS = 8_000;
 /** Кадр был недавно — захват в renderer жив (для честных логов «слух включён»). */
 const CAPTURE_ALIVE_MS = 2_000;
+/**
+ * Подстраховка: после конца воспроизведения TTS эхо/хвост ещё может звучать — фрагмент, пойманный сразу за речью
+ * Джарвиса, в облако не шлём. Ход владельца после ответа всё равно идёт окном разговора (гейт открыт).
+ */
+const RESCUE_ECHO_TAIL_MS = 1_500;
 
 export class AudioCoordinator {
   private wakeword: IWakeWord;
@@ -172,6 +182,8 @@ export class AudioCoordinator {
   private readonly closer: GateCloser;
   /** B-F8: телеметрия «говорили при закрытом гейте, wake промолчал». */
   private readonly wakeMiss: WakeMissMonitor;
+  /** Когда динамик последний раз замолчал (0 — не играл): эхо-хвост для подстраховки. */
+  private playbackEndedAt = 0;
 
   constructor(private readonly deps: AudioCoordinatorDeps) {
     this.wakeword = deps.wakeword ?? new MockWakeWord();
@@ -179,7 +191,11 @@ export class AudioCoordinator {
     this.log = deps.log ?? createLogger("audio");
     this.now = deps.now ?? (() => Date.now());
     this.closer = new GateCloser((kind) => this.onCloserFire(kind));
-    this.wakeMiss = new WakeMissMonitor({ log: this.log, now: this.now });
+    this.wakeMiss = new WakeMissMonitor({
+      log: this.log,
+      now: this.now,
+      ...(deps.sendRescue ? { onCandidate: (seg: { pcm: Int16Array; ms: number; peak: number }) => this.tryRescue(seg) } : {}),
+    });
   }
 
   get streaming(): boolean {
@@ -379,6 +395,7 @@ export class AudioCoordinator {
    * этом окне barge был выключен (serverSpeaking=false) и Джарвиса нельзя было заткнуть голосом.
    */
   setPlaybackActive(active: boolean): void {
+    if (this.playbackActive && !active) this.playbackEndedAt = this.now();
     this.playbackActive = active;
     if (active) this.playbackActiveSince = this.now();
     // Окно перебивания только что закрылось (звук доиграл) → обнуляем отсчёт устойчивости, чтобы он не
@@ -390,6 +407,26 @@ export class AudioCoordinator {
   private bargeWindowActive(): boolean {
     if (this.serverSpeaking) return true;
     return this.playbackActive && this.now() - this.playbackActiveSince < MAX_PLAYBACK_TAIL_MS;
+  }
+
+  /**
+   * Подстраховка «Джарвис» (28.09): отрезок речи при закрытом гейте, на котором локальный детектор промолчал.
+   * Шлём ТОЛЬКО когда это правда покой: гейт закрыт, не mute, слух локальный, сервер idle, Джарвис не говорит и не
+   * договорил только что (эхо). Сервер судит облачным STT и вернёт accepted — тогда onWakeRescued() откроет гейт.
+   */
+  private tryRescue(seg: { pcm: Int16Array; ms: number; peak: number }): void {
+    if (this.gateOpen || this.muted || !this.localWakeAvailable() || !this.deps.sendRescue) return;
+    if (this.lastServerState !== "idle" || this.bargeWindowActive()) return;
+    if (this.playbackEndedAt > 0 && this.now() - this.playbackEndedAt < RESCUE_ECHO_TAIL_MS) return;
+    const sent = this.deps.sendRescue(seg.pcm, { ms: seg.ms, peak: seg.peak });
+    this.log.info("wake-rescue: фрагмент отправлен на проверку облачным STT", { ms: seg.ms, peak: seg.peak, sent });
+  }
+
+  /** Сервер нашёл обращение во фрагменте и принял ход: открываем гейт под продолжение — как после обычного «Джарвис». */
+  onWakeRescued(): void {
+    if (this.muted || this.gateOpen || !this.localWakeAvailable()) return;
+    this.openGate("wake-rescue");
+    this.log.info("wake-rescue: обращение спасено облачным STT — гейт открыт под продолжение");
   }
 
   // ── внутреннее ─────────────────────────────────────────────

@@ -70,10 +70,10 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   sync-first/фон. `loop/` — фазы: state, context, step, model-call, text-turn + nudge-policy (анти-капитуляция,
   verify-нудж, goal-check), tool-round + tool-classify, post-round (§7, anti-runaway, `family-count`), outcome,
   terminal, finalize. Рядом: `checkpoint*.ts` (журнал прерванной задачи), `mask-observations.ts`, `prune-images.ts`,
-  `error-voice.ts` (эффекты: mutate/verify/neutral, BLIND_MUTATE, OUTBOUND_SEND_TOOLS).
+  `error-voice.ts` (эффекты: mutate/verify/neutral, BLIND_MUTATE, OUTBOUND_SEND_TOOLS). `presence.ts` — «слышишь?»/«Джарвис.»/время без модели.
 - `brain/router/` — tier0 ($0: медиа, громкость, запуск, консьерж), вопрос vs действие, тир (рассуждение/биржа → fable).
 - `brain/tools/` — `dispatch.ts` (тонкий маршрутизатор) + `handlers/*` (browser, messaging, info, skills, code, act,
-  self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`.
+  self, selection, file-view, mail…), `commit-gate.ts` (§14 необратимых кликов), `hot-promotions.ts`, `dynamic.ts`. `task-grant.ts` — «пройди тест» = грант на LMS-коммиты без вопроса.
 - `brain/persona/persona.md` — системный промпт (v91, бампать version при правке), `modes.ts`, `emotion.ts`.
 - `brain/tasks/` — реестр задач §20 (durable `data/tasks.json`), scope (правка vs новая), control, narrate.
 - `brain/` ещё: `app-channels.ts` (каналы программ + частота W4.2), `capabilities.ts` (паспорт возможностей),
@@ -82,7 +82,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   гард полярности, скан; общая библиотека — `seed/shared-skills.ts`), site-recipes, resolution-memory.
 - `integrations/` — `anthropic.ts`, `fallback-llm.ts`, `subscription-{llm,session}.ts`, `deepgram.ts`,
   `yandex-tts.ts`, `local-embeddings.ts` (e5), `web.ts`, `smtp.ts`/`imap.ts`.
-- `voice/pipeline.ts` — машина голоса: wake-гейт, окно разговора (только ответ владельцу), barge-in, `speakQueued`.
+- `voice/pipeline.ts` — машина голоса: wake-гейт, окно разговора (только ответ владельцу), barge-in, `speakQueued`. `wake-rescue.ts` — подстраховка «Джарвис» (фрагмент, что пропустил KWS → разовый Deepgram).
 - `proactive/` — reminders (серии), watch (наблюдения с действием), ambient (почта/календарь/телеграм из вкладок),
   briefing, consolidation (сон-цикл), incidents, quiet-hours, self-review. `autonomy/` — killswitch, часовой предохранитель.
 - `self/` — самоулучшение (свой код, слабости из телеметрии, `self_patch` через ветку+verify).
@@ -123,7 +123,7 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   кнопко-подобных, set, все submit формы); одобрение — `approvedRef` или видимая подпись (один вопрос); клавиши —
   `shared/key-combo.ts` = `parseCombo` расширения (стык: `extension/test/fixtures/key-combos.json`); цель вкладки — по задаче.
 - **Пиннинг невидимого Chrome (B-14)**: все TCP-соединения — через SOCKS5 клиента (`jarvis-browser-proxy.ts`), DNS-суд при подключении.
-- **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается
+- **Слух (клиент)**: гейт закрыт между ходами, «Джарвис» локально → пре-ролл 0,9 с; посреди речи не закрывается Промах KWS → `audio.wake_rescue` (`segment-recorder.ts`).
   (`gate-closer.ts`); mute посреди фразы → `speech_cancel`; PTT — Ctrl+Alt+J; микрофон повторяется 1→30 с.
 
 ## Решения владельца (не переигрывать)
@@ -134,6 +134,9 @@ nova-3, слух — локальный sherpa KWS + Silero VAD (W1).
   частые программы Джарвис выводит сам (W4.2).
 - Продуктовый каркас — только за мастер-флагом; дефолт = сегодняшний режим владельца.
 - На сайты (ЭИОС и др.) Джарвис входит САМ: жмёт «Вход», пароль подставляет Chrome; печатать пароль — нет (§0) (27.09).
+
+- «Джарвис»: **облачная подстраховка** промахов KWS (28.09) — только громкий фрагмент разовым запросом, не хранится.
+- **Поручение = разрешение** (28.09) на учебных страницах; банк/мессенджеры/оплата/удаление спрашивают как прежде.
 
 ## Грабли (проверено болью)
 - `.env` грузится ПОСЛЕ ESM-хойстинга → env читать в момент вызова; новые сторы — через `lazyDataPath()`.

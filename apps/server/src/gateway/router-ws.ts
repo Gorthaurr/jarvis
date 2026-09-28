@@ -15,6 +15,7 @@
 import {
   type ActionResult,
   type AudioFrame,
+  type WakeRescue,
   type AudioPlayed,
   type PlaybackState,
   type ClientContext,
@@ -757,6 +758,7 @@ export function makeSessionContext(
     // Realtime инкремент 0: mouth-to-ear (+ чем был первый звук) и W3 V-1 first_answer — в durable metrics.jsonl.
     onMouthToEar: (ms, turnSeq, firstSound) => metrics.recordMouthToEar(ms, turnSeq, session.userId, firstSound),
     onFirstAnswer: (ms, turnSeq, path) => metrics.recordFirstAnswer(ms, turnSeq, path, session.userId),
+    onWakeRescue: (verdict, ms) => metrics.recordWakeRescue(verdict, ms, session.userId),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
     sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)
@@ -1115,6 +1117,16 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     case "audio.vad":
       ctx.voice.onVadEvent((env.payload as VadEvent).state);
       break;
+    case "audio.wake_rescue": {
+      // Подстраховка «Джарвис» (28.09): фрагмент, на котором локальный детектор промолчал. Запись отпечатка идёт своим
+      // потоком — не мешаем; вердикт клиенту нужен, чтобы открыть гейт под продолжение разговора.
+      const r = env.payload as WakeRescue;
+      if (ctx.enroll || typeof r?.pcm !== "string") break;
+      void ctx.voice.rescueWake(toArrayBuffer(r.pcm), Number(r.sampleRate), { ms: Number(r.ms) || undefined, peak: Number(r.peak) || undefined }).then((v) => {
+        if (v === "accepted") ctx.session.send("wake.rescue.result", { accepted: true });
+      });
+      break;
+    }
     case "audio.played": {
       // Realtime инкремент 0: рендерер начал воспроизведение первого чанка хода → mouth-to-ear метрика.
       const p = env.payload as AudioPlayed;

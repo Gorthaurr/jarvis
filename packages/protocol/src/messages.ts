@@ -20,6 +20,7 @@ export type MessageType =
   | "dev.text" // DevText — dev-заглушка текстового ввода до голоса (M0); аналог audio.frame
   | "audio.frame" // только dev-заглушка до LiveKit; в проде аудио — ТОЛЬКО WebRTC
   | "audio.vad" // VadEvent
+  | "audio.wake_rescue" // WakeRescue — фрагмент речи, на котором локальный «Джарвис» промолчал: сервер проверит облачным STT
   | "screen.capture.result"
   | "action.result" // ActionResult — обязателен на КАЖДЫЙ ActionCommand, корреляция по commandId
   | "client.state" // ClientStateMsg
@@ -62,6 +63,7 @@ export type MessageType =
   | "voice.enroll.progress" // VoiceEnrollProgress — % готовности записи отпечатка (§3)
   | "voice.enroll.done" // VoiceEnrollDone — отпечаток записан (или нет)
   | "voice.voices" // VoiceList — текущий список enrolled-голосов
+  | "wake.rescue.result" // WakeRescueResult — вердикт по audio.wake_rescue: обращение найдено (ход принят) или нет
   | "error" // ProtocolError — напр. несовпадение версии
   | "ping";
 
@@ -91,6 +93,25 @@ export interface VadEvent {
    *  speech_cancel (ревью 2026-09-24): владелец выключил микрофон ПОСЕРЕДИНЕ реплики — недоговорённое в работу не
    *  отдавать (speech_end здесь значил бы «фраза закончена» и исполнил бы обрубок «напиши Кате, что»). */
   state: "speech_start" | "speech_end" | "barge_in" | "wake_local" | "speech_cancel";
+}
+
+/**
+ * Подстраховка слова «Джарвис» (28.09): локальный детектор пропускает ~каждую вторую попытку. Громкую короткую фразу,
+ * на которой он промолчал при закрытом гейте, клиент шлёт ОДНИМ сообщением (не стримом); сервер проверяет её разовым
+ * облачным STT и, если в тексте есть обращение, принимает как обычный ход. Не нашли — фрагмент выбрасывается, нигде не хранится.
+ */
+export interface WakeRescue {
+  /** PCM 16-bit LE mono, base64 (JSON-WS не передаёт бинарь). */
+  pcm: string;
+  sampleRate: number;
+  /** Длительность фрагмента, мс (для лога и лимитов). */
+  ms: number;
+  /** Пик rms фрагмента (для лога). */
+  peak: number;
+}
+/** Вердикт по WakeRescue: accepted — обращение найдено, ход запущен (клиент открывает гейт под продолжение). */
+export interface WakeRescueResult {
+  accepted: boolean;
 }
 
 /** Текстовый ввод — dev-заглушка до голоса (M0, §17). В проде вход — STT-транскрипт. */

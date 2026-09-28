@@ -314,6 +314,7 @@ function startTransport(): void {
     sendVad: (state) => transport?.sendVad(state),
     onMicState: (open) => win?.webContents.send(IPC.micState, open),
     onBargeIn: () => win?.webContents.send(IPC.bargeIn),
+    sendRescue: (pcm, meta) => transport?.sendWakeRescue(pcm, 16_000, meta) ?? false, // подстраховка «Джарвис» (28.09)
   });
   // W1: локальный слух (sherpa KWS «Джарвис» + Silero VAD) грузится асинхронно; нет моделей/пакета →
   // остаёмся на заглушках (гейт открыт постоянно, wake по тексту облака), клиент не падает.
@@ -333,6 +334,9 @@ function startTransport(): void {
   transport.on("serverState", (s) => {
     win?.webContents.send(IPC.state, s);
     audio?.setServerState(s);
+  });
+  transport.on("wakeRescueResult", (r) => {
+    if (r.accepted) audio?.onWakeRescued();
   });
 
   transport.on("connected", (hello) => {

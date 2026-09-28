@@ -379,6 +379,11 @@ export class MetricsCollector {
     this.appendJsonl({ ts: new Date().toISOString(), type: "first_answer", ms, turnSeq, path, ...(userId ? { userId } : {}) });
   }
 
+  /** Подстраховка «Джарвис» (28.09): вердикт по фрагменту, на котором локальный детектор промолчал (accepted = спасённое пробуждение). */
+  recordWakeRescue(verdict: "accepted" | "rejected" | "skipped", ms: number | undefined, userId?: string): void {
+    this.appendJsonl({ ts: new Date().toISOString(), type: "wake_rescue", verdict, ...(ms !== undefined ? { ms } : {}), ...(userId ? { userId } : {}) });
+  }
+
   /**
    * Скрытая ДЕГРАДАЦИЯ (пункт-6): read-инструмент отработал без ошибки, но без пользы (пустой web_search, knowledge
    * без раздела) — раньше невидимо. Durable JSONL type:"degradation"; `kind` — машинный слаг, `meta` — контекст без PII.
