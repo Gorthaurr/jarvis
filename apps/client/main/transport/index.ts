@@ -49,6 +49,8 @@ import type {
   DevText,
   ClientState,
   VadEvent,
+  WakeRescue,
+  WakeRescueResult,
   AudioPlayed,
   PlaybackState,
   DemoEvent,
@@ -99,6 +101,7 @@ export interface TransportEvents {
   speak: [SpeakChunk];
   /** Состояние от сервера (client.state): орб + аудио-гейт (§10). */
   serverState: [ClientState];
+  wakeRescueResult: [WakeRescueResult];
   nudge: [ProactiveNudge];
   confirmRequest: [ConfirmRequest];
   taskStatus: [TaskStatus];
@@ -205,6 +208,17 @@ export class Transport extends EventEmitter {
     if (!this.isOpen()) return;
     const b64 = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64");
     this.send(makeEnvelope("audio.frame", { pcm: b64, sampleRate, seq }));
+  }
+
+  /**
+   * Подстраховка «Джарвис» (28.09): один фрагмент речи, на котором локальный детектор промолчал (audio.wake_rescue).
+   * Не стрим и не пре-ролл: отдельное сообщение, сервер проверит его разовым облачным STT. false — сокет закрыт.
+   */
+  sendWakeRescue(pcm: Int16Array, sampleRate: number, meta: { ms: number; peak: number }): boolean {
+    if (!this.isOpen()) return false;
+    const b64 = Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64");
+    this.send(makeEnvelope<WakeRescue>("audio.wake_rescue", { pcm: b64, sampleRate, ms: meta.ms, peak: meta.peak }));
+    return true;
   }
 
   /** Отправить VAD-событие (audio.vad): speech_start/speech_end/barge_in (§10). */
@@ -473,6 +487,9 @@ export class Transport extends EventEmitter {
         break;
       case "client.state":
         this.emit("serverState", (env.payload as { state: ClientState }).state);
+        break;
+      case "wake.rescue.result":
+        this.emit("wakeRescueResult", env.payload as WakeRescueResult);
         break;
       case "proactive.nudge":
         this.emit("nudge", env.payload as ProactiveNudge);

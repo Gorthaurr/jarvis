@@ -22,6 +22,7 @@ import type { ToolContext, ToolResult } from "./dispatch.js";
 import { handleInfo, targetHandle } from "./gate-memory.js";
 import { browserPlace, browserWhere } from "./gui-browser-gate.js";
 import { type GuiWhere, describeSignature, resolveWhere, serverIntents, targetName } from "./gui-intents.js";
+import { eduGuiGranted } from "./task-grant.js";
 
 export interface GuiGateVerdict {
   denied?: ToolResult;
@@ -60,7 +61,7 @@ export async function guiGate(name: string, input: Record<string, unknown>, ctx:
   if (where.category === "web") {
     const place = await browserPlace(ctx, { process: where.process, title: where.title });
     host = place.host;
-    if (place.safe) return { approval: approvalFor(grantsOf(intents, where.process, host), timeoutMs) };
+    if (place.safe || eduGuiGranted(ctx, place, intents.map((i) => i.signature))) return { approval: approvalFor(grantsOf(intents, where.process, host), timeoutMs) };
     placeText = browserWhere(place);
   }
   const what = intents.map((i) => describeSignature(i.signature, where.category, display));

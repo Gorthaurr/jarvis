@@ -23,6 +23,7 @@ import type { ToolContext, ToolResult } from "./dispatch.js";
 import { browserPlace, browserWhere } from "./gui-browser-gate.js";
 import { approvalFor } from "./gui-gate.js";
 import { describeSignature } from "./gui-intents.js";
+import { eduGuiGranted } from "./task-grant.js";
 
 export type ApprovedSend = { result: ActionResult } | { tool: ToolResult };
 
@@ -66,7 +67,7 @@ async function decide(ctx: ToolContext, cmd: ActionCommand, na: NeedsApproval, k
   if (cat?.category === "web") {
     const place = await browserPlace(ctx, { process, title: na.windowTitle });
     if (place.host) grant.host = place.host;
-    if (place.safe) return { grant };
+    if (place.safe || eduGuiGranted(ctx, place, [na.signature])) return { grant };
     where = browserWhere(place);
   }
   const what = describeSignature(na.signature, cat?.category ?? null);

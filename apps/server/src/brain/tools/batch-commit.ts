@@ -17,6 +17,7 @@ import { handleInfo, targetHandle } from "./gate-memory.js";
 import { browserPlace, browserWhere } from "./gui-browser-gate.js";
 import { approvalFor } from "./gui-gate.js";
 import { type GuiWhere, describeSignature, resolveWhere, serverIntents, targetName } from "./gui-intents.js";
+import { eduGuiGranted } from "./task-grant.js";
 
 export interface StepIntent {
   /** Индекс шага (с 0). */
@@ -79,7 +80,8 @@ export async function batchGate(ctx: ToolContext, steps: readonly SkillStep[], l
   const web = intents.find((i) => i.where.category === "web");
   const place = web ? await browserPlace(ctx, { process: web.process, title: web.where.title }) : undefined;
   const approval = approvalFor(grantsOf(intents, place?.host), SKILL_EXECUTE_SERVER_TIMEOUT_MS);
-  const ask = intents.filter((i) => i.where.category !== "web" || !place?.safe);
+  // Учебное дело поручено владельцем (task-grant.ts): шаг-LMS-коммит в учебной вкладке идёт без вопроса, остальное — как было.
+  const ask = intents.filter((i) => i.where.category !== "web" || !(place?.safe || (place && eduGuiGranted(ctx, place, [i.signature]))));
   if (ask.length === 0) return { approval };
   const what = ask.map((i) => `шаг ${i.step + 1} — ${describeSignature(i.signature, i.where.category, i.display)}${i.count > 1 ? ` ×${i.count}` : ""}`);
   const places = [...new Set(ask.map((i) => (i.where.category === "web" && place ? browserWhere(place) : `программе ${i.where.display} (${i.where.human})`)))];

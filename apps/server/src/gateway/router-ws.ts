@@ -12,6 +12,7 @@
  *
  * Router держит per-session состояние (рабочая память) в SessionContext.
  */
+import { routeWakeRescue } from "./wake-rescue-route.js";
 import {
   type ActionResult,
   type AudioFrame,
@@ -757,6 +758,7 @@ export function makeSessionContext(
     // Realtime инкремент 0: mouth-to-ear (+ чем был первый звук) и W3 V-1 first_answer — в durable metrics.jsonl.
     onMouthToEar: (ms, turnSeq, firstSound) => metrics.recordMouthToEar(ms, turnSeq, session.userId, firstSound),
     onFirstAnswer: (ms, turnSeq, path) => metrics.recordFirstAnswer(ms, turnSeq, path, session.userId),
+    onWakeRescue: (verdict, ms) => metrics.recordWakeRescue(verdict, ms, session.userId),
     sendClientState: (s) => session.send("client.state", { state: s }),
     sendTranscript: (t) => session.send("transcript", t),
     sendChat: (m) => session.send("chat", m), // §22 чат-история (роль+текст)
@@ -1114,6 +1116,9 @@ export async function dispatch(ctx: SessionContext, env: Envelope): Promise<void
     }
     case "audio.vad":
       ctx.voice.onVadEvent((env.payload as VadEvent).state);
+      break;
+    case "audio.wake_rescue":
+      routeWakeRescue(ctx, env);
       break;
     case "audio.played": {
       // Realtime инкремент 0: рендерер начал воспроизведение первого чанка хода → mouth-to-ear метрика.

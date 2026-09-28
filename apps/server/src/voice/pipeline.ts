@@ -38,6 +38,8 @@ import {
 import { DEFAULT_TURN_CONFIG, TurnDetector } from "./turn.js";
 import { isNoiseOnly, isSecondChanceConfirm, isWakeAddressed, stripLeadingToken, stripWakeDetailed, wakeNearMissScore } from "./wake.js";
 import { PhraseSpeaker } from "./speak-session.js";
+import { PipelineRescue } from "./pipeline-rescue.js";
+import type { RescueVerdict } from "./wake-rescue.js";
 import type { FillerCache } from "./filler-cache.js";
 import { buildAckEarconWav } from "./earcon.js";
 import type { ISpeakerVerifier, VoiceProfile } from "./speaker/verifier.js";
@@ -172,6 +174,8 @@ export interface VoicePipelineDeps {
   onMouthToEar?: (ms: number, turnSeq: number, firstSound?: FirstSound) => void;
   /** W3 V-1: turn_end → ОТПРАВКА первого чанка СОДЕРЖАТЕЛЬНОГО ответа (не ack/филлер), мс; path — sync/promoted. */
   onFirstAnswer?: (ms: number, turnSeq: number, path: AnswerPath) => void;
+  /** Подстраховка «Джарвис» (28.09): вердикт по фрагменту, на котором локальный детектор промолчал (метрика). */
+  onWakeRescue?: (verdict: RescueVerdict, ms: number | undefined) => void;
   /** Уведомление клиента о состоянии (орб idle/listening/thinking/speaking). */
   sendClientState: (s: VoiceState) => void;
   /** Транскрипт для UI/логов (§5). */
@@ -595,6 +599,28 @@ export class VoicePipeline {
     this.dispatch({ type: "wake" });
   }
 
+  /** Подстраховка слова «Джарвис» (28.09): судья и эпоха сброса — pipeline-rescue.ts; здесь только шов к внутренностям. */
+  private readonly rescue = new PipelineRescue({
+    stt: () => this.deps.stt,
+    normalize: (raw) => this.deps.normalizeTranscript?.(raw) ?? raw,
+    now: () => this.now(),
+    idle: () => this.ctx.state === "idle",
+    speakerStrict: () => this.speakerGateActive() && process.env.JARVIS_SPEAKER_GATE_MODE === "strict",
+    clearSpeakerFlag: () => {
+      this.speakerRejected = false;
+    },
+    gate: (text) => this.gateWake(text),
+    openWindow: () => this.onVadEvent("wake_local"),
+    startTurn: (cmd) => {
+      this.onWake();
+      this.dispatch({ type: "transcript_final", text: cmd });
+    },
+    onVerdict: (verdict, ms) => this.deps.onWakeRescue?.(verdict, ms),
+  });
+  rescueWake(pcm: ArrayBuffer, sampleRate: number, meta: { ms?: number; peak?: number } = {}): Promise<RescueVerdict> {
+    return this.rescue.run(pcm, sampleRate, meta);
+  }
+
   /**
    * Произнести произвольный текст вне пользовательского хода — онбординг-приветствие
    * (§11) и проактивность (§9). Стримит TTS-чанки клиенту; НЕ ждёт реплики юзера и НЕ
@@ -886,6 +912,7 @@ export class VoicePipeline {
   /** VAD-событие от клиента. */
   onVadEvent(state: "speech_start" | "speech_end" | "barge_in" | "wake_local" | "speech_cancel"): void {
     if (state === "speech_cancel") {
+      this.rescue.bump();
       // Контроль-1 №8 (ревью 2026-09-24): микрофон выключен посреди реплики — недоговорённое не исполняем.
       // Речь кончилась (userSpeaking не залипает — B-F3), накопленный interim выбрасываем; ход в прослушивании
       // закрываем без эндпоинта (close_stt, поздний финал в idle игнорируется). Идущий ход (thinking/speaking)
@@ -980,6 +1007,7 @@ export class VoicePipeline {
 
   /** Честный mute (§0.6) — стоп захвата, в idle. */
   mute(): void {
+    this.rescue.bump();
     this.dispatch({ type: "mute" });
     this.silenceSalvage();
   }
@@ -995,6 +1023,7 @@ export class VoicePipeline {
 
   /** Освободить ресурсы (закрытие сессии). */
   dispose(): void {
+    this.rescue.kill();
     this.clearFollowup();
     this.clearSilenceTimer();
     this.clearThinkEarcon();

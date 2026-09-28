@@ -19,6 +19,7 @@ import { looksLikeCommandUtterance } from "./replay-gate.js";
 import { hasCommitmentMarker, reflectCommitmentFromUtterance } from "./commitment-reflect.js";
 import { verbalize } from "../verbalize/index.js";
 import { skipUnaddressed } from "./unaddressed.js";
+import { interceptPresence } from "./presence.js";
 import { isDuplicateGoal, looksLikeDoneEcho, looksLikeStatusQuery } from "../tasks/scope.js";
 
 /** «Зови меня X / меня зовут X / обращайся ко мне X» → имя (детерминированно, без LLM). */
@@ -440,6 +441,7 @@ export async function interceptResume(t: TurnCtx): Promise<AgentReply | null> {
 export const TURN_INTERCEPTS: readonly TurnIntercept[] = [
   interceptName,
   interceptNotForMe,
+  interceptPresence,
   interceptMode,
   interceptEmotion,
   interceptActiveTask,

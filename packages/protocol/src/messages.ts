@@ -20,6 +20,7 @@ export type MessageType =
   | "dev.text" // DevText — dev-заглушка текстового ввода до голоса (M0); аналог audio.frame
   | "audio.frame" // только dev-заглушка до LiveKit; в проде аудио — ТОЛЬКО WebRTC
   | "audio.vad" // VadEvent
+  | "audio.wake_rescue" // WakeRescue — фрагмент речи, на котором локальный «Джарвис» промолчал: сервер проверит облачным STT
   | "screen.capture.result"
   | "action.result" // ActionResult — обязателен на КАЖДЫЙ ActionCommand, корреляция по commandId
   | "client.state" // ClientStateMsg
@@ -62,6 +63,7 @@ export type MessageType =
   | "voice.enroll.progress" // VoiceEnrollProgress — % готовности записи отпечатка (§3)
   | "voice.enroll.done" // VoiceEnrollDone — отпечаток записан (или нет)
   | "voice.voices" // VoiceList — текущий список enrolled-голосов
+  | "wake.rescue.result" // WakeRescueResult — вердикт по audio.wake_rescue: обращение найдено (ход принят) или нет
   | "error" // ProtocolError — напр. несовпадение версии
   | "ping";
 

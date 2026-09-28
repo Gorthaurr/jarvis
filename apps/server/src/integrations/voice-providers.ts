@@ -58,6 +58,11 @@ export interface ISttProvider {
   open(opts: SttOpts): SttStream;
   /** Освободить ресурсы (персистентный сокет) на teardown сервера. Необязателен. */
   dispose?(): void;
+  /**
+   * РАЗОВОЕ распознавание короткого фрагмента (подстраховка слова «Джарвис», 28.09): PCM16 mono → текст, без стрима
+   * и без состояния. Нет ключа/сети → бросает; вызывающий трактует как «не распознано». Необязателен.
+   */
+  transcribeOnce?(pcm: ArrayBuffer, sampleRate: number, signal?: AbortSignal): Promise<string>;
 }
 
 // ── TTS (streaming) ──────────────────────────────────────────

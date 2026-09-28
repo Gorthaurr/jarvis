@@ -314,6 +314,7 @@ function startTransport(): void {
     sendVad: (state) => transport?.sendVad(state),
     onMicState: (open) => win?.webContents.send(IPC.micState, open),
     onBargeIn: () => win?.webContents.send(IPC.bargeIn),
+    sendRescue: (pcm, meta) => transport?.sendWakeRescue(pcm, 16_000, meta) ?? false, // подстраховка «Джарвис» (28.09)
   });
   // W1: локальный слух (sherpa KWS «Джарвис» + Silero VAD) грузится асинхронно; нет моделей/пакета →
   // остаёмся на заглушках (гейт открыт постоянно, wake по тексту облака), клиент не падает.
@@ -334,12 +335,16 @@ function startTransport(): void {
     win?.webContents.send(IPC.state, s);
     audio?.setServerState(s);
   });
+  transport.on("wakeRescueResult", (r) => {
+    if (r.accepted) audio?.onWakeRescued(r.bare === true);
+  });
 
   transport.on("connected", (hello) => {
     log.info(`подключено к серверу: session=${hello.sessionId}`);
     linkOnline = true;
     win?.webContents.send(IPC.link, { online: true });
     setState("idle");
+    audio?.syncServerIdle(); // (ре)коннект = сессия сервера новая и в покое; без этого lastServerState стейл и подстраховка молчит
     if (sensors) transport?.sendContext(sensors.snapshot()); // §9: свежий контекст занятости на (ре)коннекте
     void sendEnvProfile(); // §9: отдать агенту авто-профиль окружения (браузер/приложения)
     void sendAmbient(); // §контекст: живой снимок «что открыто и где» сразу на (ре)коннекте

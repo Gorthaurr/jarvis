@@ -55,7 +55,7 @@ function looksLikeWake(token: string): boolean {
   return levenshtein(t, "джарвис") <= 2 || levenshtein(t, "jarvis") <= 2;
 }
 
-const TOKEN_RE = /[\p{L}\p{N}]+/gu;
+export const TOKEN_RE = /[\p{L}\p{N}]+/gu;
 
 /** Есть ли в реплике обращение «Джарвис» (явное или коверканное). */
 export function isWakeAddressed(text: string): boolean {
@@ -102,7 +102,7 @@ export function stripLeadingToken(text: string): string {
  * ответы — короткие выдохи/хмыки, что Deepgram ловит из фонового шума («ах», «ох», «хм»…).
  * НЕ включаем «да/нет/ок/угу/ага/ладно» — это валидные ответы в активном разговоре (нельзя глушить).
  */
-const NOISE_WORDS = new Set([
+export const NOISE_WORDS = new Set([
   "ах", "ох", "ой", "эх", "эй", "ау", "ну", "э", "эм", "эмм", "мм", "ммм",
   "хм", "хмм", "гм", "кхм", "ааа", "ооо", "эээ", "а", "о", "у", "и", "ы", "м", "н",
 ]);
@@ -123,7 +123,7 @@ export function isNoiseOnly(text: string): boolean {
  * Хвост после обращения, который командой НЕ является: «Открой ютуб, Джарвис, пожалуйста» — команда
  * ДО обращения, «пожалуйста» после него — вежливость. Такой хвост трактуется как пустой.
  */
-const COURTESY_TAIL = new Set(["пожалуйста", "спасибо", "плиз", "please", "давай", "быстро", "быстрее", "срочно", "уже"]);
+export const COURTESY_TAIL = new Set(["пожалуйста", "спасибо", "плиз", "please", "давай", "быстро", "быстрее", "срочно", "уже"]);
 
 function isCourtesyOnly(text: string): boolean {
   const tokens = text.toLowerCase().match(TOKEN_RE);
@@ -153,7 +153,7 @@ export function splitAtWake(text: string): { before: string; after: string } | n
  * Обрывок пре-ролла (0,9 с) — это служебные слова («…что», «так вот», «бла бла»); смысл — хоть одно содержательное
  * слово в короткой (≤ PREFIX_MAX_WORDS) группе. Длиннее — уже не префикс команды, а чужая речь.
  */
-const PREFIX_FUNCTION_WORDS = new Set([
+export const PREFIX_FUNCTION_WORDS = new Set([
   ...NOISE_WORDS,
   "что", "чтобы", "так", "вот", "это", "то", "как", "но", "да", "нет", "ага", "угу", "он", "она", "оно", "они", "мы",
   "вы", "ты", "я", "бла", "короче", "значит", "типа", "вообще", "просто", "сказал", "сказала", "говорит", "говорю",

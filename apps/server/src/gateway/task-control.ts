@@ -4,6 +4,7 @@
  * отчёт клиенту, user-takeover (no-op по концепции). `SessionContext` импортируется type-only →
  * рантайм-цикла с router-ws нет (router-ws тянет эти хендлеры как значения, обратно — только тип).
  */
+import { revokeOnControl } from "../brain/tools/task-grant.js";
 import type { TaskControl, TaskStatus } from "@jarvis/protocol";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { autonomyFreeze, matchAutonomyCommand } from "../autonomy/freeze.js";
@@ -84,6 +85,7 @@ function ackControl(ctx: SessionContext, text: string, source: ControlSource): v
  * (ack только в чат, без голоса — §22). По умолчанию "voice" (обратная совместимость).
  */
 export function handleControlUtterance(ctx: SessionContext, text: string, source: ControlSource = "voice"): boolean {
+  revokeOnControl(ctx.session.userId, text); // явное «не сдавай…» снимает грант здесь: реплика до handleUserText не дойдёт
   if (!ctx.agentDeps.tasks) return false;
   // ── KILLSWITCH автономии (волна E) — ПЕРЕД классификатором задач: «полный стоп» не должен
   // падать в обычное «стоп» (stop_tts). Позитивный anchored-матч, нормализация как у роутера

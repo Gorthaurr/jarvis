@@ -16,6 +16,7 @@ import { type Logger, createLogger } from "@jarvis/shared";
 import { type IWakeWord, MockWakeWord } from "../wakeword/index.js";
 import { EnergyVad, type IVad, type VadSignal, rms } from "../vad/index.js";
 import { type GateCloseKind, GateCloser } from "./gate-closer.js";
+import { RescueLink, type RescuePort, type RescueSegment } from "./rescue-link.js";
 import { WakeMissMonitor } from "./wake-miss.js";
 
 export interface AudioCoordinatorDeps {
@@ -29,6 +30,8 @@ export interface AudioCoordinatorDeps {
   onMicState?: (open: boolean) => void;
   /** Сигнал renderer мгновенно заглушить плеер TTS (barge-in §10). */
   onBargeIn?: () => void;
+  /** Подстраховка «Джарвис»: отправить промахнувшийся фрагмент (audio.wake_rescue); false — нет связи; не задан — подстраховки нет. */
+  sendRescue?: (pcm: Int16Array, meta: { ms: number; peak: number }) => boolean;
   /** Часы (инъекция для тестов anti-echo grace §10); по умолчанию Date.now. */
   now?: () => number;
   log?: Logger;
@@ -172,6 +175,7 @@ export class AudioCoordinator {
   private readonly closer: GateCloser;
   /** B-F8: телеметрия «говорили при закрытом гейте, wake промолчал». */
   private readonly wakeMiss: WakeMissMonitor;
+  private readonly rescueLink?: RescueLink;
 
   constructor(private readonly deps: AudioCoordinatorDeps) {
     this.wakeword = deps.wakeword ?? new MockWakeWord();
@@ -179,7 +183,8 @@ export class AudioCoordinator {
     this.log = deps.log ?? createLogger("audio");
     this.now = deps.now ?? (() => Date.now());
     this.closer = new GateCloser((kind) => this.onCloserFire(kind));
-    this.wakeMiss = new WakeMissMonitor({ log: this.log, now: this.now });
+    this.rescueLink = deps.sendRescue && new RescueLink({ now: this.now, log: this.log, send: deps.sendRescue, sendVad: deps.sendVad, port: this.rescuePort() });
+    this.wakeMiss = new WakeMissMonitor({ log: this.log, now: this.now, ...(this.rescueLink ? { onCandidate: (seg: RescueSegment) => this.rescueLink?.offer(seg) } : {}) });
   }
 
   get streaming(): boolean {
@@ -294,6 +299,12 @@ export class AudioCoordinator {
     this.streamFrame(pcm);
   }
 
+  /** (Ре)коннект: сессия сервера новая и в покое — состояние синхронизируем, ГЕЙТ не трогаем (PTT/запись отпечатка). */
+  syncServerIdle(): void {
+    this.lastServerState = "idle";
+    this.serverSpeaking = false;
+  }
+
   /** Сервер сообщил своё состояние (client.state): отслеживаем speaking. */
   setServerState(state: ClientState): void {
     this.lastServerState = state;
@@ -351,6 +362,9 @@ export class AudioCoordinator {
     this.muted = true;
     this.holdOpen = false;
     this.preroll = [];
+    // closeGate при закрытом гейте выходит раньше: сбрасываем запись подстраховки явно; ушедший фрагмент отменяем (B1).
+    this.wakeMiss.reset();
+    this.rescueLink?.onMute(this.speechOpen);
     this.playbackActive = false; // звук гасится вместе с mute → снимаем barge-окно
     this.resetBargeSustain(); // окно закрыто — счётчик устойчивости не должен пережить разрыв (ревью #close)
     // Контроль-1 №8 (ревью 2026-09-24): выключили посреди фразы — это ОТМЕНА реплики, а не её конец. speech_end (его
@@ -379,6 +393,7 @@ export class AudioCoordinator {
    * этом окне barge был выключен (serverSpeaking=false) и Джарвиса нельзя было заткнуть голосом.
    */
   setPlaybackActive(active: boolean): void {
+    if (this.playbackActive && !active) this.rescueLink?.playbackStopped();
     this.playbackActive = active;
     if (active) this.playbackActiveSince = this.now();
     // Окно перебивания только что закрылось (звук доиграл) → обнуляем отсчёт устойчивости, чтобы он не
@@ -390,6 +405,21 @@ export class AudioCoordinator {
   private bargeWindowActive(): boolean {
     if (this.serverSpeaking) return true;
     return this.playbackActive && this.now() - this.playbackActiveSince < MAX_PLAYBACK_TAIL_MS;
+  }
+
+  /** Подстраховка «Джарвис» (28.09): вердикт сервера «обращение найдено» — rescue-link.ts откроет гейт. */
+  onWakeRescued(bare = false): void {
+    this.rescueLink?.onRescued(bare);
+  }
+
+  private rescuePort(): RescuePort {
+    return {
+      calm: () => !this.gateOpen && !this.muted && this.localWakeAvailable() && this.lastServerState === "idle" && !this.bargeWindowActive(),
+      canOpen: () => !this.muted && !this.gateOpen && this.localWakeAvailable(),
+      open: () => this.openGate("wake-rescue"),
+      takePreroll: () => this.preroll.splice(0),
+      stream: (f) => this.streamFrame(f),
+    };
   }
 
   // ── внутреннее ─────────────────────────────────────────────

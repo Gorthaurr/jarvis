@@ -6,6 +6,7 @@
  * через subprotocol ["token", <key>] (поддерживается Deepgram). Без ключа —
  * MockSttStream (стаб). RU-качество — bake-off на M1 (§18), провайдер заменяем (§1).
  */
+import { deepgramTranscribeOnce } from "./deepgram-once.js";
 import { type Logger, createLogger } from "@jarvis/shared";
 import { STALLED_TURN_LOG, isStalledTurnClose } from "./deepgram-stall.js";
 import {
@@ -1013,5 +1014,9 @@ export class DeepgramSttProvider implements ISttProvider {
   dispose(): void {
     this.conn?.dispose();
     this.conn = null;
+  }
+
+  transcribeOnce(pcm: ArrayBuffer, sampleRate: number, signal?: AbortSignal): Promise<string> {
+    return deepgramTranscribeOnce(this.apiKey, pcm, sampleRate, signal);
   }
 }

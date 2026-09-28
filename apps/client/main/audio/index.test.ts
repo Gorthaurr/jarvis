@@ -533,7 +533,7 @@ describe("B-F8: push-to-talk и видимость промаха wake", () => {
     const { ac } = setup(never(), { log });
     const utter = (): void => {
       for (let i = 0; i < 40; i += 1) ac.ingest(new Int16Array(320).fill(6000)); // 0,8 с речи (кадр 20 мс)
-      for (let i = 0; i < 20; i += 1) ac.ingest(new Int16Array(320).fill(10)); // тишина → конец отрезка
+      for (let i = 0; i < 30; i += 1) ac.ingest(new Int16Array(320).fill(10)); // тишина (> hangover 25 кадров) → конец отрезка
     };
     utter();
     utter();
@@ -546,7 +546,7 @@ describe("B-F8: push-to-talk и видимость промаха wake", () => {
     const log = spyLog();
     const { ac } = setup(never(), { log });
     for (let i = 0; i < 300; i += 1) ac.ingest(new Int16Array(320).fill(6000)); // 6 с
-    for (let i = 0; i < 20; i += 1) ac.ingest(new Int16Array(320).fill(10));
+    for (let i = 0; i < 30; i += 1) ac.ingest(new Int16Array(320).fill(10));
     expect(log.info.mock.calls.filter((c) => String(c[0]).includes("промах KWS"))).toHaveLength(0);
   });
 });
