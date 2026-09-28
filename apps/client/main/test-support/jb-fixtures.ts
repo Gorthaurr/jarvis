@@ -94,8 +94,16 @@ export async function fixture(routes: Record<string, Route | string>): Promise<F
   return { port, hits, close: () => new Promise((r) => srv.close(() => r())) };
 }
 
+/** Журнал прокси: проверенные адреса, к которым он ЗВОНИЛ (mapAddress зовёт только прокси, после суда). */
+export const proxyDialed: string[] = [];
+/** Адрес стенда (TEST-NET фикстур, публичный ответ rebind*, loopback), а не настоящего интернета. */
+export const isFixtureIp = (ip: string): boolean => ip === TEST_NET || ip === REBIND_PUBLIC || ip.startsWith("127.");
+
 /** Прокси пиннинга звонит на проверенный адрес: «публичный» TEST-NET фикстур живёт на 127.0.0.1. Суд — ДО подмены. */
-export const fixtureMapAddress = (ip: string): string => (ip === TEST_NET ? "127.0.0.1" : ip === REBIND_PUBLIC ? "127.0.0.2" : ip);
+export const fixtureMapAddress = (ip: string): string => {
+  proxyDialed.push(ip);
+  return ip === TEST_NET ? "127.0.0.1" : ip === REBIND_PUBLIC ? "127.0.0.2" : ip;
+};
 
 /** Настоящий JarvisBrowser на Chromium стенда (временный профиль; DNS гарда и прокси — fixtureLookup; обход прокси → host-resolver). */
 export function launchJarvisBrowser(chrome: string, opts: { noPreconnect?: boolean } = {}): { jb: JarvisBrowser; dispose(): Promise<void> } {

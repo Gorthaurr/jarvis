@@ -10,14 +10,16 @@
  * Реверт-проверки (из копии): Chrome без `--proxy-server` (сам резолвит; host-resolver стенда → 127.0.0.1) → «роутер»
  * получает запросы — rebinding и подресурсы красные; без `<-loopback>` литерал 127.0.0.1 идёт мимо прокси — подресурс-
  * литерал красный; блок прокси не сопоставлен с переходом (`proxyBlocked` → false) → web_open отдаёт страницу ошибки
- * Chrome вместо честного отказа — rebinding красный.
+ * Chrome вместо честного отказа — rebinding красный. Живой тест (example.com): прокси молча отказал в подключении →
+ * url `chrome-error://` — красный; прокси заблокировал имя → web_open бросает — красный; без `--proxy-server` страница
+ * грузится, но журнал звонков прокси пуст — красный.
  */
 import { lookup as dnsLookup } from "node:dns/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 vi.mock("electron", () => ({ screen: { getAllDisplays: () => [], getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1280, height: 800 } }) } }));
 
-import { type Fixture, PUBLIC_HOST, findChrome, fixture, launchJarvisBrowser, rebindAsked } from "../test-support/jb-fixtures.js";
+import { type Fixture, PUBLIC_HOST, findChrome, fixture, isFixtureIp, launchJarvisBrowser, proxyDialed, rebindAsked } from "../test-support/jb-fixtures.js";
 import type { JarvisBrowser } from "./jarvis-browser.js";
 import type { PinProxy } from "./jarvis-browser-proxy.js";
 
@@ -84,7 +86,15 @@ describe.skipIf(!chrome)("B-14 (rebinding): невидимый браузер п
   }, 30_000);
 
   // Настоящий интернет через прокси: TLS в CONNECT-туннеле и системный DNS (без таблиц стенда). Нет сети — пропуск.
+  // Текст example.com меняется (28.09 пропал «Example Domain» в теле) — судим не формулировку, а факты загрузки.
   it.skipIf(!online)("живьём: https://example.com открывается через прокси пиннинга", async () => {
-    expect((await jb.open("https://example.com/")).text).toContain("Example Domain");
+    const before = proxyDialed.length;
+    const page = await jb.open("https://example.com/");
+    expect(page.url).toMatch(/^https:\/\/example\.com\//u); // страница ошибки Chrome (прокси отказал) — chrome-error://
+    expect(page.text).toMatch(/domain|домен/iu);
+    expect(proxyBlocked()).not.toContain("example.com");
+    const dialed = proxyDialed.slice(before);
+    expect(dialed.length).toBeGreaterThan(0); // Chrome мимо прокси — прокси никуда не звонил
+    expect(dialed.filter(isFixtureIp)).toEqual([]);
   }, 30_000);
 });
