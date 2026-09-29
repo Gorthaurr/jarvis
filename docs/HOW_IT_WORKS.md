@@ -32,7 +32,7 @@
   %APPDATA% (лог клиента, записанный агентским запуском, мог «перекрывать» настоящий) — сверять по `client.out.log`.
 - **Расширение** (руки в браузере): загружено в Chrome пользователя. Перечитать с диска после правок `background.js`: `curl -X POST http://127.0.0.1:8787/ext/reload`.
 - **БД**: нативный PostgreSQL + pgvector (`DATABASE_URL`); фолбэк PGlite. Docker НЕ используется.
-- **Тесты**: `apps/server` `npx vitest run` (~613); `apps/client` `npx vitest run`. Typecheck: `npx tsc --noEmit` или `pnpm -r typecheck`.
+- **Тесты**: `apps/server` `npx vitest run` (~3500); `apps/client` `npx vitest run` (~1000). Typecheck: `npx tsc --noEmit` или `pnpm -r typecheck`. Всё сразу одним раннером — `pnpm verify:quick` / `pnpm verify` / `pnpm verify:full` (профили и состав — `docs/lab/VERIFY.md`).
 
 ---
 
@@ -43,7 +43,7 @@
 В корне репо есть `_jarvis_cmd.mjs` — WS-клиент, который шлёт `dev.text` в агента (как печать в чат) и печатает ответы.
 Протокол: WS на `ws://127.0.0.1:8787/ws` → `client.hello{token,clientVersion,protocolVersion:1}` → ждать `server.hello` →
 слать `dev.text{text}`. **ОБЯЗАТЕЛЬНО** отвечать `pong` на `ping` (иначе heartbeat закроет сессию). Авто-подтверждать
-`user.confirm.request`. На `action.command` (для клиент-актуаторов) отвечать фейковым `action.result{ok:true}` (telegram/web/MCP идут МИМО — server-side/расширение, поэтому реальны).
+`user.confirm.request`. На `action.command` (для клиент-актуаторов) отвечать ЧЕСТНЫМ отказом `action.result{ok:false, error:{code:"runtime"}}` — драйвер не настоящий клиент, выдавать это за успех нельзя (закон 1; `ok:true` учил ложному «готово» и убран из `_jarvis_cmd.mjs` 01.09, из `_qa_battery.mjs`/`_qa_slow.mjs` — 29.09). Telegram/web/MCP идут МИМО — server-side/расширение, поэтому реальны.
 ```
 node _jarvis_cmd.mjs 'отправь голосовое в избранное с текстом тест' 'да, отправляй'
 ```
@@ -51,7 +51,7 @@ Node 22 имеет встроенный `WebSocket` — зависимостей
 
 ### 2b. Что РЕАЛЬНО, а что фейк в текст-драйвере
 - **Реально** (server-side / через расширение): web_search, memory_*, MCP-инструменты, set_reminder, telegram_* (через ExtensionBridge), сам LLM/persona/маршрутизация.
-- **Фейк** (нужен живой Electron-клиент): app_launch/fs/input/system/screen — это `action.command` к клиенту; мой драйвер отвечает `ok` вслепую. Их живьём проверяет только запущенный клиент.
+- **Фейк** (нужен живой Electron-клиент): app_launch/fs/input/system/screen — это `action.command` к клиенту; мой драйвер отвечает на них честным отказом `ok:false runtime` (результат неизвестен). Их живьём проверяет только запущенный клиент.
 - Аудио (TTS) идёт `speak.chunk` — игнорирую; смотрю `chat`-сообщения (текст реплики).
 
 ### 2c. DEV-эндпоинты (прямая проверка расширения, минуя агента)

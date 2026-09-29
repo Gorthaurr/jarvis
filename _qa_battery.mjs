@@ -1,7 +1,8 @@
 // QA-батарея: гоняю Джарвиса текстом по всем кейсам, меряю латентность, ловлю реплики.
-// Безопасность: confirm на необратимое (выключение/удаление) ОТКЛОНЯЮ; action.command к клиенту фейкаю.
+// Безопасность: confirm на необратимое (выключение/удаление) ОТКЛОНЯЮ; action.command к клиенту — ЧЕСТНЫЙ отказ (ok:false runtime), не ложный успех.
 import { readFileSync } from "node:fs";
-const WS_URL = "ws://127.0.0.1:8787/ws";
+// Порт настраивается (JARVIS_WS_URL), как в _jarvis_cmd.mjs: хардкод 8787 молча уводил прогон в БОЕВОЙ сервер владельца.
+const WS_URL = process.env.JARVIS_WS_URL || "ws://127.0.0.1:8787/ws";
 // [метка, текст, ...follow-ups]. Читаем из файла (argv[2]) — кириллица в JSON.
 const BATTERY = JSON.parse(readFileSync(process.argv[2] || "_qa_cmds.json", "utf8"));
 const QUIET_MS = 8500, HARD_MS = 75000;
@@ -53,7 +54,9 @@ ws.onmessage = (ev) => {
       const r = results[i]; if (r) r.confirmAsked = p.summary;
       break;
     }
-    case "action.command": { const r = results[i]; if (r) (r.actions = r.actions || []).push(p.kind); log(`   [action→client] ${p.kind}`); send("action.result", { commandId: e.id, ok: true, durationMs: 1 }); break; }
+    // Честный отказ, а не `ok:true` (закон 1: инструмент не рапортует ложный успех; так же в _jarvis_cmd.mjs с 01.09):
+    // батарея — не настоящий клиент, действие на ПК не исполнялось, результат НЕИЗВЕСТЕН.
+    case "action.command": { const r = results[i]; if (r) (r.actions = r.actions || []).push(p.kind); log(`   [action→client] ${p.kind} → отказ (драйвер не исполняет действия)`); send("action.result", { commandId: e.id, ok: false, error: { code: "runtime", message: "QA-драйвер не исполняет действия на ПК (это не настоящий клиент). Результат неизвестен — не считай это выполненным." }, durationMs: 1 }); break; }
   }
 };
 setTimeout(() => { log("@@@RESULTS@@@" + JSON.stringify(results)); process.exit(0); }, 600000);
