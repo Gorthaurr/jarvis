@@ -28,7 +28,7 @@ export async function cmdSay(a: Args): Promise<unknown> {
   });
   try {
     const timeout = flag(a, "timeout");
-    const turn = await client.say(text, { waitTasks: a.flags["wait-tasks"] === true, ...(timeout ? { timeoutMs: Number(timeout) } : {}) });
+    const turn = await client.say(text, { waitTasks: a.flags["no-wait-tasks"] !== true, ...(timeout ? { timeoutMs: Number(timeout) } : {}) });
     return { turn, decisions: client.decisions(), desktop: desktop.snapshot() };
   } finally {
     await client.close();

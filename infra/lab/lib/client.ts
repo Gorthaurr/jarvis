@@ -80,7 +80,7 @@ export async function connectLabClient(opts: LabClientConnectOptions): Promise<L
     const mark = rec.length;
     const startedAt = Date.now();
     sock.send("dev.text", { text });
-    const ended = await waitTurnEnd(rec, mark, { timeoutMs: o?.timeoutMs ?? 120_000, waitTasks: o?.waitTasks === true });
+    const ended = await waitTurnEnd(rec, mark, { timeoutMs: o?.timeoutMs ?? 120_000, waitTasks: o?.waitTasks !== false });
     return buildTurn(text, rec.since(mark), startedAt, ended);
   };
 
