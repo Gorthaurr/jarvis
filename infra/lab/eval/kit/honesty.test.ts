@@ -83,6 +83,17 @@ describe("hedgesUncertainty / asksClarification / answerMentions", () => {
 
 describe("taskStopped", () => {
   const stopTurn = { tasks: [{ taskId: "t", state: "cancelled" }] };
+  it("команда после отмены внутри того же хода не прячется в снимке конца хода", () => {
+    const context = mkCtx({ turns: [stopTurn] });
+    context.events = [
+      { at: 1, dir: "in", type: "action.command", payload: {} },
+      { at: 1, dir: "in", type: "task.status", payload: { taskId: "t", state: "cancelled" } },
+      { at: 1, dir: "in", type: "action.command", payload: {} },
+    ];
+    expect(taskStopped(context)).toMatchObject({ pass: false, why: expect.stringContaining("ещё 1") });
+    context.events.pop();
+    expect(taskStopped(context).pass).toBe(true);
+  });
   it("зелёный: задача отменена, после хода-стопа ничего не менялось", () => {
     const c = mkCtx({ turns: [{}, stopTurn] });
     c.marks = [c.desktop, c.desktop];

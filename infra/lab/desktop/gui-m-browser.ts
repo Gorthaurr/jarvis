@@ -1,17 +1,17 @@
+import { loadPage, NEWTAB, normalizeAddress } from "./gui-browser-pages.js";
+export { loadPage,NEWTAB,normalizeAddress } from "./gui-browser-pages.js";
 /**
  * Браузер (chrome/edge/firefox): вкладки, адресная строка, история. Страницы берутся из `seed.web` ядра (адрес → HTML);
  * адреса вне seed — «оффлайн»: вкладка с именем хоста и честным текстом ошибки. Разметки и ссылок внутри страницы нет —
  * руки во вкладках у Джарвиса и так через расширение (W1), а не через GUI.
  */
 import type { DesktopWindow } from "../lib/contracts.js";
-import type { DesktopCore } from "./core.js";
 import type { Ctx, Model, NodeSpec } from "./gui-model.js";
 import { at, parseCombo } from "./gui-model.js";
 import { ActionError } from "./gui-state.js";
 import { closeWin } from "./gui-winops.js";
 
 const BRAND: Record<string, string> = { chrome: "Google Chrome", msedge: "Microsoft Edge", firefox: "Mozilla Firefox", brave: "Brave", opera: "Opera", browser: "Yandex", vivaldi: "Vivaldi" };
-export const NEWTAB = "chrome://newtab/";
 
 interface Tab {
   url: string;
@@ -19,28 +19,6 @@ interface Tab {
   text: string;
   back: string[];
   fwd: string[];
-}
-
-/** Нормализация введённого в адресную строку: схема есть — как есть; похоже на хост — https; иначе поиск. */
-export function normalizeAddress(raw: string): string {
-  const t = raw.trim();
-  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(t) || /^(about|chrome):/iu.test(t)) return t;
-  if (!/\s/u.test(t) && (/\./u.test(t) || /^localhost(:\d+)?(\/|$)/iu.test(t))) return `https://${t}`;
-  return `https://www.google.com/search?q=${encodeURIComponent(t)}`;
-}
-
-/** Страница из seed.web: заголовок из <title>, текст без разметки. Нет в seed — оффлайн-страница с хостом в заголовке. */
-export function loadPage(core: DesktopCore, url: string): { title: string; text: string; loaded: boolean } {
-  if (url === NEWTAB || url === "about:blank") return { title: "Новая вкладка", text: "", loaded: true };
-  const keys = [url, url.endsWith("/") ? url.slice(0, -1) : `${url}/`];
-  const html = keys.map((k) => core.web.get(k)).find((v) => v !== undefined);
-  if (html === undefined) {
-    const host = url.replace(/^[a-z]+:\/\//iu, "").replace(/^www\./iu, "").split(/[/?#]/u)[0] ?? url;
-    return { title: host, text: "Не удаётся получить доступ к сайту", loaded: false };
-  }
-  const title = /<title[^>]*>([\s\S]*?)<\/title>/iu.exec(html)?.[1]?.trim();
-  const text = html.replace(/<(script|style)[\s\S]*?<\/\1>/giu, " ").replace(/<[^>]+>/gu, " ").replace(/[ \t]+/gu, " ").replace(/\s*\n\s*/gu, "\n").trim();
-  return { title: title || url, text, loaded: true };
 }
 
 export function browserModel(ctx: Ctx, w: DesktopWindow, startUrl?: string): Model {

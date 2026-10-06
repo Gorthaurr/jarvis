@@ -4,8 +4,8 @@
  * поэтому сценарий может добавить шаги, faults, опции сервисов ПК; проверка получает все ходы и снимки между ними.
  */
 import type { ServiceOptions } from "../desktop/service-options.js";
-import type { ConfirmPolicy, CheckResult, DesktopSeed, DesktopSnapshot, EvalReport, FakeDesktop, LabClient, LabClientOptions, LabServer, Scenario, ScenarioContext, ScenarioRun, TurnResult } from "../lib/contracts.js";
 import type { LabClientConnectOptions } from "../lib/client.js";
+import type { CheckResult, ConfirmPolicy, DesktopSeed, DesktopSnapshot, EvalReport, FakeDesktop, LabClient, LabClientOptions, LabServer, Scenario, ScenarioContext, ScenarioRun, TurnResult } from "../lib/contracts.js";
 import type { ConfirmDecision } from "../lib/policy.js";
 import type { LabServerStartOptions } from "../lib/server.js";
 
@@ -19,6 +19,7 @@ export interface EvalStep {
 }
 
 export interface EvalContext extends ScenarioContext {
+  events?: ReturnType<LabClient["events"]>;
   /** Все ходы по порядку; `turn` = последний. */
   turns: TurnResult[];
   /** Снимок «ПК» после каждого хода (marks[i] ↔ turns[i]) — чтобы видеть, что происходило между репликами. */

@@ -1,3 +1,4 @@
+import { ObsReject, missing, timecode, uuid, type Obs } from "./service-obs-state.js";
 /**
  * obs.request FakeDesktop — фейковые ответы OBS WebSocket v5. Форма как у actuators/obs.ts: `{requestType, responseData}`;
  * отказ OBS — `runtime` «OBS отклонил X: code=N comment» (коды v5: 204 неизвестный запрос, 300 нет поля, 500/501 вывод
@@ -8,34 +9,6 @@ import type { ActionCommand } from "@jarvis/protocol";
 import type { DesktopCore, KindHandlers } from "./core.js";
 import type { ServiceOptions } from "./service-options.js";
 import { putFile, redact, runState } from "./service-state.js";
-
-interface Obs {
-  scene: string;
-  scenes: string[];
-  streaming: boolean;
-  streamStart: number;
-  recording: boolean;
-  recordPaused: boolean;
-  recordStart: number;
-  muted: Map<string, boolean>;
-  inputs: Array<{ inputName: string; inputKind: string }>;
-  stream: { streamServiceType: string; streamServiceSettings: Record<string, unknown> };
-}
-
-class ObsReject extends Error {
-  constructor(readonly code: number, readonly comment: string) {
-    super(comment);
-  }
-}
-const missing = (f: string): never => {
-  throw new ObsReject(300, `Your request is missing a required field: \`${f}\``);
-};
-const timecode = (ms: number): string => {
-  const s = Math.floor(ms / 1000);
-  const p = (n: number): string => String(n).padStart(2, "0");
-  return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}.${String(Math.floor(ms % 1000)).padStart(3, "0")}`;
-};
-const uuid = (name: string): string => `lab-${Buffer.from(name).toString("hex").slice(0, 24)}`;
 
 export function obsHandlers(core: DesktopCore, opts: () => ServiceOptions): KindHandlers {
   const st = (): Obs =>

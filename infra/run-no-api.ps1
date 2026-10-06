@@ -1,8 +1,9 @@
 # Personal no-API profile, separate from .env and the live server on 8787.
-# Usage: powershell -File infra\run-no-api.ps1 -Brain codex|local [-Port 8788]
+# Usage: powershell -File infra\run-no-api.ps1 -Brain codex|local [-Port 8788] [-OfflineAudio]
 param(
   [ValidateSet('codex', 'local')][string]$Brain = 'codex',
   [ValidateRange(1024, 65535)][int]$Port = 8788,
+  [switch]$OfflineAudio,
   [string]$OllamaBin = "$env:LOCALAPPDATA\Jarvis\runtime\ollama-v0.40.0\ollama.exe"
 )
 $ErrorActionPreference = 'Stop'
@@ -34,18 +35,9 @@ if ($Brain -eq 'local') {
 }
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 $DataPath = $DataDir.Replace('\', '/')
-$NoApiLines = @(
-  "PORT=$Port", 'HOST=127.0.0.1', "LLM_PROVIDER=$Brain", 'CODEX_MODEL=gpt-6-luna',
-  'OLLAMA_BASE_URL=http://127.0.0.1:11435', 'OLLAMA_MODEL=qwen3.5:9b-q4_K_M', 'OLLAMA_CONTEXT=131072',
-  'STT_PROVIDER=whisper', 'WHISPER_MODEL=Xenova/whisper-base', 'HF_ENDPOINT=https://huggingface.co',
-  'WHISPER_DEVICE=cpu', 'WHISPER_DTYPE=q8', 'TTS_PROVIDER=windows',
-  "JARVIS_DATA_DIR=$DataPath", "DATABASE_URL=pglite://$DataPath/pgdata",
-  'JARVIS_PRODUCT_MODE=0', 'JARVIS_PRIMARY_LLM=0', 'JARVIS_SUBSCRIPTION_FALLBACK=0',
-  'ANTHROPIC_API_KEY=', 'OPENAI_API_KEY=', 'CODEX_API_KEY=', 'ELEVENLABS_API_KEY=', 'YANDEX_API_KEY=',
-  'DEEPGRAM_API_KEY=', 'BRAVE_SEARCH_API_KEY=', 'CLAUDE_CODE_OAUTH_TOKEN=',
-  'JARVIS_AMBIENT_TELEGRAM=0', 'JARVIS_AMBIENT_MAIL=0', 'JARVIS_AMBIENT_CALENDAR=0', 'JARVIS_SKILL_DISTILL=0'
-)
-[IO.File]::WriteAllLines($EnvFile, $NoApiLines, (New-Object Text.UTF8Encoding($false)))
+$AudioMode = if ($OfflineAudio) { 'offline' } else { 'preserve' }
+node (Join-Path $Root 'infra\no-api-profile.mjs') $Brain $Port $AudioMode
+if ($LASTEXITCODE -ne 0) { throw 'Profile generation failed' }
 $env:JARVIS_ENV_PATH = $EnvFile
 $env:DATABASE_URL = "pglite://$DataPath/pgdata"
 Push-Location $Root

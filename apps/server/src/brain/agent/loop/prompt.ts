@@ -68,7 +68,7 @@ export async function buildPrompt(input: PromptInput) {
       // Содержимое области сюда не попадает: его модель добывает свежим кадром (screen_selection).
       ...(selectionLine ? { selection: selectionLine } : {}),
     },
-    { lean },
+    { lean, local: process.env.LLM_PROVIDER === "local" },
   );
   return sys;
 }

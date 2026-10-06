@@ -1,7 +1,7 @@
 /**
  * ЖИВОЙ прогон стенда: настоящий изолированный лаб-сервер (свой порт, PGlite, brain off) + WS-клиент + настоящий слух.
- * STT сервера — настоящий Deepgram (ключ пробросом в env процесса сервера, в файлы/логи не попадает; стоимость — копейки на
- * 2 коротких WAV). Пропуск — только с причиной: нет моделей слуха / нет ключа / LAB_SKIP_LIVE=1. Боевой сервер (8787) не трогается.
+ * STT сервера — платный Deepgram, только при LAB_LIVE_DEEPGRAM=1. Ключ пробрасывается в env процесса сервера.
+ * Без разрешения, моделей слуха или ключа — пропуск с причиной. LAB_SKIP_LIVE=1 отключает даже разрешённый запуск.
  */
 import { existsSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -10,13 +10,14 @@ import { connectLabClient, type LabClientHandle } from "../lib/client.js";
 import { repoRoot } from "../lib/deps.js";
 import { readOwnerVar } from "../lib/server-env.js";
 import { type LabServerHandle, startLabServer } from "../lib/server.js";
-import { audioStandAvailability, CORPUS_DIR } from "./availability.js";
+import { audioStandAvailability, CORPUS_DIR, deepgramLiveReason } from "./availability.js";
 import { loadHearing } from "./hearing-rig.js";
 import { type AudioStandEx, createAudioStand } from "./stand.js";
 
 const avail = audioStandAvailability();
-const hasKey = Boolean(readOwnerVar("DEEPGRAM_API_KEY")); // только факт наличия, значение нигде не хранится и не печатается
-const reason = !avail.ok ? avail.reason : process.env.LAB_SKIP_LIVE === "1" ? "LAB_SKIP_LIVE=1" : !hasKey ? "нет DEEPGRAM_API_KEY (окружение или .env владельца)" : !existsSync(repoRoot("infra/lab/lib/server.ts")) ? "нет infra/lab/lib/server.ts" : "";
+const policyReason = deepgramLiveReason();
+const hasKey = !policyReason && Boolean(readOwnerVar("DEEPGRAM_API_KEY"));
+const reason = policyReason || (!avail.ok ? avail.reason : !hasKey ? "нет DEEPGRAM_API_KEY (окружение или .env владельца)" : !existsSync(repoRoot("infra/lab/lib/server.ts")) ? "нет infra/lab/lib/server.ts" : "");
 if (reason) console.warn(`[audio-stand live] SKIP: ${reason}`);
 
 describe.skipIf(reason !== "")("аудио-стенд ЖИВОЙ: слух → лаб-сервер (Deepgram) → озвучка", () => {

@@ -1,32 +1,13 @@
+import { closeSocket, redact, type SocketOptions } from "./client-socket-protocol.js";
+export { redact,type SocketOptions } from "./client-socket-protocol.js";
 /**
  * Транспорт лаб-клиента: настоящий WS по протоколу (без Origin), hello, авто-resume при обрыве, outbox для результатов.
  * Всё входящее/исходящее пишется в рекордер. Логику кадров (ping/action/confirm) решает вызывающий через onFrame.
  */
-import { type Envelope, PROTOCOL_VERSION, makeEnvelope } from "@jarvis/protocol";
+import { PROTOCOL_VERSION, makeEnvelope, type Envelope } from "@jarvis/protocol";
 import { WebSocket, type WsLike } from "./deps.js";
-import type { EventRecorder } from "./recorder.js";
-
-export interface SocketOptions {
-  url: string;
-  token: string;
-  clientVersion: string;
-  rec: EventRecorder;
-  onFrame(env: Envelope): void;
-  connectTimeoutMs?: number;
-  /** Переподключаться с resumeSessionId после неожиданного обрыва (по умолчанию да). */
-  reconnect?: boolean;
-  /** Оставлять base64-аудио в speak.chunk журнала (аудио-стенду нужны байты озвучки; по умолчанию режем — мегабайты). */
-  keepAudio?: boolean;
-}
 
 const RETRY_MS = [200, 400, 800, 1600, 3200];
-
-/** Кадры с аудио в журнал кладём без base64 (мегабайты), с размером в audioBytes. */
-export function redact(type: string, payload: unknown): unknown {
-  if (type !== "speak.chunk" || !payload || typeof payload !== "object") return payload;
-  const { audio, ...rest } = payload as Record<string, unknown>;
-  return { ...rest, audioBytes: typeof audio === "string" ? Buffer.byteLength(audio, "base64") : 0 };
-}
 
 export class LabSocket {
   sessionId = "";
@@ -159,21 +140,8 @@ export class LabSocket {
     while (!this.isOpen && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
     return this.isOpen;
   }
-
   async close(): Promise<void> {
     this.closing = true;
-    const ws = this.ws;
-    if (!ws || ws.readyState === WebSocket.CLOSED) return;
-    await new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
-        ws.terminate();
-        resolve();
-      }, 2_000);
-      ws.on("close", () => {
-        clearTimeout(t);
-        resolve();
-      });
-      ws.close(1000, "lab done");
-    });
+    await closeSocket(this.ws);
   }
 }

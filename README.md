@@ -9,8 +9,10 @@ ambient-голос (всегда слушает по wake word), управле�
 переписка от лица пользователя в VK/Telegram, проактивный планировщик с умными напоминаниями,
 обучение новым GUI-инструментам с переиспользованием выученного.
 
-**Весь интеллект — через облачное API.** Никаких локальных LLM внутри установщика.
-Малые onnx-модели (wake word, VAD) — единицы МБ, не в счёт. (§0 спецификации)
+**Мозг выбирается настройкой `LLM_PROVIDER`:** Codex через существующий ChatGPT login, локальный Ollama
+или прежний Claude. Новые профили не требуют покупки LLM API-ключа; Codex использует общие лимиты подписки.
+Смена мозга сохраняет голос, распознавание, подтверждения и исполнение команд в Jarvis.
+Текущая карта проекта — [CLAUDE.md](CLAUDE.md), механика и проверенные команды — [HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ---
 
@@ -31,51 +33,55 @@ ambient-голос (всегда слушает по wake word), управле�
 |---|---|
 | Монорепо | pnpm + TypeScript (target ES2022) |
 | Клиент | Electron + electron-builder → `.exe` |
-| Wake word | openWakeWord / Porcupine (локально) |
+| Wake word | sherpa-onnx KWS (локально) |
 | VAD | Silero VAD (onnxruntime, локально) |
 | Ввод (мышь/клава) | SendInput через C#-сайдкар |
 | Windows a11y + ввод | `apps/sidecar-win` (C#/.NET, UIAutomation + SendInput) |
 | Сервер | Node + Fastify |
-| Голосовой пайплайн | LiveKit Agents (Node) |
-| STT | Deepgram (streaming) |
-| TTS | ElevenLabs (streaming) |
-| LLM | Anthropic SDK (тиры tier0/Haiku/Sonnet/Fable) |
-| Эмбеддинги | OpenAI text-embedding-3-small (1536d) |
-| БД | PostgreSQL + pgvector |
+| Голосовой пайплайн | Собственный WS/PCM, wake-гейт и отмена |
+| STT | Настроенный Deepgram; опционально локальный Whisper |
+| TTS | Настроенный Yandex/ElevenLabs; опционально Windows SAPI |
+| LLM | Codex App Server / Ollama / прежний Claude |
+| Эмбеддинги | Локальная e5-small или настроенный OpenAI, 384d |
+| БД | PostgreSQL + pgvector, для отдельного личного профиля PGlite |
 | Очереди/таймеры | PG + node-cron |
 
 ---
 
-## Как поднять dev-окружение
+## Личный запуск без нового ключа LLM
 
-```bash
-# 1. Установить зависимости
+```powershell
+# Зависимости и клиент
 pnpm install
+pnpm --filter @jarvis/client build
+dotnet publish apps/sidecar-win/SidecarWin.csproj -c Release
 
-# 2. Поднять инфраструктуру (PostgreSQL + pgvector)
-docker compose -f infra/docker-compose.yml up -d
+# Codex CLI должен быть установлен; вход именно через ChatGPT
+codex login
 
-# 3. Применить миграции
-pnpm db:migrate
+# Отдельные данные и сервер на 8788; прежний .env не меняется
+powershell -ExecutionPolicy Bypass -File infra/run-no-api.ps1 -Brain codex
 
-# 4. Запустить сервер
-pnpm dev:server
-
-# 5. Запустить Electron-клиент
-pnpm dev:client
+# В другом PowerShell, закрыв предыдущий экземпляр клиента
+$env:PORT='8788'
+pnpm --filter @jarvis/client start
 ```
 
-Переменные среды — скопировать `.env.example` в `.env` и заполнить ключи API.
+Запускатель переносит прежние STT/TTS из `.env`, включая голос, скорость и ключи аудиосервисов. Явный
+`-OfflineAudio` выбирает Whisper/Windows TTS. `-Brain local` выбирает установленный Ollama с моделью
+`qwen3.5:9b-q4_K_M` (подробности установки и портов — HOW_IT_WORKS §1a).
+Для перехода существующего основного профиля достаточно `LLM_PROVIDER=codex` и `CODEX_MODEL=gpt-6-luna`
+в его `.env`, с перезапуском сервера; данные и аудионастройки остаются прежними.
 
 ---
 
-## Проверка M0 (текущий рабочий срез)
+## Проверки
 
-1. Запустить `pnpm dev:server` и `pnpm dev:client`.
-2. В окне клиента ввести текстом: `открой блокнот`.
-3. Ожидаемый результат: на Windows запускается `notepad.exe`, сервер присылает `action.command` с `kind:"app.launch"`, клиент исполняет и отвечает `action.result{ok:true}`.
-
-Голос, память, скиллы и остальные возможности — в следующих milestone'ах (M1..M8). Подробнее в [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
+`pnpm verify` объединяет typecheck, размерные гейты, тесты пакетов и лаборатории, настоящее расширение Chromium
+и пятикратный прогон изменённых тестов. Для расширения нужен `CHROME_PATH`. Платные live-проверки Deepgram
+включаются только явно. Состав и ограничения — [VERIFY.md](docs/lab/VERIFY.md).
+Живые проверки моделей, микрофона и настоящего клиента находятся в `infra/lab/no-api`; различия между
+виртуальным ПК, аудиофайлом и настоящим Electron-клиентом описаны в HOW_IT_WORKS §1a.
 
 ---
 

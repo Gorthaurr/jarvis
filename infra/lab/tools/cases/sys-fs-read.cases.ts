@@ -32,8 +32,7 @@ export const cases: ToolCase[] = [
   },
   {
     tool: "fs_read", name: "файл 3,4 МБ: клиент отдаёт первые 2 МБ и ЧЕСТНО говорит truncated:true с советом читать окном (до обрезки сервера)",
-    args: { path: F }, seed: seedF("0123456789abcdef
-".repeat(200_000)),
+    args: { path: F }, seed: seedF("0123456789abcdef\n".repeat(200_000)),
     expect: { ok: true, resultIncludes: ['"truncated":true', /ОКНОМ/, /ОБРЕЗАНО сервером/], resultExcludes: '"totalLines"' }, coversTool: "fs_read",
   },
   {

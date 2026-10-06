@@ -42,7 +42,7 @@ export async function runOne(s: EvalScenario, n: number, env: RunEnv): Promise<E
     });
     const marks = await converse(client, desktop, s, turns);
     if (s.settleMs) await sleep(s.settleMs);
-    const ctx: EvalContext = { desktop: desktop.snapshot(), before, turns, turn: turns[turns.length - 1]!, marks, server: env.server, userId };
+    const ctx: EvalContext = { desktop: desktop.snapshot(), before, turns, turn: turns[turns.length - 1]!, marks, server: env.server, userId, events: client.events() };
     const budget = budgetHit(s, turns);
     if (budget === "time" && !(await env.server.health().catch(() => ({ ok: false }))).ok) throw new Error("сервер не отвечает после таймаута хода (упал или завис)");
     let verdict: CheckResult;

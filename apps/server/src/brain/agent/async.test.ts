@@ -119,10 +119,12 @@ describe("async-контур §20: аренда ввода и параллели
     // fs.read ввод не трогает → лиз не берётся → команды могут пересекаться во времени.
     let inFlight = 0;
     let peak = 0;
+    let releaseReads!: () => void;
+    const readsReleased = new Promise<void>((resolve) => { releaseReads = resolve; });
     const sendAction = vi.fn(async (_cmd: ActionCommand) => {
       inFlight += 1;
       peak = Math.max(peak, inFlight);
-      await new Promise((r) => setTimeout(r, 20));
+      await readsReleased; // держим первую команду до появления второй, независимо от нагрузки CPU
       inFlight -= 1;
       return { commandId: "c", ok: true, durationMs: 1 };
     });
@@ -135,8 +137,10 @@ describe("async-контур §20: аренда ввода и параллели
     await handleUserText(session, "найди номер один в файлах и собери", deps);
     await handleUserText(session, "проанализируй номер два и составь", deps);
 
+    try {
+      await vi.waitFor(() => expect(peak).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+    } finally { releaseReads(); }
     await vi.waitFor(() => expect(spoken.length).toBe(2), { timeout: 3000 });
-    expect(peak).toBeGreaterThanOrEqual(2); // реально параллельно (ввод свободен)
   });
 
   it("tier0 с голосовым каналом → ФОН даже при свободной аренде (не блокируем слух, тихий финал)", async () => {

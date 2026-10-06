@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { COLD_TOOL_NAMES, FACADE_TOOL_NAMES, TOOLS_BY_NAME } from "@jarvis/tools";
 import { describe, expect, it } from "vitest";
 import { SHARED_SKILL_SEED } from "../../seed/shared-skills.js";
+import { compactLocalPersona } from "./compact-local.js";
 
 const PERSONA = readFileSync(new URL("./persona.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
@@ -79,6 +80,13 @@ describe("персона и общие навыки учат только сущ
 
   it("персона: холодный инструмент назван только рядом с tool_load (в том же абзаце)", () => {
     expect(coldWithoutLoad(PERSONA)).toEqual([]);
+  });
+
+  it("локальная выжимка сохраняет существующие имена и загрузку холодных инструментов", () => {
+    const local = compactLocalPersona(PERSONA);
+    expect(local).not.toBe(PERSONA);
+    expect(unknownTools(local)).toEqual([]);
+    expect(coldWithoutLoad(local)).toEqual([]);
   });
 
   it("сам страж ловит несуществующий и холодный-без-tool_load (проверка на подложном тексте)", () => {

@@ -1,3 +1,5 @@
+import { HearingProbe, RigClock, probeLogger } from "./hearing-probe.js";
+export { HearingProbe,RigClock } from "./hearing-probe.js";
 /**
  * HearingRig — НАСТОЯЩИЙ клиентский слух в Node: AudioCoordinator (apps/client/main/audio) + sherpa KWS «Джарвис» + Silero VAD.
  * Кадры (320 сэмплов) подаются в `ingest()` — граница renderer→main (IPC.pushPcm). Всё, что координатор шлёт наружу
@@ -7,7 +9,6 @@
  */
 import { AudioCoordinator } from "../../../apps/client/main/audio/index.js";
 import { type SherpaHearing, createSherpaHearing, hearingModelsDir, hearingModelsPresent } from "../../../apps/client/main/hearing/sherpa-hearing.js";
-import type { Logger } from "@jarvis/shared";
 import { FRAME_MS } from "./mic-model.js";
 
 export interface RigSinks {
@@ -16,64 +17,6 @@ export interface RigSinks {
   /** true — «сокет открыт, фрагмент ушёл». */
   rescue(pcm: Int16Array, meta: { ms: number; peak: number }): boolean;
   bargeIn?(): void;
-}
-
-/** Что слух сделал за прогон (сбрасывается `begin()`); из публичных швов, без чтения приватных членов координатора. */
-export class HearingProbe {
-  wakeFired = false;
-  wakeKeywords: string[] = [];
-  gateOpened = false;
-  gateOpenReasons: string[] = [];
-  rescueSent = false;
-  rescueCount = 0;
-  rescueVerdict: "accepted" | "bare" | undefined;
-  framesSent = 0;
-  vad: string[] = [];
-  bargeIns = 0;
-  log: string[] = [];
-  private t0 = Date.now();
-
-  begin(): void {
-    Object.assign(this, { wakeFired: false, wakeKeywords: [], gateOpened: false, gateOpenReasons: [], rescueSent: false, rescueCount: 0, rescueVerdict: undefined, framesSent: 0, vad: [], bargeIns: 0, log: [] });
-    this.t0 = Date.now();
-  }
-
-  line(level: string, msg: string): void {
-    this.log.push(`+${Date.now() - this.t0}мс ${level} ${msg}`);
-    if (msg.startsWith("гейт микрофона ОТКРЫТ")) this.gateOpened = true;
-  }
-}
-
-/** Логгер, пишущий в hearing.log (child возвращает себя). */
-function probeLogger(p: HearingProbe): Logger {
-  const mk = (level: string) => (msg: string, meta?: unknown): void => {
-    let m = msg;
-    if (meta && typeof meta === "object") m += ` ${JSON.stringify(meta)}`;
-    p.line(level, m);
-    if (level === "info" && msg.startsWith("гейт микрофона ОТКРЫТ") && meta && typeof meta === "object") p.gateOpenReasons.push(String((meta as { reason?: unknown }).reason));
-  };
-  const l: Logger = { debug: () => {}, info: mk("info"), warn: mk("warn"), error: mk("error"), child: () => l };
-  return l;
-}
-
-/** Часы координатора: реальные или виртуальные (монотонные при переключении). */
-export class RigClock {
-  private virtual = false;
-  private v = 0;
-  private last = 0;
-  now = (): number => {
-    const t = this.virtual ? this.v : Date.now();
-    this.last = Math.max(this.last, t);
-    return this.last;
-  };
-  use(realtime: boolean): void {
-    if (realtime === !this.virtual) return;
-    this.virtual = !realtime;
-    if (this.virtual) this.v = Math.max(Date.now(), this.last);
-  }
-  tick(ms: number): void {
-    this.v += ms;
-  }
 }
 
 /** Мост колбэка onWake sherpa (создаётся при загрузке) к текущему rig: движки живут дольше rig-ов. */

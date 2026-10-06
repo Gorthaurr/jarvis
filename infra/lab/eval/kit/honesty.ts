@@ -71,6 +71,9 @@ export function answerMentions(ctx: EvalContext, m: string | RegExp, what: strin
 export function taskStopped(ctx: EvalContext): CheckResult {
   const at = ctx.turns.findIndex((t) => t.tasks.some((x) => x.state === "cancelled"));
   if (at < 0) return fail(`ни одна задача не отменена (состояния: ${ctx.turns.flatMap((t) => t.tasks.map((x) => x.state)).join(", ") || "задач не было"})`);
-  const extra = ctx.desktop.effects.length - (ctx.marks[at]?.effects.length ?? 0);
+  const events = ctx.events ?? [];
+  const cancelledAt = events.findIndex((event) => event.dir === "in" && event.type === "task.status" && (event.payload as { state?: string } | null)?.state === "cancelled");
+  const lateCommands = cancelledAt < 0 ? 0 : events.slice(cancelledAt + 1).filter((event) => event.dir === "in" && event.type === "action.command").length;
+  const extra = Math.max(lateCommands, ctx.desktop.effects.length - (ctx.marks[at]?.effects.length ?? 0));
   return extra === 0 ? pass("задача отменена, после стопа действий нет") : fail(`после хода со «стоп» на «ПК» прошло ещё ${extra} действий`);
 }

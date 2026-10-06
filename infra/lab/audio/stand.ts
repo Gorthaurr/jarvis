@@ -1,3 +1,6 @@
+import { settleAudioTurn } from "./stand-settle.js";
+import { type AudioStandEx, type AudioStandOptions, type AudioStandResultEx, AudioStandUnavailable } from "./stand-types.js";
+export { AudioStandUnavailable,type AudioStandEx,type AudioStandOptions,type AudioStandResultEx } from "./stand-types.js";
 /**
  * createAudioStand — «WAV → настоящий клиентский слух → сервер → озвучка». Слух (AudioCoordinator + sherpa) НАСТОЯЩИЙ;
  * сервер и транспорт — через LabClient (тот же WS-протокол, что у Electron); озвучку принимает фейковый плеер, который
@@ -8,54 +11,16 @@
 import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { AudioStand, AudioStandResult, LabClient, TurnResult } from "../lib/contracts.js";
-import { FakePlayer } from "./fake-player.js";
+import type { TurnResult } from "../lib/contracts.js";
 import { sliceAfter } from "./event-cursor.js";
+import { FakePlayer } from "./fake-player.js";
 import { ServerFeedback } from "./feedback.js";
-import { type HearingLoad, HearingRig, loadHearing } from "./hearing-rig.js";
+import { HearingRig, loadHearing } from "./hearing-rig.js";
 import { micChain, toFrames } from "./mic-model.js";
 import { type NoiseKind, makeNoise } from "./noise.js";
 import { type Phrase, SpeechStore } from "./speech-store.js";
 import { buildTurn, recognized } from "./turn-collect.js";
 import { loadWav16k } from "./wav.js";
-
-export class AudioStandUnavailable extends Error {}
-
-export interface AudioStandOptions {
-  client: LabClient;
-  /** Каталог озвучки (по умолчанию %TEMP%/jarvis-lab/audio/<время>). */
-  outDir?: string;
-  /** Каталог моделей слуха (по умолчанию ~/.jarvis/models). */
-  hearingDir?: string;
-  /** Уже поднятые движки (loadHearing): sherpa грузится ~1,5 с — стенды по очереди могут делить один набор (не параллельно!). */
-  hearing?: Extract<HearingLoad, { ok: true }>;
-  /** Уровень «сырого микрофона» до makeup-кривой (см. mic-model.ts); 1 = WAV как есть. */
-  preGain?: number;
-  makeup?: boolean;
-  /** По умолчанию true. */
-  realtime?: boolean;
-  /** Во сколько раз фейковый плеер играет быстрее реального (1 = реальный темп). */
-  playbackRate?: number;
-  /** Тишина сервера после конца хода, мс (деф 1000). */
-  quietMs?: number;
-  /** Сколько ждать, что сервер отреагирует на открытый гейт/подстраховку, мс (деф 8000: STT + эндпоинт + rescue-STT ≈ 4 с). */
-  engageGraceMs?: number;
-}
-
-export interface AudioStandResultEx extends AudioStandResult {
-  speechFiles: Phrase[];
-  mode: "realtime" | "fast";
-  stats: { frames: number; framesSent: number; vad: string[]; wakeKeywords: string[]; gateOpenReasons: string[]; rescueCount: number; bargeIns: number; feedMs: number };
-}
-
-export interface AudioStandEx extends AudioStand {
-  sayWav(wav: Buffer | string, opts?: { realtime?: boolean; tailSilenceMs?: number; timeoutMs?: number; preGain?: number }): Promise<AudioStandResultEx>;
-  feedNoise(kind: "silence" | "room" | "tv", ms: number): Promise<AudioStandResultEx>;
-  /** Дождаться idle сервера (окно follow-up ≈12 с): иначе следующая реплика идёт без «Джарвис», как у живого клиента. */
-  waitIdle(timeoutMs?: number): Promise<boolean>;
-  readonly rig: HearingRig;
-  readonly outDir: string;
-}
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const b64 = (pcm: Int16Array): string => Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString("base64");
@@ -106,24 +71,6 @@ export async function createAudioStand(o: AudioStandOptions): Promise<AudioStand
   const quietMs = o.quietMs ?? 1000;
   const grace = o.engageGraceMs ?? 8000;
 
-  /** Ждём конец хода: сервер вернулся из thinking/speaking, плеер доиграл, задачи завершены, тишина quietMs. */
-  async function settle(lastFrameAt: number, timeoutMs: number): Promise<TurnResult["ended"]> {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      fb.drain();
-      const now = Date.now();
-      if (now > deadline) return "timeout";
-      const quiet = now - Math.max(fb.lastEventAt, playerChangedAt, lastFrameAt);
-      const heard = rig.probe.gateOpened || rig.probe.rescueSent;
-      if (!fb.engaged) {
-        if (heard ? now - lastFrameAt >= grace : quiet >= quietMs) return "idle";
-      } else if (fb.state !== "thinking" && fb.state !== "speaking" && !player.active && fb.tasksDone && quiet >= quietMs) {
-        return fb.tasks.size > 0 ? "task_done" : "idle";
-      }
-      await sleep(25);
-    }
-  }
-
   async function run(label: string, frames: Int16Array[], realtime: boolean, timeoutMs: number): Promise<AudioStandResultEx> {
     fb.drain();
     const mark = client.events().at(-1);
@@ -138,7 +85,7 @@ export async function createAudioStand(o: AudioStandOptions): Promise<AudioStand
     try {
       await rig.feed(frames, realtime);
       feedMs = Date.now() - t0;
-      ended = await settle(Date.now(), timeoutMs);
+      ended = await settleAudioTurn({ fb, player, rig, quietMs, grace, playerChangedAt: () => playerChangedAt }, Date.now(), timeoutMs);
     } finally {
       clearInterval(pump);
     }

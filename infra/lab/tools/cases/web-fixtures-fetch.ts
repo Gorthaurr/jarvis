@@ -4,8 +4,8 @@
  * адреса вообще пытались открыть: гард, сработавший ДО запроса, виден как пустой журнал (запрос во внутреннюю сеть
  * успевает нанести вред, даже если тело читать не стали).
  */
-import { WebProvider } from "../../../../apps/server/src/integrations/web.js";
 import type { WebTransport } from "../../../../apps/server/src/integrations/pinned-fetch.js";
+import { WebProvider } from "../../../../apps/server/src/integrations/web.js";
 import type { ToolCase } from "../case-format.js";
 import { rigCase } from "./web-fixtures.js";
 
@@ -23,7 +23,7 @@ export function fetchRig(routes: Routes) {
     const r = routes[url] ?? routes["*"]; // "*" — маршрут по умолчанию (цепочки адресов, которые не перечислить)
     if (!r) return new Response("нет такого маршрута", { status: 404 });
     const x = typeof r === "function" ? r(url) : r;
-    return new Response((x.body ?? "") as BodyInit, { status: x.status ?? 200, headers: x.headers ?? { "content-type": "text/html; charset=utf-8" } });
+    return new Response(x.body ?? "", { status: x.status ?? 200, headers: x.headers ?? { "content-type": "text/html; charset=utf-8" } });
   };
   return { web: new WebProvider(undefined, transport), requested };
 }
