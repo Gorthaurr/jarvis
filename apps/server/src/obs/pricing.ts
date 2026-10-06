@@ -99,12 +99,12 @@ export function costUsd(model: string, u: TokenUsage, opts?: { cacheTtl?: "5m" |
  * ушедший по подписке, — фантомные доллары копились в месячном потолке SpendGuard.
  */
 export function chargedCostUsd(resp: { usage: TokenUsage; channel?: string }, model: string): number {
-  return resp.channel === "subscription" ? 0 : costUsd(model, resp.usage);
+  return resp.channel === "subscription" || resp.channel === "local" ? 0 : costUsd(model, resp.usage);
 }
 
 /** Канал вызова для метрик/ledger (`UsageSinkEvent.channel`): подписка или API. */
-export function usageChannel(resp: { channel?: string }): "api" | "subscription" {
-  return resp.channel === "subscription" ? "subscription" : "api";
+export function usageChannel(resp: { channel?: string }): "api" | "subscription" | "local" {
+  return resp.channel === "local" ? "local" : resp.channel === "subscription" ? "subscription" : "api";
 }
 
 /** Стоимость в МИКРО-долларах (целое) — единица ledger продукта: без потери на округлении до цента. */

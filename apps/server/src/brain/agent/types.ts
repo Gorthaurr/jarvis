@@ -75,7 +75,7 @@ export interface UsageSinkEvent {
   /** Стоимость по obs/pricing в USD (0 у хода по подписке). */
   costUsd: number;
   kind: "turn" | "prefill" | "reflect";
-  channel: "api" | "subscription";
+  channel: "api" | "subscription" | "local";
   /** Ответ — аварийный стаб без вызова API: расхода нет, строку ledger не писать. */
   stubbed?: boolean;
   /** Размер промпта (watermark прошлого usage) — оценка стоимости, если стрим оборвался до usage-события. */

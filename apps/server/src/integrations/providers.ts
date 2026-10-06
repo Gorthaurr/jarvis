@@ -12,6 +12,7 @@ import { type ISttProvider, type ITtsProvider, MockSttProvider, MockTtsProvider 
 import { WhisperSttProvider } from "./whisper-stt.js";
 import { YandexTtsProvider } from "./yandex-tts.js";
 import { YandexTtsV3Provider } from "./yandex-tts-v3.js";
+import { WindowsTtsProvider } from "./windows-tts.js";
 
 const log: Logger = createLogger("voice:providers");
 
@@ -41,6 +42,8 @@ export function createSttProvider(cfg: {
 }
 
 export function createTtsProvider(cfg: { elevenLabsApiKey?: string; voiceId?: string }): ITtsProvider {
+  if (process.env.TTS_PROVIDER === "windows") return new WindowsTtsProvider();
+  if (process.env.TTS_PROVIDER === "mock") return new MockTtsProvider();
   // §Волна3 (3.5) ОПТ-ИН: Yandex v3 (REST-стрим) — первые байты за ~150-300мс, чанки уходят клиенту
   // по мере синтеза (−300-600мс до первого звука на каждой фразе). Боевой дефолт остаётся v1.
   if ((process.env.TTS_PROVIDER || "").toLowerCase() === "yandex3" && process.env.YANDEX_API_KEY) {

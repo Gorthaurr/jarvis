@@ -1,0 +1,13 @@
+{
+  "src/gateway/server.ts::createGateway": 589,
+  "src/gateway/router-ws.ts::makeSessionContext": 552,
+  "src/brain/tools/dispatch.ts::dispatchToolCore": 451,
+  "src/product/gateway-hooks.ts::createProductRuntime": 269,
+  "src/gateway/router-ws.ts::dispatch": 233,
+  "src/brain/tools/handlers/browser.ts::browserAct": 191,
+  "src/brain/tools/handlers/messaging.ts::telegramSendLocked": 185,
+  "src/gateway/task-control.ts::handleControlUtterance": 182,
+  "src/gateway/server.ts::onConnection": 172,
+  "src/memory/skills.ts::createSkillProvider": 158,
+  "src/brain/agent/index.ts::handleUserText": 157
+}

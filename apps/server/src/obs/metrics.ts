@@ -63,7 +63,7 @@ export interface AgentMetricEvent {
    */
   costUsd?: number;
   /** Каким каналом шёл ход (для разреза «быстрота/цена по каналу»). */
-  channel?: "api" | "subscription";
+  channel?: "api" | "subscription" | "local";
   /**
    * Действовавший потолок времени задачи, мс. Он ЗАВИСИТ ОТ КАНАЛА (на резерве шире, раунд дороже),
    * поэтому без него из телеметрии нельзя понять, «не успел» ход или «упёрся в узкий потолок».
@@ -359,7 +359,7 @@ export class MetricsCollector {
      * подписки: медиана раунда там 4.9 с против долей секунды на кешированном основном канале.
      */
     latencyMs?: number;
-    channel?: "api" | "subscription";
+    channel?: "api" | "subscription" | "local";
   }): void {
     const charged = typeof event.costUsd === "number" && Number.isFinite(event.costUsd) ? event.costUsd : costUsd(event.model, event.usage);
     this.appendJsonl({ ts: new Date().toISOString(), type: "round", ...event, costUsd: charged });

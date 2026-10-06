@@ -44,7 +44,7 @@ export interface CapabilityInput {
    * Модель должна знать факт, чтобы честно предупреждать про долгие пошаговые задачи, а не обещать
    * прежний темп и упираться в потолок времени.
    */
-  llmChannel?: { primary: "ok" | "cooldown" | "off"; kind?: string; human?: string; subscriptionLive: boolean };
+  llmChannel?: { primary: "ok" | "cooldown" | "off"; kind?: string; human?: string; subscriptionLive: boolean; activeProvider?: string };
   /**
    * §режим выделения: горячая клавиша «обвести область», как её ЗАРЕГИСТРИРОВАЛ клиент (null — не
    * зарегистрирована; undefined — клиент ещё не сообщил). Называть клавишу в советах владельцу можно
@@ -88,7 +88,9 @@ export function renderCapabilityPassport(c: CapabilityInput): string {
   // 5-7 секунд вместо доли секунды (нет prompt-кеша), поэтому длинная пошаговая работа (меню игры,
   // десятки кликов) в потолок времени НЕ влезет. Честно предупреждать заранее, а не обрываться на
   // полпути с «время вышло» — это тот же закон, что «не обещай канал, которого нет».
-  if (c.llmChannel && c.llmChannel.primary === "off" && c.llmChannel.subscriptionLive) {
+  if (c.llmChannel?.activeProvider) {
+    lines.push(`- Выбранный мозг: ${c.llmChannel.activeProvider}. Платный API и автоматический переход на него отключены; доступность проверяется реальным вызовом.`);
+  } else if (c.llmChannel && c.llmChannel.primary === "off" && c.llmChannel.subscriptionLive) {
     lines.push(
       `- ⚠️ Основной канал модели (ключ API) ВЫКЛЮЧЕН: ${(c.llmChannel.human ?? "недоступен").slice(0, 120)}. Работаешь по подписке: ответы идут медленнее и без кеша промпта, каждый шаг с инструментом — секунды. Если задача требует десятков пошаговых действий, СКАЖИ об этом заранее и предложи путь короче (скрипт одним code_run, батч шагов, программный канал), а не начинай долгий перебор.`,
     );

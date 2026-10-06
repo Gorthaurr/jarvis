@@ -15,7 +15,13 @@
     "test": "pnpm -r test",
     "dev:server": "pnpm --filter @jarvis/server dev",
     "dev:client": "pnpm --filter @jarvis/client dev",
-    "db:migrate": "node infra/migrate.mjs"
+    "db:migrate": "node infra/migrate.mjs",
+    "verify": "node --import tsx infra/lab/verify.ts --profile verify",
+    "verify:quick": "node --import tsx infra/lab/verify.ts --profile quick",
+    "verify:full": "node --import tsx infra/lab/verify.ts --profile full",
+    "lab": "node --import tsx infra/lab/lab.ts",
+    "lab:test": "vitest run --root infra/lab",
+    "lab:coverage": "node --import tsx infra/lab/coverage/cli.ts"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.3.3",

@@ -1,0 +1,633 @@
+{
+ "id": "memory-skills-knowledge",
+ "summary": "Память Джарвиса: эпизодика (Postgres+pgvector, InMemory без БД; пороги 0.82 retrieval/0.93 дедуп/0.85 забывание откалиброваны на e5-small 384d), навыки (личные+общие, семантический recall, скан/карантин, самообучение, авто-макрос), профиль и согласия (json на диске), рабочая память (кольцо, TTL 12 ч), рецепты сайтов/программ/резолва, база знаний trading, сон-цикл консолидации. Всё подменяется в лаборатории: PGlite со всеми миграциями 0001-0006, Hash(384) или настоящий e5, скриптованный LLM, JARVIS_DATA_DIR, фейковые часы. Ловушки: dev-сессия не пишет память/навыки; env-пороги навыков читаются на загрузке модуля; тест схемы БД не применяет миграцию 0005; learned-путь site-recipes не подключён; сон-цикл упирается в TTL 12 ч. Микрофон и ПК не нужны; liveOnly только калибровка на живом корпусе.",
+ "capabilities": [
+  {
+   "id": "episodic-search",
+   "title": "Семантический поиск фактов (cosine, minScore, stale/invalid фильтр)",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/episodic.ts:181",
+   "trigger": "event",
+   "needs": [
+    "db",
+    "fake-llm"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/episodic.test.ts",
+    "apps/server/src/memory/episodic-ranking.test.ts",
+    "apps/server/src/db/persistence.integration.test.ts"
+   ]
+  },
+  {
+   "id": "episodic-write",
+   "title": "Запись эпизода с эмбеддингом passage (NULL при мёртвом эмбеддере)",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/episodic.ts:211",
+   "trigger": "tool",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/episodic.test.ts",
+    "apps/server/src/db/persistence.integration.test.ts"
+   ]
+  },
+  {
+   "id": "episodic-backfill",
+   "title": "Досчёт эмбеддингов осиротевших строк на boot",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/episodic.ts:239",
+   "trigger": "event",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/episodic.test.ts"
+   ]
+  },
+  {
+   "id": "episodic-supersede",
+   "title": "Bi-temporal supersede (invalid_at) + витрина было->стало",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/episodic.ts:325",
+   "trigger": "event",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/episodic.test.ts",
+    "apps/server/src/db/persistence.integration.test.ts"
+   ]
+  },
+  {
+   "id": "episodic-forget-stale",
+   "title": "Мягкое забывание семантически близких (markStale) и по id",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/episodic.ts:262",
+   "trigger": "tool",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/episodic.test.ts",
+    "apps/server/src/memory/user-memory.test.ts"
+   ]
+  },
+  {
+   "id": "episodic-list-ui",
+   "title": "Листинг живых записей для вкладки Память",
+   "kind": "ui",
+   "entry": "apps/server/src/memory/episodic.ts:285",
+   "trigger": "ui",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/episodic.test.ts"
+   ]
+  },
+  {
+   "id": "memory-write-tool",
+   "title": "memory_write: дедуп 0.93, запись, мост в профиль, хук противоречий",
+   "kind": "tool",
+   "entry": "apps/server/src/brain/tools/dispatch.ts:947",
+   "trigger": "tool",
+   "needs": [
+    "db",
+    "fake-llm"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/user-memory.test.ts",
+    "apps/server/src/brain/agent/index.test.ts",
+    "apps/server/src/brain/agent/unaddressed-loop.test.ts"
+   ]
+  },
+  {
+   "id": "memory-forget-tool",
+   "title": "memory_forget: markStale + чистка профиля пословно",
+   "kind": "tool",
+   "entry": "apps/server/src/brain/tools/dispatch.ts:963",
+   "trigger": "tool",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/user-memory.test.ts"
+   ]
+  },
+  {
+   "id": "memory-search-tool",
+   "title": "memory_search: явный поиск без порога",
+   "kind": "tool",
+   "entry": "apps/server/src/brain/tools/handlers/info.ts:64",
+   "trigger": "tool",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/tools/handlers/info.test.ts"
+   ]
+  },
+  {
+   "id": "memory-reflex",
+   "title": "Рефлекс-бэкстоп записи факта из реплики с маркером",
+   "kind": "proactive",
+   "entry": "apps/server/src/brain/agent/memory-reflect.ts:88",
+   "trigger": "voice",
+   "needs": [
+    "fake-llm",
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/agent/memory-reflect.test.ts"
+   ]
+  },
+  {
+   "id": "contradiction-hook",
+   "title": "Хук противоречий: LLM выбирает устаревшие соседи 0.70-0.93",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/contradiction-hook.ts:62",
+   "trigger": "event",
+   "needs": [
+    "fake-llm",
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/contradiction-hook.test.ts"
+   ]
+  },
+  {
+   "id": "consolidation-sleep-cycle",
+   "title": "Сон-цикл: вчерашние реплики -> до 5 фактов, фильтр директив, журнал",
+   "kind": "proactive",
+   "entry": "apps/server/src/proactive/consolidation.ts:103",
+   "trigger": "time",
+   "needs": [
+    "fake-llm",
+    "fake-clock",
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/proactive/consolidation.test.ts",
+    "apps/server/src/proactive/consolidation-journal.test.ts"
+   ]
+  },
+  {
+   "id": "turn-retrieval",
+   "title": "Параллельный retrieval фактов+recall навыка+каталог на каждом ходе",
+   "kind": "flow",
+   "entry": "apps/server/src/brain/agent/loop/retrieval.ts:43",
+   "trigger": "voice",
+   "needs": [
+    "db",
+    "fake-llm"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/agent/skill-hint-gate-loop.test.ts"
+   ]
+  },
+  {
+   "id": "skill-hint-gate",
+   "title": "Гейт подсказки навыка в промпт (командный глагол, raw cos 0.86, якорь)",
+   "kind": "flow",
+   "entry": "apps/server/src/brain/agent/loop/retrieval.ts:20",
+   "trigger": "voice",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/agent/skill-hint-gate-loop.test.ts",
+    "apps/server/src/memory/skill-anchors.test.ts",
+    "apps/server/src/seed/lms-quiz-recall-e5.test.ts"
+   ]
+  },
+  {
+   "id": "skill-recall-semantic",
+   "title": "Семантический recall навыка: e5 + лексика + платформа + гард полярности",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/skill-recall.ts:247",
+   "trigger": "voice",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skills.test.ts",
+    "apps/server/src/memory/intent-polarity.test.ts",
+    "apps/server/src/seed/lms-quiz-recall-e5.test.ts"
+   ]
+  },
+  {
+   "id": "skill-recall-lexical",
+   "title": "Лексический фолбэк recall со стеммингом",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/skill-recall.ts:145",
+   "trigger": "voice",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skills.test.ts"
+   ]
+  },
+  {
+   "id": "skill-save",
+   "title": "skill_save: скан, карантин, дедуп, дистилляция, version++",
+   "kind": "tool",
+   "entry": "apps/server/src/brain/tools/handlers/skills.ts:241",
+   "trigger": "tool",
+   "needs": [
+    "db",
+    "fake-llm"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skills.test.ts",
+    "apps/server/src/memory/skill-scan.test.ts"
+   ]
+  },
+  {
+   "id": "skill-self-learn",
+   "title": "Самообучение: нудж модели сохранить приём после решённой задачи",
+   "kind": "flow",
+   "entry": "apps/server/src/brain/agent/loop/self-learn.ts:21",
+   "trigger": "event",
+   "needs": [
+    "fake-llm",
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/agent/skill-prefill.test.ts"
+   ]
+  },
+  {
+   "id": "skill-promote",
+   "title": "Подъём личного навыка в общую библиотеку с пересканом",
+   "kind": "tool",
+   "entry": "apps/server/src/memory/skills.ts:870",
+   "trigger": "tool",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skills.test.ts"
+   ]
+  },
+  {
+   "id": "skill-outcome-suppress",
+   "title": "recordOutcome: fail_count +-1, подавление после 3 провалов",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/skills.ts:535",
+   "trigger": "event",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skills.test.ts"
+   ]
+  },
+  {
+   "id": "skill-scan-quarantine",
+   "title": "Скан инъекций в тексте навыка и карантин",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/skill-scan.ts:120",
+   "trigger": "event",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skill-scan.test.ts"
+   ]
+  },
+  {
+   "id": "skill-macro-replay",
+   "title": "Авто-макрос: трасса жестов -> секция реплея в навыке",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/skill-macro.ts:47",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skill-macro.test.ts"
+   ]
+  },
+  {
+   "id": "skill-slots",
+   "title": "Слоты навыка: извлечение и подстановка",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/skill-slots.ts:26",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skill-slots.test.ts"
+   ]
+  },
+  {
+   "id": "skill-execute",
+   "title": "skill_execute: реплей steps по id (свои+общие)",
+   "kind": "tool",
+   "entry": "apps/server/src/brain/tools/handlers/skills.ts:33",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/tools/handlers/skills-step-text.test.ts",
+    "apps/server/src/brain/tools/handlers/skills-timeout.test.ts"
+   ]
+  },
+  {
+   "id": "shared-skills-seed",
+   "title": "Сид 12 курируемых общих навыков на boot по версии",
+   "kind": "infra",
+   "entry": "apps/server/src/seed/shared-skills.ts:312",
+   "trigger": "event",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/skills-seed.test.ts",
+    "apps/server/src/seed/shared-skills.test.ts"
+   ]
+  },
+  {
+   "id": "profile-facts",
+   "title": "Курируемый профиль: имя/язык/контекст/факты, кап 50, архив вытесненных",
+   "kind": "memory",
+   "entry": "apps/server/src/brain/profile.ts:291",
+   "trigger": "event",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/profile.test.ts"
+   ]
+  },
+  {
+   "id": "fact-age-labels",
+   "title": "Возраст факта в доверенном блоке промпта",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/fact-age.ts:53",
+   "trigger": "event",
+   "needs": [
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/fact-age.test.ts"
+   ]
+  },
+  {
+   "id": "memory-tab-ui",
+   "title": "Вкладка Память: memory.request / memory.forget",
+   "kind": "ui",
+   "entry": "apps/server/src/gateway/router-ws.ts:277",
+   "trigger": "ui",
+   "needs": [
+    "db"
+   ],
+   "liveOnly": false,
+   "testedBy": []
+  },
+  {
+   "id": "consent-send",
+   "title": "Согласия на отправку: approve/isApproved/revoke, персист",
+   "kind": "memory",
+   "entry": "apps/server/src/brain/consent.ts:46",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/consent.test.ts"
+   ]
+  },
+  {
+   "id": "working-memory",
+   "title": "Кольцо реплик + стек анафоры",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/working.ts:56",
+   "trigger": "voice",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/working.test.ts"
+   ]
+  },
+  {
+   "id": "working-store-persist",
+   "title": "Персист рабочей памяти (TTL 12 ч, атомарно, flush)",
+   "kind": "infra",
+   "entry": "apps/server/src/memory/working-store.ts:37",
+   "trigger": "event",
+   "needs": [
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/working-store.test.ts"
+   ]
+  },
+  {
+   "id": "site-recipes",
+   "title": "Рецепты сайтов по host (seed 8), recall хинтом в browser",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/site-recipes.ts:57",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/site-recipes.test.ts"
+   ]
+  },
+  {
+   "id": "app-recipes",
+   "title": "Выученные рецепты программных каналов (запись только по пробе)",
+   "kind": "tool",
+   "entry": "apps/server/src/memory/app-recipes.ts:61",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/app-channels.test.ts"
+   ]
+  },
+  {
+   "id": "resolution-memory",
+   "title": "Память резолва получателей: remember/recall/forget, TTL 180 д",
+   "kind": "memory",
+   "entry": "apps/server/src/memory/resolution-memory.ts:57",
+   "trigger": "tool",
+   "needs": [
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/memory/resolution-memory.test.ts",
+    "apps/server/src/brain/tools/handlers/messaging.test.ts"
+   ]
+  },
+  {
+   "id": "knowledge-consult",
+   "title": "knowledge_consult по домену trading, честный matched:false",
+   "kind": "tool",
+   "entry": "apps/server/src/brain/tools/handlers/info.ts:41",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/server/src/brain/knowledge/knowledge.test.ts"
+   ]
+  },
+  {
+   "id": "recall-quality-live-corpus",
+   "title": "Калибровка порогов recall/подсказки на живых STT-формулировках владельца",
+   "kind": "flow",
+   "entry": "apps/server/src/brain/agent/loop/retrieval.ts:20",
+   "trigger": "voice",
+   "needs": [
+    "real-brain",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/server/src/seed/lms-quiz-recall-e5.test.ts"
+   ]
+  }
+ ],
+ "seams": [
+  {
+   "name": "БД (Postgres/pgvector)",
+   "file": "apps/server/src/db/pool.ts:44",
+   "how_to_fake": "__setQueryClientForTests(PGlite+vector) с миграциями infra/migrations 0001..0006 (+0002 seed DEV_USER, ensureUser(SHARED_USER_ID)); или DATABASE_URL=pglite://<dir> на весь сервер; образец db/persistence.integration.test.ts, product/test-db.ts"
+  },
+  {
+   "name": "Эмбеддер",
+   "file": "apps/server/src/integrations/openai-embeddings.ts:96",
+   "how_to_fake": "HashEmbeddingProvider(384) (только 384d), StubEmbeddingProvider (null-деградация), LocalEmbeddingProvider для реального e5 (JARVIS_EMBED_DEVICE=dml на Windows, веса в ~/.jarvis/models/hf); пороги через JARVIS_MEMORY_MIN_SCORE"
+  },
+  {
+   "name": "LLM фоновых механизмов",
+   "file": "apps/server/src/memory/contradiction-hook.ts:34",
+   "how_to_fake": "ILlmProvider: MockLlmProvider / gateway/bench/scripted-llm.ts ScriptedLlm; дистиллятор навыков - параметр createSkillProvider(embedder, distiller)"
+  },
+  {
+   "name": "Каталог данных",
+   "file": "apps/server/src/paths.ts:34",
+   "how_to_fake": "JARVIS_DATA_DIR (vitest.setup.ts создаёт tmp); loadSiteRecipeStore(dir), loadResolutionMemory(now,dir), readPersisted/writePersisted(dir)"
+  },
+  {
+   "name": "Часы",
+   "file": "apps/server/src/memory/working-store.ts:16",
+   "how_to_fake": "vi.useFakeTimers/setSystemTime для Date.now (TTL 12 ч, возраст фактов, сутки сон-цикла); ResolutionMemory(now) и SiteRecipeStore(now) принимают now"
+  },
+  {
+   "name": "Профиль/консент/рецепты приложений (глобальные кеши)",
+   "file": "apps/server/src/brain/consent.ts:148",
+   "how_to_fake": "_resetConsentForTest, resetAppRecipesForTest (app-recipes.ts:159), loadProfile(userId) на чистом data dir"
+  },
+  {
+   "name": "Dev-изоляция сессии",
+   "file": "apps/server/src/gateway/dev-session.ts",
+   "how_to_fake": "dev/bench-сессия не пишет память, навыки, самообучение; для проверки записи - не-dev сессия или прямые writeUserMemory/createSkillProvider; retrieval dev-сессии читает общий brain.episodic под DEV_USER"
+  },
+  {
+   "name": "Bench-сессия",
+   "file": "apps/server/src/gateway/bench/bench-hub.ts",
+   "how_to_fake": "долгоживущая bench-сессия с ScriptedLlm и выключенным кешем ответов; подходит для сценариев с инструментами"
+  },
+  {
+   "name": "Boot-сид и прогрев",
+   "file": "apps/server/src/gateway/server.ts:640",
+   "how_to_fake": "вызвать seedSharedSkills(SHARED_SKILL_SEED), backfillMissingEmbeddings, recall-прогрев напрямую на тестовой БД"
+  }
+ ],
+ "defects": [
+  {
+   "severity": "med",
+   "where": "apps/server/src/db/persistence.integration.test.ts:34",
+   "what": "Тест схемы применяет 0001+0002+0006 без 0005; столбец VECTOR(1536) и Hash(1536), боевая размерность 384 не проверена, дрейф схемы остаётся зелёным"
+  },
+  {
+   "severity": "med",
+   "where": "apps/server/src/memory/skill-recall.ts:46",
+   "what": "Пороги JARVIS_SKILL_* (и replay-gate.ts:29, site-recipes.ts:27, app-recipes.ts:33) читаются на загрузке модуля: .env грузится после ESM-хойстинга, значения из .env игнорируются (в отличие от memoryMinScore)"
+  },
+  {
+   "severity": "med",
+   "where": "apps/server/src/memory/site-recipes.ts:57",
+   "what": "upsert(learned)/reinforce/demote не вызываются из прод-кода, только recall: learned-рецептов и self-heal нет, вопреки шапке модуля"
+  },
+  {
+   "severity": "med",
+   "where": "apps/server/src/gateway/server.ts:1027",
+   "what": "Сон-цикл берёт реплики из working-store с TTL 12 ч; при коннекте утром после долгого простоя реплик нет и цикл не запускается; приватная функция без теста"
+  },
+  {
+   "severity": "med",
+   "where": "apps/server/src/memory/episodic.ts:425",
+   "what": "InMemory.markStale физически удаляет запись, pg ставит stale=true (обратимо): лаборатория на in-memory не воспроизводит обратимость забывания"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/memory/user-memory.ts:14",
+   "what": "DEDUP_MIN=0.93 и зона хука 0.70-0.93 зашиты под e5 и не embedder-aware, в отличие от memoryMinScore/forgetMinScore"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/memory/skills.ts:445",
+   "what": "Фолбэк memSkills при упавшем запросе с живой БД не читается getSkill/listSkills: навык persisted:false невидим для recall до рестарта"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/memory/skills.ts:1",
+   "what": "skills.ts 1034 строки, episodic.ts 479: нарушение закона модулей < 150 строк (старые файлы)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/brain/agent/memory-reflect.ts:12",
+   "what": "Комментарий про кап 20 фактов профиля устарел, реальный кап 50 (profile.ts:184)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/brain/consent.ts:30",
+   "what": "Ключ согласия нормализуется toLowerCase, а revokeSendMatching сверяет через foldName: разные нормализации адресата"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/memory/episodic.ts:181",
+   "what": "pg-поиск фильтрует stale/invalid_at после HNSW-выборки limit k: при многих stale-соседях вернётся меньше k (по чтению, не воспроизводилось)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/server/src/memory/episodic.ts:211",
+   "what": "Строка с embedding NULL (эмбеддер не ответил) невидима поиску до backfill на следующем boot"
+  }
+ ],
+ "labRequirements": [
+  "Изолированная PGlite со всеми миграциями 0001-0006, seed DEV_USER и ensureUser(SHARED_USER_ID); пересоздание на сценарий и режим pglite:// для рестартов",
+  "Эмбеддер Hash(384) с переопределяемым JARVIS_MEMORY_MIN_SCORE и отдельный режим настоящего e5 (dml) для калибровки порогов, с явной пометкой режима в отчёте",
+  "Скриптованный LLM для хука противоречий, рефлекса, сон-цикла, дистиллятора и самообучения, с проверкой отсутствия вызовов при выключенных флагах",
+  "Управляемые часы (TTL working-store 12 ч, возраст фактов, сутки сон-цикла, TTL резолва) и tmp JARVIS_DATA_DIR на сценарий",
+  "Не-dev bench-сессия или прямой вызов writeUserMemory/createSkillProvider для проверки записи (dev-сессия память и навыки не пишет), с отдельной БД, чтобы не читать память владельца",
+  "Сценарии рестарта: тот же data dir и PGlite dir, проверка персиста, flushWorkingStores, backfill эмбеддингов, повторного сида",
+  "Корпус реплик владельца с ожидаемым попаданием/промахом навыка для регрессии recall и подсказки"
+ ]
+}

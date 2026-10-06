@@ -52,7 +52,7 @@ export class PipelineRescue {
 
   async run(pcm: ArrayBuffer, sampleRate: number, meta: { ms?: number; peak?: number } = {}): Promise<RescueVerdict> {
     const once = this.seam.stt().transcribeOnce?.bind(this.seam.stt());
-    if (!once || this.dead || this.seam.speakerStrict()) return "skipped"; // нет разового STT (mock/whisper) / сессия мертва / строгий диктор
+    if (!once || this.dead || this.seam.speakerStrict()) return "skipped"; // нет разового STT / сессия мертва / строгий диктор
     this.judge ??= new WakeRescue({
       transcribe: (b, sr) => once(b, sr),
       normalize: this.seam.normalize,

@@ -85,6 +85,10 @@ describe.skipIf(!chrome)("B-14 (rebinding): невидимый браузер п
 
   // Настоящий интернет через прокси: TLS в CONNECT-туннеле и системный DNS (без таблиц стенда). Нет сети — пропуск.
   it.skipIf(!online)("живьём: https://example.com открывается через прокси пиннинга", async () => {
-    expect((await jb.open("https://example.com/")).text).toContain("Example Domain");
+    const page = await jb.open("https://example.com/");
+    // Текст чужого сайта меняется. Сломанный TLS даёт chrome-error:// вместо URL назначения.
+    expect(page.url).toBe("https://example.com/");
+    expect(page.title).toMatch(/example/iu);
+    expect(page.text.trim().length).toBeGreaterThan(0);
   }, 30_000);
 });

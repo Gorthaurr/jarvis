@@ -19,7 +19,7 @@ export interface TierState {
    */
   modelUsedLast: string | undefined;
   /** Каким каналом шёл последний раунд — в метрику задачи (разрез «быстрота/цена по каналу»). */
-  lastChannelUsed: "api" | "subscription" | undefined;
+  lastChannelUsed: "api" | "subscription" | "local" | undefined;
   // Волна 1 (1.8): пер-раундовая диагностика кеша — модель прошлого раунда и был ли prune скринов
   // (обе — типовые причины перезаписи префикса; см. WARN «перезапись префикса» ниже).
   prevRoundModel: string;

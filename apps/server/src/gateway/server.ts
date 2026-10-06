@@ -11,6 +11,7 @@
  *
  * Это реально работающий код M0/M2-среза.
  */
+import { createBrainProvider } from "../integrations/brain-provider.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import {
@@ -25,7 +26,6 @@ import { autonomyFreeze } from "../autonomy/freeze.js";
 import { autonomyThrottle } from "../autonomy/throttle.js";
 import type { ServerConfig } from "../config.js";
 import { SpendGuards } from "../billing/index.js";
-import { describeProductPolicy } from "../product/policy.js";
 import { createProductRuntime } from "../product/gateway-hooks.js";
 import { registerProductRoutes } from "../product/routes/index.js";
 import { sameSecret } from "../product/routes/guards.js";
@@ -42,9 +42,6 @@ import { DynamicToolStore } from "../brain/tools/dynamic.js";
 import { McpManager } from "../brain/mcp/manager.js";
 import { loadMcpConfig } from "../brain/mcp/config.js";
 import { TOOLS_BY_NAME } from "@jarvis/tools";
-import { AnthropicLlmProvider } from "../integrations/anthropic.js";
-import { FallbackLlmProvider } from "../integrations/fallback-llm.js";
-import { SubscriptionLlmProvider } from "../integrations/subscription-llm.js";
 import { getProfile, loadProfile, setLastConsolidated, setLastGreeted } from "../brain/profile.js";
 import { verbalize } from "../brain/verbalize/index.js";
 import { claimConsolidationRun, consolidateMemory, consolidationEnabled } from "../proactive/consolidation.js";
@@ -189,42 +186,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
   const tinkoff = makeTinkoffProvider(); // §трейдинг: РЕАЛЬНЫЙ Тинькофф (read-only) при TINKOFF_INVEST_TOKEN
   const market = new TradingService(new MarketDataProvider(tinkoff), loadPredictionStore(), tinkoff); // данные+анализ+прогнозы+портфель
   const knowledge = new KnowledgeBase(); // §экспертность: база знаний по доменам (свериться перед экспертной задачей)
-  // §7: мозг — ТОЛЬКО облачный Opus (Anthropic). Концепция: ничего локального (тонкий
-  // клиент, должен идти и на телефоне). Никаких резервных/локальных моделей. Сбой Opus →
-  // честный стаб «Связь прервалась, сэр».
-  const apiLlm = new AnthropicLlmProvider({
-    apiKey: config.anthropicApiKey,
-    cacheTtl: config.anthropicCacheTtl,
-    baseUrl: config.anthropicBaseUrl,
-  });
-  // ВОЛНА G: РЕЗЕРВ НА ПОДПИСКЕ. Кончился кредит API / лимит / сеть → ход уходит в Claude Max через
-  // Agent SDK вместо стаба «связь прервалась» (см. integrations/subscription-llm.ts — там же честно
-  // расписано, чем резерв ХУЖЕ основного канала: нет наших кеш-брейкпоинтов, история идёт текстом).
-  // Резерв активируется САМ и только при реальном отказе основного; выключатель JARVIS_SUBSCRIPTION_FALLBACK=0.
-  let anthropicLlm: AnthropicLlmProvider | FallbackLlmProvider = apiLlm;
-  if (config.product.enabled) {
-    // ПРОДУКТОВЫЙ РЕЖИМ (2026-09-02): резерв на ЛИЧНОЙ подписке владельца НЕ конструируется вовсе —
-    // «отдавать этот канал другим людям нельзя» (subscription-llm.ts). Не «выключен флагом», а
-    // отсутствует по построению. Заданный токен подписки в продуктовом профиле — отказ старта: иначе
-    // пользователи продукта молча жили бы на подписке владельца. Файл ~/.claude/.credentials.json
-    // (он есть на машине владельца всегда) — не повод не стартовать, лишь предупреждение.
-    if ((process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "").trim()) {
-      throw new Error(
-        "PRODUCT MODE: задан CLAUDE_CODE_OAUTH_TOKEN — личная подписка владельца не может обслуживать пользователей продукта; уберите переменную из продуктового профиля env",
-      );
-    }
-    log.info(describeProductPolicy(config.product));
-    log.info("резерв мозга на подписке в продуктовом режиме НЕ создаётся (канал личный, не для пользователей)");
-  } else {
-    const subscriptionLlm = new SubscriptionLlmProvider();
-    anthropicLlm = new FallbackLlmProvider(apiLlm, subscriptionLlm);
-    if (subscriptionLlm.live) {
-      log.info("резерв мозга на подписке ГОТОВ (Claude Max через Agent SDK)", { auth: SubscriptionLlmProvider.authMode() });
-      void subscriptionLlm.warmup(); // fire-and-forget: первый ход владельца не платит за холодный старт
-    } else {
-      log.warn(`резерв мозга на подписке НЕ активен: ${SubscriptionLlmProvider.unavailableReason()}`);
-    }
-  }
+  const anthropicLlm = createBrainProvider(config, log);
   // Реестр самописных инструментов (§8+): имена встроенных — зарезервированы.
   // Рехидратация с диска — в listen() ДО приёма соединений (чтобы ранние сессии видели
   // выученные инструменты), не fire-and-forget.
@@ -696,6 +658,7 @@ export function createGateway(config: ServerConfig, logger: Logger): Gateway {
       await Promise.race([brain.spend.drainAll().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
       // L3: убить speaker-сайдкар (sherpa-child) — иначе зомби с моделью в памяти при taskkill /F на порту.
       providers.speakerVerifier?.dispose?.();
+      anthropicLlm.dispose?.();
       // L6: дождаться закрытия MCP-клиентов (stdio-child), bounded — зависший клиент не держит выход.
       // ⚠️ kill дерева stdio-детей на Windows (taskkill /T) — внутри McpManager.dispose (вне этого кластера).
       await Promise.race([mcp.dispose().catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);

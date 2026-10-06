@@ -1,0 +1,831 @@
+{
+ "id": "client-actuators-gui",
+ "summary": "Клиентский dispatch (index.ts) превращает ActionCommand в ActionResult: гейт вуали, USER_BUSY для proactive, снимок UIA до, актуатор, честные коды ошибок. Все мутации GUI идут через injectRpc и рубеж (self, secret, commit) в сайдкар SidecarWin.exe (C#, NDJSON: ground, ground.at, invoke, click, type, key, mouse, window.list/focus, ui.snapshot, read.*, ocr, demo.record, raw-input.subscribe). Примитив gui.act делает найди-сделай-сверь за один вызов с verified met/failed/unchecked. Координаты модели живут в кадрах задачи (frames.ts). Есть фейк-сайдкар в реальной форме Ipc.cs и server-link e2e, но нет стейтфул-рабочего стола; C# exe старше исходников; найдены дефекты: синхронный throw request(), потеря overlay_drawing в window.focus по hwnd, нерабочая отмена skill.execute.",
+ "capabilities": [
+  {
+   "id": "app.launch",
+   "title": "Запуск приложения/игры/URI: алиасы, App Paths, Steam, Пуск, PATH; сверка факта запуска",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:296",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "hardware"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/app-resolve.test.ts",
+    "apps/client/main/actuators/app-resolve-steam.test.ts",
+    "apps/client/main/actuators/app-resolve-lnk-args.test.ts",
+    "apps/client/main/actuators/launch-window.test.ts",
+    "apps/client/main/actuators/apps.test.ts"
+   ]
+  },
+  {
+   "id": "app.focus",
+   "title": "Вынести окно приложения на передний план (сайдкар window.focus, фолбэк AppActivate)",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:300",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/apps.test.ts"
+   ]
+  },
+  {
+   "id": "app.close",
+   "title": "Безопасное закрытие по процессу, CRITICAL_PROCESSES, graceful/force",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:314",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/rubezh-bridge.test.ts",
+    "apps/client/main/actuators/apps.test.ts"
+   ]
+  },
+  {
+   "id": "browser.open",
+   "title": "Открыть URL: inDefault через shell либо CDP-браузер с откатом",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:332",
+   "trigger": "tool",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts"
+   ]
+  },
+  {
+   "id": "input.type",
+   "title": "Печать текста кусками (Enter/Tab между), джиттер в сайдкаре, вставка длинного через буфер",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:353",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/input.test.ts",
+    "apps/client/main/actuators/paste-text.test.ts",
+    "apps/client/main/actuators/secret-paste.test.ts",
+    "apps/client/main/actuators/rubezh-keys.test.ts"
+   ]
+  },
+  {
+   "id": "input.key",
+   "title": "Нажатие/удержание клавиши, блок-лист комбо, накопление удержания, scancode",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:359",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/input.test.ts",
+    "apps/client/main/actuators/held-keys.test.ts",
+    "apps/client/main/actuators/rubezh-keys.test.ts"
+   ]
+  },
+  {
+   "id": "input.click",
+   "title": "Клик: лестница UIA-invoke -> ground.at -> физический SendInput с возвратом курсора",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/input.ts:156",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/input.test.ts",
+    "apps/client/main/actuators/rubezh-commit.test.ts",
+    "apps/client/main/actuators/injection-seam.test.ts"
+   ]
+  },
+  {
+   "id": "input.mouse",
+   "title": "Мышь: move/down/up/wheel/drag, учёт зажатых кнопок, авто-отпускание при закрытии вуали",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/input.ts:241",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/pointer-release.test.ts",
+    "apps/client/main/actuators/pointer-release-wiring.test.ts",
+    "apps/client/main/actuators/frames-dispatch.test.ts"
+   ]
+  },
+  {
+   "id": "gui.act",
+   "title": "Примитив найди-сделай-сверь с 12 глаголами и verify",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/act.ts:79",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act.test.ts",
+    "apps/client/main/actuators/act-do.test.ts",
+    "apps/client/main/actuators/act-verbs.test.ts",
+    "apps/client/main/actuators/act-rubezh.test.ts",
+    "apps/client/main/actuators/act-find.test.ts"
+   ]
+  },
+  {
+   "id": "act.find",
+   "title": "Поиск цели: handle -> точка -> UIA-снапшот (баллы, неоднозначность) -> OCR окна",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/act-find.ts:132",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act-find.test.ts",
+    "apps/client/main/actuators/act-find-ocr.test.ts"
+   ]
+  },
+  {
+   "id": "act.verify",
+   "title": "Сверка исхода: дельта наблюдения + признак verify (text/element/title/gone), preMet",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/act-verify.ts:64",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act.test.ts"
+   ]
+  },
+  {
+   "id": "act.clear-type-enter",
+   "title": "Печать в поле: clear по роли, setValue или Ctrl+A/Delete, enter после",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/act-do-text.ts:82",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act-do.test.ts",
+    "apps/client/main/actuators/act-verbs.test.ts"
+   ]
+  },
+  {
+   "id": "act.pointer-verbs",
+   "title": "triple/middle/hover/scroll/drag через рубеж",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/act-do-pointer.ts:47",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act-verbs.test.ts"
+   ]
+  },
+  {
+   "id": "ui.invoke",
+   "title": "UIA-паттерн по handle/роли: invoke/setValue/toggle/select/expand/scroll",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:402",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/observe-wiring.test.ts",
+    "apps/client/main/actuators/rubezh-commit.test.ts"
+   ]
+  },
+  {
+   "id": "ui.ground",
+   "title": "Найти элемент по роли/имени/automationId -> handle+bbox",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/ground.ts:68",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/ground-real-form.test.ts"
+   ]
+  },
+  {
+   "id": "ui.snapshot",
+   "title": "Set-of-marks: интерактивные элементы окна (до 200) в кадре задачи",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/ground.ts:96",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/frames-dispatch.test.ts",
+    "apps/client/main/actuators/ground-real-form.test.ts"
+   ]
+  },
+  {
+   "id": "ui.groundAt",
+   "title": "Элемент под точкой (бесшумный клик по пикселям)",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/ground.ts:108",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/ground-real-form.test.ts",
+    "apps/client/main/actuators/input.test.ts"
+   ]
+  },
+  {
+   "id": "context.read",
+   "title": "Дейксис: selection/active_window/screen через TextPattern и a11y-выжимку",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/ground.ts:139",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act-bridge.test.ts"
+   ]
+  },
+  {
+   "id": "window.list",
+   "title": "Окна верхнего уровня с монитором, без окон вуали",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/windows.ts:78",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/windows.test.ts",
+    "apps/client/main/actuators/windows-own.test.ts"
+   ]
+  },
+  {
+   "id": "window.focus",
+   "title": "Фокус по hwnd/query с честным readback и фолбэком AppActivate",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:420",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/windows.test.ts",
+    "apps/client/main/actuators/focus-veil.test.ts"
+   ]
+  },
+  {
+   "id": "window.arrange",
+   "title": "Свернуть/развернуть/восстановить/перенести на монитор",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/window-arrange.ts:136",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/window-arrange-postcheck.test.ts",
+    "apps/client/main/actuators/window-arrange-veil.test.ts"
+   ]
+  },
+  {
+   "id": "audio.sessions",
+   "title": "Кто звучит: Core Audio сессии по процессам с пиком",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/audio-sessions.ts:285",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/audio-sessions.test.ts"
+   ]
+  },
+  {
+   "id": "audio.set",
+   "title": "Точечный мьют/громкость приложения",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/audio-sessions.ts:293",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/audio-sessions.test.ts"
+   ]
+  },
+  {
+   "id": "screen.capture",
+   "title": "Снимок монитора/региона -> кадр f/z/s с id, кап зрения",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/screen.ts:58",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/screen-capture.test.ts",
+    "apps/client/main/actuators/frames.test.ts",
+    "apps/client/main/actuators/frames-xvfb.test.ts"
+   ]
+  },
+  {
+   "id": "screen.ocr",
+   "title": "Локальный OCR (Windows.Media.Ocr) в нативе, полосы 4K, строки в кадре",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/screen-ocr.ts:45",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/screen-ocr.test.ts"
+   ]
+  },
+  {
+   "id": "screen.probe",
+   "title": "Перцептивный хеш региона (проба изменения)",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/screen-probe.ts:20",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": []
+  },
+  {
+   "id": "screen.selection",
+   "title": "Режим выделения: start/view/clear, вуаль, свежий кадр области",
+   "kind": "ui",
+   "entry": "apps/client/main/actuators/selection.ts:160",
+   "trigger": "voice",
+   "needs": [
+    "owner",
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/selection.test.ts",
+    "apps/client/main/actuators/focus-veil.test.ts"
+   ]
+  },
+  {
+   "id": "wait.for",
+   "title": "Клиентское ожидание: ui/window/text/sound/gsi/file/process, unknown != не выполнено",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/sensors-cheap.ts:188",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/race-cap.test.ts",
+    "apps/client/main/actuators/wait-file-process.test.ts"
+   ]
+  },
+  {
+   "id": "observe.fused",
+   "title": "Наблюдение после действия: a11y-дельта/OCR-дельта, weak/changed",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/observe.ts:510",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/observe-delta.test.ts",
+    "apps/client/main/actuators/observe-ocr-delta.test.ts",
+    "apps/client/main/actuators/observe-wiring.test.ts"
+   ]
+  },
+  {
+   "id": "frames.registry",
+   "title": "Реестр кадров задачи (LRU 64) и перевод координат кадр->DIP",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/frames.ts:84",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/frames.test.ts",
+    "apps/client/main/actuators/coords.test.ts"
+   ]
+  },
+  {
+   "id": "inject.guard",
+   "title": "Рубеж инжекции: self -> secret -> commit по найденному элементу",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/injection-guard.ts:56",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/injection-seam.test.ts",
+    "apps/client/main/actuators/rubezh-commit.test.ts",
+    "apps/client/main/actuators/rubezh-keys.test.ts",
+    "apps/client/main/actuators/injection-facts.test.ts"
+   ]
+  },
+  {
+   "id": "inject.self-judge",
+   "title": "Отказ мутации в окно самого Джарвиса, expectedForeground",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/self-judge.ts:59",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/rubezh-commit.test.ts",
+    "apps/client/main/actuators/act-rubezh.test.ts"
+   ]
+  },
+  {
+   "id": "inject.secret-judge",
+   "title": "Параграф 0: карта/пароль/автоввод менеджера паролей, буфер вставки",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/secret-judge.ts:75",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/secret-field.test.ts",
+    "apps/client/main/actuators/secret-buffer.test.ts",
+    "apps/client/main/actuators/secret-paste.test.ts",
+    "apps/client/main/actuators/secret-signs.test.ts"
+   ]
+  },
+  {
+   "id": "inject.commit-judge",
+   "title": "Параграф 14: коммит в рискованной программе — грант области или needsApproval",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/commit-judge.ts:50",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop",
+    "owner"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/rubezh-commit.test.ts",
+    "apps/client/main/actuators/rubezh-keys.test.ts",
+    "apps/client/main/actuators/approval-scope.test.ts",
+    "apps/client/main/actuators/approval-bridge.test.ts"
+   ]
+  },
+  {
+   "id": "approval.scope",
+   "title": "ALS-область одобрения: server/bridge/local, списание грантов",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/approval-scope.ts:54",
+   "trigger": "event",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/approval-scope.test.ts",
+    "apps/client/main/actuators/approval-bridge.test.ts"
+   ]
+  },
+  {
+   "id": "sdk.bridge",
+   "title": "Loopback-мост для python SDK jarvis.* (allowlist видов, токен per-boot, срез approval)",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/act-bridge.ts:74",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act-bridge.test.ts",
+    "apps/client/main/actuators/rubezh-bridge.test.ts",
+    "apps/client/main/actuators/jarvis-sdk-rubezh.test.ts",
+    "apps/client/main/actuators/jarvis-sdk-veil.test.ts",
+    "apps/client/main/actuators/secret-sdk.test.ts"
+   ]
+  },
+  {
+   "id": "sdk.find",
+   "title": "ui.find моста: поиск цели той же лестницей act",
+   "kind": "tool",
+   "entry": "apps/client/main/actuators/bridge-find.ts:28",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/act-bridge.test.ts"
+   ]
+  },
+  {
+   "id": "skill.execute",
+   "title": "Реплей навыка на клиенте с бюджетом 80 с и наблюдением итога",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/index.ts:583",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/rubezh-replay.test.ts",
+    "apps/client/main/actuators/dispatch-honesty.test.ts"
+   ]
+  },
+  {
+   "id": "presence.owner",
+   "title": "Присутствие владельца (idle, user-takeover push, lastOwnerInput)",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/index.ts:168",
+   "trigger": "event",
+   "needs": [
+    "fake-clock",
+    "hardware"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/user-presence.test.ts",
+    "apps/client/main/actuators/input-mark.test.ts"
+   ]
+  },
+  {
+   "id": "gate.user-busy",
+   "title": "Отказ физического ввода proactive-команде при активном владельце",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/index.ts:266",
+   "trigger": "event",
+   "needs": [
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/user-presence.test.ts"
+   ]
+  },
+  {
+   "id": "gate.veil",
+   "title": "Гейт вуали режима выделения на входе и пост-проверка вокруг RPC",
+   "kind": "flow",
+   "entry": "apps/client/main/actuators/index.ts:251",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/focus-veil.test.ts",
+    "apps/client/main/actuators/jarvis-sdk-veil.test.ts",
+    "apps/client/main/actuators/window-arrange-veil.test.ts"
+   ]
+  },
+  {
+   "id": "monitor.set-list-assign",
+   "title": "Рабочий монитор Джарвиса: set/list/assign",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:756",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/monitors.test.ts"
+   ]
+  },
+  {
+   "id": "sidecar.lifecycle",
+   "title": "Запуск/рестарт сайдкара с бэкоффом, generation, подписки raw-input",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/sidecar-client.ts:121",
+   "trigger": "event",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/sidecar-client.test.ts",
+    "apps/client/main/actuators/sidecar-generation.test.ts"
+   ]
+  },
+  {
+   "id": "sidecar.user-takeover",
+   "title": "Глобальные LL-хуки: физический ввод владельца -> push user-input",
+   "kind": "sensor",
+   "entry": "apps/sidecar-win/InputArbiter.cs:13",
+   "trigger": "event",
+   "needs": [
+    "hardware",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": []
+  },
+  {
+   "id": "sidecar.demo-record",
+   "title": "Запись демонстрации навыка UIA-хуком (демо-события)",
+   "kind": "sensor",
+   "entry": "apps/sidecar-win/DemoRecorder.cs:1",
+   "trigger": "ui",
+   "needs": [
+    "hardware",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": []
+  },
+  {
+   "id": "file.view",
+   "title": "Зрение на файл: картинка/страница PDF в base64",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/file-view.ts:65",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/file-view.test.ts"
+   ]
+  }
+ ],
+ "seams": [
+  {
+   "name": "sidecar (UIA+SendInput+окна+OCR)",
+   "file": "apps/client/main/actuators/sidecar-client.ts",
+   "how_to_fake": "vi.mock sidecar-client.js -> test-support/fake-sidecar.ts (FakeSidecar, handlers[op], mutations()); для лаборатории нужен стейтфул FakeDesktop и NDJSON-двойник процесса с подменяемым путём exe (сейчас зашит в main/index.ts:766)"
+  },
+  {
+   "name": "electron screen/desktopCapturer/clipboard/powerMonitor",
+   "file": "apps/client/main/test-support/electron-mock.ts",
+   "how_to_fake": "electron-mock.ts + fake-capturer.ts (пиксели с происхождением, мониторы и масштаб); coords.setScreenApi; настоящий Electron под Xvfb только Linux (frames-xvfb.test.ts)"
+  },
+  {
+   "name": "часы простоя владельца",
+   "file": "apps/client/main/actuators/input-mark.ts",
+   "how_to_fake": "powerMonitor.getSystemIdleTime в electron-mock; noteJarvisInput/noteOwnerInput, _resetJarvisInputForTest; push user-input от сайдкара"
+  },
+  {
+   "name": "PowerShell-процессы (запуск, AppActivate, закрытие, arrange, audio)",
+   "file": "apps/client/main/actuators/apps.ts",
+   "how_to_fake": "env JARVIS_START_MENU_DIRS, JARVIS_STEAM_ROOT, JARVIS_STEAM_REG_KEY, JARVIS_STEAM_WAIT_MS, JARVIS_LAUNCH_NO_EXEC=1; vi.mock листьев как в dispatch-honesty.test.ts; реальные эффекты только на Windows"
+  },
+  {
+   "name": "мост SDK",
+   "file": "apps/client/main/actuators/act-bridge.ts",
+   "how_to_fake": "startActBridge(dispatch) принимает dispatch; тестировать без Electron"
+  },
+  {
+   "name": "сервер<->клиент",
+   "file": "apps/client/main/test-support/server-link.ts",
+   "how_to_fake": "настоящий серверный dispatchTool + настоящий клиентский dispatch через JSON, фейки на краях (сайдкар, capturer, confirm владельца)"
+  },
+  {
+   "name": "судьи рубежа",
+   "file": "apps/client/main/actuators/injection-guard.ts",
+   "how_to_fake": "vi.mock self-judge/secret-judge/commit-judge (injection-seam.test.ts) либо настоящие + FakeSidecar (rubezh-*.test.ts)"
+  },
+  {
+   "name": "область одобрения",
+   "file": "apps/client/main/actuators/approval-scope.ts",
+   "how_to_fake": "serverExecutor(dispatch) с approval/grants в конверте; runWithoutApproval для моста/реплея; test-support/rubezh-fixtures.ts"
+  },
+  {
+   "name": "dev-сессия сервера (клиентские действия фейк)",
+   "file": "apps/server/src/gateway/dev-session.ts",
+   "how_to_fake": "clientVersion cmd|test|qa|bench...; команды GUI на dev-сессии не доходят до реального клиента"
+  },
+  {
+   "name": "время (sleep/setTimeout/Date.now)",
+   "file": "apps/client/main/actuators/act-verify.ts",
+   "how_to_fake": "vi.useFakeTimers; единого инжектируемого шва часов нет — добавить в лаборатории"
+  },
+  {
+   "name": "Chromium+расширение для web-act",
+   "file": "apps/client/main/e2e/web-act-e2e.chromium.test.ts",
+   "how_to_fake": "настоящий Chromium, CHROME_PATH; infra/bench (сервер+Xvfb)"
+  }
+ ],
+ "defects": [
+  {
+   "severity": "med",
+   "where": "apps/sidecar-win/bin/Release/net8.0-windows10.0.19041.0/win-x64/publish/SidecarWin.exe",
+   "what": "exe (mtime 14.07) старше Ipc.cs/UiaGrounder.cs/WindowManager.cs (mtime 16.07): правки C# могли не попасть в бинарь; пересобрать/сверить перед живыми прогонами"
+  },
+  {
+   "severity": "med",
+   "where": "apps/client/main/actuators/sidecar-client.ts:218",
+   "what": "request() не async и при !ready бросает синхронно; main/index.ts:801 делает sc.request(...).catch(...) внутри setTimeout — при упавшем сайдкаре исключение не поймается"
+  },
+  {
+   "severity": "med",
+   "where": "apps/client/main/actuators/index.ts:584",
+   "what": "skill.execute: cancel={cancelled:false} навсегда (TODO M8) — стоп/killswitch не останавливает реплей навыка до 80 с"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/index.ts:424",
+   "what": "window.focus только по hwnd: DrawingOverlayError глотается в sidecarErr и уходит как runtime вместо overlay_drawing (кормит эскалацию §7)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/index.ts:1",
+   "what": "index.ts 793 строки (>150) и устаревшая шапка (список реализованных/нереализованных видов); dispatchInner ~500 строк одним switch"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/injection-guard.ts:6",
+   "what": "шапка утверждает, что судьи — заглушки P0; на деле реальные"
+  },
+  {
+   "severity": "low",
+   "where": "apps/sidecar-win/README.md",
+   "what": "описывает self-contained 70-120 МБ, реальный publish 153 КБ; ocr.limits из комментариев не реализован в C#"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/index.ts:664",
+   "what": "demo.record — вид протокола с вечным not implemented (M4); реальная запись мимо dispatch (main/index.ts:427)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/windows.ts:14",
+   "what": "NotImplementedError импортируется из input.js, хотя вынесен в sidecar-ready.ts против циклов"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/observe.ts:102",
+   "what": "JARVIS_FUSED_OBSERVE=0 отключает основной механизм сверки; вместе с JARVIS_CAPTURE_FOREGROUND, JARVIS_SKILL_REPLAY_BUDGET_MS, JARVIS_ALLOW_MOCK_SEND — флаги вне закона один флаг одно решение"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/test-support/fake-sidecar.ts:117",
+   "what": "фейк статичен: мутации всегда success, снапшот не меняется от действий — verified/observation на изменяющемся состоянии не проверяются"
+  }
+ ],
+ "labRequirements": [
+  "Стейтфул FakeDesktop за интерфейсом сайдкара в реальной форме Ipc.cs (окна, z-порядок, UIA-дерево с реакциями, OCR по нарисованным строкам, курсор, мониторы/масштаб)",
+  "NDJSON-двойник процесса сайдкара для настоящего SidecarClient (рестарт, таймауты, generation, push user-input) с подменяемым путём exe",
+  "Инжектируемые часы и простой владельца (powerMonitor, Date.now, sleep) для USER_BUSY, verify, бюджетов act/skill",
+  "Прогон настоящего dispatch под serverExecutor с грантами и без, а также через SDK-мост с реальным python",
+  "Управляемая вуаль режима выделения, включая открытие ВО ВРЕМЯ RPC; матрица DPI 100/125/150/200 и несколько мониторов",
+  "Проверка совместимости exe сайдкара с исходниками (хэш/пересборка) и контрактный тест форм Ipc.cs; liveOnly-набор (Steam/UWP/Core Audio/LL-хуки) вынести в список ожидания владельца"
+ ]
+}

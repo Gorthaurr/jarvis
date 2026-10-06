@@ -1,0 +1,780 @@
+{
+ "id": "client-actuators-system",
+ "summary": "Область: клиентские актуаторы fs/system/office/screen/невидимый браузер/code-runner/obs/messaging/audio/wait.for и skill-runner. Все команды идут через dispatch (index.ts:211) -> switch по kind -> один ActionResult; исключения маппятся в error.runtime, ActionError несёт код и stepActionInjected. Честность исхода реализована (readback громкости и раскладки, pause только при звуке, search с exhausted, unknown у wait.for, три исхода telegram). Швы: electron и сайдкар подменяются готовыми фейками (fake-capturer, electron-mock, fake-sidecar, server-link), Chrome - через DI JarvisBrowserOpts и jb-fixtures; у system/office/audio нет DI на spawn (нужен PATH-шим). Найдено: office без своего серверного таймаута (15 с против 30 с COM), fs.edit портит не-UTF-8, таймаут exec в system.ts возвращает успех, skill.execute не отменяется и не эскалирует, лишний CDP-порт у окна входа. Читалось без запуска, живьём не проверено.",
+ "capabilities": [
+  {
+   "id": "fs.read",
+   "title": "Чтение текстового файла с окном строк, кодировками и честным усечением",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:167",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts",
+    "apps/client/main/actuators/fs-honesty.test.ts",
+    "apps/client/main/actuators/fs-honesty-2.test.ts",
+    "apps/client/main/actuators/fs-read-window.test.ts"
+   ]
+  },
+  {
+   "id": "fs.write",
+   "title": "Создать/перезаписать файл (createDirs)",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:317",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts",
+    "apps/client/main/actuators/fs-honesty.test.ts"
+   ]
+  },
+  {
+   "id": "fs.edit",
+   "title": "Точечная замена фрагмента (0 или >1 совпадений = ошибка)",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:332",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts"
+   ]
+  },
+  {
+   "id": "fs.append",
+   "title": "Дописать в конец файла",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:359",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts"
+   ]
+  },
+  {
+   "id": "fs.list",
+   "title": "Список каталога, рекурсивно, кап 5000",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:366",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts"
+   ]
+  },
+  {
+   "id": "fs.delete",
+   "title": "Удаление файла/каталога с защитой поддерева",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:385",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts",
+    "apps/client/main/actuators/self-guard.test.ts"
+   ]
+  },
+  {
+   "id": "fs.move",
+   "title": "Перемещение/переименование (EXDEV -> copy+rm)",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:396",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts",
+    "apps/client/main/actuators/self-guard.test.ts"
+   ]
+  },
+  {
+   "id": "fs.mkdir",
+   "title": "Создание каталога рекурсивно",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:412",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts"
+   ]
+  },
+  {
+   "id": "fs.search",
+   "title": "Поиск по имени/содержимому с отчётом о полноте",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/fs.ts:425",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/fs.test.ts",
+    "apps/client/main/actuators/fs-search-ignore.test.ts",
+    "apps/client/main/actuators/fs-honesty-2.test.ts"
+   ]
+  },
+  {
+   "id": "fs.view",
+   "title": "Картинка/страница PDF с диска как base64 для зрения модели",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/file-view.ts:65",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/file-view.test.ts"
+   ]
+  },
+  {
+   "id": "system.lock",
+   "title": "Блокировка рабочей станции",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/system.ts:162",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/system.test.ts"
+   ]
+  },
+  {
+   "id": "system.power",
+   "title": "sleep/shutdown/restart (отложенно)/logoff/cancel",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/system.ts:164",
+   "trigger": "tool",
+   "needs": [
+    "hardware",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/system.test.ts"
+   ]
+  },
+  {
+   "id": "system.media",
+   "title": "Медиа-клавиши, state по WASAPI peak, pause только при звуке",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/system.ts:181",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/system.test.ts",
+    "apps/client/main/actuators/system.integration.test.ts"
+   ]
+  },
+  {
+   "id": "system.volume",
+   "title": "Громкость get/set/up/down/mute через Core Audio с readback",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/system.ts:187",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/system.test.ts",
+    "apps/client/main/actuators/system.integration.test.ts"
+   ]
+  },
+  {
+   "id": "system.clipboard",
+   "title": "Чтение/запись буфера обмена через PowerShell",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/system.ts:196",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/system.test.ts"
+   ]
+  },
+  {
+   "id": "system.layout",
+   "title": "Переключение раскладки foreground-окна с readback",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/system.ts:200",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/system.test.ts"
+   ]
+  },
+  {
+   "id": "office.excel",
+   "title": "Excel через COM: read/write_cell/append_row",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/office.ts:164",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/office.test.ts",
+    "apps/client/main/actuators/office-injection.test.ts"
+   ]
+  },
+  {
+   "id": "office.word",
+   "title": "Word через COM: read/write/append",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/office.ts:170",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/office.test.ts",
+    "apps/client/main/actuators/office-injection.test.ts"
+   ]
+  },
+  {
+   "id": "screen.capture",
+   "title": "Снимок монитора/региона в нативе, кадр f/z, кап зрения",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/screen.ts:58",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/screen-capture.test.ts",
+    "apps/client/main/actuators/frames.test.ts",
+    "apps/client/main/actuators/frames-dispatch.test.ts",
+    "apps/client/main/actuators/frames-xvfb.test.ts"
+   ]
+  },
+  {
+   "id": "screen.ocr",
+   "title": "Локальный OCR экрана через сайдкар, плитки, строки в кадре задачи",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/screen-ocr.ts:45",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/screen-ocr.test.ts",
+    "apps/client/main/actuators/observe-ocr-delta.test.ts"
+   ]
+  },
+  {
+   "id": "screen.probe",
+   "title": "Перцептивный хеш региона (изменилось ли)",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/screen-probe.ts:20",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/selection.test.ts"
+   ]
+  },
+  {
+   "id": "wait.for",
+   "title": "Клиентское ожидание ui/window/text/sound/gsi/file/process/browser с unknown/veiled",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/sensors-cheap.ts:188",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/wait-file-process.test.ts"
+   ]
+  },
+  {
+   "id": "code.run",
+   "title": "Синхронный запуск python/node/powershell с таймаутом и env без секретов",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/code-runner.ts:158",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/code-runner.test.ts",
+    "apps/client/main/actuators/code-runner-jobs.test.ts",
+    "apps/client/main/actuators/jarvis-sdk-rubezh.test.ts",
+    "apps/client/main/actuators/jarvis-sdk-veil.test.ts"
+   ]
+  },
+  {
+   "id": "code.run.background",
+   "title": "Фоновое задание code.run с логами в temp",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/code-runner.ts:309",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/code-runner-jobs.test.ts",
+    "apps/server/src/brain/tools/handlers/code-background.test.ts"
+   ]
+  },
+  {
+   "id": "job.status",
+   "title": "Статус/остановка фонового задания, маркер вуали",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/code-runner.ts:354",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/code-runner-jobs.test.ts"
+   ]
+  },
+  {
+   "id": "skill.execute",
+   "title": "Детерминированный реплей навыка без LLM: предусловия, expect, ретраи, бюджет",
+   "kind": "flow",
+   "entry": "apps/client/main/skill-runner/index.ts:123",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop",
+    "fake-clock"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/skill-runner/index.test.ts",
+    "apps/client/main/skill-runner/client-actuator.test.ts",
+    "apps/client/main/skill-runner/step-policy.test.ts",
+    "apps/client/main/skill-runner/focus-step.test.ts",
+    "apps/client/main/actuators/rubezh-replay.test.ts"
+   ]
+  },
+  {
+   "id": "jbrowser.open",
+   "title": "Открыть http(s) в невидимом браузере Джарвиса и прочитать страницу",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:274",
+   "trigger": "tool",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/jarvis-browser-ssrf.chromium.test.ts",
+    "apps/client/main/actuators/jarvis-browser-nav-guard.test.ts"
+   ]
+  },
+  {
+   "id": "jbrowser.read",
+   "title": "Прочитать текущую страницу невидимого браузера",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:292",
+   "trigger": "tool",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/jarvis-browser-ssrf.chromium.test.ts"
+   ]
+  },
+  {
+   "id": "jbrowser.inspect",
+   "title": "Инвентарь интерактивных элементов страницы",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:339",
+   "trigger": "tool",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": []
+  },
+  {
+   "id": "jbrowser.act",
+   "title": "web_act в невидимом браузере: click/type/key с гардами 0 и 14",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:348",
+   "trigger": "tool",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/jarvis-browser-pin.chromium.test.ts"
+   ]
+  },
+  {
+   "id": "jbrowser.login",
+   "title": "Открыть видимое окно входа в общий профиль",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:469",
+   "trigger": "tool",
+   "needs": [
+    "chrome",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": []
+  },
+  {
+   "id": "jbrowser.import_cookies",
+   "title": "Импорт кук из расширения в браузер Джарвиса",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:308",
+   "trigger": "tool",
+   "needs": [
+    "chrome",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": []
+  },
+  {
+   "id": "jbrowser.navguard",
+   "title": "Гард навигации и пиннинг DNS невидимого браузера (B-14)",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/jarvis-browser-nav-guard.ts:1",
+   "trigger": "event",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/jarvis-browser-ssrf.chromium.test.ts",
+    "apps/client/main/actuators/jarvis-browser-dns.chromium.test.ts",
+    "apps/client/main/actuators/jarvis-browser-pin.chromium.test.ts",
+    "apps/client/main/actuators/jarvis-browser-proxy.test.ts",
+    "apps/client/main/actuators/jarvis-browser-proxy-judge.test.ts",
+    "apps/client/main/actuators/jarvis-browser-nav-guard.test.ts"
+   ]
+  },
+  {
+   "id": "telegram.send",
+   "title": "Невидимая отправка в Telegram web через браузер Джарвиса с проверкой пузыря",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:422",
+   "trigger": "tool",
+   "needs": [
+    "chrome",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": []
+  },
+  {
+   "id": "telegram.read",
+   "title": "Чтение последних сообщений чата Telegram web",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/jarvis-browser.ts:457",
+   "trigger": "tool",
+   "needs": [
+    "chrome",
+    "owner"
+   ],
+   "liveOnly": true,
+   "testedBy": []
+  },
+  {
+   "id": "browser.open",
+   "title": "Открыть URL: в дефолтном браузере или CDP-контроллере с откатом",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:332",
+   "trigger": "tool",
+   "needs": [
+    "chrome"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/browser-cdp.test.ts",
+    "apps/client/main/actuators/cdp-core.test.ts"
+   ]
+  },
+  {
+   "id": "order.place",
+   "title": "Заглушка заказа: всегда честная ошибка (M7)",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/browser.ts:24",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": []
+  },
+  {
+   "id": "message.send",
+   "title": "Отправка userbot-ом (fail-closed без кред)",
+   "kind": "integration",
+   "entry": "apps/client/main/actuators/messaging.ts:44",
+   "trigger": "tool",
+   "needs": [],
+   "liveOnly": false,
+   "testedBy": []
+  },
+  {
+   "id": "obs.request",
+   "title": "Запрос obs-websocket v5",
+   "kind": "integration",
+   "entry": "apps/client/main/actuators/obs.ts:37",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/obs.test.ts"
+   ]
+  },
+  {
+   "id": "audio.sessions",
+   "title": "Список аудио-сессий процессов",
+   "kind": "sensor",
+   "entry": "apps/client/main/actuators/audio-sessions.ts:285",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/audio-sessions.test.ts"
+   ]
+  },
+  {
+   "id": "audio.set",
+   "title": "Mute/громкость приложения",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/audio-sessions.ts:293",
+   "trigger": "tool",
+   "needs": [
+    "hardware"
+   ],
+   "liveOnly": true,
+   "testedBy": [
+    "apps/client/main/actuators/audio-sessions.test.ts"
+   ]
+  },
+  {
+   "id": "monitor.set_list_assign",
+   "title": "Выбор монитора для видимой активности Джарвиса",
+   "kind": "action",
+   "entry": "apps/client/main/actuators/index.ts:756",
+   "trigger": "tool",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/monitors.test.ts"
+   ]
+  },
+  {
+   "id": "dispatch.contract",
+   "title": "Диспетчер: ровно один ActionResult, вуаль, USER_BUSY, маппинг ошибок",
+   "kind": "infra",
+   "entry": "apps/client/main/actuators/index.ts:211",
+   "trigger": "event",
+   "needs": [
+    "fake-desktop"
+   ],
+   "liveOnly": false,
+   "testedBy": [
+    "apps/client/main/actuators/dispatch-honesty.test.ts",
+    "apps/client/main/actuators/focus-veil.test.ts",
+    "apps/client/main/actuators/frames-dispatch.test.ts"
+   ]
+  }
+ ],
+ "seams": [
+  {
+   "name": "electron (desktopCapturer/screen/nativeImage/powerMonitor/clipboard)",
+   "file": "apps/client/main/test-support/fake-capturer.ts",
+   "how_to_fake": "vi.mock('electron') через fakeElectronModule(); resetCapturer([{id,bounds,scaleFactor}]); electron-mock.ts для idleSec/scale/ownFocused; настоящий Electron только Linux+Xvfb (xvfb-frames-smoke.ts)"
+  },
+  {
+   "name": "win-сайдкар (UIA/OCR/window.list/input)",
+   "file": "apps/client/main/test-support/fake-sidecar.ts",
+   "how_to_fake": "vi.mock('../actuators/sidecar-client.js') через fakeSidecarModule(); useFakeSidecar() даёт журнал мутаций; формы ответов как в Ipc.cs"
+  },
+  {
+   "name": "spawn powershell/shutdown/rundll32/taskkill",
+   "file": "apps/client/main/actuators/system.ts:266",
+   "how_to_fake": "DI нет; подложить записывающие шимы в PATH или добавить setSpawn(); planSystem чистая. Затрагивает system.*, office.*, audio.*, apps.*"
+  },
+  {
+   "name": "файловая система",
+   "file": "apps/client/main/actuators/fs.ts:125",
+   "how_to_fake": "абсолютные пути во временном каталоге + USERPROFILE/HOME на песочницу для ~ и относительных путей; self-guard остаётся активным"
+  },
+  {
+   "name": "буфер обмена",
+   "file": "apps/client/main/actuators/system.ts:196",
+   "how_to_fake": "идёт через PowerShell, не electron.clipboard: шим powershell либо реальный буфер Windows с бэкапом"
+  },
+  {
+   "name": "часы",
+   "file": "apps/client/main/skill-runner/index.ts:81",
+   "how_to_fake": "vi.useFakeTimers() для waitFor/code-runner/office; в runSkill есть DI sleep/now/veiledSince/overlayBlockReason; в waitFor DI нет"
+  },
+  {
+   "name": "Chrome невидимого браузера",
+   "file": "apps/client/main/actuators/jarvis-browser.ts:131",
+   "how_to_fake": "JarvisBrowserOpts {chromePath, extraArgs headless/no-sandbox, profileDir, startUrl, settleMs, resolveHost, mapAddress}; test-support/jb-fixtures.ts (findChrome, fixture, launchJarvisBrowser, fixtureLookup); CHROME_PATH"
+  },
+  {
+   "name": "CDP-контроллер browser.open",
+   "file": "apps/client/main/actuators/browser-cdp.ts:84",
+   "how_to_fake": "конструктор {headless, chromePath, userDataDir}; cdp-core.ts с WsLike-фейком"
+  },
+  {
+   "name": "интерпретаторы code.run",
+   "file": "apps/client/main/actuators/code-runner.ts:105",
+   "how_to_fake": "реальные python/node/powershell из PATH, cwd в песочницу, setActBridge(undefined) отключает jarvis SDK"
+  },
+  {
+   "name": "мост SDK актуаторов",
+   "file": "apps/client/main/actuators/code-runner.ts:40",
+   "how_to_fake": "поднять реальный act-bridge.ts (act-bridge.test.ts) и вызвать setActBridge({port,token})"
+  },
+  {
+   "name": "obs-websocket",
+   "file": "apps/client/main/actuators/obs.ts:37",
+   "how_to_fake": "env OBS_WEBSOCKET_HOST/PORT/PASSWORD -> локальный фейк-WS сервер v5; такого фейка в репо нет"
+  },
+  {
+   "name": "userbot-отправители",
+   "file": "apps/client/main/actuators/messaging.ts:23",
+   "how_to_fake": "MockSender из @jarvis/userbots + JARVIS_ALLOW_MOCK_SEND=1; без флага fail-closed"
+  },
+  {
+   "name": "SkillActuator",
+   "file": "apps/client/main/skill-runner/index.ts:41",
+   "how_to_fake": "передать свой объект {executeStep, checkExpect, checkPrecondition} в runSkill"
+  },
+  {
+   "name": "сквозной сервер-клиент",
+   "file": "apps/client/main/test-support/server-link.ts",
+   "how_to_fake": "настоящий серверный dispatchTool + клиентский dispatch в одном процессе; фейки sidecar/capturer/confirm по краям"
+  },
+  {
+   "name": "вуаль режима выделения",
+   "file": "apps/client/main/selection/store.ts",
+   "how_to_fake": "управлять singleton selectionStore (drawing/drawingEndedAfter) из теста"
+  }
+ ],
+ "defects": [
+  {
+   "severity": "med",
+   "where": "packages/protocol/src/constants.ts:71",
+   "what": "У office.excel/office.word нет своего серверного таймаута: дефолт 15 с, клиентский COM-таймаут 30 с и ретрай открытия до 3 с. Ложный таймаут при успешной записи, повтор append_row дублирует строку"
+  },
+  {
+   "severity": "med",
+   "where": "apps/client/main/actuators/fs.ts:342",
+   "what": "editFile читает/пишет utf8 без sniff: файл cp1251/UTF-16 (fs_read читает честно) после правки портится; appendFile в UTF-16 файл добавляет utf8-байты"
+  },
+  {
+   "severity": "med",
+   "where": "apps/client/main/actuators/system.ts:280",
+   "what": "Таймаут exec 8 с делает resolve(out), а не reject: зависший PowerShell даёт ok:true для lock/media/clipboard.write/power; clipboard.write без readback"
+  },
+  {
+   "severity": "med",
+   "where": "apps/client/main/actuators/index.ts:584",
+   "what": "skill.execute: cancel не связан с отменой задачи (TODO M8), escalate не передаётся (:598) - needsLlm-шаги всегда провал"
+  },
+  {
+   "severity": "med",
+   "where": "apps/client/main/actuators/jarvis-browser.ts:482",
+   "what": "Видимое окно входа запускается с --remote-debugging-port без --remote-allow-origins, CDP ему не нужен; на логин-профиле локальный процесс без Origin может подключиться. Тёплый браузер (:188) ограничен только по Origin"
+  },
+  {
+   "severity": "med",
+   "where": "packages/protocol/src/constants.ts:71",
+   "what": "jbrowser.* без своего таймаута (15 с), а холодный launchWarm: settle 2.5 с + CDP-ожидание до 15 с + waitLoad до 15 с; возможен ложный таймаут (web-act.ts:71, web-place.ts:90); telegram.send спасён явными 90 с"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/skill-runner/client-actuator.ts:default",
+   "what": "Неизвестное действие шага логируется и считается успехом; ui.ground с не-role target - тихий no-op"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/system.ts:167",
+   "what": "SetSuspendState 0,1,0 при включённой гибернации известно гибернирует вместо сна (не проверено на этом ПК); logoff мгновенный без окна отмены (:175)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/fs.ts:412",
+   "what": "makeDir без assertWritable, listDir без assertReadable и без игнора node_modules при recursive"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/code-runner.ts:309",
+   "what": "Реестр фоновых заданий в памяти; дети startJob не убиваются при выходе клиента; sweepJobs вызывается лишь из startJob, логи в temp копятся"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/code-runner.ts:90",
+   "what": "runnerEnv - денилист по имени и URL-с-паролем; секрет с безобидным именем и не-URL значением уходит скрипту с сетью (закон: позитивные allowlist-ы)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/office.ts:65",
+   "what": "Excel read приводит ячейки к строке Value2 (даты - серийные числа), без капа строк"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/jarvis-browser.ts:148",
+   "what": "Поле injected присваивается и не читается (мёртвый код)"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/browser.ts:24",
+   "what": "order.place - заглушка, всегда бросает; demo.record - notImplemented; мёртвые виды в протоколе и dispatch"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/index.ts:234",
+   "what": "Нарушение закона <150 строк: index.ts 793, fs.ts 532, jarvis-browser.ts 513, code-runner.ts 481; dispatchInner - один switch ~500 строк"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/system.ts:24",
+   "what": "7 JARVIS_* флагов только в этой области (SHUTDOWN_DELAY_SEC, CODE_TIMEOUT_MS, SKILL_REPLAY_BUDGET_MS, CAPTURE_FOREGROUND, FS_SEARCH_SCAN_CAP, FS_SEARCH_BUDGET_MS, ALLOW_MOCK_SEND) - кандидаты на слияние"
+  },
+  {
+   "severity": "low",
+   "where": "apps/client/main/actuators/obs.test.ts:7",
+   "what": "obs.test.ts проверяет только формулу аутентификации; сам request() (handshake, ошибки, таймаут) тестами не покрыт"
+  }
+ ],
+ "labRequirements": [
+  "Песочница ФС: временный корень, подмена USERPROFILE/HOME/TEMP/APPDATA, фикстуры utf8/BOM/utf16/cp1251/бинарник/PDF/картинки/симлинк/.env/node_modules",
+  "Слой шимов процессов ОС (powershell, shutdown, rundll32, taskkill) с программируемым выводом, кодом и зависанием, либо DI на spawn в system/office/audio",
+  "Виртуальный монитор: fake-capturer с масштабами и синтетический скриншот + fake-sidecar OCR; настоящий Electron на Linux+Xvfb для screen.*",
+  "Управляемые часы для waitFor, runSkill, таймаутов code-runner/office/system",
+  "Интерпретаторы python/node/powershell в PATH лаборатории, cwd-песочница, отключаемый jarvis-мост, проверка kill дерева и timedOut",
+  "Chromium с фикстурными сайтами (jb-fixtures) и фикстура-копия вёрстки Telegram webK для __tg; фейк-WS OBS; MockSender",
+  "Сквозной клиент+сервер (server-link) как транспорт лабораторных сценариев; сверка ActionResult с реальными формами",
+  "Регрессионные сценарии: office-таймаут 15 с, fs.edit не-UTF-8, exec-таймаут как успех, отмена реплея навыка"
+ ]
+}
