@@ -1,11 +1,7 @@
 /**
  * Контракт LLM-провайдера с поддержкой tool-use (§7, §8, §15).
  *
- * Абстрагирует тир/модель и инструменты. Реальная реализация — anthropic.ts;
- * MockLlmProvider (здесь) скриптует ответы для тестов agent-loop без сети.
- *
- * Сообщения поддерживают блоки (text/tool_use/tool_result) — иначе agent-loop
- * с вызовом инструментов не выразить.
+ * Провайдеры: Anthropic, Codex/ChatGPT, Ollama. MockLlmProvider — для тестов без сети.
  */
 import type { ThinkingEffort, Tier } from "@jarvis/shared";
 import type { ToolSchema } from "@jarvis/tools";
@@ -118,15 +114,12 @@ export interface LlmResponse {
     cacheReadTokens: number;
     cacheCreationTokens: number;
   };
+  /** Размер последнего промпта отдельно от накопленного/задержанного usage. */
+  contextTokens?: number;
   /** true — ответ синтезирован стабом/моком (без реального вызова). */
   stubbed: boolean;
-  /**
-   * ВОЛНА G/H: каким каналом выполнен ход. «subscription» — резерв на Claude Max (Agent SDK).
-   * Важно для ДЕНЕГ: подписка оплачена помесячно и НЕ тарифицируется по токенам, поэтому считать
-   * её ходы в долларовый расход API нельзя — иначе фиктивная стоимость съедает месячный потолок
-   * SpendGuard и блокирует работу (поймано живым прогоном: $0.82 за один ход по подписке).
-   */
-  channel?: "primary" | "subscription";
+  /** Канал учёта: subscription/local имеют нулевой API-расход; primary тарифицируется по токенам. */
+  channel?: "primary" | "subscription" | "local";
   /**
    * Модель, которая РЕАЛЬНО выполнила ход. Обязательна там, где канал выбирает модель САМ: у резерва
    * на подписке модель задаётся своим параметром (Opus 5), а `req.model` — это модель тира основного
@@ -167,6 +160,8 @@ export interface ILlmProvider {
   channelStatus?(): LlmChannelStatus;
   /** W2: задача с этим `sessionKey` завершена — освободить её сессию (процесс/кеш). Идемпотентно. */
   release?(sessionKey: string): void;
+  /** Завершение gateway: освободить процессы и незавершённые сетевые запросы. */
+  dispose?(): void;
 }
 
 /**
@@ -177,6 +172,8 @@ export interface ILlmProvider {
  *    (кончился баланс / ключ не принят). Пока он off, запросов к API не делается вовсе.
  */
 export interface LlmChannelStatus {
+  /** Явно выбранный провайдер без API (название + модель), для паспорта возможностей. */
+  activeProvider?: string;
   primary: "ok" | "cooldown" | "off";
   /** Класс причины: credits | auth | no_key | disabled | transient (undefined при "ok"). */
   kind?: string;

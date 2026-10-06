@@ -41,7 +41,7 @@ export interface WeaknessReport {
    * резерв на подписке (кеша нет вовсе). Разница на порядок — именно она определяет, влезет ли
    * многошаговая задача в потолок времени. Пусто — таких раундов в окне не было (не «быстро»).
    */
-  speed?: { channel: "api" | "subscription"; rounds: number; medianMs: number; p90Ms: number }[];
+  speed?: { channel: "api" | "subscription" | "local"; rounds: number; medianMs: number; p90Ms: number }[];
   /** Телеметрию прочитать не удалось (нет каталога/пустые файлы) — «не знаю», не «всё хорошо». */
   unavailable?: string;
 }
@@ -214,18 +214,18 @@ export async function collectWeaknesses(logsDir: string, opts: { days?: number; 
  */
 export function speedByChannel(
   events: readonly Record<string, unknown>[],
-): { channel: "api" | "subscription"; rounds: number; medianMs: number; p90Ms: number }[] {
-  const buckets = new Map<"api" | "subscription", number[]>();
+): { channel: "api" | "subscription" | "local"; rounds: number; medianMs: number; p90Ms: number }[] {
+  const buckets = new Map<"api" | "subscription" | "local", number[]>();
   for (const e of events) {
     if (e.type !== "round") continue;
     const ms = Number(e.latencyMs);
-    const ch = e.channel === "subscription" ? "subscription" : e.channel === "api" ? "api" : undefined;
+    const ch = e.channel === "local" ? "local" : e.channel === "subscription" ? "subscription" : e.channel === "api" ? "api" : undefined;
     if (!ch || !Number.isFinite(ms) || ms <= 0) continue;
     const arr = buckets.get(ch) ?? [];
     arr.push(ms);
     buckets.set(ch, arr);
   }
-  const out: { channel: "api" | "subscription"; rounds: number; medianMs: number; p90Ms: number }[] = [];
+  const out: { channel: "api" | "subscription" | "local"; rounds: number; medianMs: number; p90Ms: number }[] = [];
   for (const [channel, arr] of buckets) {
     const sorted = [...arr].sort((a, b) => a - b);
     // Нearest-rank (стандарт для латентностей): p-й процентиль — элемент ранга ceil(p·n).

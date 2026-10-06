@@ -66,7 +66,7 @@ export function accountRound(ctx: LoopCtx, step: number, resp: LlmResponse, llmC
   st.usage.toolCallsTotal += resp.toolUses.length;
   // Гард контекст-окна: реальный размер ТОЛЬКО ЧТО отправленного промпта (весь вход = не-кеш + чтение из
   // кеша + запись в кеш). Проверяется в блоке бюджета на следующей итерации (watermark прошлого раунда).
-  st.budget.lastPromptTokens = resp.usage.inputTokens + resp.usage.cacheReadTokens + resp.usage.cacheCreationTokens;
+  st.budget.lastPromptTokens = resp.contextTokens ?? (resp.usage.inputTokens + resp.usage.cacheReadTokens + resp.usage.cacheCreationTokens);
   // PROACTIVE-гард: этот usage УЖЕ включает результаты прошлого раунда → сбрасываем их оценку; результаты
   // ТЕКУЩЕГО раунда (ещё не отправленные) будут оценены после их формирования (см. ниже, у convo.push).
   st.budget.pendingResultTokens = 0;

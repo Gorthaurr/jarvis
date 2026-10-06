@@ -28,7 +28,7 @@ export async function selfWeaknesses(_ctx: ToolContext, input: Record<string, un
   const speed = (report.speed ?? [])
     .map(
       (x) =>
-        `${x.channel === "subscription" ? "подписка" : "API"}: медиана ${(x.medianMs / 1000).toFixed(1)}с, p90 ${(x.p90Ms / 1000).toFixed(1)}с (раундов ${x.rounds})`,
+        `${x.channel === "local" ? "локально" : x.channel === "subscription" ? "подписка" : "API"}: медиана ${(x.medianMs / 1000).toFixed(1)}с, p90 ${(x.p90Ms / 1000).toFixed(1)}с (раундов ${x.rounds})`,
     )
     .join("; ");
   const speedLine = speed ? `\nБыстрота обращения к модели — ${speed}.` : "";
