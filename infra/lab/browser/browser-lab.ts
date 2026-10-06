@@ -111,9 +111,19 @@ export async function startBrowserLab(opts: BrowserLabOptions = {}): Promise<Bro
       screenshot: (urlPart) => screenshotPage(browser.cdp, urlPart),
       async reset() {
         await benchReset(server);
-        const old = await pages(browser.cdp);
-        await browser.cdp.send("Target.createTarget", { url: "about:blank" }); // сначала новая: браузер без вкладок мог бы завершиться
-        for (const p of old) await browser.cdp.send("Target.closeTarget", { targetId: p.targetId });
+        await browser.sw(`(async () => {
+          const oldTabs = await chrome.tabs.query({});
+          const blank = await chrome.tabs.create({ url: "about:blank", active: true });
+          const oldIds = oldTabs.map(tab => tab.id).filter(tabId => tabId != null);
+          if (oldIds.length) await chrome.tabs.remove(oldIds);
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            const current = await chrome.tabs.get(blank.id);
+            if (current.url === "about:blank" && current.status === "complete") return;
+            if (Date.now() >= deadline) throw new Error("reset: новая пустая вкладка не готова");
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
+        })()`);
         fixtures.reset();
       },
       close: teardown,

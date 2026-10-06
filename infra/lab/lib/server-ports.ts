@@ -3,9 +3,6 @@ export const LIVE_PORT = 8787;
 export const LAB_PORT_MIN = 8811;
 export const LAB_PORT_MAX = 8899;
 
-/** Порты, выданные в этом процессе и ещё не освобождённые (два параллельных старта не должны взять один порт). */
-export const claimed = new Set<number>();
-
 export function isPortFree(port: number, host = "127.0.0.1"): Promise<boolean> {
   return new Promise((resolve) => {
     const s = net.createServer();
@@ -14,27 +11,54 @@ export function isPortFree(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
-/** Свободный порт лаборатории. `avoid` — порты уже зарегистрированных лаб-серверов (из state.json). */
-export async function claimPort(preferred?: number, avoid: number[] = []): Promise<number> {
-  if (preferred === LIVE_PORT) throw new Error(`порт ${LIVE_PORT} — БОЕВОЙ сервер владельца, лаборатория его не использует`);
-  if (preferred) {
-    if (claimed.has(preferred) || !(await isPortFree(preferred))) throw new Error(`порт ${preferred} занят`);
-    claimed.add(preferred);
-    return preferred;
+/** Each pool owns an OS socket namespace; tests can reserve a private range without competing with live labs. */
+export function createPortPool(min = LAB_PORT_MIN, max = LAB_PORT_MAX, leaseOffset = 20_000) {
+  if (![min, max, leaseOffset].every(Number.isInteger) || min < 1 || max < min || max > 65535
+    || !leaseOffset || min + leaseOffset < 1 || max + leaseOffset > 65535) throw new Error("invalid port pool");
+  const claimed = new Set<number>();
+  // The extra loopback listener holds the lease across workers while HTTP is still unbound (PGlite/startup).
+  // An OS lease disappears automatically if the owning process dies; no stale lock files need deleting.
+  const leases = new Map<number, net.Server>();
+
+  async function reserve(port: number): Promise<boolean> {
+    if (claimed.has(port)) return false;
+    const lease = net.createServer((socket) => socket.destroy());
+    const acquired = await new Promise<boolean>((resolve) => {
+      lease.once("error", () => resolve(false));
+      lease.listen(port + leaseOffset, "127.0.0.1", () => resolve(true));
+    });
+    if (!acquired) return false;
+    lease.unref();
+    if (!(await isPortFree(port))) { lease.close(); return false; }
+    leases.set(port, lease);
+    claimed.add(port);
+    return true;
   }
-  const span = LAB_PORT_MAX - LAB_PORT_MIN + 1;
-  const start = Math.floor(Math.random() * span);
-  for (let i = 0; i < span; i += 1) {
-    const port = LAB_PORT_MIN + ((start + i) % span);
-    if (port === LIVE_PORT || claimed.has(port) || avoid.includes(port)) continue;
-    if (await isPortFree(port)) {
-      claimed.add(port);
-      return port;
+
+  /** `avoid` includes ports already registered by the CLI. */
+  async function claimPort(preferred?: number, avoid: number[] = []): Promise<number> {
+    if (preferred === LIVE_PORT) throw new Error(`порт ${LIVE_PORT} — БОЕВОЙ сервер владельца, лаборатория его не использует`);
+    if (preferred) {
+      if (!Number.isInteger(preferred) || preferred < min || preferred > max) throw new Error(`порт ${preferred} вне диапазона лаборатории ${min}..${max}`);
+      if (avoid.includes(preferred) || !(await reserve(preferred))) throw new Error(`порт ${preferred} занят`);
+      return preferred;
     }
+    const span = max - min + 1;
+    const start = Math.floor(Math.random() * span);
+    for (let i = 0; i < span; i += 1) {
+      const port = min + ((start + i) % span);
+      if (port === LIVE_PORT || claimed.has(port) || avoid.includes(port)) continue;
+      if (await reserve(port)) return port;
+    }
+    throw new Error(`нет свободного порта ${min}..${max}`);
   }
-  throw new Error(`нет свободного порта ${LAB_PORT_MIN}..${LAB_PORT_MAX}`);
+
+  function releasePort(port: number): void {
+    leases.get(port)?.close();
+    leases.delete(port);
+    claimed.delete(port);
+  }
+  return { claimed, claimPort, releasePort };
 }
 
-export function releasePort(port: number): void {
-  claimed.delete(port);
-}
+export const { claimed, claimPort, releasePort } = createPortPool();
