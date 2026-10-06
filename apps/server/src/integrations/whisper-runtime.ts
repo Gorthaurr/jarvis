@@ -52,4 +52,3 @@ export function warmupWhisper(model: string): void {
     log.warn("Whisper: прогрев не удался", e instanceof Error ? e.message : String(e)),
   );
 }
-

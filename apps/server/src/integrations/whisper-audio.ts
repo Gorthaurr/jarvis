@@ -67,4 +67,3 @@ export function isNoise(text: string): boolean {
   if (s.replace(/[^\p{L}\p{N}]/gu, "").length < 2) return true;
   return HALLUCINATIONS.some((re) => re.test(s));
 }
-
