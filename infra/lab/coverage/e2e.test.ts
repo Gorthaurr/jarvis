@@ -24,7 +24,7 @@ describe("buildCoverage на репозитории", () => {
     const t = rep.matrix.totals;
     expect(t.rows).toBe((t["kind:tool"] ?? 0) + (t["kind:action"] ?? 0) + (t["kind:intent"] ?? 0));
     expect(t["kind:tool"]).toBeGreaterThan(100);
-    expect(t["kind:action"]).toBe(59);
+    expect(t["kind:action"]).toBe(60);
     const fsDelete = rep.matrix.rows.find((r) => r.id === "tool:fs_delete")!;
     expect(fsDelete.coveredBy).toContain("lab-tool");
     // uncovered согласован со строками: ровно те, у кого только none

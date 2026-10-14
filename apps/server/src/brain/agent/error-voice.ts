@@ -160,14 +160,14 @@ const NEUTRAL_ACT_VERBS = new Set(["hover", "scroll"]);
 
 /**
  * Эффект КОНКРЕТНОГО вызова: у части инструментов под одним именем операции разной природы. Единая точка для петли
- * и журнала — разойдись они, журнал звал бы «сделанным» то, что петля считала взглядом (и наоборот).
+ * и журнала; список снимков файла — чтение, восстановление — действие.
  *  - screen_selection: `view` — свежий кадр области (сверка), start/clear — нейтральны;
  *  - browser_act{hover|scroll_to}, act{hover|scroll} (не серия) — нейтральны: ни дела, ни verify-долга; act{steps} — mutate.
- * Вызов — КАНОНИЧЕСКИЙ (петля и журнал канонизируют до этого): browser_tabs{op:"close"} приходит как browser_close
- * (facades.ts) и по имени — mutate. Без входа (потребители по одному имени) — эффект по имени, как раньше.
+ * Вызов канонический: browser_tabs{op:"close"} приходит как browser_close (mutate).
  */
 export function toolCallEffect(name: string, input?: unknown): "verify" | "mutate" | "neutral" {
   const i = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  if (name === "fs_undo" && i.op === "list") return "neutral";
   if (name === "screen_selection") return String(i.op ?? "view") === "view" ? "verify" : "neutral";
   if (name === "browser_act" && NEUTRAL_BROWSER_INTENTS.has(String(i.intent ?? ""))) return "neutral";
   if (name === "act" && i.steps === undefined && NEUTRAL_ACT_VERBS.has(String(i.do ?? ""))) return "neutral";

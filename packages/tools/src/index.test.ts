@@ -82,6 +82,7 @@ describe("@jarvis/tools — покрытие актуаторов (§6)", () => 
       "fs.write",
       "fs.edit",
       "fs.append",
+      "fs.undo",
       "fs.list",
       "fs.delete",
       "fs.move",

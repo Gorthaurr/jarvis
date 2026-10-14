@@ -25,6 +25,7 @@
 import type { ActionKind } from "@jarvis/protocol";
 import { ACT_TOOL, SCREEN_RECT_SCHEMA, TARGET_SCHEMA } from "./gui-schemas.js";
 import { schemaFields } from "./input-fields.js";
+import { FS_UNDO_TOOL } from "./fs-undo-tool.js";
 
 /** Инструмент в формате Anthropic tool-use (§6, §12). */
 export interface ToolSchema {
@@ -35,8 +36,6 @@ export interface ToolSchema {
   /** Валидный JSON Schema object: {type:"object", properties, required, ...}. */
   input_schema: Record<string, unknown>;
 }
-
-// ───────────────────────────── Вспомогательные под-схемы ─────────────────────────────
 
 /** UIA-паттерны для act — основной путь действия (§6). */
 /** G-17 (W2): без scroll — UIA ScrollPattern сайдкара крутит только вниз и мелким шагом; прокрутка — act{do:"scroll"}. */
@@ -112,6 +111,7 @@ export const ACTUATOR_TOOL_BY_KIND: Record<ActionKind, string> = {
   "fs.write": "fs_write",
   "fs.edit": "fs_edit",
   "fs.append": "fs_append",
+  "fs.undo": "fs_undo",
   "fs.list": "fs_list",
   "fs.delete": "fs_delete",
   "fs.move": "fs_move",
@@ -989,7 +989,7 @@ const FS_TOOLS: ToolSchema[] = [
   {
     name: "fs_write",
     description:
-      "Создать новый файл ИЛИ перезаписать существующий заданным содержимым. Это основной способ «создать/изменить файл». createDirs=true — создать недостающие родительские каталоги. Перезапись существующего файла теряет прежнее содержимое — будь уверен в пути.",
+      "Создать новый файл ИЛИ перезаписать существующий заданным содержимым. Это основной способ «создать/изменить файл». createDirs=true — создать недостающие родительские каталоги. Если результат содержит undoId, прежние байты можно вернуть через fs_undo. При undoAvailable=false не обещай отмену; note объясняет причину.",
     input_schema: obj(
       {
         path: { type: "string", description: "Путь к файлу для создания/перезаписи." },
@@ -1016,7 +1016,7 @@ const FS_TOOLS: ToolSchema[] = [
   {
     name: "fs_append",
     description:
-      "Дописать текст в конец файла, не затирая прежнее (ActionCommand fs.append, §6). Если файла нет — он создаётся.",
+      "Дописать текст в конец файла, не затирая прежнее (ActionCommand fs.append, §6). Если файла нет — он создаётся. undoId в результате позволяет вернуть прежние байты через fs_undo; undoAvailable=false означает, что снимка нет.",
     input_schema: obj(
       {
         path: { type: "string", description: "Путь к файлу." },
@@ -2006,12 +2006,11 @@ const SKILL_TOOLS: ToolSchema[] = [
   },
 ];
 
-// ───────────────────────────── Сборка и индекс ─────────────────────────────
-
 /** Полный набор инструментов мозга (§6 актуаторы + fs/system + самописные + §12 web + §8 память). */
 export const TOOL_SCHEMAS: ToolSchema[] = [
   ...ACTUATOR_TOOLS,
   ...FS_TOOLS,
+  FS_UNDO_TOOL,
   ...SYSTEM_TOOLS,
   ...OFFICE_TOOLS,
   ...SKILL_TOOLS,
@@ -2082,7 +2081,7 @@ export const COLD_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   "web_login",
   // fs_mkdir/fs_move/fs_delete — ГОРЯЧИЕ (причина №5): «перенеси в папку», «удали старые» — бытовые просьбы офиса
   // и дома; fs_delete и так под §14-подтверждением. fs_append остаётся холодным (редок против fs_write/fs_edit).
-  "fs_append",
+  "fs_append", "fs_undo",
   // ⚠️ W4 «Руки» (2026-09-10, ревью §7.3): низкоуровневые GUI-инструменты УШЛИ В COLD — горячий набор из 109 схем не
   // помещался в голову модели, и лестница восприятия из персоны не применялась (телеметрия 30 дней: act 32 /
   // act 2, screen_capture 20 / look{what:'elements'} 10, look{what:'text'} 0). Горячими остаются ОДИН примитив действия
