@@ -96,7 +96,8 @@ Whisper CPU + Windows TTS только с `-OfflineAudio`. Механика — 
 - `actuators/` — `dispatch` + apps/input/ground/fs/system/office/screen/browser/code-runner (+ jarvis SDK, `act-bridge.ts`),
   **`act*.ts`** (найди+сделай+сверь: UIA → OCR окна → точка; met/failed/unchecked), **`inject.ts`** (рубеж инжекции),
   `windows-builtins.ts` (встроенные — из %SystemRoot%), `paste-text.ts`, `observe.ts`, `self-guard.ts`.
-- `audio/` + `hearing/` + `vad/` + `wakeword/` — слух (см. механизмы). `renderer/` — UI (орб, чат, настройки, память).
+- `fs-undo*.ts` в актуаторах — 10 снимков существующих файлов ≤1 MiB в RAM, `fs_undo` list/restore по id с проверкой конфликта.
+- `audio/hearing/vad/wakeword` — слух; `renderer` — UI; `confirm-queue.ts` — FIFO подтверждений с expiresAt и привязкой жеста к вопросу.
 - `sensors/` — снимок ПК, профиль системы и каталог автоматизации (`TOOL_SPECS`), `usage-profile.ts` (минуты фокуса).
 - `selection/` — режим выделения (рамка «вот тут»), `veil-policy.ts`. `skill-runner/` — реплей навыков.
 

@@ -26,8 +26,8 @@
  */
 import { foldText } from "@jarvis/shared";
 import type { TaskControlKind } from "./task.js";
+import { isFileUndoRequest } from "./file-undo-intent.js";
 
-/** Решение классификатора управления задачей (§20). */
 export interface TaskControlDecision {
   /** Род команды управления (§20): cancel/stop_tts/pause/resume/status/none. */
   kind: TaskControlKind;
@@ -194,9 +194,9 @@ export function classifyTaskControl(text: string): TaskControlDecision {
     }
   }
 
-  // norm окаймлён пробелами с обеих сторон → ` фраза ` ловит фразу как ПОЛНЫЕ слова в любом месте
-  // (включая начало/конец). Прежние односторонние варианты матчили префикс: «не надо больше» ловило
-  // «не надо большего внимания» → ложный cancel. Теперь строго по границам слов.
+  // Явный откат файла идёт модели; kill/silence выше сохраняют приоритет.
+  if (isFileUndoRequest(norm)) return { kind: "none", confidence: "high", reason: "восстановление файла через fs_undo" };
+  // Фразы сопоставляем по полным словам, включая начало/конец.
   for (const phrase of CANCEL_PHRASES) {
     if (norm.includes(` ${phrase} `)) {
       return { kind: "cancel", confidence: "high", reason: `cancel-фраза «${phrase}» — прервать задачу (§20)` };

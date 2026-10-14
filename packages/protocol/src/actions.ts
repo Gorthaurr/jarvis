@@ -282,12 +282,12 @@ type ActionCommandKind =
   | { kind: "jbrowser.login"; url: string } // открыть страницу ВИДИМО для входа (тот же профиль) → дальше невидимо
   | { kind: "jbrowser.import_cookies"; cookies: Array<Record<string, unknown>> } // §перенос логинов: куки из расширения → браузер Джарвиса (CDP setCookie)
   | { kind: "order.place"; vendor: string; items: Record<string, unknown>[]; total: number } // confirm + spend cap + idempotency
-  // ── Файловая система (§6): прямое управление файлами на машине пользователя ──
   // Прочитать текстовый файл целиком ИЛИ ОКНОМ строк (причина №6 USER_SCENARIOS_2026-09-02): offset+lines / tail.
   | { kind: "fs.read"; path: string; maxBytes?: number; offset?: number; lines?: number; tail?: number }
   | { kind: "fs.write"; path: string; content: string; createDirs?: boolean } // создать/перезаписать (правка файла)
   | { kind: "fs.edit"; path: string; old: string; new: string; replaceAll?: boolean } // точечная правка: заменить фрагмент (без перезаписи всего файла)
   | { kind: "fs.append"; path: string; content: string } // дописать в конец
+  | { kind: "fs.undo"; op: "list" | "restore"; id?: string } // восстановить снимок клиента; restore требует id
   | { kind: "fs.list"; path: string; recursive?: boolean } // содержимое каталога
   | { kind: "fs.delete"; path: string; recursive?: boolean } // удалить файл/каталог — ТРЕБУЕТ confirm (§4)
   | { kind: "fs.move"; from: string; to: string } // переместить/переименовать

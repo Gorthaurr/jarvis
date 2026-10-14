@@ -23,7 +23,7 @@ import * as audioSessions from "./audio-sessions.js";
 import * as windowArrange from "./window-arrange.js";
 import * as browser from "./browser.js";
 import * as codeRunner from "./code-runner.js";
-import * as fs from "./fs.js";
+import { dispatchFileCommand } from "./fs-dispatch.js";
 import { viewFile } from "./file-view.js";
 import { type CaptureRect, captureScreen, probeScreen } from "./screen.js";
 import { toDipPoint } from "./coords.js";
@@ -714,24 +714,16 @@ async function dispatchInner(commandId: string, cmd: ActionCommand): Promise<Act
 
       // ── Файловая система (§6): прямое управление файлами ──────
       case "fs.read":
-        return okResult(commandId, startedAt, await fs.readFile(cmd.path, cmd.maxBytes, { offset: cmd.offset, lines: cmd.lines, tail: cmd.tail }));
       case "fs.write":
-        return okResult(commandId, startedAt, await fs.writeFile(cmd.path, cmd.content, cmd.createDirs));
       case "fs.edit":
-        return okResult(commandId, startedAt, await fs.editFile(cmd.path, cmd.old, cmd.new, cmd.replaceAll));
       case "fs.append":
-        return okResult(commandId, startedAt, await fs.appendFile(cmd.path, cmd.content));
+      case "fs.undo":
       case "fs.list":
-        return okResult(commandId, startedAt, await fs.listDir(cmd.path, cmd.recursive));
       case "fs.delete":
-        // Необратимо: confirm уже взят на сервере (§4); здесь — исполнение.
-        return okResult(commandId, startedAt, await fs.deleteEntry(cmd.path, cmd.recursive));
       case "fs.move":
-        return okResult(commandId, startedAt, await fs.moveEntry(cmd.from, cmd.to));
       case "fs.mkdir":
-        return okResult(commandId, startedAt, await fs.makeDir(cmd.path));
       case "fs.search":
-        return okResult(commandId, startedAt, await fs.search(cmd.root, cmd.query, cmd.inContent, cmd.maxResults, Array.isArray(cmd.ignore) ? { ignore: cmd.ignore.map(String) } : undefined));
+        return okResult(commandId, startedAt, await dispatchFileCommand(cmd));
 
       // ── Системное управление (§6): питание/блокировка/медиа/громкость/буфер ──
       case "system.lock":

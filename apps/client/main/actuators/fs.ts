@@ -12,12 +12,14 @@
  */
 import { type Dirent, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, resolve, sep } from "node:path";
 import { cutText, createLogger } from "@jarvis/shared";
 import { type ContentSniff, decodeTextDetailed, sniffContent, textForSearchDetailed, type TextEncoding } from "./fs-content.js";
 import { HEAD_SNIFF_BYTES, type LineWindow, TAIL_CHUNK_BYTES, WINDOW_WHOLE_FILE_CAP, applyLineWindow, dropPartialFirstLine, dropPartialLastLine, hasLineWindow, readHeadBytes, readTailBytes, splitLines, validateLineWindow } from "./fs-read-window.js";
 import { DEFAULT_IGNORED_DIRS, EMPTY_GAPS, type SearchGaps, type SearchMatch, type SearchOptions, type SearchResult, type SearchStopReason, describeDirError, isExhausted, searchBudgetMs, searchNote, searchScanCap } from "./fs-search-report.js";
 import { assertReadable, assertWritable, canonicalizePath, isAncestorOfSelf, isProtectedSelfPathFast, isSecretPathFast } from "./self-guard.js";
+import { appendText, editText, writeText } from "./fs-mutations.js";
+import { fileMutationMutex } from "./fs-undo.js";
 
 const log = createLogger("actuator:fs");
 
@@ -314,14 +316,8 @@ async function readWindow(abs: string, window: LineWindow, maxChars: number, opt
   };
 }
 
-export async function writeFile(path: string, content: string, createDirs = false): Promise<{ path: string; bytes: number; created: boolean }> {
-  const abs = expandPath(path);
-  assertWritable(abs); // § рельсы: не перезаписываем критичное для Джарвиса (node_modules/.env/бинарь)
-  const existed = await exists(abs);
-  if (createDirs) await fsp.mkdir(dirname(abs), { recursive: true });
-  await fsp.writeFile(abs, content, "utf8");
-  log.info("fs.write", { path: abs, bytes: Buffer.byteLength(content), overwrote: existed });
-  return { path: abs, bytes: Buffer.byteLength(content), created: !existed };
+export async function writeFile(path: string, content: string, createDirs = false) {
+  return writeText(expandPath(path), content, createDirs);
 }
 
 /**
@@ -334,33 +330,12 @@ export async function editFile(
   oldStr: string,
   newStr: string,
   replaceAll = false,
-): Promise<{ path: string; replacements: number; bytes: number }> {
-  const abs = expandPath(path);
-  assertWritable(abs); // § рельсы самомодификации
-  if (oldStr === newStr) throw new Error("fs.edit: old и new одинаковы — нечего менять");
-  if (oldStr === "") throw new Error("fs.edit: old пустой — нечего искать");
-  const src = await fsp.readFile(abs, "utf8");
-  const parts = src.split(oldStr);
-  const count = parts.length - 1;
-  if (count === 0) throw new Error("fs.edit: фрагмент не найден (нужно ТОЧНОЕ совпадение, включая пробелы/отступы)");
-  if (count > 1 && !replaceAll) {
-    throw new Error(`fs.edit: фрагмент встречается ${count} раз — добавь контекста для уникальности или передай replaceAll=true`);
-  }
-  // Без String.replace: он трактует $-паттерны в newStr. Склейка по split — буквальная.
-  const next = replaceAll
-    ? parts.join(newStr)
-    : src.slice(0, src.indexOf(oldStr)) + newStr + src.slice(src.indexOf(oldStr) + oldStr.length);
-  await fsp.writeFile(abs, next, "utf8");
-  const replacements = replaceAll ? count : 1;
-  log.info("fs.edit", { path: abs, replacements, bytes: Buffer.byteLength(next) });
-  return { path: abs, replacements, bytes: Buffer.byteLength(next) };
+) {
+  return editText(expandPath(path), oldStr, newStr, replaceAll);
 }
 
-export async function appendFile(path: string, content: string): Promise<{ path: string; bytes: number }> {
-  const abs = expandPath(path);
-  assertWritable(abs); // § рельсы самомодификации
-  await fsp.appendFile(abs, content, "utf8");
-  return { path: abs, bytes: Buffer.byteLength(content) };
+export async function appendFile(path: string, content: string) {
+  return appendText(expandPath(path), content);
 }
 
 export async function listDir(path: string, recursive = false): Promise<{ path: string; entries: FsEntry[]; truncated: boolean }> {
@@ -383,30 +358,34 @@ export async function listDir(path: string, recursive = false): Promise<{ path: 
 }
 
 export async function deleteEntry(path: string, recursive = false): Promise<{ path: string; deleted: boolean }> {
-  const abs = expandPath(path);
-  // § рельсы: не даём удалить критичное для себя. Аудит [11]: рекурсивно — сверяем ВСЁ поддерево,
-  // иначе rm(recursive) снёс бы node_modules/.env/бинарь внутри мимо leaf-гарда.
-  if (recursive) await assertTreeWritable(abs);
-  else assertWritable(abs);
-  await fsp.rm(abs, { recursive, force: false });
-  log.info("fs.delete", { path: abs, recursive });
-  return { path: abs, deleted: true };
+  return fileMutationMutex.run(async () => {
+    const abs = expandPath(path);
+    // § рельсы: не даём удалить критичное для себя. Аудит [11]: рекурсивно — сверяем ВСЁ поддерево,
+    // иначе rm(recursive) снёс бы node_modules/.env/бинарь внутри мимо leaf-гарда.
+    if (recursive) await assertTreeWritable(abs);
+    else assertWritable(abs);
+    await fsp.rm(abs, { recursive, force: false });
+    log.info("fs.delete", { path: abs, recursive });
+    return { path: abs, deleted: true };
+  });
 }
 
 export async function moveEntry(from: string, to: string): Promise<{ from: string; to: string }> {
-  const a = expandPath(from);
-  const b = expandPath(to);
-  // § рельсы: ни источник, ни приёмник не должны затрагивать критичное. Аудит [11]: rename/cp двигает
-  // ВЕСЬ подкаталог источника — если это каталог с .env/node_modules/бинарём внутри, релокация обошла бы
-  // и self-guard, и confirm (fs_move не confirm-гейтится). Поэтому источник сверяем поддеревом.
-  await assertTreeWritable(a);
-  assertWritable(b);
-  await fsp.rename(a, b).catch(async (e: NodeJS.ErrnoException) => {
-    // EXDEV — разные тома: копируем и удаляем.
-    if (e.code === "EXDEV") { await fsp.cp(a, b, { recursive: true }); await fsp.rm(a, { recursive: true, force: true }); }
-    else throw e;
+  return fileMutationMutex.run(async () => {
+    const a = expandPath(from);
+    const b = expandPath(to);
+    // § рельсы: ни источник, ни приёмник не должны затрагивать критичное. Аудит [11]: rename/cp двигает
+    // ВЕСЬ подкаталог источника — если это каталог с .env/node_modules/бинарём внутри, релокация обошла бы
+    // и self-guard, и confirm (fs_move не confirm-гейтится). Поэтому источник сверяем поддеревом.
+    await assertTreeWritable(a);
+    assertWritable(b);
+    await fsp.rename(a, b).catch(async (e: NodeJS.ErrnoException) => {
+      // EXDEV — разные тома: копируем и удаляем.
+      if (e.code === "EXDEV") { await fsp.cp(a, b, { recursive: true }); await fsp.rm(a, { recursive: true, force: true }); }
+      else throw e;
+    });
+    return { from: a, to: b };
   });
-  return { from: a, to: b };
 }
 
 export async function makeDir(path: string): Promise<{ path: string }> {
@@ -525,8 +504,4 @@ export async function search(root: string, query: string, inContent = false, max
   log.info("fs.search", { root: absRoot, inContent, matches: matches.length, scannedFiles: files, stopReason, exhausted, recodedFiles, ignoredDirs, ...gaps });
   // matches — ПОСЛЕДНИМ: серверный кап режет JSON с хвоста, а exhausted/stopReason/note обязаны пережить обрезку.
   return { truncated: stopReason !== undefined, ...(stopReason ? { stopReason } : {}), scannedFiles: files, recodedFiles, exhausted, ignoredDirs, ignoredNames: ignoredList, ...gaps, ...(note ? { note } : {}), matches };
-}
-
-async function exists(abs: string): Promise<boolean> {
-  try { await fsp.access(abs); return true; } catch { return false; }
 }

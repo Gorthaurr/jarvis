@@ -8,6 +8,8 @@ import type { ConfirmRequest } from "@jarvis/protocol";
 import type { JarvisBridge } from "../main/ipc-contract.js";
 import { $ } from "./dom.js";
 import { rememberFocus, restoreFocus } from "./focus-trap.js";
+import { ConfirmQueue } from "./confirm-queue.js";
+import { bindConfirmGesture } from "./confirm-gesture.js";
 
 const confirmOverlay = $("confirmOverlay");
 const confirmKind = $("confirmKind");
@@ -31,7 +33,7 @@ function openConfirm(req: ConfirmRequest): void {
   confirmKind.textContent = CONFIRM_KIND_RU[req.kind] ?? req.kind;
   confirmSummary.textContent = req.summary;
   revisionInput.value = "";
-  rememberFocus();
+  if (!isConfirmOpen()) rememberFocus();
   confirmOverlay.classList.remove("overlay--hidden");
   revisionInput.focus(); // фокус внутрь диалога (нейтральное поле, не деструктивная кнопка)
 }
@@ -53,36 +55,29 @@ export function denyConfirm(): void {
 }
 
 /** Инициализация модалки (§14): кнопки approve/revise/deny + клик по фону + подписка onConfirmRequest. */
-export function initConfirmDialog(jarvis: JarvisBridge): void {
-  approveBtn.addEventListener("click", () => {
-    if (!activeConfirm) return;
-    jarvis.sendConfirmResult({ requestId: activeConfirm.requestId, approved: true });
-    closeConfirm();
-  });
-
-  reviseBtn.addEventListener("click", () => {
-    // §14 revise-петля: approved:false + revision -> сервер перегенерирует и пришлёт новый confirm.
-    if (!activeConfirm) return;
-    const revision = revisionInput.value.trim();
-    jarvis.sendConfirmResult({
-      requestId: activeConfirm.requestId,
-      approved: false,
-      revision: revision || undefined,
-    });
-    closeConfirm();
-  });
-
-  denyBtn.addEventListener("click", () => {
-    if (!activeConfirm) return;
-    jarvis.sendConfirmResult({ requestId: activeConfirm.requestId, approved: false });
-    closeConfirm();
-  });
-
-  // Клик по затемнению вне окна = отклонить (безопасный дефолт: действие НЕ выполняется, сервер
-  // получает ответ, а не зависает в ожидании). ESC обрабатывается глобально в renderer.
-  confirmOverlay.addEventListener("click", (e) => {
-    if (e.target === confirmOverlay) denyBtn.click();
-  });
-
-  jarvis.onConfirmRequest((r: ConfirmRequest) => openConfirm(r));
+export function initConfirmDialog(jarvis: JarvisBridge): () => void {
+  const queue = new ConfirmQueue((request) => request ? openConfirm(request) : closeConfirm());
+  const answer = (id: string, approved: boolean, revision?: string) => {
+    const request = queue.take(id);
+    if (request) jarvis.sendConfirmResult({ requestId: request.requestId, approved, ...(revision ? { revision } : {}) });
+  };
+  const currentId = () => activeConfirm?.requestId;
+  const unbind = [
+    bindConfirmGesture(approveBtn, currentId, (id) => answer(id, true)),
+    bindConfirmGesture(denyBtn, currentId, (id) => answer(id, false)),
+    bindConfirmGesture(reviseBtn, currentId, (id) => answer(id, false, revisionInput.value.trim())),
+    bindConfirmGesture(confirmOverlay, currentId, (id) => answer(id, false), true),
+  ];
+  const unsubscribe = jarvis.onConfirmRequest((r) => queue.enqueue(r));
+  let disposed = false;
+  const cleanup = () => {
+    if (disposed) return;
+    disposed = true;
+    unsubscribe();
+    queue.dispose();
+    for (const off of unbind) off();
+    window.removeEventListener("pagehide", cleanup);
+  };
+  window.addEventListener("pagehide", cleanup, { once: true });
+  return cleanup;
 }
