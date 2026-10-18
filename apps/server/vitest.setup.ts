@@ -7,13 +7,8 @@
  * Setup выполняется ДО импортов тест-файла (важно: часть модулей читает dataPath на module-load).
  * Тесты, которым нужен свой каталог (crypto/credentials), переопределяют env сами — это их право.
  */
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-if (!process.env.JARVIS_DATA_DIR || !process.env.JARVIS_DATA_DIR.trim()) {
-  process.env.JARVIS_DATA_DIR = mkdtempSync(join(tmpdir(), "jarvis-test-data-"));
-}
+// Общий infra/testing/vitest-temp-setup.ts уже изолировал TEMP и JARVIS_DATA_DIR;
+// global teardown удалит весь принадлежащий прогону каталог, даже если тест упал.
 
 // Рефлекс-бэкстоп памяти (А3, 2026-07-10) в юнит-тестах ВЫКЛ: fire-and-forget LLM-вызов на реплике
 // с маркером («я люблю…») молча съедал бы скриптованные ответы MockLlmProvider → флаки. Тесты самого

@@ -23,7 +23,7 @@ vi.mock("../actuators/sidecar-client.js", async () => (await import("../test-sup
 vi.mock("../actuators/messaging.js", () => ({ sendMessage: async () => ({ messageId: "1" }), configureSenders: () => undefined }));
 vi.mock("../actuators/jarvis-browser.js", async (orig) => ({ ...(await orig<typeof import("../actuators/jarvis-browser.js")>()), jarvisBrowser: () => jbHolder.jb }));
 
-import { type Fixture, PUBLIC_HOST, findChrome, fixture, launchJarvisBrowser } from "../test-support/jb-fixtures.js";
+import { type Fixture, PUBLIC_HOST, findChrome, fixture, fixtureLookup, launchJarvisBrowser } from "../test-support/jb-fixtures.js";
 import { linkServerToClient } from "../test-support/server-link.js";
 
 const chrome = findChrome();
@@ -60,6 +60,8 @@ describe.skipIf(!chrome)("web_act сквозь провод: строгая це
   /** Сервер ↔ клиент ↔ Chromium: открыть страницу фикстуры web_open'ом и сбросить журнал. */
   async function at(path: string, answer = true) {
     const link = linkServerToClient({ answer, sidecarOps: () => [] });
+    // Серверный SSRF-гард использует ту же DNS-таблицу фикстур, что клиент и proxy.
+    link.ctx.resolveHost = fixtureLookup;
     const open = await link.tool("web_open", { url: `http://${PUBLIC_HOST}:${shop.port}${path}` });
     expect(open.isError, text(open)).toBeFalsy();
     shop.hits.length = 0;

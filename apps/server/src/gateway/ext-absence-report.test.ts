@@ -4,15 +4,24 @@
  * Реверт-проверки: «Chrome открыт» в настоящем времени → «прошедшее время»; дата/цифры в голосе → «голос без
  * дат»; лечение «Загрузить распакованное» при отказе пиннингом → «пиннинг»; голос раньше чата → «сбой голоса».
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExtAbsence, type ExtAbsenceDue } from "./ext-absence.js";
 import { extensionDir, flushExtAbsence, formatExtAbsence } from "./ext-absence-report.js";
 import { JARVIS_WEB_HANDS_EXT_ID as OURS } from "./ext-id.js";
 
 const SEEN = new Date(2026, 8, 24, 21, 15).getTime();
+const tempDirs: string[] = [];
+const fixtureDir = (prefix: string) => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+};
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 const due = (over: Partial<ExtAbsenceDue> = {}): ExtAbsenceDue => ({
   kind: "chrome",
   lastSeenAt: SEEN,
@@ -55,7 +64,7 @@ describe("formatExtAbsence", () => {
   });
 
   it("extensionDir: путь только к СОБРАННОМУ расширению (SW = dist/background.js), иначе null", () => {
-    const d = mkdtempSync(join(tmpdir(), "ext-dir-"));
+    const d = fixtureDir("ext-dir-");
     writeFileSync(join(d, "manifest.json"), "{}");
     expect(extensionDir(d)).toBeNull();
     mkdirSync(join(d, "dist"));
@@ -67,17 +76,19 @@ describe("formatExtAbsence", () => {
 describe("flushExtAbsence", () => {
   const ready = () => {
     const clock = { t: SEEN };
-    const tracker = new ExtAbsence(() => join(mkdtempSync(join(tmpdir(), "ext-report-")), "ext-presence.json"), () => clock.t);
+    const file = join(fixtureDir("ext-report-"), "ext-presence.json");
+    const tracker = new ExtAbsence(() => file, () => clock.t);
     tracker.tick("chrome", false);
     for (let i = 0; i < 3 * 240; i++) {
       clock.t += 15_000;
       tracker.tick("chrome", false);
     }
-    return tracker;
+    return { tracker, file };
   };
 
   it("сбой голоса не теряет доклад: чат уходит ПЕРВЫМ", () => {
-    const tracker = ready();
+    const { tracker, file } = ready();
+    expect(new ExtAbsence(() => file).due(false)).not.toBeNull();
     const order: string[] = [];
     const chat = vi.fn(() => void order.push("chat"));
     const speak = vi.fn(() => {
@@ -89,7 +100,7 @@ describe("flushExtAbsence", () => {
   });
 
   it("владелец занят → ни слова, флаг цел; освободился → доклад", () => {
-    const tracker = ready();
+    const { tracker } = ready();
     const chat = vi.fn();
     expect(flushExtAbsence({ tracker, connected: false, ownerBusy: true, speak: vi.fn(), chat, dir: null })).toBe(false);
     expect(chat).not.toHaveBeenCalled();

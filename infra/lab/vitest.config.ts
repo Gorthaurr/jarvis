@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+import { tempTestConfig } from "../testing/vitest-temp-config.js";
 
 const at = (p: string): string => fileURLToPath(new URL(p, import.meta.url));
 
@@ -18,6 +19,7 @@ export default defineConfig({
     },
   },
   test: {
+    ...tempTestConfig,
     include: ["**/*.test.ts"],
     testTimeout: 30_000,
     hookTimeout: 60_000,

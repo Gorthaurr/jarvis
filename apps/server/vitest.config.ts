@@ -1,9 +1,9 @@
 import { defineConfig } from "vitest/config";
+import { tempTestConfig } from "../../infra/testing/vitest-temp-config.js";
 
 export default defineConfig({
   test: {
-    // Гигиена данных (аудит 2026-07-02): изолированный JARVIS_DATA_DIR на прогон —
-    // тесты не пишут в боевой apps/server/data (см. vitest.setup.ts).
-    setupFiles: ["./vitest.setup.ts"],
+    ...tempTestConfig,
+    setupFiles: [...tempTestConfig.setupFiles, "./vitest.setup.ts"],
   },
 });
