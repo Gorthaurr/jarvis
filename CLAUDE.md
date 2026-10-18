@@ -51,6 +51,7 @@ Whisper CPU + Windows TTS только с `-OfflineAudio`. Механика — 
 - **Стенд (облако, `infra/bench/README.md`)**: `node infra/bench/bench.mjs up|status|tool|say|shot|log|down` — сервер,
   Chromium+расширение на Xvfb, HTTPS-фикстуры на хостах §14; сценарии `node --test "infra/bench/scenarios/*.test.mjs"`.
 - БД: нативный PostgreSQL 18 + pgvector (`DATABASE_URL`), миграции `node infra/migrate.mjs` (продуктовые — `--product`).
+- Изоляция и очистка Temp всех наборов Vitest: `infra/testing/vitest-temp-*.ts`; схема — `docs/HOW_IT_WORKS.md` §1.
   Фолбэк PGlite. Docker не используется.
 - Модели (ASCII-путь!): `~/.jarvis/models` — слух (`fetch-hearing-models.mjs`), e5 в `hf/` (качается сам с `HF_ENDPOINT`).
 

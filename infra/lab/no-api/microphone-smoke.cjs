@@ -1,6 +1,6 @@
 /** Real Electron + production AudioCapture. Keeps only frame counts, never microphone audio. */
-const { resolve, join } = require("node:path");
-const { writeFileSync, mkdtempSync } = require("node:fs");
+const { dirname, resolve, join } = require("node:path");
+const { writeFileSync, mkdtempSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { createRequire } = require("node:module");
 const root = resolve(__dirname, "../../..");
@@ -13,15 +13,26 @@ if (!process.versions.electron) {
     outfile: join(renderer, "microphone-smoke.js"), bundle: true, format: "iife", platform: "browser", globalName: "JarvisAudio" });
   writeFileSync(html, '<!doctype html><meta charset="utf-8"><script src="./microphone-smoke.js"></script>');
   const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE;
-  const r = require("node:child_process").spawnSync(clientRequire("electron"), [__filename],
-    { env, windowsHide: true, encoding: "utf8", timeout: 30_000 });
-  if (r.stdout) process.stdout.write(r.stdout);
-  if (r.stderr) process.stderr.write(r.stderr);
-  if (r.error) console.error(r.error.message);
-  process.exitCode = r.status ?? 1;
+  const tempParent = resolve(tmpdir());
+  const profile = resolve(mkdtempSync(join(tempParent, "jarvis-microphone-smoke-")));
+  env.JARVIS_MICROPHONE_SMOKE_PROFILE = profile;
+  try {
+    const r = require("node:child_process").spawnSync(clientRequire("electron"), [__filename],
+      { env, windowsHide: true, encoding: "utf8", timeout: 30_000 });
+    if (r.stdout) process.stdout.write(r.stdout);
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.error) console.error(r.error.message);
+    process.exitCode = r.status ?? 1;
+  } finally {
+    // The parent removes its own fixture only after Electron releases the profile.
+    if (dirname(profile) !== tempParent) throw new Error("Unexpected microphone fixture location");
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
 } else {
   const { app, BrowserWindow, session } = require("electron");
-  app.setPath("userData", mkdtempSync(join(tmpdir(), "jarvis-microphone-smoke-")));
+  const profile = process.env.JARVIS_MICROPHONE_SMOKE_PROFILE;
+  if (!profile) throw new Error("Run this smoke with node so the parent can clean up the Electron profile");
+  app.setPath("userData", profile);
   app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
   app.whenReady().then(async () => {
     let win;

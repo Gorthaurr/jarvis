@@ -4,10 +4,10 @@
  * Реверт-проверки: detach-обёртка без проверки перехода → «error недопущенного сокета»; `rejected` без проверки
  * «нашего нет на связи» → «отказ самозванцу при живом расширении»; lastSeenAt только тиками → «detach без тиков».
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { ExtensionBridge } from "./extension-bridge.js";
 import { CHROME_EVIDENCE_MS, ExtAbsence, STRONG_ABSENT_MS } from "./ext-absence.js";
 import { trackExtPresence } from "./ext-absence-seam.js";
@@ -15,10 +15,18 @@ import { JARVIS_WEB_HANDS_EXT_ID as OURS } from "./ext-id.js";
 
 const HOUR = 3_600_000;
 const OTHER_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 function setup() {
   const clock = { t: Date.UTC(2026, 8, 24, 18, 0) };
-  const tracker = new ExtAbsence(() => join(mkdtempSync(join(tmpdir(), "ext-seam-")), "ext-presence.json"), () => clock.t);
+  const dir = mkdtempSync(join(tmpdir(), "ext-seam-"));
+  tempDirs.push(dir);
+  const file = join(dir, "ext-presence.json");
+  const tracker = new ExtAbsence(() => file, () => clock.t);
   const bridge = new ExtensionBridge();
   const routes = trackExtPresence(bridge, () => tracker);
   /** Владелец за ПК ms, на переднем плане app, расширения нет. */
@@ -30,12 +38,12 @@ function setup() {
     }
   };
   const sock = () => ({ send: () => undefined, close: () => undefined });
-  return { clock, tracker, routes, observe, sock };
+  return { file, clock, tracker, routes, observe, sock };
 }
 
 describe("trackExtPresence: события моста → учёт", () => {
   it("detach живого расширения фиксирует момент потери даже без тиков клиента", () => {
-    const { tracker, clock, routes, observe, sock } = setup();
+    const { file, tracker, clock, routes, observe, sock } = setup();
     const s = sock();
     routes.attach(s);
     clock.t += 3 * HOUR; // клиент лежал — тиков нет
@@ -43,6 +51,7 @@ describe("trackExtPresence: события моста → учёт", () => {
     routes.detach(s);
     observe(STRONG_ABSENT_MS + CHROME_EVIDENCE_MS);
     expect(tracker.due(false)?.lastSeenAt).toBe(lostAt);
+    expect(new ExtAbsence(() => file, () => clock.t).due(false)?.lastSeenAt).toBe(lostAt);
   });
 
   it("error недопущенного сокета (мост его игнорирует) не освежает lastSeenAt отсутствующего расширения", () => {

@@ -4,13 +4,12 @@
 // Расширение — КОПИЯ во временном каталоге: WS_URL переписан на мёртвый порт (к боевому серверу на 8787 стенд не
 // подключается никогда — не нашёл строку, значит не запускаю), ответ SW серверу replyFor(msg, handle) выставлен в
 // globalThis для CDP. Загрузка — CDP Extensions.loadUnpacked через pipe: фирменный Chrome ≥137 игнорирует --load-extension.
-import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findChrome } from "./cdp-harness.mjs";
+import { withBrowserFixture } from "./browser-fixture.mjs";
 
 const extDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PROD_WS = 'const WS_URL = "ws://127.0.0.1:8787/ext";';
@@ -31,6 +30,15 @@ function pipeCdp(proc) {
   const [, , , toChrome, fromChrome] = proc.stdio;
   const pending = new Map();
   let id = 0;
+  let ended = false;
+  const end = () => {
+    ended = true;
+    for (const done of pending.values()) done({ error: { message: "Browser CDP pipe closed" } });
+    pending.clear();
+    toChrome.destroy(); fromChrome.destroy();
+  };
+  toChrome.on("error", end); fromChrome.on("error", end);
+  proc.once("error", end); proc.once("exit", end);
   // Буфер байтов, а не строка: чанк может разрезать кириллицу посреди символа (подписи кнопок сравниваются дословно).
   let buf = Buffer.alloc(0);
   fromChrome.on("data", (d) => {
@@ -44,12 +52,13 @@ function pipeCdp(proc) {
   // Chrome упал / завис → вызов не висит вечно (иначе before-хук держал бы набор 120 с и оставлял процесс).
   const send = (method, params = {}, sessionId) =>
     new Promise((res) => {
+      if (ended) return res({ error: { message: "Browser CDP pipe closed" } });
       const i = ++id;
       const timer = setTimeout(() => { pending.delete(i); res({ error: { message: `CDP ${method}: нет ответа 15 с` } }); }, 15_000);
       pending.set(i, (m) => { clearTimeout(timer); res(m); });
       toChrome.write(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }) + "\0");
     });
-  return { send, end: () => { try { toChrome.end(); fromChrome.destroy(); } catch { /* уже закрыт */ } } };
+  return { send, end };
 }
 
 /**
@@ -60,55 +69,53 @@ function pipeCdp(proc) {
 export async function launchExtension() {
   const chrome = findChrome();
   if (!chrome) return null;
-  const dir = mkdtempSync(join(tmpdir(), "jarvis-ext-sw-"));
-  await buildCopy(join(dir, "ext"));
-  const hermetic = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE *.localhost, EXCLUDE 127.0.0.1";
-  const rootOnly = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
-  const args = [...rootOnly, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", hermetic, "--remote-debugging-pipe", "--enable-unsafe-extension-debugging", `--user-data-dir=${join(dir, "profile")}`, "about:blank"];
-  const proc = spawn(chrome, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"], windowsHide: true });
-  const cdp = pipeCdp(proc);
-  const close = async () => {
-    cdp.end();
-    if (process.platform === "win32") spawn("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).unref();
-    else proc.kill();
-    await new Promise((r) => setTimeout(r, 500));
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* профиль ещё занят */ }
-  };
-  const loaded = await cdp.send("Extensions.loadUnpacked", { path: join(dir, "ext") });
-  if (loaded.error) { await close(); return null; }
-  let target = null;
-  for (let i = 0; i < 100 && !target; i++) {
-    const t = await cdp.send("Target.getTargets");
-    target = (t.result?.targetInfos ?? []).find((x) => x.type === "service_worker" && x.url.includes(loaded.result.id));
-    if (!target) await new Promise((r) => setTimeout(r, 100));
-  }
-  if (!target) { await close(); throw new Error("стенд: service worker расширения не поднялся"); }
-  const attached = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
-  if (attached.error) { await close(); throw new Error("стенд: не подключился к service worker — " + attached.error.message); }
-  const { result } = attached;
-  const sw = async (expression) => {
-    const m = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, result.sessionId);
-    if (m.error) throw new Error(m.error.message);
-    if (m.result.exceptionDetails) throw new Error(m.result.exceptionDetails.exception?.description ?? m.result.exceptionDetails.text);
-    return m.result.result.value;
-  };
-  // Цель SW появляется раньше, чем его скрипт исполнился (под нагрузкой параллельного набора — «chrome is not defined»).
-  const ready = "typeof chrome === 'object' && Boolean(chrome.tabs) && typeof globalThis.__jarvisReply === 'function'";
-  for (let i = 0; i < 200 && !(await sw(ready).catch(() => false)); i++) await new Promise((r) => setTimeout(r, 50));
-  const tab = (id) => sw(`chrome.tabs.get(${Number(id)}).then((t) => ({ url: t.url, status: t.status }))`);
-  return {
-    sw,
-    tab,
-    async openTab(url) {
-      const id = await sw(`chrome.tabs.create({ url: ${JSON.stringify(url)}, active: false }).then((t) => t.id)`);
-      for (let i = 0; i < 100 && (await tab(id)).status !== "complete"; i++) await new Promise((r) => setTimeout(r, 50));
-      return id;
-    },
-    async reply(msg, capMs) {
-      const t0 = Date.now();
-      const reply = await sw(`Promise.race([globalThis.__jarvisReply(${JSON.stringify(msg)}), new Promise((r) => setTimeout(() => r({ timeout: true }), ${Number(capMs)}))])`);
-      return { reply, ms: Date.now() - t0 };
-    },
-    close,
-  };
+  return withBrowserFixture("jarvis-ext-sw-", async (fixture) => {
+    const dir = fixture.dir;
+    await buildCopy(join(dir, "ext"));
+    const hermetic = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE *.localhost, EXCLUDE 127.0.0.1";
+    const rootOnly = process.getuid?.() === 0 ? ["--no-sandbox"] : [];
+    const args = [...rootOnly, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", hermetic, "--remote-debugging-pipe", "--enable-unsafe-extension-debugging", `--user-data-dir=${join(dir, "profile")}`, "about:blank"];
+    const proc = fixture.spawn(chrome, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"], windowsHide: true });
+    const cdp = pipeCdp(proc);
+    fixture.onClose(() => cdp.end());
+    const close = () => fixture.close();
+    const loaded = await cdp.send("Extensions.loadUnpacked", { path: join(dir, "ext") });
+    fixture.assertRunning();
+    if (loaded.error) { await close(); return null; }
+    let target = null;
+    for (let i = 0; i < 100 && !target; i++) {
+      const t = await cdp.send("Target.getTargets");
+      target = (t.result?.targetInfos ?? []).find((x) => x.type === "service_worker" && x.url.includes(loaded.result.id));
+      if (!target) await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!target) { await close(); throw new Error("стенд: service worker расширения не поднялся"); }
+    const attached = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    if (attached.error) { await close(); throw new Error("стенд: не подключился к service worker — " + attached.error.message); }
+    const { result } = attached;
+    const sw = async (expression) => {
+      const m = await cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, result.sessionId);
+      if (m.error) throw new Error(m.error.message);
+      if (m.result.exceptionDetails) throw new Error(m.result.exceptionDetails.exception?.description ?? m.result.exceptionDetails.text);
+      return m.result.result.value;
+    };
+    // Цель SW появляется раньше, чем его скрипт исполнился (под нагрузкой параллельного набора — «chrome is not defined»).
+    const ready = "typeof chrome === 'object' && Boolean(chrome.tabs) && typeof globalThis.__jarvisReply === 'function'";
+    for (let i = 0; i < 200 && !(await sw(ready).catch(() => false)); i++) await new Promise((r) => setTimeout(r, 50));
+    const tab = (id) => sw(`chrome.tabs.get(${Number(id)}).then((t) => ({ url: t.url, status: t.status }))`);
+    return {
+      sw,
+      tab,
+      async openTab(url) {
+        const id = await sw(`chrome.tabs.create({ url: ${JSON.stringify(url)}, active: false }).then((t) => t.id)`);
+        for (let i = 0; i < 100 && (await tab(id)).status !== "complete"; i++) await new Promise((r) => setTimeout(r, 50));
+        return id;
+      },
+      async reply(msg, capMs) {
+        const t0 = Date.now();
+        const reply = await sw(`Promise.race([globalThis.__jarvisReply(${JSON.stringify(msg)}), new Promise((r) => setTimeout(() => r({ timeout: true }), ${Number(capMs)}))])`);
+        return { reply, ms: Date.now() - t0 };
+      },
+      close,
+    };
+  });
 }

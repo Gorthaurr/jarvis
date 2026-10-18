@@ -8,7 +8,7 @@
  * игнорировать `skip` → кейсы dev-сессии и продуктового режима; не передать locked в тик → кейс «экран заблокирован»;
  * убрать голос из флаша → первый кейс.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +25,7 @@ import { dispatch, makeSessionContext, type BrainProviders } from "./router-ws.j
 import type { Session } from "./session.js";
 
 type Sent = Array<{ type: string; payload: { text?: string } }>;
+const tempDirs: string[] = [];
 
 function fakeSession(sent: Sent): Session {
   const scopes = new Map<string, unknown>();
@@ -45,7 +46,10 @@ function fakeSession(sent: Sent): Session {
 
 function setup(opts: { clientVersion?: string; connected?: boolean; product?: boolean } = {}) {
   const clock = { t: Date.UTC(2026, 8, 24, 18, 0) };
-  const tracker = new ExtAbsence(() => join(mkdtempSync(join(tmpdir(), "ext-abs-wire-")), "ext-presence.json"), () => clock.t);
+  const dir = mkdtempSync(join(tmpdir(), "ext-abs-wire-"));
+  tempDirs.push(dir);
+  const file = join(dir, "ext-presence.json");
+  const tracker = new ExtAbsence(() => file, () => clock.t);
   setExtAbsenceForTests(tracker);
   const sent: Sent = [];
   const brain = {
@@ -79,7 +83,7 @@ function setup(opts: { clientVersion?: string; connected?: boolean; product?: bo
       tracker.tick("chrome", false);
     }
   };
-  return { tracker, live, say, context, extReports, ownerObserved, speakQueued };
+  return { file, tracker, live, say, context, extReports, ownerObserved, speakQueued };
 }
 
 /** Продуктовый режим (арендаторы): ровно то, что makeSessionContext трогает при включённом режиме. */
@@ -98,12 +102,16 @@ function productStub() {
   };
 }
 
-afterEach(() => setExtAbsenceForTests(undefined));
+afterEach(() => {
+  setExtAbsenceForTests(undefined);
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 describe("доклад об отсутствии расширения доходит до владельца", () => {
   it("Chrome открыт 2+ ч без расширения → на реплике владельца доклад в чат (с шагами) и голосом, один раз", async () => {
     const s = setup();
     await s.live(STRONG_ABSENT_MS + CHROME_EVIDENCE_MS);
+    expect(new ExtAbsence(() => s.file).due(false)).not.toBeNull();
     await s.say("который час");
     expect(s.extReports()).toHaveLength(1);
     expect(s.extReports()[0]?.payload.text).toMatch(/Chrome был у вас на экране.*Загрузить распакованное/);
